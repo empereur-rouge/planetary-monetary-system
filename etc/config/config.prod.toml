@@ -1,0 +1,39 @@
+[rocks]
+path = "./data/pms-rocks" # mainnet redis://redis:6379/ et dev redis://127.0.0.1:6379/0
+prefix = "pms:main"
+tip_limit = 256
+
+[network]
+mode = "dev"  # "dev" | "testnet" | "mainnet"
+network_id = "pms-main"
+protocol_version = 1
+
+[address]
+hrp = "8e"
+
+[admin]
+wallet_addresses = [
+    "8e1eqy642zaz5dsyzc3cf54ul642r9259kre2d40m3mp7q8h4fq4333yw0hjkw02e4lljjm4em8hqjc67p3m4esvq774n",
+]
+
+[client]
+bind_addr = "0.0.0.0:8443"      # listener P2P si tu en as
+api_addr  = "127.0.0.1:8080"    # API derrière proxy
+allow_insecure_tls = true
+
+[tls]
+cert_pem = "/etc/pms/tls/cert.pem" # en docker "/etc/pms/tls/cert.pem", en local "/secrets/tls/cert.pem"
+key_pem  = "/etc/pms/tls/key.pem" # en docker "/etc/pms/tls/key.pem", en local "/secrets/tls/key.pem"
+# liste des empreintes SHA-256 autorisées (whitelist des pairs)
+whitelist_fp256 = []
+
+[limits]
+max_body_bytes = 262144
+request_timeout_ms = 4000
+rate_limit_rps = 50
+burst = 100
+
+[auth]
+require_signed_submit = false
+admin_api_token = "env:PMS_ADMIN_TOKEN_DEV"
+

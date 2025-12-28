@@ -1,0 +1,33 @@
+# ---------- build base ----------
+FROM rust:1.89-alpine AS build-base
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev
+WORKDIR /app
+COPY . .
+
+# Features: tls + ops_api (POST /submit/block, etc.)
+# Build node
+FROM build-base AS build-node
+RUN cargo build --release -p bin --features "tls,ops_api"
+
+# Build cli (utile en test/dev)
+FROM build-base AS build-cli
+RUN cargo build --release -p tools-cli --features "tls"
+
+# ---------- runtime node ----------
+FROM alpine:3.20 AS node
+RUN apk add --no-cache ca-certificates
+ENV PMS_NETWORK=testnet \
+    RUST_LOG=info,pms_server=info
+COPY --from=build-node /app/target/release/bin /usr/local/bin/pms-node
+USER 65532:65532
+EXPOSE 8050 8080
+HEALTHCHECK --interval=5s --timeout=2s --retries=30 CMD wget -qO- http://127.0.0.1:8080/live || exit 1
+ENTRYPOINT ["/usr/local/bin/pms-node"]
+
+# ---------- runtime cli ----------
+FROM alpine:3.20 AS cli
+RUN apk add --no-cache ca-certificates
+ENV PMS_NETWORK=testnet
+COPY --from=build-cli /app/target/release/tools-cli /usr/local/bin/tools-cli
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/tools-cli"]
