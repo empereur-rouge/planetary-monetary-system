@@ -1,0 +1,33 @@
+# Rust - Compilation
+target/
+**/target/
+**/*.rs.bk
+
+# Système (Mac/Linux)
+.DS_Store
+.DS_Store?
+._*
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Fichiers sensibles et Configuration
+backups/
+secrets/
+etc/secrets/
+*.key
+*.pem
+*.log
+wallet-seed-*.json
+
+# Configuration spécifique (à adapter si besoin)
+etc/pms/admin-wallet.json
+etc/pms/node-identity.key
+# On ignore les fichiers de config locaux pour ne pas écraser la prod
+etc/config/config.dev.toml
+etc/config/config.prod.toml
