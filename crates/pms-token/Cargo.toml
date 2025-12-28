@@ -1,0 +1,10 @@
+[package]
+name = "pms-token"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_with = "3.8"
+thiserror = "2.0.12"

@@ -1,0 +1,24 @@
+[package]
+name = "pms-network"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pms-storage = {path = "../pms-storage"}
+pms-interface = {path = "../pms-interface"}
+serde = { version = "1.0.219", features = ["derive"] }
+async-trait = "0.1.89"
+anyhow = "1.0.99"
+tokio = "1.47.1"
+serde_json = "1.0.143"
+pms-wire = { path = "../pms-wire" }
+tempfile = "3.23.0"
+
+[dev-dependencies]
+pms-utils = {path = "../pms-utils"}
+pms-types = {path = "../pms-types"}
+pms-core = {path = "../pms-core"}
+pms-server = { path = "../pms-server" }
+pms-testkit = { path = "../pms-testkit" }
+pms-config = { path = "../pms-config" }
+pms-wallet = { path = "../pms-wallet" }

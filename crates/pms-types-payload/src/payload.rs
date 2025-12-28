@@ -1,10 +1,17 @@
-use serde::{Serialize, Deserialize};
-
-use crate::{Transaction, Reward};
+use crate::EncryptedPayload;
+use pms_types_transaction::{Transaction, TxOutput};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Payload {
+pub enum PayloadEnvelope {
+    Plain(PlainPayload),         // DEV / interne
+    Encrypted(EncryptedPayload), // PROD privé
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PlainPayload {
+    // comme avant (UTXO, Mint, Milestone…)
     Genesis,
-    Reward(Reward),
-    Transaction(Transaction),
+    Mint { outputs: Vec<TxOutput> },
+    TxUtxo(Transaction),
+    Milestone { approved: Vec<String> },
 }

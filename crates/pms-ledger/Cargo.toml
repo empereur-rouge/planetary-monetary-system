@@ -1,0 +1,9 @@
+[package]
+name = "pms-ledger"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rand = "0.10.0-rc.5"
+pms-config = {path="../pms-config"}
+anyhow = "1.0.100"

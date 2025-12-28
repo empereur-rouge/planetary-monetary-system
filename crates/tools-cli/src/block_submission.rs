@@ -1,292 +1,376 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use dialoguer::{Confirm, Input, Select};
 use dialoguer::theme::ColorfulTheme;
 use owo_colors::OwoColorize;
 use tokio::sync::Mutex;
 use pms_types::{EncryptedPayload, OutputId, PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput, Unlock};
-use crate::helpers::{pubkey_of_local_addr, wait_enter};
-use anyhow::{Result};
+use crate::helpers::{wait_enter};
+use anyhow::{bail, Result};
+use rust_decimal::Decimal;
 use serde_json::json;
+use pms_config::{load_config, NetworkMode, Settings};
+use pms_core::{to_wire, Dag};
 use pms_interface::NetDagAdapter;
-use pms_storage::RedisStore;
-use pms_wallet::SignerBackend;
-use crate::repl::{CliState, DagRef};
+use pms_storage::DagStorage;
+use pms_storage::rocks_store::store::RocksStore;
+use pms_types_block::Block;
+use pms_utils::{build_http_client, compute_block_id, submit_block_http};
+use pms_wallet::{decode_address, make_address, pick_admin_recipient, SignError, SignerBackend, Wallet};
+use pms_wallet::signing_wire::canonical_wireblock_message;
+use pms_wallet::utxo_store::{gather_wallet_utxos_dec, select_utxos_dec};
+use pms_wire::WireBlock;
+use crate::repl::{action_reload_dag, CliState, DagRef};
+use crate::utils::sync::sync_after_submit;
 
-async fn maybe_submit(mined: &pms_types_block::Block) -> Result<()> {
-    if !Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Soumettre au nœud maintenant ?")
-        .default(true)
-        .interact()?
-    {
-        return Ok(());
-    }
+#[derive(serde::Deserialize)]
+struct SubmitResp {
+    id: String,
+}
 
-    let node = std::env::var("ORACLE_URL")
-        .ok()
-        .unwrap_or_else(|| "http://127.0.0.1:8080".into());
+/// Wrapper local pour le compute id
+fn compute_id_from_wb(wb: &WireBlock) -> String {
+    compute_block_id(
+        &wb.parents,
+        &wb.payload_json
+            .as_ref()
+            .and_then(|json| serde_json::from_str(json).ok()),
+        wb.nonce,
+    )
+}
 
-    let wb = pms_wire::WireBlock {
-        id: mined.id.clone(),
-        parents: mined.parents.clone(),
-        payload_json: serde_json::to_string(&mined.payload).ok(),
-        nonce: mined.nonce,
+/// Forge un bloc (sans modifier le DAG) + affiche un log standardisé.
+/// `kind` sert juste au log ("Mint", "Tx", …).
+pub async fn forge_block_with(
+    dag: &DagRef,
+    payload: Option<PayloadEnvelope>,
+    _label: &str,
+) -> anyhow::Result<Block> {
+    let settings = load_config()?;
+    let difficulty = match settings.network.mode {
+        NetworkMode::Dev => 0,
+        NetworkMode::Testnet => 1,
+        NetworkMode::Mainnet => 2, // à ajuster
     };
 
-    let resp = reqwest::Client::new()
-        .post(format!("{}/submit/block", node))
-        .json(&wb)
-        .send()
-        .await?;
+    let mut d = dag.lock().await;
+    let b = d.forge_block(payload, difficulty, |wb| compute_id_from_wb(wb));
+    Ok(b)
+}
 
-    println!("📣 Soumission: {}", resp.status());
+pub async fn reload_dag_after_submit(
+    dag: &Arc<Mutex<Dag>>,
+    store: &Arc<RocksStore>,
+) {
+    match Dag::bootstrap_from_store::<RocksStore>(&*store).await {
+        Ok(new_dag) => {
+            let mut d = dag.lock().await;
+            *d = new_dag;
+            println!("{}", "🔄 DAG rechargé depuis le store".bright_blue());
+        }
+        Err(e) => {
+            eprintln!("{} {}", "⚠️ Échec du rechargement DAG:".yellow(), e);
+        }
+    }
+}
+
+/// Forge un bloc avec un payload chiffré, signe le WireBlock avec le `wallet`,
+/// l'envoie au nœud HTTP, puis:
+///   - synchronise le store secondaire (refresh_from_primary + sync_after_submit)
+///   - recharge le DAG local
+///
+/// Paramètres:
+/// - `dag`: DAG en RAM (Arc<Mutex<Dag>>), utilisé pour choisir les parents + forger le bloc.
+/// - `store`: RocksStore local (peut être secondaire).
+/// - `wallet`: wallet secp256k1 qui signe le bloc (signer_pk_hex + signature).
+/// - `payload`: payload déjà prêt (généralement `PayloadEnvelope::Encrypted(...)`).
+/// - `label`: juste un tag lisible pour les logs ("Mint", "TxUtxo", etc.).
+/// - `network_id`, `protocol_version`: issus de ta config (settings.network.*).
+async fn submit_encrypted_block_from_cli(
+    dag: &DagRef,
+    store: &Arc<RocksStore>,
+    wallet: &Wallet,
+    payload: PayloadEnvelope,
+    label: &str,
+    network_id: &str,
+    protocol_version: u16,
+) -> anyhow::Result<()> {
+    // 1) Forge le bloc en RAM:
+    //    - choisit les parents dans le DAG
+    //    - applique éventuellement du PoW (ici difficulté=0 en pratique)
+    //    - ne persiste rien en local, c’est juste une “maquette” de bloc.
+    let forged = forge_block_with(dag, Some(payload), label).await?;
+    println!(
+        "[CLI][FORGED][{}] id={} parents={:?} nonce={}",
+        label, forged.id, forged.parents, forged.nonce
+    );
+
+    // 2) Conversion Block → WireBlock:
+    //    - on sérialise le payload en JSON
+    //    - on garde id/parents/nonce
+    //    - les champs réseau + signature sont ajoutés juste après.
+    let mut wb = to_wire(&forged);
+
+    // 3) Injecte les métadonnées réseau (ce que le nœud attend pour filtrer).
+    wb.network_id       = network_id.to_string();
+    wb.protocol_version = protocol_version;
+
+    // 4) Clé publique du signataire (secp256k1, encodée en hex)
+    wb.signer_pk_hex = wallet.encoded_public_key();
+
+    // 5) Message canonique:
+    //    On prend *tous* les champs structurants (id, parents, payload_json,
+    //    nonce, network_id, protocol_version, signer_pk_hex) et on génère
+    //    une string *canonique* (ordre stable, sans champs inutiles).
+    //    C’est ce message exact qui est signé et vérifié côté nœud.
+    let msg = canonical_wireblock_message(&wb);
+
+    // 6) Signature ECDSA via ton Wallet:
+    //    - `wallet.sign(&msg)` produit une signature base64.
+    //    - cette signature sera vérifiée avec `verify_block_signature`
+    //      dans `persist_block`.
+    let sig_b64 = wallet
+        .sign(&msg)
+        .map_err(|e| anyhow::anyhow!("sign error: {e:?}"))?;
+    wb.signature_hex = sig_b64;
+
+    // 7) Envoi HTTP au nœud:
+    //    - `/submit/block` va:
+    //        * vérifier réseau (network_id/protocol_version)
+    //        * vérifier la signature ECDSA
+    //        * persister dans Rocks
+    //        * mettre à jour DAG + finalité côté serveur
+    println!(
+        "[CLI][HTTP][OUT][{}] POST /submit/block id={} parents={:?}",
+        label, wb.id, wb.parents
+    );
+    let (status, id_opt) = submit_block_http(&wb).await?;
+
+    // 8) Si tu as un store secondaire, on essaye de le resynchroniser:
+    if let Err(e) = store.refresh_from_primary() {
+        eprintln!("[CLI][REFRESH_BEFORE][ERR] {e:#}");
+    } else {
+        let cnt = store.all_block_ids().await.map(|v| v.len()).unwrap_or(0);
+        println!("[CLI][REFRESH_BEFORE][OK] store_count={}", cnt);
+    }
+
+    // 9) Sync fine (en fonction du status + id retourné par le nœud)
+    sync_after_submit(store, id_opt.as_deref(), status).await?;
+
+    // 10) Rechargement complet du DAG local depuis le store:
+    //     - toutes les nouvelles arêtes/enfants/finalités sont reflétées dans le CLI.
+    reload_dag_after_submit(dag, store).await;
+    {
+        let d = dag.lock().await;
+        let tips = d.find_tips();
+        println!(
+            "[CLI][AFTER_RELOAD][{}] blocks_ram={}, tips_ram={:?}",
+            label,
+            d.blocks.len(),
+            tips
+        );
+    }
+
+    // 11) Feedback lisible pour l’utilisateur final
+    match status {
+        s if s == reqwest::StatusCode::CREATED => {
+            let id = id_opt.as_deref().unwrap_or(&wb.id);
+            println!("✅ [{}] 201 Created (id={})", label, id);
+        }
+        s if s == reqwest::StatusCode::ACCEPTED => {
+            let id = id_opt.as_deref().unwrap_or(&wb.id);
+            println!("⚠️  [{}] 202 Accepted (async, id={})", label, id);
+        }
+        s if s == reqwest::StatusCode::CONFLICT => {
+            println!("ℹ️  [{}] 409 Conflict (déjà présent)", label);
+        }
+        other => {
+            eprintln!("❌ [{}] Statut inattendu: {}", label, other);
+        }
+    }
+
     Ok(())
 }
 
-pub async fn action_make_reward(
+pub async fn action_make_mint(
     state: &Arc<Mutex<CliState>>,
     dag: &DagRef,
-    _store: &Arc<RedisStore>,
-    adapter: &Arc<dyn NetDagAdapter>,
-) -> Result<()> {
-    // bénéficiaire = wallet courant
-    let w = {
-        let st = state.lock().await;
-        match st.current_wallet() {
-            Some(w) => w.clone(),
-            None => {
-                eprintln!("{}", "Aucun wallet sélectionné".red());
-                wait_enter();
-                return Ok(());
-            }
-        }
-    };
-
-    // montant
-    let amount: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Montant (string décimale)")
-        .default("1000".into())
-        .interact_text()?;
-
-    // payload clair
-    let plain = PlainPayload::Reward {
-        outputs: vec![TxOutput { address: w.get_address(), amount: amount.clone() }],
-    };
-
-    // destinataires chiffrement
-    let admin_pk_hex = std::env::var("PMS_ADMIN_PUBKEY_HEX").unwrap_or_else(|_| {
-        Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Admin public key hex")
-            .interact_text()
-            .unwrap()
-    });
-    let recipients = vec![w.encoded_public_key(), admin_pk_hex];
-
-    // chiffrement
-    let enc = match EncryptedPayload::encrypt_for_plain(&plain, &recipients) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("{} {}", "❌ Chiffrement échoué:".red(), e);
+    store: &Arc<RocksStore>,
+    _adapter: &Arc<dyn NetDagAdapter>,
+) -> anyhow::Result<()> {
+    // 1) Wallet courant
+    let w = match state.lock().await.current_wallet() {
+        Some(w) => w.clone(),
+        None => {
+            eprintln!("{}", "Aucun wallet sélectionné".red());
             wait_enter();
             return Ok(());
         }
     };
 
-    // minage RAM
-    let mined = {
-        let mut d = dag.lock().await;
-        match d.add_payload_auto_parents_mined(
-            Some(PayloadEnvelope::Encrypted(enc)),
-            0,
-            pms_utils::compute_block_id,
-        ) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("{} {}", "❌ Minage échoué:".red(), e);
-                wait_enter();
-                return Ok(());
-            }
-        }
+    // 2) Config (HRP + réseau + admin)
+    let settings  = load_config()?;
+    let hrp       = settings.address.hrp.clone();
+    let admin_xpk = pick_admin_recipient(&settings.admin.wallet_addresses).await?;
+
+    // 3) Montant
+    let amount: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Montant (string décimale)")
+        .default("1000".into())
+        .interact_text()?;
+
+    // 4) Payload Mint → chiffrage pour (moi + admin)
+    let plain = PlainPayload::Mint {
+        outputs: vec![TxOutput {
+            address: w.get_address(&hrp),
+            amount: amount.clone(),
+        }],
     };
+    let recipients = vec![w.x25519_pub_hex.clone(), admin_xpk];
+    let enc = EncryptedPayload::encrypt_for_plain(&plain, &recipients)
+        .map_err(|e| anyhow::anyhow!(e))?;
 
-    println!(
-        "{} {}  {} {}  {} {}",
-        "✅ Reward miné:".green().bold(),
-        mined.id.yellow(),
-        "dest:".bright_black(),
-        w.get_address().cyan(),
-        "amount:".bright_black(),
-        amount
-    );
-
-    // wire
-    let wb = pms_wire::WireBlock {
-        id: mined.id.clone(),
-        parents: mined.parents.clone(),
-        payload_json: serde_json::to_string(&mined.payload).ok(),
-        nonce: mined.nonce,
-    };
-
-    // persist + broadcast
-    match adapter.persist_block(&wb).await {
-        Ok(pms_storage::PutResult::Inserted) => {
-            println!("{}", "✅ Persisté dans le store".green());
-            match adapter.broadcast_block(&wb).await {
-                Ok(_)  => println!("{}", "📣 Bloc broadcasté".yellow()),
-                Err(e) => eprintln!("{} {}", "❌ Broadcast échoué:".red(), e),
-            }
-        }
-        Ok(pms_storage::PutResult::AlreadyExists) => {
-            println!("{}", "ℹ️ Bloc déjà présent (dup)".bright_black());
-        }
-        Ok(other) => {
-            eprintln!("{} {:?}", "❌ PutResult inattendu:".red(), other);
-        }
-        Err(e) => {
-            eprintln!("{} {}", "❌ Persistance échouée:".red(), e);
-        }
-    }
+    // 5) Forge + sign + submit + reload via helper unifié
+    submit_encrypted_block_from_cli(
+        dag,
+        store,
+        &w,
+        PayloadEnvelope::Encrypted(enc),
+        "Mint",
+        &settings.network.network_id,
+        settings.network.protocol_version as u16,
+    )
+        .await?;
 
     wait_enter();
     Ok(())
 }
 
-// TX MAKING
-pub async fn action_make_tx(
+pub async fn action_send_tokens(
     state: &Arc<Mutex<CliState>>,
     dag: &DagRef,
-    store: &Arc<RedisStore>,
-    adapter: &Arc<dyn NetDagAdapter>,
+    store: &Arc<RocksStore>,
 ) -> Result<()> {
-    // --- sélection expéditeur + destinataire (inchangé) ---
-    let (from_w, to_addr) = {
+    // 1) Wallet courant + HRP + X25519 SK + settings
+    let (w, w_pub, w_xpk, w_xsk, hrp, settings) = {
         let st = state.lock().await;
-        if st.wallets.is_empty() { anyhow::bail!("Crée d'abord un wallet"); }
-        let items: Vec<String> = st.wallets.iter().map(|w| w.get_address()).collect();
-        drop(st);
-
-        let from_idx = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("Wallet expéditeur").items(&items).default(0).interact()?;
-
-        let dest_mode = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("Choisir le destinataire")
-            .items(&["Adresse saisie", "Parmi mes wallets"]).default(0).interact()?;
-
-        let to_addr = if dest_mode==1 {
-            let st2 = state.lock().await;
-            let def = if st2.wallets.len()>1 { 1 } else { 0 };
-            let idx = Select::with_theme(&ColorfulTheme::default())
-                .with_prompt("Wallet destinataire")
-                .items(&items).default(def).interact()?;
-            st2.wallets[idx].get_address()
-        } else {
-            Input::with_theme(&ColorfulTheme::default())
-                .with_prompt("Adresse destinataire").interact_text()?
-        };
-
-        let st3 = state.lock().await;
-        (st3.wallets[from_idx].clone(), to_addr)
+        let wallet = st
+            .current_wallet()
+            .ok_or_else(|| anyhow::anyhow!("Aucun wallet sélectionné"))?;
+        let settings = load_config()?;
+        let hrp = settings.address.hrp.clone();
+        let xsk = wallet
+            .x25519_sk_hex()
+            .ok_or_else(|| anyhow::anyhow!("Wallet sans mnemonic → pas de X25519 SK"))?;
+        (
+            wallet.clone(),
+            wallet.public_key_hex.clone(),
+            wallet.x25519_pub_hex.clone(),
+            xsk,
+            hrp,
+            settings,
+        )
     };
 
-    // --- sélection UTXO (ici on demande un input simple; remplace par auto-UTXO si dispo) ---
-    let prev_txid: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Input: txid").interact_text()?;
-    let prev_index: u32 = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Input: index").default(0).interact_text()?;
+    // 2) Saisie destinataire + montant + frais
+    let dest_addr: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Adresse destinataire (Bech32m)")
+        .interact_text()?;
 
-    let amount_out: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Montant à envoyer (string décimale)").default("100".into()).interact_text()?;
+    let amount_str: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Montant (string décimale)")
+        .interact_text()?;
 
-    // calcule la fee automatiquement si tu as une FeePolicy accessible ; ici on laisse le prompt optionnel
-    let fee: String = {
-        // remarque: remplace par FeePolicy::compute_fee(&amount_out) si tu as la policy ici.
-        Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Frais (string décimale) — tu peux appuyer Entrée pour auto")
-            .allow_empty(true)
-            .interact_text()?
-    };
-    let fee = if fee.trim().is_empty() {
-        // fallback minimal si pas de policy: "0"
-        "0".to_string()
-    } else {
-        fee
-    };
+    let fee_str: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Frais (string décimale) — Entrée pour 0")
+        .default("0".into())
+        .interact_text()?;
 
-    // --- construit la tx, signe ---
-    let inputs = vec![TxInput { out: OutputId { txid: prev_txid.clone(), index: prev_index } }];
-    let outputs = vec![TxOutput { address: to_addr.clone(), amount: amount_out.clone() }];
-    let canon = json!({ "inputs": inputs, "outputs": outputs, "fee": fee });
+    // 3) Parse montants
+    let want = Decimal::from_str_exact(&amount_str)
+        .map_err(|_| anyhow::anyhow!("Montant invalide"))?;
+    let fee = Decimal::from_str_exact(&fee_str)
+        .map_err(|_| anyhow::anyhow!("Frais invalides"))?;
 
-    let canon_str = serde_json::to_string(&canon)?;
-    let sig_b64 = from_w
-        .sign(&canon_str)
-        .map_err(|e| anyhow::anyhow!("signature failed: {:?}", e))?;
+    // 4) UTXO du wallet
+    let utxos = gather_wallet_utxos_dec(&*store, &w_pub, &w_xpk, &w_xsk, &hrp, 5_000).await?;
+    if utxos.is_empty() {
+        eprintln!("{}", "Aucun UTXO disponible".red());
+        wait_enter();
+        return Ok(());
+    }
 
-    let unlocks = vec![Unlock {
-        pubkey_hex: from_w.encoded_public_key(),
-        signature_b64: sig_b64,
+    // 5) Sélection gloutonne
+    let need = want + fee;
+    let (picked, change) = select_utxos_dec(utxos, need)?;
+
+    // 6) Construire la transaction (outputs: destinataire [+ change])
+    let mut outputs = vec![TxOutput {
+        address: dest_addr.clone(),
+        amount: amount_str.clone(),
     }];
+    if change > Decimal::ZERO {
+        let change_addr = make_address(&hrp, &w_pub, &w_xpk);
+        outputs.push(TxOutput {
+            address: change_addr,
+            amount: change.to_string(),
+        });
+    }
 
-    let tx = Transaction { inputs, outputs, fee: fee.clone(), unlocks };
-    let plain = PlainPayload::TxUtxo(tx);
+    let inputs: Vec<TxInput> = picked
+        .into_iter()
+        .map(|u| TxInput {
+            out: OutputId {
+                txid: u.txid,
+                index: u.index,
+            },
+        })
+        .collect();
 
-    // --- destinataires pour le chiffrement ---
-    let admin_pk_hex = std::env::var("PMS_ADMIN_PUBKEY_HEX")
-        .unwrap_or_else(|_| Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Admin public key hex").interact_text().unwrap());
+    let mut tx = Transaction {
+        inputs,
+        outputs,
+        fee: fee_str.clone(),
+        unlocks: vec![],
+    };
 
-    let mut recipients = vec![from_w.encoded_public_key(), admin_pk_hex];
-    if let Some(pk) = pubkey_of_local_addr(state, &to_addr).await {
-        recipients.push(pk);
-    } else if Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Ajouter la pubkey hex du destinataire pour qu'il puisse déchiffrer ?")
-        .default(true).interact()?
+    // 7) Signature de la Tx UTXO (niveau “transaction”)
     {
-        let to_pk_hex: String = Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Dest pubkey hex").interact_text()?;
-        recipients.push(to_pk_hex);
+        let msg = tx.signing_message()?;
+        let sig_b64 = w
+            .sign(&msg)
+            .map_err(|_| anyhow::anyhow!("Failed to sign transaction"))?;
+        tx.unlocks = vec![Unlock {
+            pubkey_hex: w.public_key_hex.clone(),
+            signature_b64: sig_b64,
+        }];
     }
 
-    // --- chiffrement ---
-    let enc = EncryptedPayload::encrypt_for_plain(&plain, &recipients)
-        .map_err(|e| anyhow::anyhow!("encrypt failed: {e}"))?;
+    // 8) Chiffrement du payload (destinataires = nous + destinataire)
+    let (_h20, dest_xpk) = decode_address(&dest_addr)
+        .map_err(|e| anyhow::anyhow!("Adresse destinataire invalide: {e}"))?;
 
-    // --- minage RAM -> bloc complet ---
-    let mined = {
-        let mut d = dag.lock().await;
-        d.add_payload_auto_parents_mined(
-            Some(PayloadEnvelope::Encrypted(enc)),
-            0,
-            pms_utils::compute_block_id,
-        )?
-    };
+    let plain = PlainPayload::TxUtxo(tx);
+    let enc = EncryptedPayload::encrypt_for_plain(&plain, &[w_xpk.clone(), dest_xpk])
+        .map_err(|e| anyhow::anyhow!(e))?;
 
-    println!("{} {}", "✅ Tx minée (RAM):".green().bold(), mined.id.yellow());
+    // 9) Forge + sign + submit + reload via helper unifié
+    submit_encrypted_block_from_cli(
+        dag,
+        store,
+        &w,
+        PayloadEnvelope::Encrypted(enc),
+        "TxUtxo",
+        &settings.network.network_id,
+        settings.network.protocol_version as u16,
+    )
+        .await?;
 
-    // --- transforme en WireBlock ---
-    let wb = pms_wire::WireBlock {
-        id: mined.id.clone(),
-        parents: mined.parents.clone(),
-        payload_json: serde_json::to_string(&mined.payload).ok(),
-        nonce: mined.nonce,
-    };
-
-    // --- persist localement via l'adapter/store ---
-    match adapter.persist_block(&wb).await {
-        Ok(pms_storage::PutResult::Inserted) => {
-            println!("{}", "✅ Persisté dans le store".green());
-            // broadcast si persist ok
-            match adapter.broadcast_block(&wb).await {
-                Ok(_) => println!("{}", "📣 Bloc broadcasté".yellow()),
-                Err(e) => eprintln!("{} {}", "❌ Erreur broadcast:".red(), e),
-            }
-        }
-        Ok(pms_storage::PutResult::AlreadyExists) => {
-            println!("{}", "ℹ️  Bloc déjà présent (dup)".bright_black());
-        }
-        Err(e) => {
-            eprintln!("{} {}", "❌ Persist failed:".red(), e);
-        }
-    }
-
+    println!(
+        "{} {}",
+        "✅ Transaction soumise, bloc id:".green().bold(),
+        "voir logs ci-dessus".cyan()
+    );
+    wait_enter();
     Ok(())
 }

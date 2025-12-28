@@ -1,0 +1,10 @@
+[package]
+name = "pms-config"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0.226", features = ["derive"] }
+anyhow = "1.0.100"
+config = "0.15.16"
+thiserror = "2.0.16"

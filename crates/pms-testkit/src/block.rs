@@ -1,0 +1,49 @@
+use pms_types::PayloadEnvelope;
+use pms_utils::compute_block_id;
+use pms_wallet::{SignerBackend, Wallet};
+use pms_wallet::signing_wire::canonical_wireblock_message;
+use pms_wire::{WireBlock, WireMeta};
+
+pub fn forge_signed_wire_block_for_test(
+    parents: Vec<String>,
+    meta: &WireMeta,
+    wallet: &Wallet,
+    nonce: u64,
+    payload: Option<PayloadEnvelope>,
+) -> WireBlock {
+    // 1) Sérialise le payload (ou None -> "null")
+    let payload_json = payload
+        .as_ref()
+        .and_then(|p| serde_json::to_string(p).ok());
+
+    // 2) Construit le squelette du WireBlock (sans signature)
+    let mut wb = WireBlock {
+        id: String::new(), // on va le remplir juste après
+        parents,
+        payload_json,
+        nonce,
+        network_id: meta.network_id.clone(),
+        protocol_version: meta.protocol_version as u16,
+        signer_pk_hex: wallet.encoded_public_key(), // clé publique en hex
+        signature_hex: String::new(),               // signature à remplir après
+    };
+
+    // 3) Calculer l'ID *avant* la signature, comme en prod
+    wb.id = compute_block_id(
+        &wb.parents,
+        &wb.payload_json
+            .as_ref()
+            .and_then(|s| serde_json::from_str(s).ok()),
+        wb.nonce,
+    );
+
+    // 4) Construire le message canonique incluant l'ID + meta réseau
+    let msg = canonical_wireblock_message(&wb);
+
+    // 5) Signer exactement ce message
+    wb.signature_hex = wallet
+        .sign(&msg)
+        .expect("sign ne doit pas fail en test");
+
+    wb
+}

@@ -1,5 +1,5 @@
 [rocks]
-path = "../data/pms-rocks"
+path = "data/pms-rocks"
 prefix = "pms:dev"
 tip_limit = 256
 
@@ -12,8 +12,10 @@ protocol_version = 1
 hrp = "8e"
 
 [admin]
-wallet_addresses = [
-    "8e1eqy642zaz5dsyzc3cf54ul642r9259kre2d40m3mp7q8h4fq4333yw0hjkw02e4lljjm4em8hqjc67p3m4esvq774n",
+wallet_addresses = [ # bech32m (adresse = hash + xpk)
+    "8e1eqy642zaz5dsyzc3cf54ul642r9259kre2d40m3mp7q8h4fq4333yw0hjkw02e4lljjm4em8hqjc67p3m4esvq774n", ]
+signer_pubkeys = [ # ECDSA pubkey hex (autorisation mint)
+    "0465f74d7b176f075ebfeee4fda8b2aa229986cb4531fd5a59fe083571cbd8aac5d2e2eec393d2d7931010b1a817d815d366e74adecbadca6a68f4a9a1472592d2",
 ]
 
 [client]
@@ -22,8 +24,8 @@ api_addr  = "127.0.0.1:8080"
 allow_insecure_tls = true
 
 [tls]
-cert_pem = "../secrets/tls/cert.pem" # en docker "/etc/pms/tls/cert.pem", en local "/secrets/tls/cert.pem"
-key_pem  = "../secrets/tls/key_pk8.pem" # en docker "/etc/pms/tls/key.pem", en local "/secrets/tls/key.pem"
+cert_pem = "etc/secrets/tls/cert.pem" # en docker "/etc/pms/tls/cert.pem", en local "/secrets/tls/cert.pem"
+key_pem  = "etc/secrets/tls/key_pk8.pem" # en docker "/etc/pms/tls/key.pem", en local "/secrets/tls/key.pem"
 # liste des empreintes SHA-256 autorisées (whitelist des pairs)
 whitelist_fp256 = []
 
@@ -33,6 +35,31 @@ request_timeout_ms = 4000
 rate_limit_rps = 50
 burst = 100
 
+[fees]
+epsilon = "0.001"
+scan_limit = 2000
+mode = "uniform" # "uniform" | "round_robin"
+seed = 42        # optionnel (tests / déterminisme)
+enforce_fee_recipient = true
+
 [auth]
 require_signed_submit = false
 admin_api_token = "env:PMS_ADMIN_TOKEN_DEV"
+
+[secrets]
+node_identity_key_path = "etc/pms/node-identity.key"
+admin_wallet_file      = "etc/pms/admin-wallet.json"
+
+[validation]
+min_pow_leading_zero_bits = 0   # en dev: pas de contrainte
+max_payload_bytes          = 65536   # 64 KB
+min_parents_after_boot     = 2
+max_parents                = 8
+require_unique_parents     = true
+forbid_self_parent         = true
+max_inputs                 = 64
+max_outputs                = 64
+max_tx_bytes               = 65536   # 64 KB
+max_fee_per_tx             = 100
+enforce_parent_existence   = false
+enforce_fee_recipient      = true

@@ -1,0 +1,10 @@
+[package]
+name = "pms-interface"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1.89"
+anyhow = "1.0.99"
+pms-wire = { path = "../pms-wire" }
+pms-storage = { path = "../pms-storage" }

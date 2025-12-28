@@ -1,0 +1,937 @@
+use crate::UtxoDelta;
+use crate::checkpoint_rocks::rotate_checkpoints;
+use crate::helpers::{be_to_i64, key_time_index};
+use crate::helpers::{be_to_ts, le_to_u64, now_ms_i64, parse_time_index_key, ts_to_be, u64_to_le};
+use crate::{DagStorage, LedgerMutation, PutResult, StoredBlock};
+use anyhow::{Context, Result};
+use pms_wire::WireBlock;
+use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options};
+use serde::Serialize;
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, MissedTickBehavior, interval, sleep};
+use tokio_util::sync::CancellationToken;
+
+pub struct RocksStore {
+    /// handle RocksDB partagé
+    pub db: Arc<DB>,
+    /// nombre max de tips qu’on garde (même rôle que RedisStore.tip_limit)
+    pub tip_limit: usize,
+    /// namespace logique (équivalent prefix Redis)
+    pub prefix: String,
+}
+
+impl RocksStore {
+    pub async fn new(path: &str, tip_limit: usize, prefix: impl Into<String>) -> Result<Self> {
+        let prefix = prefix.into();
+
+        let path = PathBuf::from(path);
+        eprintln!("[rocks] init at {}", path.display());
+
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("create_dir_all({})", path.display()))?;
+
+        // ==============
+        // 1) Options DB globales (SSD-friendly)
+        // ==============
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+
+        // Un peu d’optimisation générique
+        db_opts.increase_parallelism(num_cpus::get() as i32);
+        db_opts.set_max_background_jobs(4);
+        db_opts.set_level_compaction_dynamic_level_bytes(true);
+
+        // Tunings mémoire “raisonnables” pour dev/prod
+        db_opts.set_write_buffer_size(64 * 1024 * 1024); // 64 MB
+        db_opts.set_max_write_buffer_number(3);
+        db_opts.set_target_file_size_base(64 * 1024 * 1024); // 64 MB par sstable
+
+        // ==============
+        // 2) CF attendues (préfixées)
+        // ==============
+        let required: BTreeSet<String> = [
+            "blocks",
+            "idx_blocks",
+            "by_time",
+            "id2ts",
+            "final",
+            "last_ms",
+            "children_count",
+            "tips",
+            "children_set",
+            "ver",
+            "utxo",
+            "utxo_spent",
+            "tx_applied",
+        ]
+        .into_iter()
+        .map(|s| format!("{prefix}:{s}"))
+        .collect();
+
+        // 3) Si le dossier existe déjà, on valide les CF existantes
+        if Path::new(&path).exists() {
+            let existing = DB::list_cf(&db_opts, &path).unwrap_or_default();
+            let existing_prefixed: BTreeSet<String> = existing
+                .iter()
+                .filter(|cf| *cf != "default")
+                .cloned()
+                .collect();
+
+            // a) CF avec un autre prefix → DB incohérente
+            let wrong_prefix = existing_prefixed
+                .iter()
+                .any(|cf| !cf.starts_with(&format!("{prefix}:")));
+            if wrong_prefix {
+                anyhow::bail!(
+                    "Incohérence: DB contient d’autres prefixes. prefix='{prefix}', existantes={existing_prefixed:?}"
+                );
+            }
+
+            // b) S’il manque des CF, RocksDB les créera grâce à create_missing_column_families(true).
+        }
+
+        // ==============
+        // 4) Helper pour CF options (bloom pour index)
+        // ==============
+        fn cf_opts_with_bloom() -> Options {
+            let mut opts = Options::default();
+            opts.set_optimize_filters_for_hits(true);
+
+            let mut table_opts = BlockBasedOptions::default();
+            // ~10 bits / key → compromis entre mémoire et perf
+            table_opts.set_bloom_filter(10.0, false);
+            opts.set_block_based_table_factory(&table_opts);
+            opts
+        }
+
+        // 5) Construire les CF descriptors
+        let mut cf_descs = Vec::with_capacity(required.len() + 1);
+
+        // CF "default" basique (peu utilisée)
+        cf_descs.push(ColumnFamilyDescriptor::new(
+            "default".to_string(),
+            Options::default(),
+        ));
+
+        for name in &required {
+            // On met un bloom sur les CF typées index / lookup
+            let mut opts = if name.ends_with(":blocks")
+                || name.ends_with(":id2ts")
+                || name.ends_with(":idx_blocks")
+                || name.ends_with(":tips")
+                || name.ends_with(":utxo")
+                || name.ends_with(":utxo_spent")
+            {
+                cf_opts_with_bloom()
+            } else {
+                Options::default()
+            };
+
+            // Ces CF doivent aussi être créées si manquantes
+            opts.create_if_missing(true);
+
+            cf_descs.push(ColumnFamilyDescriptor::new(name.clone(), opts));
+        }
+
+        // 6) Ouverture DB + CF
+        let db = DB::open_cf_descriptors(&db_opts, &path, cf_descs)
+            .with_context(|| format!("open RocksDB at {}", path.display()))?;
+
+        Ok(Self {
+            db: Arc::new(db),
+            tip_limit,
+            prefix,
+        })
+    }
+
+    pub async fn put_block(&self, b: &StoredBlock) -> Result<PutResult> {
+        let cf_blocks = self.cf("blocks");
+        let cf_idx = self.cf("idx_blocks");
+
+        let key = b.id.as_bytes();
+
+        // 1. check existence
+        if self.db.get_cf(cf_blocks, key)?.is_some() {
+            // déjà là → Always register in idx_blocks just in case (idempotent)
+            self.db.put_cf(cf_idx, key, b"")?;
+            return Ok(PutResult::AlreadyExists);
+        }
+
+        // 2. serialize StoredBlock en JSON (même format que Redis)
+        let json = serde_json::to_vec(b)?;
+
+        // 3. store
+        self.db.put_cf(cf_blocks, key, json)?;
+        self.db.put_cf(cf_idx, key, b"")?;
+
+        Ok(PutResult::Inserted)
+    }
+
+    // helper privé appelé après append_block_atomic
+    pub(crate) fn trim_by_time(&self) -> Result<()> {
+        if self.tip_limit == 0 {
+            return Ok(());
+        }
+
+        let cf_time = self.cf("by_time");
+        let cf_i2t = self.cf("id2ts");
+
+        // Collect newest first (exactly tip_limit à garder)
+        let mut newest: Vec<Vec<u8>> = Vec::new();
+        for kv in self.db.iterator_cf(cf_time, rocksdb::IteratorMode::End) {
+            let (k, _v) = kv?;
+            newest.push(k.to_vec());
+            if newest.len() >= self.tip_limit {
+                break;
+            } // ✅ >= au lieu de >
+        }
+
+        // Si on a ≤ tip_limit, rien à faire
+        if newest.len() < self.tip_limit {
+            return Ok(());
+        }
+
+        // Construis le set des clés à garder
+        use std::collections::HashSet;
+        let keep: HashSet<Vec<u8>> = newest.iter().cloned().collect();
+
+        // Supprime toutes celles qui ne sont PAS dans keep
+        for kv in self.db.iterator_cf(cf_time, rocksdb::IteratorMode::Start) {
+            let (k, _v) = kv?;
+            let kvec = k.to_vec();
+            if !keep.contains(&kvec) {
+                self.db.delete_cf(cf_time, &kvec)?;
+                if let Some((_ts, bid)) = parse_time_index_key(&kvec) {
+                    self.db.delete_cf(cf_i2t, bid.as_bytes())?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn trim_tips(&self) -> anyhow::Result<()> {
+        if self.tip_limit == 0 {
+            return Ok(());
+        }
+
+        let cf_tips = self.cf("tips");
+
+        // 1. Collecte toutes les tips : (id, ts)
+        let mut tips: Vec<(String, i64)> = Vec::new();
+        for kv in self.db.iterator_cf(cf_tips, rocksdb::IteratorMode::Start) {
+            let (k, v) = kv?;
+            let id = String::from_utf8(k.to_vec())?;
+            let ts = be_to_i64(&v)?; // on va écrire ce helper juste après
+            tips.push((id, ts));
+        }
+
+        // 2. Trie par ts DESC (plus récent d'abord).
+        tips.sort_by_key(|(_, ts)| Reverse(*ts));
+
+        // 3. Si on est déjà <= tip_limit, rien à faire.
+        if tips.len() <= self.tip_limit {
+            return Ok(());
+        }
+
+        // 4. Construit un set des IDs qu'on garde.
+        let keep: HashSet<&str> = tips[..self.tip_limit]
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+
+        // 5. Supprime les autres dans cf_tips.
+        for (id, _) in tips.into_iter().skip(self.tip_limit) {
+            self.db.delete_cf(cf_tips, id.as_bytes())?;
+        }
+
+        Ok(())
+    }
+
+    fn child_edge_key(parent: &str, child: &str) -> Vec<u8> {
+        let mut k = Vec::with_capacity(parent.len() + 1 + child.len());
+        k.extend_from_slice(parent.as_bytes());
+        k.push(0);
+        k.extend_from_slice(child.as_bytes());
+        k
+    }
+    fn child_edge_prefix(parent: &str) -> Vec<u8> {
+        // tout ce qui commence par parent + 0x00
+        let mut k = Vec::with_capacity(parent.len() + 1);
+        k.extend_from_slice(parent.as_bytes());
+        k.push(0);
+        k
+    }
+
+    /// Récupère les timestamps (ms) pour une liste d'ids via la CF `id2ts`.
+    pub async fn ts_for_ids(&self, ids: &[String]) -> Result<HashMap<String, i64>> {
+        let cf_i2t = self.cf("id2ts");
+        let mut out = HashMap::with_capacity(ids.len());
+        for id in ids {
+            if let Some(raw) = self.db.get_cf(cf_i2t, id.as_bytes())? {
+                if raw.len() == 8 {
+                    let mut be = [0u8; 8];
+                    be.copy_from_slice(&raw);
+                    let ts = u64::from_be_bytes(be) as i64;
+                    out.insert(id.clone(), ts);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn bootstrap_once_for_production(&self) -> anyhow::Result<()> {
+        self.db.flush()?; // CF prêtes
+        self.db.compact_range::<&[u8], &[u8]>(None, None); // compact au boot (optionnel)
+        Ok(())
+    }
+
+    /// Lance une tâche de maintenance en arrière-plan :
+    /// - flush WAL périodique
+    /// - compaction périodique
+    /// - log des stats RocksDB
+    /// - checkpoint + rotation (snapshots) 1 fois / 24h
+    ///
+    /// Elle s'arrête proprement quand `cancel.cancel()` est appelé.
+    pub fn spawn_background_maintenance(
+        self: Arc<Self>,
+        cancel: CancellationToken,
+        compact_every: Duration,
+        flush_every: Duration,
+        stats_every: Duration,
+    ) -> JoinHandle<()> {
+        // Interval pour les checkpoints (1 fois / 24h)
+        let checkpoint_every = Duration::from_secs(24 * 3600);
+
+        // Dossier de backup :
+        // - en prod tu mettras typiquement /var/backups/pms
+        // - en dev: ./backups/pms
+        let backup_root =
+            std::env::var("PMS_BACKUP_ROOT").unwrap_or_else(|_| "./backups/pms".to_string());
+
+        tokio::spawn(async move {
+            // Timers périodiques
+            let mut flush_tick = interval(flush_every);
+            flush_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+            let mut compact_tick = interval(compact_every);
+            compact_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+            let mut stats_tick = interval(stats_every);
+            stats_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+            let mut checkpoint_tick = interval(checkpoint_every);
+            checkpoint_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+            eprintln!(
+                "[rocks] background maintenance started (flush={:?}, compact={:?}, stats={:?}, checkpoint={:?}, backup_root={})",
+                flush_every, compact_every, stats_every, checkpoint_every, backup_root,
+            );
+
+            loop {
+                tokio::select! {
+                    // Signal d’arrêt propre (Server::run appelle cancel.cancel())
+                    _ = cancel.cancelled() => {
+                        eprintln!("[rocks] background maintenance cancelled, exiting");
+                        break;
+                    }
+
+                    // Flush WAL (évite d’avoir un WAL trop gros, améliore la durabilité)
+                    _ = flush_tick.tick() => {
+                        if let Err(e) = self.flush_wal().await {
+                            eprintln!("[rocks] flush_wal failed: {e:#}");
+                        }
+                    }
+
+                    // Compaction de toutes les CF (réduction fragmentation, taille disque)
+                    _ = compact_tick.tick() => {
+                        if let Err(e) = self.compact_all().await {
+                            eprintln!("[rocks] compact_all failed: {e:#}");
+                        }
+                    }
+
+                    // Log de stats RocksDB (diagnostic: taille, compaction, etc.)
+                    _ = stats_tick.tick() => {
+                        if let Err(e) = self.log_stats().await {
+                            eprintln!("[rocks] log_stats failed: {e:#}");
+                        }
+                    }
+
+                    // Checkpoint + rotation (snapshots de sécurité)
+                    _ = checkpoint_tick.tick() => {
+                        if let Err(e) = self.create_checkpoint(&backup_root) {
+                            eprintln!("[rocks] create_checkpoint failed: {e:#}");
+                        } else if let Err(e) = rotate_checkpoints(&backup_root, 7) {
+                            eprintln!("[rocks] rotate_checkpoints failed: {e:#}");
+                        }
+                    }
+                }
+            }
+
+            eprintln!("[rocks] background maintenance stopped");
+        })
+    }
+
+    pub async fn open_read_only(
+        path: &str,
+        tip_limit: usize,
+        prefix: &str,
+    ) -> anyhow::Result<Self> {
+        let mut opts = Options::default();
+        opts.create_if_missing(false);
+
+        // false => pas d'erreur si des WAL existent, pas de lock exclusif
+        let db = DB::open_for_read_only(&opts, path, false)
+            .map_err(|e| anyhow::anyhow!("open_read_only: {e}"))?;
+
+        Ok(Self {
+            db: std::sync::Arc::new(db),
+            // ... tes autres champs
+            tip_limit,
+            prefix: "".to_string(),
+        })
+    }
+
+    pub fn refresh_from_primary(&self) -> anyhow::Result<()> {
+        self.db
+            .try_catch_up_with_primary()
+            .map_err(|e| anyhow::anyhow!("catch_up: {e}"))
+    }
+
+    pub async fn open_secondary(
+        primary_path: &str,
+        secondary_path: &str,
+        tip_limit: usize,
+        prefix: impl Into<String>,
+    ) -> Result<Self> {
+        let prefix = prefix.into();
+
+        let primary = PathBuf::from(primary_path);
+        let secondary = PathBuf::from(secondary_path);
+
+        std::fs::create_dir_all(&secondary)
+            .with_context(|| format!("create_dir_all({})", secondary.display()))?;
+
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(false);
+        db_opts.create_missing_column_families(false);
+
+        let required: BTreeSet<String> = [
+            "blocks",
+            "idx_blocks",
+            "by_time",
+            "id2ts",
+            "final",
+            "last_ms",
+            "children_count",
+            "tips",
+            "children_set",
+            "ver",
+            "utxo",
+            "utxo_spent",
+            "tx_applied",
+        ]
+        .into_iter()
+        .map(|s| format!("{prefix}:{s}"))
+        .collect();
+
+        // Juste les noms de CF
+        let mut cf_names: Vec<String> = Vec::with_capacity(required.len() + 1);
+        cf_names.push("default".to_string());
+        cf_names.extend(required.into_iter());
+
+        let db = DB::open_cf_as_secondary(&db_opts, &primary, &secondary, &cf_names).with_context(
+            || {
+                format!(
+                    "open RocksDB secondary at {} (primary={})",
+                    secondary.display(),
+                    primary.display()
+                )
+            },
+        )?;
+
+        Ok(Self {
+            db: Arc::new(db),
+            tip_limit,
+            prefix,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl DagStorage for RocksStore {
+    async fn put_block(&self, b: &StoredBlock) -> Result<PutResult> {
+        self.put_block(b).await
+    }
+
+    async fn get_block(&self, id: &str) -> Result<Option<StoredBlock>> {
+        let cf_blocks = self.cf("blocks");
+        if let Some(v) = self.db.get_cf(cf_blocks, id.as_bytes())? {
+            let sb: StoredBlock = serde_json::from_slice(&v)?;
+            Ok(Some(sb))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn add_child_edge(&self, parent: &str, child: &str) -> Result<()> {
+        let cf_count = self.cf("children_count");
+        let cf_set = self.cf("children_set");
+
+        // 1. bump count
+        let key_parent = parent.as_bytes();
+        let cur = self.db.get_cf(cf_count, key_parent)?;
+        let newcount = match cur {
+            Some(v) if v.len() == 8 => {
+                let n = le_to_u64(&v);
+                n + 1
+            }
+            _ => 1u64,
+        };
+        self.db.put_cf(cf_count, key_parent, u64_to_le(newcount))?;
+
+        // 2. record edge parent->child
+        // concat key: parent || 0x00 || child
+        let mut edge_key = Vec::with_capacity(parent.len() + 1 + child.len());
+        edge_key.extend_from_slice(parent.as_bytes());
+        edge_key.push(0);
+        edge_key.extend_from_slice(child.as_bytes());
+        self.db.put_cf(cf_set, edge_key, b"")?;
+
+        Ok(())
+    }
+    async fn children_count(&self, id: &str) -> Result<u64> {
+        let cf_count = self.cf("children_count");
+        if let Some(v) = self.db.get_cf(cf_count, id.as_bytes())? {
+            if v.len() == 8 {
+                return Ok(le_to_u64(&v));
+            }
+        }
+        Ok(0)
+    }
+
+    async fn add_tip(&self, id: &str) -> Result<()> {
+        let cf_tips = self.cf("tips");
+        let ts = now_ms_i64();
+        self.db.put_cf(cf_tips, id.as_bytes(), ts_to_be(ts))?;
+        self.trim_tips()?;
+        Ok(())
+    }
+
+    async fn remove_tip(&self, id: &str) -> Result<()> {
+        let cf_tips = self.cf("tips");
+        self.db.delete_cf(cf_tips, id.as_bytes())?;
+        Ok(())
+    }
+
+    async fn top_tips(&self, limit: usize) -> Result<Vec<String>> {
+        let cf_tips = self.cf("tips");
+        // collect all tips
+        let mut v: Vec<(String, i64)> = Vec::new();
+        for kv in self.db.iterator_cf(cf_tips, rocksdb::IteratorMode::Start) {
+            let (k, val) = kv?;
+            let id = String::from_utf8(k.to_vec())?;
+            let ts = if val.len() == 8 { be_to_ts(&val) } else { 0 };
+            v.push((id, ts));
+        }
+        // sort desc by ts
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+        // take limit
+        Ok(v.into_iter().take(limit).map(|(id, _)| id).collect())
+    }
+
+    async fn all_block_ids(&self) -> Result<Vec<String>> {
+        let cf_idx = self.cf("idx_blocks");
+        let mut out = Vec::new();
+        for kv in self.db.iterator_cf(cf_idx, rocksdb::IteratorMode::Start) {
+            let (k, _v) = kv?;
+            out.push(String::from_utf8(k.to_vec())?);
+        }
+        Ok(out)
+    }
+
+    async fn export_json(&self) -> anyhow::Result<String> {
+        let cf_idx = self.cf("idx_blocks");
+        let cf_blocks = self.cf("blocks");
+
+        // 1. collect all ids from idx_blocks CF
+        let mut ids = Vec::new();
+        for kv in iter_cf_all(&self.db, cf_idx) {
+            let (k, _v) = kv?;
+            let id = String::from_utf8(k.to_vec())?;
+            ids.push(id);
+        }
+
+        // 2. fetch StoredBlock for each id
+        let mut out: Vec<StoredBlock> = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(raw) = self.db.get_cf(cf_blocks, id.as_bytes())? {
+                let sb: StoredBlock = serde_json::from_slice(&raw)?;
+                out.push(sb);
+            }
+        }
+
+        // 3. pretty JSON
+        Ok(serde_json::to_string_pretty(&out)?)
+    }
+
+    async fn export_namespace(&self) -> anyhow::Result<String> {
+        let cf_blocks = self.cf("blocks");
+        let mut all_blocks = Vec::new();
+
+        for kv in iter_cf_all(&self.db, cf_blocks) {
+            let (_k, v) = kv?;
+            let sb: StoredBlock = serde_json::from_slice(&v)?;
+            all_blocks.push(sb);
+        }
+
+        Ok(serde_json::to_string(&all_blocks)?)
+    }
+
+    /// Importe un dump JSON (issu de `export_json`) :
+    /// - pour chaque block :
+    ///   - `put_block` (persist + index)
+    ///   - `add_tip` (pour qu’il soit éligible à la sélection de parents)
+    ///   - pour chaque parent :
+    ///       - `add_child_edge(parent, id)` (reconstruit les compteurs)
+    ///       - `remove_tip(parent)` (un parent référencé n’est plus un tip)
+    ///
+    /// *Idempotence*: réimporter un même dump écrase juste la valeur du block et reconstruit les index.
+    async fn import_json(&self, dump: &str) -> anyhow::Result<()> {
+        // 1. parse
+        let blocks: Vec<StoredBlock> = serde_json::from_str(dump)?;
+
+        let cf_blocks = self.cf("blocks");
+        let cf_idx = self.cf("idx_blocks");
+        let cf_tips = self.cf("tips");
+        let cf_children_cnt = self.cf("children_count");
+        let cf_children_set = self.cf("children_set");
+
+        // Sanity: ensure CF exist (they should, since new() created them).
+        let _ = (cf_blocks, cf_idx, cf_tips, cf_children_cnt, cf_children_set);
+
+        // 2. insert / update idx
+        for b in &blocks {
+            // réutilise la logique put_block()
+            let _ = self.put_block(b).await?;
+        }
+
+        // 3. rebuild parent->child edges & child counters
+        //    (idempotent : on overwrite counters by recomputing)
+        //
+        //    ATTENTION: contrairement à Redis, là si tu ré-importes
+        //    plusieurs fois tu vas re-incrémenter.
+        //
+        //    Pour coller à Redis "reconstruit les index", on veut repartir de 0.
+        //    => On wipe children_count + children_set avant.
+        //
+        {
+            // wipe children_count CF
+            for kv in iter_cf_all(&self.db, self.cf("children_count")) {
+                let (k, _) = kv?;
+                self.db.delete_cf(self.cf("children_count"), &k)?;
+            }
+            // wipe children_set CF
+            for kv in iter_cf_all(&self.db, self.cf("children_set")) {
+                let (k, _) = kv?;
+                self.db.delete_cf(self.cf("children_set"), &k)?;
+            }
+        }
+
+        for b in &blocks {
+            for p in &b.parents {
+                self.add_child_edge(p, &b.id).await?;
+            }
+        }
+
+        // 4. rebuild tips set:
+        //    wipe tips CF, puis:
+        //    - add_tip(child) pour tous les blocs
+        //    - remove_tip(parent) pour chaque parent
+        {
+            // wipe tips
+            for kv in iter_cf_all(&self.db, cf_tips) {
+                let (k, _) = kv?;
+                self.db.delete_cf(cf_tips, &k)?;
+            }
+
+            // tous en tip
+            for b in &blocks {
+                self.add_tip(&b.id).await?;
+            }
+            // puis retire les parents
+            for b in &blocks {
+                for p in &b.parents {
+                    self.remove_tip(p).await?;
+                }
+            }
+        }
+
+        // NOTE: on NE reconstruit PAS ici:
+        // - by_time (ordre insertion)
+        // - id2ts (timestamp pour recent_ids_by_time)
+        // - final / last_ms
+        //
+        // c'est pareil que Redis import_json(): il ne touchait pas la finalité,
+        // ni les ZSET temporels.
+
+        Ok(())
+    }
+
+    async fn append_block_atomic(&self, b: &StoredBlock) -> Result<bool> {
+        // délégation directe → évite la récursion infinie car on appelle
+        // la méthode inhérente (même nom, mais contexte différent)
+        RocksStore::append_block_atomic(self, b).await
+    }
+
+    async fn load_final(&self) -> Result<Vec<String>> {
+        let cf_final = self.cf("final");
+        let mut out = Vec::new();
+        for kv in self.db.iterator_cf(cf_final, rocksdb::IteratorMode::Start) {
+            let (k, _v) = kv?;
+            out.push(String::from_utf8(k.to_vec())?);
+        }
+        Ok(out)
+    }
+
+    async fn load_last_milestone(&self) -> Result<Option<String>> {
+        let cf_ms = self.cf("last_ms");
+        if let Some(v) = self.db.get_cf(cf_ms, b"last")? {
+            Ok(Some(String::from_utf8(v.to_vec())?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn recent_ids(&self, limit: usize) -> Result<Vec<String>> {
+        let cf_time = self.cf("by_time");
+        let mut out = Vec::new();
+
+        for kv in self.db.iterator_cf(cf_time, rocksdb::IteratorMode::End) {
+            let (k, _v) = kv?;
+            if let Some((_ts, id)) = parse_time_index_key(&k) {
+                out.push(id);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn recent_ids_by_time(
+        &self,
+        after_ts: Option<i64>,
+        after_id: Option<String>,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<String>, Option<(i64, String, bool)>)> {
+        let cf_time = self.cf("by_time");
+        let cf_i2t = self.cf("id2ts");
+
+        // Point de départ pour l’itérateur (Reverse).
+        let start_mode = if let (Some(ts), Some(id)) = (after_ts, after_id.clone()) {
+            let k = key_time_index(ts, &id);
+            IteratorMode::From(&k.clone(), Direction::Reverse)
+        } else {
+            IteratorMode::End
+        };
+
+        let mut ids = Vec::with_capacity(limit + 1);
+        let mut iter = self.db.iterator_cf(cf_time, start_mode);
+
+        // Si on a un curseur, la 1re entrée peut être exactement (ts,id) → sauter
+        if after_ts.is_some() && after_id.is_some() {
+            if let Some(Ok((k, _))) = iter.next() {
+                if let Some((_ts, kid)) = parse_time_index_key(&k) {
+                    if Some(kid) != after_id {
+                        // on a commencé "avant" la clé exacte, garder cet élément
+                        // sinon on l’a skip en consommant déjà l’item égal
+                        ids.push(parse_time_index_key(&k).unwrap().1);
+                    }
+                }
+            }
+        }
+
+        // Poursuivre jusqu’à limit+1 (pour savoir s’il y a une page suivante)
+        while ids.len() < limit + 1 {
+            match iter.next() {
+                Some(Ok((k, _))) => {
+                    if let Some((_ts, id)) = parse_time_index_key(&k) {
+                        ids.push(id);
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        let has_more = ids.len() > limit;
+        if has_more {
+            ids.pop();
+        } // garder exactement `limit`
+
+        // Construire next_cursor depuis le dernier id renvoyé
+        let next_cursor = ids.last().and_then(|last_id| {
+            self.db
+                .get_cf(cf_i2t, last_id.as_bytes())
+                .ok()
+                .flatten()
+                .and_then(|v| {
+                    if v.len() == 8 {
+                        let mut b = [0u8; 8];
+                        b.copy_from_slice(&v);
+                        let ts = u64::from_be_bytes(b) as i64;
+                        Some((ts, last_id.clone(), has_more))
+                    } else {
+                        None
+                    }
+                })
+        });
+
+        Ok((ids, next_cursor))
+    }
+
+    async fn get_blocks_by_ids(&self, ids: &[String]) -> Result<Vec<WireBlock>> {
+        let cf_blocks = self.cf("blocks");
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(v) = self.db.get_cf(cf_blocks, id.as_bytes())? {
+                if let Ok(sb) = serde_json::from_slice::<StoredBlock>(&v) {
+                    out.push(WireBlock {
+                        id: sb.id,
+                        parents: sb.parents,
+                        payload_json: sb.payload_json,
+                        nonce: sb.nonce,
+                        network_id: String::new(),
+                        protocol_version: 0,
+                        signer_pk_hex: String::new(),
+                        signature_hex: String::new(),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn persist_final(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let cf_final = self.cf("final");
+        for id in ids {
+            self.db.put_cf(cf_final, id.as_bytes(), b"")?;
+        }
+        Ok(())
+    }
+
+    async fn persist_last_milestone(&self, id: &str) -> Result<()> {
+        let cf_ms = self.cf("last_ms");
+        self.db.put_cf(cf_ms, b"last", id.as_bytes())?;
+        Ok(())
+    }
+
+    async fn append_block_atomic_with_utxo(
+        &self,
+        b: &StoredBlock,
+        delta: Option<&UtxoDelta>,
+    ) -> Result<bool> {
+        use rocksdb::WriteBatch;
+
+        // 0) bloc déjà là ? → idempotent
+        let cf_blocks = self.cf("blocks");
+        if self.db.get_cf(cf_blocks, b.id.as_bytes())?.is_some() {
+            return Ok(false);
+        }
+
+        // 1) prépare le batch global
+        let mut batch = WriteBatch::default();
+
+        // 1.a) UTXO Delta
+        if let Some(d) = delta {
+            let cf_utxo = self.cf("utxo");
+            let cf_utxo_spent = self.cf("utxo_spent");
+
+            // SPENDS
+            // 1) delete from utxo (unspent)
+            // 2) put into utxo_spent
+            for (txid, idx) in &d.spend {
+                let key = make_utxo_key(txid, *idx);
+
+                // Note: on pourrait vérifier ici l'existence préalable pour détecter une double dépense
+                // au moment du commit, ou on fait confiance à la validation DAG en amont.
+                // Dans un design "optimiste", le DAG layer a déjà checké.
+                // Si on veut être strict RocksDB, on fait un Get().
+
+                // Suppression de l'unspent
+                batch.delete_cf(cf_utxo, &key);
+
+                // Marquage spent (on stocke le block_id qui dépense, ou timestamp, ou juste "")
+                // Ici on met juste un marqueur vide pour dire "c'est dépensé".
+                batch.put_cf(cf_utxo_spent, &key, b.id.as_bytes());
+            }
+
+            // CREATES
+            for (txid, idx, addr, amt) in &d.create {
+                let key = make_utxo_key(txid, *idx);
+
+                #[derive(Serialize)]
+                struct OutVal<'a> {
+                    addr: &'a str,
+                    amt: &'a str,
+                }
+
+                let val = OutVal { addr, amt };
+                let json = serde_json::to_vec(&val)?;
+                batch.put_cf(cf_utxo, &key, &json);
+            }
+        }
+
+        // 1.b) Indices DAG (ton code existant d’append_block_atomic)
+        self.apply_dag_indices(&mut batch, b)?;
+
+        // 2) write atomique
+        self.db.write(batch)?;
+
+        // 3) trims
+        self.trim_by_time()?;
+        self.trim_tips()?;
+
+        Ok(true)
+    }
+}
+
+fn make_utxo_key(txid: &str, index: u32) -> Vec<u8> {
+    format!("{txid}#{index}").into_bytes()
+}
+
+fn iter_cf_all<'a>(
+    db: &'a rocksdb::DB,
+    cf: &'a rocksdb::ColumnFamily,
+) -> impl Iterator<Item = anyhow::Result<(Box<[u8]>, Box<[u8]>)>> + 'a {
+    db.iterator_cf(cf, IteratorMode::Start).map(|res| {
+        let (k, v) = res?;
+        Ok((k, v))
+    })
+}
+
+fn iter_cf_prefix<'a>(
+    db: &'a rocksdb::DB,
+    cf: &'a rocksdb::ColumnFamily,
+    prefix: Vec<u8>,
+) -> impl Iterator<Item = anyhow::Result<(Box<[u8]>, Box<[u8]>)>> + 'a {
+    db.iterator_cf(cf, IteratorMode::From(&prefix, Direction::Forward))
+        .take_while(move |res| {
+            match res {
+                Ok((k, _)) => k.starts_with(&prefix),
+                Err(_) => true, // propagera après
+            }
+        })
+        .map(|res| {
+            let (k, v) = res?;
+            Ok((k, v))
+        })
+}

@@ -1,7 +1,7 @@
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use rocksdb::{WriteBatch};
 use crate::rocks_store::store::RocksStore;
+use anyhow::Result;
+use rocksdb::WriteBatch;
+use serde::{Deserialize, Serialize};
 
 /// Représentation minimale d’une TX pour l’appliquer au set UTXO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,6 +11,12 @@ pub struct UtxoApply {
     pub inputs: Vec<(String, u32)>,
     /// Sorties : (address, amount_decstr)
     pub outputs: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UtxoDelta {
+    pub spend: Vec<(String, u32)>,                  // (txid, index)
+    pub create: Vec<(String, u32, String, String)>, // (txid, index, address, amount)
 }
 
 impl RocksStore {
@@ -31,14 +37,6 @@ impl RocksStore {
         txid.as_bytes()
     }
 
-    /// Colonnes pratiques (doivent exister dans `new()`):
-    ///   <prefix>:utxo        (HASH outpoint -> json {addr, amt})
-    ///   <prefix>:tx:applied  (SET txid -> "")
-    #[inline]
-    fn cf_utxo(&self) -> &rocksdb::ColumnFamily { self.cf("utxo") }
-    #[inline]
-    fn cf_tx_applied(&self) -> &rocksdb::ColumnFamily { self.cf("tx:applied") }
-
     /// Applique une transaction au set UTXO de manière atomique (via batch).
     ///
     /// - `Ok(true)`  : appliquée (inputs existants, non appliquée auparavant)
@@ -52,7 +50,11 @@ impl RocksStore {
     pub async fn utxo_apply_tx_atomic(&self, tx: &UtxoApply) -> Result<bool> {
         // 1) Idempotence: déjà appliquée ?
         let cf_applied = self.cf_tx_applied();
-        if self.db.get_cf(cf_applied, Self::k_tx_applied_key(&tx.txid))?.is_some() {
+        if self
+            .db
+            .get_cf(cf_applied, Self::k_tx_applied_key(&tx.txid))?
+            .is_some()
+        {
             return Ok(false);
         }
 
@@ -77,7 +79,10 @@ impl RocksStore {
 
         // Crée les sorties: outpoints = `${txid}:${i}`
         #[derive(Serialize)]
-        struct OutVal<'a> { addr: &'a str, amt: &'a str }
+        struct OutVal<'a> {
+            addr: &'a str,
+            amt: &'a str,
+        }
 
         for (i, (addr, amount)) in tx.outputs.iter().enumerate() {
             let key = Self::k_utxo_key(&tx.txid, i as u32);

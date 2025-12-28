@@ -1,0 +1,26 @@
+[package]
+name = "pms-storage"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features=["derive"] }
+serde_json = "1"
+tokio = { version = "1.47.1", features=["rt-multi-thread","macros"] }
+tokio-util = { version = "0.7.17" }
+thiserror = "2.0.16"
+nanoid = "0.4"
+pms-wire = { path = "../pms-wire" }
+rocksdb = "0.24.0"
+tempfile = "3.23.0"
+num_cpus = "1.17.0"
+chrono = "0.4.42"
+pms-errors = { path = "../pms-errors" }
+pms-types = { path = "../pms-types" }
+
+
+[dev-dependencies]
+pms-testkit = { path = "../pms-testkit" }
+pms-core = { path = "../pms-core" }

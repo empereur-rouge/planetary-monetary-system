@@ -1,0 +1,10 @@
+[package]
+name = "pms-types"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pms-types-transaction = { path = "../pms-types-transaction" }
+pms-types-mint      = { path = "../pms-types-mint" }
+pms-types-payload     = { path = "../pms-types-payload" }
+pms-types-block        = { path = "../pms-types-block" }

@@ -1,0 +1,41 @@
+# Admin Subdomain (Protected)
+# Remplace par ton vrai sous-domaine
+admin.pms.example.com {
+  tls internal
+  reverse_proxy node:8080
+}
+
+# Public Domain
+pms.example.com {
+  tls internal
+  encode gzip zstd
+
+  # Sécurité headers (proxy)
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    Referrer-Policy "no-referrer"
+  }
+
+  # Health endpoints (corrigés: /live, /ready)
+  @health path /live /ready
+  log {
+    format json
+  }
+
+  # /metrics (Allowlist IP recommandée ici)
+  @metrics path /metrics
+  handle @metrics {
+    # remote_ip 1.2.3.4/32
+    reverse_proxy node:8080
+  }
+
+  # Proxy principal
+  reverse_proxy node:8080 {
+    transport http {
+      dial_timeout 5s
+      response_header_timeout 15s
+    }
+  }
+}

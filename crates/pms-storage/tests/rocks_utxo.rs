@@ -1,55 +1,64 @@
 use anyhow::Result;
-use pms_storage::{RedisStore};
-use pms_storage::utxo::UtxoApply;
+use std::sync::Arc;
+use tempfile::{tempdir, TempDir};
+use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::utxo::UtxoApply;
 
-async fn flushdb(url: &str) -> Result<()> {
-    let client = redis::Client::open(url)?;
-    let mut con = client.get_multiplexed_async_connection().await?;
-    let _: () = redis::cmd("FLUSHDB").query_async(&mut con).await?;
-    Ok(())
+//
+// petit helper: DB éphémère + store
+//
+struct TestStore {
+    _dir: TempDir,
+    pub path: String,
+    pub store: Arc<RocksStore>,
 }
-fn redis_url() -> String { std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1/".into()) }
+
+async fn mk_store(prefix: &str, tip_limit: usize) -> Result<TestStore> {
+    let dir = tempdir()?;
+    let path = dir.path().join(format!("rocks-utxo-{}", nanoid::nanoid!(5)));
+    std::fs::create_dir_all(&path)?;
+    let path_str = path.to_string_lossy().to_string();
+    let store = Arc::new(RocksStore::new(&path_str, tip_limit, prefix).await?);
+    Ok(TestStore { _dir: dir, path: path_str, store })
+}
 
 #[tokio::test]
-async fn apply_tx_atomic_ok_then_conflict() -> Result<()> {
-    let url = redis_url();
-    flushdb(&url).await?;
-    let store = RedisStore::new(&url, 64, "it:utxo").await?;
-    store.ensure_schema().await?;
+async fn apply_tx_atomic_ok_then_conflict_rocks() -> Result<()> {
+    // 1) store éphémère
+    let ts = mk_store("it:utxo", 64).await?;
 
-    // Seed: coinbase UTXO existant
-    {
-        // Simule un coinbase: on insère une entrée UTXO "coinbase1:0"
-        let mut con = store.con.clone();
-        let _: () = redis::AsyncCommands::hset(
-            &mut con,
-            store.k_utxo(),
-            "coinbase1:0",
-            r#"{"addr":"A","amt":"1.0"}"#,
-        ).await?;
-    }
+    // ⚠️ On suppose que tu as bien créé les CF "it:utxo:utxo" et "it:utxo:tx_applied"
+    // dans RocksStore::new(...) (cf. ColumnFamilyDescriptor).
+    // On seed un UTXO coinbase "coinbase1:0" -> {"addr":"A","amt":"1.0"}
 
-    // 1) t1 consomme coinbase1:0 -> OK
+    let cf_utxo = ts.store.cf("utxo"); // cf("<prefix>:utxo")
+    ts.store.db.put_cf(
+        cf_utxo,
+        b"coinbase1:0",
+        br#"{"addr":"A","amt":"1.0"}"#,
+    )?;
+
+    // 2) t1 consomme coinbase1:0 -> OK (retour true)
     let t1 = UtxoApply {
         txid: "t1".into(),
         inputs: vec![("coinbase1".into(), 0)],
         outputs: vec![("A".into(), "1.0".into())],
     };
-    let ok1 = store.utxo_apply_tx_atomic(&t1).await?;
+    let ok1 = ts.store.utxo_apply_tx_atomic(&t1).await?;
     assert!(ok1, "t1 doit passer");
 
-    // 2) t2 re-consomme coinbase1:0 -> conflit
+    // 3) t2 re-consomme coinbase1:0 -> conflit (retour false)
     let t2 = UtxoApply {
         txid: "t2".into(),
         inputs: vec![("coinbase1".into(), 0)],
         outputs: vec![("B".into(), "1.0".into())],
     };
-    let ok2 = store.utxo_apply_tx_atomic(&t2).await?;
-    assert!(!ok2, "t2 doit être rejetée (double spend)");
+    let ok2 = ts.store.utxo_apply_tx_atomic(&t2).await?;
+    assert!(!ok2, "t2 doit être rejetée (double-spend)");
 
-    // 3) idempotence: rejouer t1 -> false
-    let again = store.utxo_apply_tx_atomic(&t1).await?;
-    assert!(!again, "rejeu t1 doit être ignoré");
+    // 4) idempotence: rejouer t1 -> false (déjà appliquée)
+    let again = ts.store.utxo_apply_tx_atomic(&t1).await?;
+    assert!(!again, "rejeu t1 doit être ignoré (déjà appliquée)");
 
     Ok(())
 }

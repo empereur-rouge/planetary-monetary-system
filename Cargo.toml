@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "crates/pms-wallet",
+    "crates/pms-core",
+    "crates/pms-server",
+    "crates/pms-storage",
+    "crates/pms-utils",
+    "crates/pms-token",
+    "crates/pms-types-transaction",
+    "crates/pms-types-mint",
+    "crates/pms-types-payload",
+    "crates/pms-types",
+    "crates/pms-types-block",
+    "bin",
+    "crates/pms-network",
+    "crates/pms-interface",
+    "crates/pms-wire",
+    "crates/pms-crypto",
+    "crates/tools-cli",
+    "crates/pms-config",
+    "crates/pms-testkit", "crates/pms-types-dag", "crates/pms-errors", "crates/pms-ledger",
+]
+
+resolver = "2"
+
+[workspace.metadata.docs]
+default-members = ["crates/pms-wallet", "crates/pms-core", "crates/pms-types"]
+
+[workspace.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+hyper-rustls = { version = "0.27", features = ["ring", "http2"] }
+tokio-rustls = "0.26"

@@ -1,0 +1,9 @@
+[package]
+name = "pms-types-dag"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = "1.48.0"
+pms-types-block = {path = "../pms-types-block"}
+pms-network = {path = "../pms-network"}

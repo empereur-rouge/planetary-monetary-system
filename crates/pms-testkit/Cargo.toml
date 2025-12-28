@@ -1,0 +1,24 @@
+[package]
+name = "pms-testkit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+tempfile = "3.23.0"
+pms-storage = {path = "../pms-storage"}
+pms-interface = {path = "../pms-interface"}
+pms-server = {path = "../pms-server"}
+pms-config = {path = "../pms-config"}
+pms-core = {path = "../pms-core"}
+pms-utils = {path = "../pms-utils"}
+pms-types = {path = "../pms-types"}
+pms-wire = {path = "../pms-wire"}
+pms-wallet = {path = "../pms-wallet"}
+nanoid = "0.4.0"
+tokio = "1.47.1"
+serde_json = "1.0.145"
+axum = "0.8.4"
+http = "1.4.0"
+tower = "0.5.2"
+rust_decimal = "1.39.0"

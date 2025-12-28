@@ -1,0 +1,60 @@
+services:
+  node:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: pms-node:latest
+    user: "pms"
+    environment:
+      # Configurations écrasables par env
+      RUST_LOG: info,pms_stats=info
+      PMS_CONFIG: /home/pms/config/config.prod.toml
+      # Relax limits for load testing
+      PMS__LIMITS__RATE_LIMIT_RPS: 1000
+      PMS__LIMITS__BURST: 2000
+      PMS_ADMIN_TOKEN_DEV: pms_admin_secret
+    volumes:
+      # Montage de la config (read-only)
+      - ./etc/config/config.prod.toml:/home/pms/config/config.prod.toml:ro
+      # Montage des clés/secrets
+      - ./etc/pms/node-identity.key:/home/pms/config/node-identity.key:ro
+      - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
+      - ./secrets/tls:/home/pms/tls:ro
+      # Persistance (volume docker)
+      # Persistance (volume host pour tests, permet contrôle perms)
+      - ./docker_data:/home/pms/data
+    healthcheck:
+      # Note: wget n'est pas installé dans debian-slim par défaut si on ne l'ajoute pas.
+      # Le Dockerfile a ajouté 'openssl', on peut vérifier le port TCP ou utiliser le binaire si on ajoute un flag healthcheck.
+      # Ici on suppose que le binaire a une commande simple, ou on garde wget si installé.
+      # Dans le Dockerfile j'ai mis "CMD /usr/local/bin/pms-node --version", ici on fait un vrai check HTTP si possible.
+      # Vu que 'curl'/'wget' ne sont pas dans bookworm-slim par défaut sauf install explicite (j'ai mis ca-certificates/openssl).
+      # On va utiliser /dev/tcp bashism ou simplement pinger le port.
+      test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "8050:8050" # P2P
+      - "127.0.0.1:8080:8080" # API (Localhost only par sécu)
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      node:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:
+  node_data:

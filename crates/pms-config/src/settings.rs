@@ -1,0 +1,207 @@
+use config::Source;
+use std::{env, fs};
+use std::path::{Path, PathBuf};
+use crate::{Address, Admin, Auth, Client, FeesSettings, Limits, LoadError, Network, NetworkMode, Rocks, SecretSettings, TlsConfig, ValidationSettings};
+use anyhow::{bail, Context, Result};
+use config::{Config, ConfigError, Environment, File};
+use serde::Deserialize;
+
+const ROOT_CONFIG_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config");
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Settings {
+    pub rocks: Rocks,
+    pub network: Network,
+    pub address: Address,
+    pub admin: Admin,
+    pub client: Option<Client>,
+    pub tls: Option<TlsConfig>,
+    pub limits: Limits,
+    pub auth: Auth,
+    pub secrets: SecretSettings,
+    pub validation: ValidationSettings,
+    pub fees: FeesSettings,
+}
+
+impl Settings {
+    pub fn validate(&self) -> Result<()> {
+        // 1) Prefix attendu selon le mode
+        let expected_prefix = match self.network.mode {
+            NetworkMode::Dev     => "pms:dev",
+            NetworkMode::Testnet => "pms:test",
+            NetworkMode::Mainnet => "pms:main",
+        };
+        if self.rocks.prefix != expected_prefix {
+            bail!(
+            "Prefix incohérent pour {:?}: attendu '{}', reçu '{}'",
+            self.network.mode, expected_prefix, self.rocks.prefix
+        );
+        }
+
+        // 2) Client insecure TLS interdit en prod
+        if self.network.mode.is_prod() {
+            if let Some(c) = &self.client {
+                if c.allow_insecure_tls {
+                    bail!("Mainnet: client.allow_insecure_tls doit être false");
+                }
+                if !c.api_addr.starts_with("https://") {
+                    bail!("Mainnet: client.api_addr doit être HTTPS");
+                }
+            }
+        }
+
+        // 3) TLS
+        if let Some(tls) = &self.tls {
+            if self.network.mode.is_prod() {
+                if !Path::new(&tls.cert_pem).exists() {
+                    bail!("TLS: fichier introuvable: {}", tls.cert_pem);
+                }
+                if !Path::new(&tls.key_pem).exists() {
+                    bail!("TLS: fichier introuvable: {}", tls.key_pem);
+                }
+            } else {
+                if !Path::new(&tls.cert_pem).exists() || !Path::new(&tls.key_pem).exists() {
+                    eprintln!(
+                        "[config] ⚠ TLS files not found for mode {:?}, check ignoré (non-prod)",
+                        self.network.mode
+                    );
+                }
+            }
+        } else if self.network.mode.is_prod() {
+            bail!("TLS: bloc [tls] obligatoire en mainnet");
+        }
+
+        // 4) 🔐 Secrets (node_identity_key_path + admin_wallet_file)
+        {
+            let secrets = &self.secrets;
+
+            let node_key = Path::new(&secrets.node_identity_key_path);
+            let admin_file = Path::new(&secrets.admin_wallet_file);
+
+            if !(node_key.exists() && admin_file.exists()) {
+                if self.network.mode.is_prod() {
+                    bail!(
+                    "Secrets manquants en prod : node_identity_key_path='{}', admin_wallet_file='{}'",
+                    secrets.node_identity_key_path,
+                    secrets.admin_wallet_file
+                );
+                }
+            }
+        }
+
+        // 5) Mining power validation
+        if self.validation.min_pow_leading_zero_bits > 32 {
+            bail!("validation.min_pow_leading_zero_bits > 32 est absurde");
+        }
+
+        Ok(())
+    }
+}
+
+/// Charge la configuration en suivant cet ordre (idempotent) :
+/// 1) valeurs par défaut,
+/// 2) fichier pointé par $PMS_CONFIG si présent,
+/// 3) fallbacks: ./config.prod.toml, ./config/config.prod.toml, /etc/pms/config.prod.toml,
+/// 4) variables d’env. préfixées PMS__ (double underscore pour sous-clés).
+///
+/// Exemple ENV: PMS__NETWORK__MODE, PMS__TLS__CERT_PEM, etc.
+pub fn load_config() -> Result<Settings, ConfigError> {
+    use config::{Config, ConfigError, File};
+    use std::{env, path::PathBuf};
+
+    let mut b = Config::builder();
+
+    if let Ok(path) = env::var("PMS_CONFIG") {
+        let pb = PathBuf::from(&path);
+        b = b.add_source(File::from(pb).required(true));
+    } else {
+        // 1) Répertoire "config" classique (ce que tu avais déjà)
+        let config_dir = PathBuf::from(ROOT_CONFIG_DIR);
+
+        // 2) Répertoire "etc/config" à la racine du repo
+        //    On remonte à la racine du repo à partir de crates/pms-config
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..");
+        let etc_config_dir = repo_root.join("etc/config");
+
+        let candidates = [
+            // ancien chemin (si tu mets un jour dag-pms/config/config.dev.toml)
+            config_dir.join("config.dev.toml"),
+            // NOUVEAU: ton vrai dossier actuel
+            etc_config_dir.join("config.dev.toml"),
+            // chemins génériques
+            PathBuf::from("config.dev.toml"),
+            PathBuf::from("/etc/pms/config.dev.toml"),
+        ];
+
+        for pb in candidates {
+            b = b.add_source(File::from(pb).required(false));
+        }
+    }
+
+    let cfg = b.add_source(Environment::with_prefix("PMS").separator("__"));
+
+    let mut settings: Settings = cfg.build()?.try_deserialize()?;
+
+    if settings.network.network_id.is_empty() {
+        settings.network.network_id = "pms-dev".into();
+    }
+
+    if settings.network.mode.is_prod() {
+        if let Some(c) = settings.client.as_mut() {
+            c.allow_insecure_tls = false;
+        }
+    }
+
+    settings.validate().expect("Settings invalide");
+    Ok(settings)
+}
+pub fn load_config_with(arg: Option<&std::path::Path>) -> Result<Settings, LoadError> {
+    let mut b = Config::builder()
+        .set_default("rocks.path", "./data/pms-rocks")?
+        .set_default("rocks.prefix", "pms:dev")?
+        .set_default("network.mode", "dev")?
+        .set_default("address.hrp", "8e")?
+        .set_default("admin.wallet_addresses", Vec::<String>::new())?
+        .set_default("client.oracle_url", "https://127.0.0.1:8080")?
+        .set_default("client.allow_insecure_tls", true)?
+        .set_default("tip_limit", 200)?
+        .add_source(Environment::with_prefix("PMS").separator("__"));
+
+    if let Some(path) = arg {
+        // Si on a fourni un fichier --config, il prime sur tout le reste
+        b = b.add_source(File::from(path).required(true));
+    } else if let Ok(env_path) = std::env::var("PMS_CONFIG") {
+        // sinon, on respecte la variable d’environnement si elle existe
+        let pb = PathBuf::from(&env_path);
+        b = if pb.extension().is_some() || pb.is_absolute() {
+            b.add_source(File::from(pb).required(false))
+        } else {
+            b.add_source(File::with_name(&env_path).required(false))
+        };
+    } else {
+        // fallback standard
+        let candidates = [
+            "/config.dev.toml",
+            "../config.dev.toml",
+            "config/config.dev.toml",
+            "../config/config.dev.toml",
+            "/etc/pms/config.dev.toml",
+        ];
+
+        for p in candidates {
+            b = b.add_source(File::from(PathBuf::from(p)).required(false));
+        }
+    }
+
+    let mut s: Settings = b.build()?.try_deserialize()?;
+
+    // garde-fou production
+    if s.network.mode.is_prod() {
+        if let Some(c) = s.client.as_mut() {
+            c.allow_insecure_tls = false;
+        }
+    }
+
+    Ok(s)
+}

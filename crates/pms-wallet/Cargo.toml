@@ -1,0 +1,37 @@
+[package]
+name = "pms-wallet"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+signature = "3.0.0-rc.2"
+base64 = "0.22.1"
+sha2 = "0.10"
+hex = "0.4.3"
+k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
+serde = { version = "1.0.219", features = ["derive"] }
+bip39 = { version = "2.2.0", features = ["rand_core"] }
+serde_json = "1.0.141"
+pms-token = { path = "../pms-token" }
+pms-types-transaction = { path = "../pms-types-transaction" }
+pms-types-payload = { path = "../pms-types-payload" }
+pms-types-block = { path = "../pms-types-block" }
+pms-utils = { path = "../pms-utils" }
+pms-storage = { path = "../pms-storage" }
+pms-wire = { path = "../pms-wire" }
+thiserror = "2.0.12"
+x25519-dalek = { version = "2.0.0-rc.3", features = ["static_secrets"] }
+bech32 = { version = "0.8.1" }
+anyhow = "1.0.99"
+rand = "0.8.5"
+futures = "0.3.31"
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+tokio = "1.47.1"
+pms-config = { path = "../pms-config" }
+dec = "0.4.11"
+rust_decimal_macros = "1.39.0"
+hkdf = "0.12.4"
+
+[dev-dependencies]
+pms-testkit = { path = "../pms-testkit" }
+pms-wallet = { path = "../pms-wallet" }

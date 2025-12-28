@@ -1,0 +1,25 @@
+[package]
+name = "bin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+pms-server = { path = "../crates/pms-server" }
+pms-core = { path = "../crates/pms-core" }
+pms-storage = { path = "../crates/pms-storage" }
+pms-interface = { path = "../crates/pms-interface" }
+pms-types-block = { path = "../crates/pms-types-block" }
+pms-utils = { path = "../crates/pms-utils" }
+pms-config = { path = "../crates/pms-config" }
+pms-wire = { path = "../crates/pms-wire" }
+pms-wallet = { path = "../crates/pms-wallet" }
+tokio = "1.47.1" # + "tls" si tu veux
+owo-colors = "4"
+tracing-log = "0.2.0"
+dotenvy = "0.15"
+rustls-pemfile = "2.2.0"
+rustls = { workspace = true }       # même si tu n'importes rien de rustls
+clap = { version = "4.5.51", features = ["derive"] }
