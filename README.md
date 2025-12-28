@@ -94,6 +94,11 @@ Le nœud est instrumenté pour Prometheus et Grafana.
     curl -k -H "Authorization: Bearer pms_admin_secret" https://127.0.0.1:8080/metrics
     ```
 *   **Logs JSON** : Activés par défaut via `RUST_LOG=info`, parsables pour Elasticsearch/Loki.
+*   **Grafana** : Un dashboard prêt à l'emploi est disponible dans `etc/grafana/pms-dashboard.json`. Importez-le dans Grafana pour visualiser :
+    *   Taille du DAG & Tips.
+    *   Débit d'ingestion (Blocks/s).
+    *   Latence de persistance.
+    *   Santé réseau et erreurs.
 
 ## 🔒 Sécurité
 
