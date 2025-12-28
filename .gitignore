@@ -30,4 +30,3 @@ etc/pms/admin-wallet.json
 etc/pms/node-identity.key
 # On ignore les fichiers de config locaux pour ne pas écraser la prod
 etc/config/config.dev.toml
-etc/config/config.prod.toml
