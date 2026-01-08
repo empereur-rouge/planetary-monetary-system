@@ -51,5 +51,6 @@ docker_data/
 !.env.example
 
 # Production configs with secrets
+etc/config/config.prod.toml
 Caddyfile.prod
 docker-compose.prod.yml

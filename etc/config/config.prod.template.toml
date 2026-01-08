@@ -1,53 +1,66 @@
 # Configuration Production PMS
 # =============================================================================
-# Ce fichier est un TEMPLATE. Copiez-le et remplacez les valeurs.
+# Ce fichier est la config pour le déploiement production.
 
 [rocks]
-path = "/data/pms/rocks"
-prefix = "pms:main"           # MAINNET: pms:main | TESTNET: pms:test
+path = "/home/pms/data/rocks"
+prefix = "pms:main"
+tip_limit = 256
 
 [network]
-mode = "mainnet"              # "dev" | "testnet" | "mainnet"
+mode = "mainnet"
 network_id = "pms-mainnet-v1"
 protocol_version = 1
 
 [address]
-host = "0.0.0.0"
-port = 8080
+hrp = "8e"
 
 [admin]
-token = "CHANGE_ME_ADMIN_TOKEN_64_CHARS_MINIMUM_VERY_SECURE_RANDOM_STRING"
+wallet_addresses = []
 
-[limits]
-max_block_size = 1048576      # 1 MB
-max_parents = 8
-rate_limit_rps = 1000
-burst = 2000
-max_concurrent_requests = 500
-request_timeout_ms = 30000
-
-[auth]
-allowed_ips = ["127.0.0.1"]   # IPs autorisées pour /admin/*
-
-[tls]
-cert_pem = "/etc/pms/tls/cert.pem"
-key_pem = "/etc/pms/tls/key.pem"
-
-[secrets]
-node_identity_key_path = "/etc/pms/node-identity.key"
-admin_wallet_file = "/etc/pms/admin-wallet.json"
-
-[validation]
-min_pow_leading_zero_bits = 8         # Difficulté PoW (8 = facile, 16 = dur)
-require_signature = true
-coordinator_public_key = ""           # Clé publique du Coordinator (laisser vide si pas de restrictions)
-
-[fees]
-rate_bps = 100                # 1% de frais
-platform_bps = 2000           # 20% des frais → plateforme
-node_bps = 3000               # 30% des frais → pool nœuds
+[client]
+bind_addr = "0.0.0.0:8443"
+api_addr = "0.0.0.0:8080"
+allow_insecure_tls = false
 
 [p2p]
-bind_addr = "0.0.0.0:8443"
-known_peers = []              # ["p2ps://peer1.pms.network:8443", "p2ps://peer2.pms.network:8443"]
-heartbeat_interval_ms = 5000
+known_peers = ""
+
+[tls]
+cert_pem = "/home/pms/tls/cert.pem"
+key_pem = "/home/pms/tls/key.pem"
+whitelist_fp256 = []
+
+[limits]
+max_body_bytes = 1048576
+request_timeout_ms = 30000
+rate_limit_rps = 1000
+burst = 2000
+
+[fees]
+epsilon = "0.001"
+mode = "uniform"
+
+[auth]
+require_signed_submit = true
+admin_api_token = "REPLACE_WITH_YOUR_SECRET_TOKEN"
+allowed_ips = []
+
+[secrets]
+node_identity_key_path = "/home/pms/config/node-identity.key"
+admin_wallet_file = "/home/pms/config/admin-wallet.json"
+
+[validation]
+min_pow_leading_zero_bits = 8
+max_payload_bytes = 65536
+min_parents_after_boot = 2
+max_parents = 8
+require_unique_parents = true
+forbid_self_parent = true
+max_inputs = 64
+max_outputs = 64
+max_tx_bytes = 65536
+max_fee_per_tx = 1000
+enforce_parent_existence = true
+enforce_fee_recipient = true
+coordinator_public_key = ""
