@@ -2,17 +2,18 @@
 //! MVP: on diffuse directement le bloc complet (pas de INV/GET).
 //! Pourquoi ? Moins d’allers-retours, plus simple à intégrer au début.
 
-use serde::{Serialize, Deserialize};
+use pms_types::BlockMetadata;
 use pms_wire::WireBlock;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum NetMsg {
     // Handshake
     Hello {
-        proto: u16,          // version protocole
-        node_id: String,     // ident peer (aléatoire au boot)
-        nonce: u64,          // anti-rejeu sur connexion
-        ping_ms: u32,        // intervalle ping
+        proto: u16,      // version protocole
+        node_id: String, // ident peer (aléatoire au boot)
+        nonce: u64,      // anti-rejeu sur connexion
+        ping_ms: u32,    // intervalle ping
     },
     HelloAck {
         ok: bool,
@@ -34,18 +35,34 @@ pub enum NetMsg {
         protocol_version: u16,
         signer_pk_hex: String,
         signature_hex: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<BlockMetadata>,
     },
     // --- rattrapage / sync ciblé ---
     /// Demande les tips connues du pair (bornées)
-    GetTips { limit: usize },
+    GetTips {
+        limit: usize,
+    },
     /// Réponse avec une liste d’ids (pas de payload)
-    Tips { ids: Vec<String> },
+    Tips {
+        ids: Vec<String>,
+    },
 
     /// Annonce légère d’un inventaire de blocs (ids)
-    Inv { ids: Vec<String> },
+    Inv {
+        ids: Vec<String>,
+    },
 
     /// Demande le bloc complet par id
-    GetBlock { id: String },
+    GetBlock {
+        id: String,
+    },
+    /// Demande plusieurs blocs complets par ids (batching)
+    GetBlocks {
+        ids: Vec<String>,
+    },
     /// Réponse avec un lot (borné) de blocs complets
-    Blocks { blocks: Vec<WireBlock> },
+    Blocks {
+        blocks: Vec<WireBlock>,
+    },
 }

@@ -8,29 +8,43 @@ use k256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use std::sync::atomic::Ordering;
 
 use crate::api::AppState;
-use pms_network::messages::NetMsg;
 use pms_storage::PutResult;
 use pms_wallet::signing_wire::canonical_wireblock_message;
 use pms_wire::WireBlock;
 
-pub async fn submit_block(State(st): State<AppState>, Json(wb): Json<WireBlock>) -> StatusCode {
+use axum::response::IntoResponse;
+
+pub async fn submit_block(
+    State(st): State<AppState>,
+    Json(wb): Json<WireBlock>,
+) -> impl IntoResponse {
     // 0) vérif network_id + version
     if wb.network_id != st._cfg.network.network_id {
-        return StatusCode::BAD_REQUEST;
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid NetworkID: expected {}", st._cfg.network.network_id),
+        )
+            .into_response();
     }
-    // Protocol Check: on cast config u32 -> u16 si WireBlock est limité
+    // Protocol Check
     if u32::from(wb.protocol_version) != st._cfg.network.protocol_version {
-        return StatusCode::BAD_REQUEST;
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Invalid Protocol Version: expected {}",
+                st._cfg.network.protocol_version
+            ),
+        )
+            .into_response();
     }
 
     // 0b) vérif signature
-    // On exige la signature SI la config le demande OU SI des champs de signature sont présents (pour éviter les fausses signatures)
     let has_sig_fields = !wb.signer_pk_hex.is_empty();
 
     if st._cfg.auth.require_signed_submit || has_sig_fields {
         if let Err(code) = verify_wireblock_signature(&wb) {
             st.stats.persisted_err.fetch_add(1, Ordering::Relaxed);
-            return code;
+            return (code, "Signature verification failed").into_response();
         }
     }
 
@@ -38,31 +52,26 @@ pub async fn submit_block(State(st): State<AppState>, Json(wb): Json<WireBlock>)
     match st.srv.adapter_arc().persist_block(&wb).await {
         Ok(PutResult::Inserted) => {
             st.stats.persisted_ok.fetch_add(1, Ordering::Relaxed);
-            let _ = st
-                .srv
-                .broadcast(&NetMsg::Inv {
-                    ids: vec![wb.id.clone()],
-                })
-                .await;
-            crate::metrics::BLOCKS_PERSISTED.inc(); // Existant
-            crate::metrics::PMS_BLOCKS_TOTAL.inc(); // Nouveau !
-            StatusCode::ACCEPTED
+            let _ = st.srv.enqueue_broadcast(wb.id.clone()).await;
+
+            crate::metrics::BLOCKS_PERSISTED.inc();
+            crate::metrics::PMS_BLOCKS_TOTAL.inc();
+            StatusCode::ACCEPTED.into_response()
         }
         Ok(PutResult::AlreadyExists) => {
             st.stats.persisted_dup.fetch_add(1, Ordering::Relaxed);
-            StatusCode::CONFLICT
+            StatusCode::CONFLICT.into_response()
         }
         Ok(PutResult::Rejected(reason)) => {
             tracing::warn!("❌ Block Rejected: {}", reason);
             st.stats.persisted_err.fetch_add(1, Ordering::Relaxed);
-            StatusCode::BAD_REQUEST
+            (StatusCode::BAD_REQUEST, reason).into_response()
         }
         Err(e) => {
             tracing::error!("❌ Internal Persist Error: {:#}", e);
             st.stats.persisted_err.fetch_add(1, Ordering::Relaxed);
-            StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

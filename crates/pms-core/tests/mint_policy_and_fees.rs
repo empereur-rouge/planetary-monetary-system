@@ -4,23 +4,24 @@ use std::sync::Arc;
 
 use rust_decimal::Decimal;
 use tempfile::tempdir;
-use tokio::sync::Mutex;
 
 use pms_config::{
-    Address, Admin, Auth, FeePickMode, FeesSettings, Limits, Network, NetworkMode, Rocks,
-    SecretSettings, Settings, ValidationSettings, load_config,
+    Address, Admin, Auth, FeePickMode, FeesSettings, Limits, Network, NetworkMode, P2pConfig,
+    Rocks, SecretSettings, Settings, ValidationSettings, load_config,
 };
 use pms_storage::rocks_store::store::RocksStore;
 use pms_wallet::{SignerBackend, Wallet};
 use pms_wire::{WireBlock, WireMeta};
 
-use pms_core::dag::Dag;
-use pms_core::{CoreAdapter, ValidatePolicy, tx_amounts_valid, validate_mint_policy};
+use pms_core::{
+    ConcurrentDag, CoreAdapter, ValidatePolicy, tx_amounts_valid, validate_mint_policy,
+};
 use pms_errors::ValidationError;
 use pms_interface::NetDagAdapter;
 use pms_storage::{DagStorage, PutResult};
 use pms_testkit::forge_signed_wire_block_for_test;
-use pms_types::{PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput, Unlock};
+use pms_types::{Block, PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput, Unlock};
+use pms_utils::compute_block_id;
 
 /// Ce test vérifie la chaîne complète "policy Mint + signature":
 /// - un bloc Mint signé par un admin est accepté,
@@ -34,29 +35,23 @@ async fn mint_policy_enforced_on_admin_vs_non_admin() -> anyhow::Result<()> {
     let store =
         Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test:mint").await?);
 
-    // 2) Un premier load_config pour bootstrapper le DAG (network_id, proto, etc.)
+    // 2) Load config and create genesis
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
 
-    let dag_loaded = Dag::bootstrap_from_store_or_new_dag(&*store, &meta).await?;
-    let dag = Arc::new(Mutex::new(dag_loaded));
+    let genesis = Block::genesis(compute_block_id);
+    let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
 
     let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
 
-    // 3) Wallet ADMIN: on le met dans la config via variable d'environnement
+    // 3) Wallet ADMIN
     let admin_wallet = Wallet::from_seed(&[7u8; 32], None)
         .expect("Wallet admin from_seed ne doit pas fail en test");
 
-    // On force la liste des admins à contenir exactement ce pubkey.
-    // Selon ta config, adapte la clé d'env:
-    // PMS__ADMIN__WALLET_ADDRESSES = '["<pubkey_hex>"]'
-    // Nettoie d’abord les anciennes vars au cas où
     unsafe {
         std::env::set_var("PMS_TEST_ADMIN_PUBKEY", admin_wallet.encoded_public_key());
     }
 
-    // IMPORTANT: on recharge la config après avoir posé la VAR d'env,
-    // car persist_block() va appeler load_config().
     let settings2 = load_config()?;
     let meta2 = WireMeta::from(&settings2);
 
@@ -67,14 +62,8 @@ async fn mint_policy_enforced_on_admin_vs_non_admin() -> anyhow::Result<()> {
     }];
     let mint_payload = PayloadEnvelope::Plain(PlainPayload::Mint { outputs });
 
-    // Parents = tips actuels (typiquement genesis)
-    let mut parents = store.top_tips(2).await?;
-    if parents.is_empty() {
-        let all = store.all_block_ids().await?;
-        if let Some(first) = all.first() {
-            parents.push(first.clone());
-        }
-    }
+    // Parents = genesis
+    let parents = vec![genesis.id.clone()];
 
     // 5) Bloc Mint signé par l'ADMIN → doit passer
     let wb_admin: WireBlock = forge_signed_wire_block_for_test(
@@ -100,8 +89,6 @@ async fn mint_policy_enforced_on_admin_vs_non_admin() -> anyhow::Result<()> {
     let res_non_admin = adapter.persist_block(&wb_non_admin).await?;
     match res_non_admin {
         PutResult::Rejected(reason) => {
-            // On ne fige pas le message exact, on vérifie juste qu'on
-            // passe bien par la policy Mint.
             assert!(
                 reason.contains("mint") || reason.contains("UnauthorizedMint"),
                 "Mint non-admin devrait être rejeté par la policy, got reason='{reason}'"
@@ -119,15 +106,13 @@ async fn mint_policy_enforced_on_admin_vs_non_admin() -> anyhow::Result<()> {
 /// doit être rejetée par tx_amounts_valid.
 #[test]
 fn tx_utxo_with_fee_above_policy_is_rejected() {
-    // Policy avec un max de frais très bas pour le test
     let mut policy = ValidatePolicy::default();
     policy.max_fee_per_tx = Decimal::from_str_exact("1.0").unwrap();
 
-    // Transaction bidon: 0 input / 0 output, juste pour tester la fee
     let tx = Transaction {
         inputs: Vec::<TxInput>::new(),
         outputs: Vec::<TxOutput>::new(),
-        fee: "2.0".to_string(), // > 1.0 → doit casser
+        fee: "2.0".to_string(),
         unlocks: Vec::<Unlock>::new(),
     };
 
@@ -180,20 +165,19 @@ async fn dev_mode_mint_signed_by_admin_is_accepted() -> anyhow::Result<()> {
         RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test:mint-dev").await?,
     );
 
-    // 2) Bootstrap DAG (config dev normale)
+    // 2) Bootstrap DAG
     let settings = load_config()?;
     assert!(matches!(settings.network.mode, NetworkMode::Dev));
 
     let meta = WireMeta::from(&settings);
-    let dag_loaded = Dag::bootstrap_from_store_or_new_dag(&*store, &meta).await?;
-    let dag = Arc::new(Mutex::new(dag_loaded));
+    let genesis = Block::genesis(compute_block_id);
+    let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
     let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
 
     // 3) Wallet ADMIN de test
     let admin_wallet = Wallet::from_seed(&[7u8; 32], None)
         .expect("Wallet admin from_seed ne doit pas fail en test");
 
-    // Override de test : PMS_TEST_ADMIN_PUBKEY = pubkey hex de ce wallet
     unsafe {
         std::env::set_var("PMS_TEST_ADMIN_PUBKEY", admin_wallet.encoded_public_key());
     }
@@ -205,14 +189,8 @@ async fn dev_mode_mint_signed_by_admin_is_accepted() -> anyhow::Result<()> {
     }];
     let mint_payload = PayloadEnvelope::Plain(PlainPayload::Mint { outputs });
 
-    // Parents = tips actuels (typiquement genesis)
-    let mut parents = store.top_tips(2).await?;
-    if parents.is_empty() {
-        let all = store.all_block_ids().await?;
-        if let Some(first) = all.first() {
-            parents.push(first.clone());
-        }
-    }
+    // Parents = genesis
+    let parents = vec![genesis.id.clone()];
 
     // 5) Bloc Mint signé par l'ADMIN → doit passer
     let wb_admin: WireBlock =
@@ -224,7 +202,7 @@ async fn dev_mode_mint_signed_by_admin_is_accepted() -> anyhow::Result<()> {
         "bloc Mint signé par un admin en Dev devrait être accepté, obtenu: {res_admin:?}"
     );
 
-    // Nettoyage de la variable d'env pour ne pas polluer les autres tests
+    // Nettoyage de la variable d'env
     unsafe {
         std::env::remove_var("PMS_TEST_ADMIN_PUBKEY");
     }
@@ -234,7 +212,7 @@ async fn dev_mode_mint_signed_by_admin_is_accepted() -> anyhow::Result<()> {
 
 #[test]
 fn mint_policy_rejects_non_admin_in_mainnet() {
-    // 1) Faux settings "mainnet" minimal pour la policy
+    // Faux settings "mainnet" minimal pour la policy
     let settings = Settings {
         rocks: Rocks {
             path: "/var/lib/pms/rocks".to_string(),
@@ -249,7 +227,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
         address: Address { hrp: "8e".into() },
         admin: Admin {
             wallet_addresses: vec![],
-            signer_pubkeys: vec!["04deadbeef".into()], // seul admin autorisé
+            signer_pubkeys: vec!["04deadbeef".into()],
         },
         client: None,
         tls: None,
@@ -262,6 +240,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
         auth: Auth {
             require_signed_submit: true,
             admin_api_token: None,
+            allowed_ips: vec![],
         },
         secrets: SecretSettings {
             node_identity_key_path: "".to_string(),
@@ -281,16 +260,25 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             enforce_parent_existence: false,
             enforce_fee_recipient: false,
             allowed_fee_addresses: vec![],
+            coordinator_public_key: None,
         },
         fees: FeesSettings {
             epsilon: "0.001".to_string(),
-            scan_limit: 1000,
+            ratio: "0.035".to_string(),
+            base_fee: "0.0".to_string(),
             mode: FeePickMode::Uniform,
             seed: None,
+            platform_address: None,
+            platform_address_signature: None,
+            platform_fee_ratio: "0.45".to_string(),
+        },
+        p2p: P2pConfig {
+            known_peers: String::new(),
+            bind_addr: None,
         },
     };
 
-    // 2) WireBlock signé par un "non-admin"
+    // WireBlock signé par un "non-admin"
     let wb = WireBlock {
         id: "dummy-id".into(),
         parents: vec![],
@@ -298,8 +286,9 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
         nonce: 0,
         network_id: settings.network.network_id.clone(),
         protocol_version: settings.network.protocol_version as u16,
-        signer_pk_hex: "04cafebabe".into(), // ≠ 04deadbeef
+        signer_pk_hex: "04cafebabe".into(),
         signature_hex: "dummy".into(),
+        metadata: None,
     };
 
     let outputs = vec![TxOutput {

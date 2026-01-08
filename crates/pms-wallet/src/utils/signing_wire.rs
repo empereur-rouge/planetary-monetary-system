@@ -1,6 +1,5 @@
-
-use serde::Serialize;
 use pms_wire::WireBlock;
+use serde::Serialize;
 
 /// Vue canonique pour signature (ordre de champs figé)
 #[derive(Serialize)]
@@ -26,6 +25,5 @@ pub fn canonical_wireblock_message(wb: &WireBlock) -> String {
         signer_pk_hex: &wb.signer_pk_hex,
     };
 
-    serde_json::to_string(&view)
-        .expect("WireBlockSignView must always be serializable")
+    serde_json::to_string(&view).expect("WireBlockSignView must always be serializable")
 }

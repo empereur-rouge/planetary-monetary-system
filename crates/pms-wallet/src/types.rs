@@ -1,31 +1,32 @@
-
 //! # PMS Wallet - Crate principal
 //!
 //! Ce crate permet la création, la sauvegarde et l'utilisation d'un wallet basé
 //! sur une phrase mnémotechnique (BIP-39). Il fournit également une interface
 //! abstraite [`SignerBackend`] pour changer facilement d'algorithme de cryptographie.
 
+use thiserror::Error;
+
 /// Erreurs possibles lors de la signature d’un message.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum SignError {
-    /// La clé privée est invalide en base64.
+    #[error("Base64 decode failed")]
     Base64Decode,
-    /// Mauvaise longueur de clé privée.
+    #[error("Invalid key length")]
     InvalidLength,
-    /// La génération de la clé de signature a échoué.
+    #[error("Signing key error")]
     SigningKey,
 }
 
 /// Erreurs possibles lors de la vérification d’une signature.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum VerifyError {
-    /// La signature fournie n’est pas encodée en base64.
+    #[error("Base64 decode failed")]
     Base64Decode,
-    /// Le format DER de la signature est invalide.
+    #[error("Invalid signature format")]
     SignatureFormat,
-    /// La clé publique n’est pas décodable en hexadécimal.
+    #[error("Hex decode failed")]
     HexDecode,
-    /// La clé publique est mal formée ou invalide.
+    #[error("Invalid public key")]
     InvalidPubKey,
 }
 

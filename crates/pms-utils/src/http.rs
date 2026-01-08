@@ -1,7 +1,7 @@
 use anyhow::Result;
-use pms_config::{load_config, NetworkMode, Settings};
-use reqwest::{Client, StatusCode};
+use pms_config::{NetworkMode, Settings, load_config};
 use pms_wire::WireBlock;
+use reqwest::{Client, StatusCode};
 
 #[derive(Debug, serde::Deserialize)]
 pub struct SubmitResp {
@@ -80,7 +80,6 @@ pub async fn submit_block_http(wb: &WireBlock) -> anyhow::Result<(StatusCode, Op
     submit_block_http_to(base, wb, allow_insecure).await
 }
 
-
 /// Construit un client HTTP(s) adapté au mode réseau.
 /// - dev/testnet  → accepte les certificats auto-signés
 /// - mainnet      → strict (pas de danger_accept)
@@ -89,7 +88,10 @@ pub fn build_http_client(settings: &Settings) -> Result<Client> {
 
     match settings.network.mode {
         NetworkMode::Dev | NetworkMode::Testnet => {
-            eprintln!("⚠️  TLS: certificats auto-signés acceptés (mode = {:?})", settings.network.mode);
+            eprintln!(
+                "⚠️  TLS: certificats auto-signés acceptés (mode = {:?})",
+                settings.network.mode
+            );
             builder = builder.danger_accept_invalid_certs(true);
         }
         NetworkMode::Mainnet => {

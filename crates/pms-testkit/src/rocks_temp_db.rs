@@ -1,11 +1,10 @@
-use anyhow::Result;
+use pms_storage::rocks_store::store::RocksStore;
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 use tokio::net::TcpStream;
-use tokio::time::{sleep, Instant};
-use pms_storage::rocks_store::store::RocksStore;
+use tokio::time::{Instant, sleep};
 
 /// Crée un RocksStore éphémère pour tests, avec un prefix unique.
 ///
@@ -13,7 +12,7 @@ use pms_storage::rocks_store::store::RocksStore;
 /// - La DB est stockée dans un dossier temporaire qui sera supprimé à la fin du test.
 pub struct TestRocksStore {
     pub store: Arc<RocksStore>,
-    _dir: TempDir,         // juste pour la durée de vie
+    _dir: TempDir, // juste pour la durée de vie
 }
 
 pub async fn test_rocks_store(name: &str) -> anyhow::Result<TestRocksStore> {
@@ -27,7 +26,10 @@ pub async fn test_rocks_store(name: &str) -> anyhow::Result<TestRocksStore> {
     Ok(TestRocksStore { store, _dir: dir })
 }
 
-pub async fn test_rocks_store_with_limit(name: &str, tip_limit: usize) -> anyhow::Result<Arc<RocksStore>> {
+pub async fn test_rocks_store_with_limit(
+    name: &str,
+    tip_limit: usize,
+) -> anyhow::Result<Arc<RocksStore>> {
     let dir = tempdir()?;
     let db = dir.path().join(name);
     fs::create_dir_all(&db)?;

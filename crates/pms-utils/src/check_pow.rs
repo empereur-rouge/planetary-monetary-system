@@ -15,7 +15,7 @@ pub fn check_pow_leading_zero_bits(id_hex: &str, leading_zero_bits: u8) -> bool 
     };
 
     let full_bytes = (leading_zero_bits / 8) as usize;
-    let rem_bits   = (leading_zero_bits % 8) as u8;
+    let rem_bits = leading_zero_bits % 8;
 
     // 1) Bytes complets = 0
     for i in 0..full_bytes {

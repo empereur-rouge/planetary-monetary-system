@@ -1,7 +1,7 @@
 mod amount;
+pub mod fee;
 mod token;
-mod fee;
 
 pub use amount::*;
-pub use token::*;
 pub use fee::*;
+pub use token::*;

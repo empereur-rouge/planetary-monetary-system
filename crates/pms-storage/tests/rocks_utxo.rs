@@ -1,8 +1,8 @@
 use anyhow::Result;
-use std::sync::Arc;
-use tempfile::{tempdir, TempDir};
 use pms_storage::rocks_store::store::RocksStore;
 use pms_storage::rocks_store::utxo::UtxoApply;
+use std::sync::Arc;
+use tempfile::{TempDir, tempdir};
 
 //
 // petit helper: DB éphémère + store
@@ -15,11 +15,17 @@ struct TestStore {
 
 async fn mk_store(prefix: &str, tip_limit: usize) -> Result<TestStore> {
     let dir = tempdir()?;
-    let path = dir.path().join(format!("rocks-utxo-{}", nanoid::nanoid!(5)));
+    let path = dir
+        .path()
+        .join(format!("rocks-utxo-{}", nanoid::nanoid!(5)));
     std::fs::create_dir_all(&path)?;
     let path_str = path.to_string_lossy().to_string();
     let store = Arc::new(RocksStore::new(&path_str, tip_limit, prefix).await?);
-    Ok(TestStore { _dir: dir, path: path_str, store })
+    Ok(TestStore {
+        _dir: dir,
+        path: path_str,
+        store,
+    })
 }
 
 #[tokio::test]
@@ -32,11 +38,9 @@ async fn apply_tx_atomic_ok_then_conflict_rocks() -> Result<()> {
     // On seed un UTXO coinbase "coinbase1:0" -> {"addr":"A","amt":"1.0"}
 
     let cf_utxo = ts.store.cf("utxo"); // cf("<prefix>:utxo")
-    ts.store.db.put_cf(
-        cf_utxo,
-        b"coinbase1:0",
-        br#"{"addr":"A","amt":"1.0"}"#,
-    )?;
+    ts.store
+        .db
+        .put_cf(cf_utxo, b"coinbase1:0", br#"{"addr":"A","amt":"1.0"}"#)?;
 
     // 2) t1 consomme coinbase1:0 -> OK (retour true)
     let t1 = UtxoApply {

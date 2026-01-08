@@ -1,23 +1,21 @@
 use crate::block_builder::BlockMineBuilder;
 use crate::finality::FinalityState;
+use crate::has_k_confirmations_dag;
 use crate::validations::check::ValidatePolicy;
 use crate::validations::{apply, check};
-use crate::{has_k_confirmations_dag, tips};
 use anyhow::Result;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_interface::NetDagAdapter;
 use pms_storage::{DagStorage, StoredBlock};
 use pms_types::{Block, BlockId, PayloadEnvelope, PlainPayload};
 use pms_utils::{compute_block_id, hash_meets_difficulty};
+use pms_wallet::SignerBackend;
+use pms_wallet::signing_wire::canonical_wireblock_message;
 use pms_wire::{WireBlock, WireMeta};
 use rand::Rng;
 use rand::distr::Distribution;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc};
-use tokio::sync::Mutex;
-use pms_interface::NetDagAdapter;
-use pms_wallet::SignerBackend;
-use pms_wallet::signing_wire::canonical_wireblock_message;
+use std::sync::Arc;
 
 pub const TIP_CHILDREN_THRESHOLD: u64 = 4;
 pub const MAX_TIPS_CAP: usize = 64;
@@ -33,7 +31,8 @@ pub struct Dag {
     pub spent_outpoints: HashSet<(String, u32)>,
 }
 
-pub type DagRef = Arc<Mutex<Dag>>;
+use crate::concurrent_dag::ConcurrentDag;
+pub type DagRef = Arc<ConcurrentDag>;
 
 impl Dag {
     pub fn new_with_genesis(genesis: Block) -> Self {
@@ -239,7 +238,11 @@ impl Dag {
         adapter: &Arc<dyn NetDagAdapter>,
     ) -> anyhow::Result<Block> {
         // 1) Parents
-        let min = if self.blocks.len() <= 1 { 1 } else { PARENTS_MIN };
+        let min = if self.blocks.len() <= 1 {
+            1
+        } else {
+            PARENTS_MIN
+        };
 
         // Tips en RAM
         let mut parents = self.find_tips();
@@ -251,7 +254,7 @@ impl Dag {
 
         // Si pas assez de parents, on fallback sur le genesis
         if parents.len() < min {
-            if let Some((gid, b)) = self.blocks.iter().find(|(_, b)| b.parents.is_empty()) {
+            if let Some((gid, _b)) = self.blocks.iter().find(|(_, b)| b.parents.is_empty()) {
                 parents.push(gid.clone());
             }
         }
@@ -264,9 +267,9 @@ impl Dag {
         let block = BlockMineBuilder::new(parents.clone(), payload.clone(), compute_id, |id| {
             self.blocks.contains_key(id)
         })
-            .difficulty(difficulty_leading_zeros)
-            .canonicalize_parents(true)
-            .build();
+        .difficulty(difficulty_leading_zeros)
+        .canonicalize_parents(true)
+        .build();
 
         // 3) JSON du payload
         let payload_json = serde_json::to_string(&block.payload)?;
@@ -283,6 +286,7 @@ impl Dag {
             protocol_version: meta.protocol_version as u16,
             signer_pk_hex: signer_pk_hex.clone(),
             signature_hex: String::new(),
+            metadata: block.metadata.clone(),
         };
 
         // 5) Canonical message
@@ -339,11 +343,7 @@ impl Dag {
         for id in ids {
             // On récupère le StoredBlock complet (avec meta + signature),
             // mais on ne garde en RAM que ce qui intéresse le DAG.
-            let Some(sb) = store
-                .get_block(&id)
-                .await
-                .map_err(anyhow::Error::msg)?
-            else {
+            let Some(sb) = store.get_block(&id).await.map_err(anyhow::Error::msg)? else {
                 continue;
             };
 
@@ -366,6 +366,9 @@ impl Dag {
                 parents: sb.parents.clone(),
                 payload,
                 nonce: sb.nonce,
+                metadata: None,
+                signer_pk: Some(sb.signer_pk_hex).filter(|s| !s.is_empty()),
+                signature: Some(sb.signature_hex).filter(|s| !s.is_empty()),
             };
 
             // incrémente les compteurs enfants (en mémoire)
@@ -396,10 +399,7 @@ impl Dag {
 
     /// Charge le DAG depuis le store ; s’il est vide, crée un genesis,
     /// le persiste de façon atomique, puis retourne un DAG initialisé.
-    pub async fn bootstrap_from_store_or_new_dag<S>(
-        store: &S,
-        meta: &WireMeta,
-    ) -> Result<Self>
+    pub async fn bootstrap_from_store_or_new_dag<S>(store: &S, meta: &WireMeta) -> Result<Self>
     where
         S: DagStorage + Send + Sync,
     {
@@ -424,6 +424,7 @@ impl Dag {
                 // bloc système: on le marque comme GENESIS
                 signer_pk_hex: "GENESIS".to_string(),
                 signature_hex: String::new(),
+                metadata: genesis.metadata.clone(),
             };
 
             // idempotent côté store (append_atomic retourne false si déjà présent)
@@ -459,7 +460,7 @@ impl Dag {
     /// **valide** (signature vérifiée ailleurs), on finalise tout son cône d’ancêtres.
     pub fn maybe_update_finality_with(&mut self, block: &Block) {
         match &block.payload {
-            Some(PayloadEnvelope::Plain(PlainPayload::Milestone { approved })) => {
+            Some(PayloadEnvelope::Plain(PlainPayload::Milestone { approved, .. })) => {
                 // 1) on marque le milestone
                 self.finality.last_milestone = Some(block.id.clone());
                 // 2) on finalise tous les parents accessibles (BFS)
@@ -487,9 +488,9 @@ impl Dag {
         // 1) Si le nouveau bloc est un milestone, on met à jour la seed AVANT le calcul K-depth
         if let Some(b) = self.blocks.get(new_block_id) {
             if matches!(
-            &b.payload,
-            Some(PayloadEnvelope::Plain(PlainPayload::Milestone { .. }))
-        ) {
+                &b.payload,
+                Some(PayloadEnvelope::Plain(PlainPayload::Milestone { .. }))
+            ) {
                 self.finality.set_milestone(new_block_id.to_string());
             }
         }
@@ -537,11 +538,11 @@ impl Dag {
                 parents: parents.clone(),
                 payload_json: payload_json.clone(),
                 nonce,
-                // champs réseau/signature vides à ce niveau
                 network_id: String::new(),
                 protocol_version: 0,
                 signer_pk_hex: String::new(),
                 signature_hex: String::new(),
+                metadata: None,
             };
 
             let id = compute_id(&wb);
@@ -554,6 +555,9 @@ impl Dag {
                     parents: parents.clone(),
                     payload: payload.clone(),
                     nonce,
+                    metadata: None,
+                    signer_pk: None,
+                    signature: None,
                 };
             }
 

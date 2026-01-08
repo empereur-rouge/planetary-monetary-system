@@ -1,20 +1,14 @@
 use crate::rocks_store::store::RocksStore;
 use anyhow::{Context, Result};
-use std::path::PathBuf;
 use chrono::Utc;
 use rocksdb::checkpoint::Checkpoint;
-
-/// Nombre maximum de checkpoints à conserver.
-/// Les plus récents sont gardés, les plus anciens supprimés.
-pub const MAX_CHECKPOINTS: usize = 10;
+use std::path::PathBuf;
 
 impl RocksStore {
     /// Flush le WAL sur disque.
     /// Côté RocksDB: db.flush_wal(true) = flush WAL et fsync.
     pub async fn flush_wal(&self) -> Result<()> {
-        self.db
-            .flush_wal(true)
-            .context("flush_wal(true)")?;
+        self.db.flush_wal(true).context("flush_wal(true)")?;
         Ok(())
     }
 
@@ -41,7 +35,8 @@ impl RocksStore {
         for name in CF_NAMES {
             if let Some(cf) = self.db.cf_handle(name) {
                 // None/None = compacter toute la plage de la CF
-                self.db.compact_range_cf::<&[u8], &[u8]>(&cf, None::<&[u8]>, None::<&[u8]>);
+                self.db
+                    .compact_range_cf::<&[u8], &[u8]>(&cf, None::<&[u8]>, None::<&[u8]>);
             }
         }
 
@@ -81,8 +76,7 @@ impl RocksStore {
 
         // ⚠ Ne PAS créer `dest` à l'avance :
         //    - create_checkpoint() attend un dossier INEXISTANT.
-        let cp = Checkpoint::new(&*self.db)
-            .context("Checkpoint::new")?;
+        let cp = Checkpoint::new(&*self.db).context("Checkpoint::new")?;
 
         cp.create_checkpoint(&dest)
             .with_context(|| format!("create_checkpoint({})", dest.display()))?;

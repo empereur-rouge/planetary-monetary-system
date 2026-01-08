@@ -1,9 +1,11 @@
 use owo_colors::OwoColorize;
-use serde_json::json;
 use pms_types::Block;
 
 pub fn print_block_full(b: &Block) {
-    println!("{}", "---------------- BLOCK ----------------".bright_black());
+    println!(
+        "{}",
+        "---------------- BLOCK ----------------".bright_black()
+    );
 
     // ID en jaune
     println!("{} {}", "id:".bright_black(), b.id.yellow());
@@ -29,5 +31,8 @@ pub fn print_block_full(b: &Block) {
 
 pub fn ts_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }

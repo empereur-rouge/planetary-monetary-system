@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use tempfile::tempdir;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 use pms_storage::rocks_store::store::RocksStore;
 use pms_storage::rotate_checkpoints;
@@ -33,11 +33,7 @@ async fn rocks_checkpoints_are_created_and_rotated() -> Result<()> {
     //    - path: db_path
     //    - tip_limit: 256 (valeur arbitraire pour le test)
     //    - prefix: "it:test"
-    let store = RocksStore::new(
-        db_path.to_string_lossy().as_ref(),
-        256,
-        "it:test",
-    )
+    let store = RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "it:test")
         .await
         .expect("RocksStore::new doit réussir en test");
 
@@ -66,9 +62,9 @@ async fn rocks_checkpoints_are_created_and_rotated() -> Result<()> {
         .filter(|p| {
             p.is_dir()
                 && p.file_name()
-                .and_then(|s| s.to_str())
-                .map(|name| name.starts_with("rocks-"))
-                .unwrap_or(false)
+                    .and_then(|s| s.to_str())
+                    .map(|name| name.starts_with("rocks-"))
+                    .unwrap_or(false)
         })
         .collect();
 
@@ -89,9 +85,9 @@ async fn rocks_checkpoints_are_created_and_rotated() -> Result<()> {
         .filter(|p| {
             p.is_dir()
                 && p.file_name()
-                .and_then(|s| s.to_str())
-                .map(|name| name.starts_with("rocks-"))
-                .unwrap_or(false)
+                    .and_then(|s| s.to_str())
+                    .map(|name| name.starts_with("rocks-"))
+                    .unwrap_or(false)
         })
         .collect();
 

@@ -1,7 +1,7 @@
-use sha2::{Sha256, Digest};
 use crate::{Dag, MAX_TIPS_CAP, TIP_CHILDREN_THRESHOLD};
 use pms_storage::DagStorage;
 use pms_types::BlockId;
+use sha2::{Digest, Sha256};
 
 pub async fn select_parents_deterministic<S: DagStorage + Send + Sync>(
     dag: &Dag,
@@ -10,7 +10,9 @@ pub async fn select_parents_deterministic<S: DagStorage + Send + Sync>(
     window: usize,
 ) -> anyhow::Result<Vec<String>> {
     // 0) genesis id RAM (si présent)
-    let genesis_id = dag.blocks.iter()
+    let genesis_id = dag
+        .blocks
+        .iter()
         .find(|(_, b)| b.parents.is_empty())
         .map(|(id, _)| id.clone());
 
@@ -25,8 +27,12 @@ pub async fn select_parents_deterministic<S: DagStorage + Send + Sync>(
 
     // 4) tri déterministe (sha256(seed||tip_id))
     tips.sort_by(|a, b| {
-        let mut ha = Sha256::new(); ha.update(seed.as_bytes()); ha.update(a.as_bytes());
-        let mut hb = Sha256::new(); hb.update(seed.as_bytes()); hb.update(b.as_bytes());
+        let mut ha = Sha256::new();
+        ha.update(seed.as_bytes());
+        ha.update(a.as_bytes());
+        let mut hb = Sha256::new();
+        hb.update(seed.as_bytes());
+        hb.update(b.as_bytes());
         ha.finalize().as_slice().cmp(hb.finalize().as_slice())
     });
 
@@ -38,7 +44,11 @@ pub async fn select_parents_deterministic<S: DagStorage + Send + Sync>(
     //    - au boot (≤1 bloc en RAM), 1 parent (le genesis)
     //    - sinon, au moins 2 parents (si k >= 2)
     let n_existing = dag.blocks.len();
-    let min_needed = if n_existing <= 1 { 1 } else { core::cmp::min(2, k) };
+    let min_needed = if n_existing <= 1 {
+        1
+    } else {
+        core::cmp::min(2, k)
+    };
 
     // 7) fallback: si liste insuffisante, rajoute genesis si dispo
     if tips.len() < min_needed {

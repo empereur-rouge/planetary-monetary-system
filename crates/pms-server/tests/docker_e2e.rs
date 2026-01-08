@@ -53,7 +53,8 @@ async fn docker_e2e_scenario() -> Result<()> {
     let mut block = Block::new(
         parents.clone(),
         payload.clone(),
-        0, // start nonce
+        0,    // start nonce
+        None, // pas de metadata
         compute_block_id,
     )
     .expect("Failed to create block");
@@ -96,6 +97,7 @@ async fn docker_e2e_scenario() -> Result<()> {
         protocol_version: 1,
         signer_pk_hex: wallet.encoded_public_key(),
         signature_hex: String::new(),
+        metadata: None,
     };
 
     // Calculate Canonical Message & Sign

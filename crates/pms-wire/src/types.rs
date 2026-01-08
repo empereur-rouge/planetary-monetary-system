@@ -1,6 +1,6 @@
-use serde::{Serialize, Deserialize};
 use pms_config::Settings;
-use pms_types_block::Block;
+use pms_types_block::{Block, BlockMetadata};
+use serde::{Deserialize, Serialize};
 
 /// Format réseau / JSON, indépendant du stockage et du core.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -10,10 +10,13 @@ pub struct WireBlock {
     pub payload_json: Option<String>,
     pub nonce: u64,
 
-    pub network_id: String,       // ex: "devnet", "testnet", "mainnet"
-    pub protocol_version: u16,    // ex: 1
-    pub signer_pk_hex: String,    // clé publique (compressed) hex
-    pub signature_hex: String,    // signature ECDSA hex
+    pub network_id: String,    // ex: "devnet", "testnet", "mainnet"
+    pub protocol_version: u16, // ex: 1
+    pub signer_pk_hex: String, // clé publique (compressed) hex
+    pub signature_hex: String, // signature ECDSA hex
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<BlockMetadata>,
 }
 
 #[derive(Clone)]
@@ -29,8 +32,10 @@ impl From<WireBlock> for Block {
             parents: wb.parents,
             nonce: wb.nonce,
             // on convertit payload_json en Payload (si présent)
-            payload: wb.payload_json
-                .and_then(|s| serde_json::from_str(&s).ok()),
+            payload: wb.payload_json.and_then(|s| serde_json::from_str(&s).ok()),
+            metadata: wb.metadata,
+            signer_pk: Some(wb.signer_pk_hex).filter(|s| !s.is_empty()),
+            signature: Some(wb.signature_hex).filter(|s| !s.is_empty()),
         }
     }
 }

@@ -1,16 +1,16 @@
 // crates/pms-storage/tests/rocks_migration
 use anyhow::Result;
-use tempfile::{tempdir, TempDir};
-use tokio::time::{sleep, Duration};
 use std::sync::Arc;
+use tempfile::{TempDir, tempdir};
+use tokio::time::{Duration, sleep};
 
-use pms_storage::{DagStorage, StoredBlock};
 use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::{DagStorage, StoredBlock};
 use pms_testkit::{mk_block, test_meta_and_wallet};
 
 // -- helper: crée une DB éphémère + RocksStore
 struct TestStore {
-    _dir: TempDir,                // garde la vie du dossier
+    _dir: TempDir, // garde la vie du dossier
     pub path: String,
     pub store: Arc<RocksStore>,
 }
@@ -22,7 +22,11 @@ async fn mk_store(tip_limit: usize, prefix: &str) -> Result<TestStore> {
     let path_str = path.to_string_lossy().to_string();
 
     let store = Arc::new(RocksStore::new(&path_str, tip_limit, prefix).await?);
-    Ok(TestStore { _dir: dir, path: path_str, store })
+    Ok(TestStore {
+        _dir: dir,
+        path: path_str,
+        store,
+    })
 }
 
 #[tokio::test]
@@ -119,7 +123,13 @@ async fn tips_respect_limit_with_trim_rocks() -> Result<()> {
 
     let tips = ts.store.top_tips(10).await?;
     assert_eq!(tips.len(), 4);
-    assert_eq!(tips, vec!["T5", "T4", "T3", "T2"].iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    assert_eq!(
+        tips,
+        vec!["T5", "T4", "T3", "T2"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+    );
     Ok(())
 }
 
@@ -131,7 +141,7 @@ async fn export_then_import_roundtrip_rocks() -> Result<()> {
     let (meta, wallet) = test_meta_and_wallet();
 
     // P -> C1, P -> C2
-    let p  = mk_block("P",  vec![], &meta);
+    let p = mk_block("P", vec![], &meta);
     let c1 = mk_block("C1", vec!["P".into()], &meta);
     let c2 = mk_block("C2", vec!["P".into()], &meta);
 
@@ -151,7 +161,9 @@ async fn export_then_import_roundtrip_rocks() -> Result<()> {
     // Export JSON
     let dump = src.store.export_namespace().await?;
     #[derive(serde::Deserialize)]
-    struct SB { id: String }
+    struct SB {
+        id: String,
+    }
     let v: Vec<SB> = serde_json::from_str(&dump)?;
     let ids: std::collections::HashSet<_> = v.into_iter().map(|b| b.id).collect();
     assert!(ids.contains("P"));
@@ -195,6 +207,7 @@ async fn append_is_atomic_and_idempotent_rocks() -> Result<()> {
         protocol_version: meta.protocol_version as u16,
         signer_pk_hex: String::new(),
         signature_hex: String::new(),
+        metadata: None,
     };
     assert!(ts.store.append_block_atomic(&b0).await?);
 
@@ -209,6 +222,7 @@ async fn append_is_atomic_and_idempotent_rocks() -> Result<()> {
         protocol_version: meta.protocol_version as u16,
         signer_pk_hex: String::new(),
         signature_hex: String::new(),
+        metadata: None,
     };
 
     // lance 10 fois en parallèle
@@ -216,9 +230,7 @@ async fn append_is_atomic_and_idempotent_rocks() -> Result<()> {
     for _ in 0..10 {
         let st = ts.store.clone();
         let blk = b1.clone();
-        js.spawn(async move {
-            st.append_block_atomic(&blk).await
-        });
+        js.spawn(async move { st.append_block_atomic(&blk).await });
     }
 
     while let Some(res) = js.join_next().await {

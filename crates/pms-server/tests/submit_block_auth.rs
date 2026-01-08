@@ -4,20 +4,17 @@ use std::sync::Arc;
 
 use anyhow::{Error, Result};
 use pms_config::{ServerConfig, load_config};
-use pms_core::{CoreAdapter, Dag};
+use pms_core::{ConcurrentDag, CoreAdapter};
 use pms_interface::NetDagAdapter;
 use pms_storage::rocks_store::store::RocksStore;
 use pms_storage::{PutResult, StoredBlock};
 use pms_testkit::forge_signed_wire_block_for_test;
 use pms_types::{Block, TxOutput};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
-use pms_utils::{compute_block_id, compute_id_adapter, submit_block_http, submit_block_http_to};
-use pms_wallet::signing_wire::canonical_wireblock_message;
+use pms_utils::compute_block_id;
 use pms_wallet::{SignerBackend, Wallet};
 use pms_wire::{WireBlock, WireMeta};
-use tokio::sync::Mutex;
-
-type DagRef = Arc<Mutex<Dag>>;
+type DagRef = Arc<ConcurrentDag>;
 
 fn to_wire(
     forged: &Block,
@@ -34,6 +31,7 @@ fn to_wire(
         protocol_version: meta.protocol_version as u16,
         signer_pk_hex,
         signature_hex,
+        metadata: None,
     }
 }
 
@@ -50,8 +48,7 @@ fn mk_test_cfg(api_addr: &str) -> ServerConfig {
 
 /// Forge un bloc minimal en RAM (Mint/Payload vide) sans passer par CLI.
 async fn forge_test_block(dag: &DagRef) -> Block {
-    let mut d = dag.lock().await;
-    d.add_payload_auto_parents_mined(None, 0, compute_block_id)
+    dag.forge_block(None, 0, compute_block_id)
         .expect("forge test block")
 }
 
@@ -65,6 +62,7 @@ fn block_to_unsigned_wire(b: &Block, network_id: &str, protocol_version: u16) ->
         protocol_version,
         signer_pk_hex: String::new(),
         signature_hex: String::new(),
+        metadata: None,
     }
 }
 
@@ -87,19 +85,18 @@ async fn unsigned_block_is_rejected() -> anyhow::Result<()> {
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
 
-    let dag_loaded = Dag::bootstrap_from_store_or_new_dag(&*store, &meta).await?;
-    let dag: DagRef = Arc::new(Mutex::new(dag_loaded));
+    let genesis = Block::genesis(compute_block_id);
+    let dag_loaded = ConcurrentDag::new_with_genesis(genesis);
+    let dag: DagRef = Arc::new(dag_loaded);
 
     let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
 
     // 2) Forge un bloc simple (payload None) avec les fonctions existantes
-    let mut d = dag.lock().await;
-    let block = d.forge_block(
+    let block = dag.forge_block(
         None,
         0, // difficulté test
-        compute_id_adapter,
-    );
-    drop(d);
+        compute_block_id,
+    )?;
 
     // 3) Meta cohérente avec la config actuelle
     let settings = load_config()?;
@@ -119,6 +116,7 @@ async fn unsigned_block_is_rejected() -> anyhow::Result<()> {
         protocol_version: meta.protocol_version as u16,
         signer_pk_hex: wallet.encoded_public_key(),
         signature_hex: String::new(), // <- PAS DE SIGNATURE
+        metadata: None,
     };
 
     // 6) Persist via l'adapter (chemin réel DAG + Rocks)
@@ -150,15 +148,14 @@ async fn signed_plain_block_is_accepted() -> Result<()> {
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
 
-    let dag_loaded = Dag::bootstrap_from_store_or_new_dag(&*store, &meta).await?;
-    let dag: DagRef = Arc::new(Mutex::new(dag_loaded));
+    let genesis = Block::genesis(compute_block_id);
+    let dag_loaded = ConcurrentDag::new_with_genesis(genesis);
+    let dag: DagRef = Arc::new(dag_loaded);
 
     let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
 
     // 1) Forge bloc (payload None) via Dag
-    let mut d = dag.lock().await;
-    let block = d.forge_block(None, 0, compute_id_adapter);
-    drop(d);
+    let block = dag.forge_block(None, 0, compute_block_id)?;
 
     // 2) Meta + wallet de test
     let settings = load_config()?;
@@ -198,8 +195,9 @@ async fn signed_encrypted_mint_is_accepted() -> Result<()> {
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
 
-    let dag_loaded = Dag::bootstrap_from_store_or_new_dag(&*store, &meta).await?;
-    let dag: DagRef = Arc::new(Mutex::new(dag_loaded));
+    let genesis = Block::genesis(compute_block_id);
+    let dag_loaded = ConcurrentDag::new_with_genesis(genesis);
+    let dag: DagRef = Arc::new(dag_loaded);
 
     let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
 
@@ -224,9 +222,7 @@ async fn signed_encrypted_mint_is_accepted() -> Result<()> {
     let payload = Some(PayloadEnvelope::Encrypted(enc));
 
     // 3) Forge un bloc avec ce payload
-    let mut d = dag.lock().await;
-    let block = d.forge_block(payload, 0, compute_id_adapter);
-    drop(d);
+    let block = dag.forge_block(payload, 0, compute_block_id)?;
 
     // 4) WireBlock + signature
     let wb = forge_signed_wire_block_for_test(

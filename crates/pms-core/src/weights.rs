@@ -1,8 +1,8 @@
 // pms-core/src/dag.rs (ou un module voisin)
 
-use std::collections::{HashMap, VecDeque};
-use pms_types::BlockId;
 use crate::dag::Dag;
+use pms_types::BlockId;
+use std::collections::{HashMap, VecDeque};
 
 impl Dag {
     /// Calcule le "cumulative weight" façon IOTA.
@@ -17,11 +17,8 @@ impl Dag {
             self.blocks.keys().map(|id| (id.clone(), 1u64)).collect();
 
         // out_degree[id] = nombre d'enfants (combien de blocks référencent `id` comme parent)
-        let mut out_degree: HashMap<BlockId, u32> = self
-            .blocks
-            .keys()
-            .map(|id| (id.clone(), 0u32))
-            .collect();
+        let mut out_degree: HashMap<BlockId, u32> =
+            self.blocks.keys().map(|id| (id.clone(), 0u32)).collect();
 
         for (_id, blk) in &self.blocks {
             for parent in &blk.parents {

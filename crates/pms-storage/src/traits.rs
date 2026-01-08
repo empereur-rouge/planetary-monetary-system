@@ -1,10 +1,7 @@
-use crate::store::PutResult;
-use crate::{StoredBlock, UtxoDelta};
+use crate::{PutResult, StoredBlock, UtxoDelta};
 use anyhow::Result;
 use async_trait::async_trait;
 use pms_wire::WireBlock;
-use rocksdb::WriteBatch;
-use std::format;
 
 #[async_trait]
 pub trait DagStorage: Send + Sync {

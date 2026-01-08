@@ -1,8 +1,8 @@
-use pms_types::{Block, PayloadEnvelope, PlainPayload};
 use crate::validations::traits::WriteState;
+use pms_types::{Block, PayloadEnvelope, PlainPayload};
 
 /// Applique les effets **en mémoire** (pas de Redis ici).
-pub fn apply_block_mem<W: WriteState>(dag: &mut W, b: & Block) {
+pub fn apply_block_mem<W: WriteState>(dag: &mut W, b: &Block) {
     // ------------------------------------------------------------
     // 1) Parents uniques (évite de sur-compter les enfants)
     // ------------------------------------------------------------

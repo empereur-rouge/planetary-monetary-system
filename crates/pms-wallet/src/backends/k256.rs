@@ -1,9 +1,11 @@
-use k256::ecdsa::{SigningKey, VerifyingKey, Signature, signature::{Signer, Verifier}};
-use base64::{engine::general_purpose, Engine as _};
-use hex;
-use k256::{FieldBytes};
 use crate::types::{SignError, SignerBackend, VerifyError};
 use crate::wallet::Wallet;
+use base64::{Engine as _, engine::general_purpose};
+use k256::FieldBytes;
+use k256::ecdsa::{
+    Signature, SigningKey, VerifyingKey,
+    signature::{Signer, Verifier},
+};
 
 impl SignerBackend for Wallet {
     fn sign(&self, message: &str) -> Result<String, SignError> {

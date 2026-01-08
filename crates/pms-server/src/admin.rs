@@ -1,17 +1,14 @@
-use axum::extract::State;
-use axum::http::HeaderMap;
-use axum::response::IntoResponse;
-use axum::http::StatusCode;
-use axum::Json;
-use serde_json::json;
 use crate::api::AppState;
 use crate::helper::is_admin_authorized;
+use axum::Json;
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use serde_json::json;
 
 /// Simple endpoint pour tester le token admin.
-pub async fn admin_ping(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn admin_ping(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if !is_admin_authorized(&state, &headers) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -30,10 +27,7 @@ pub async fn admin_ping(
 }
 
 /// Endpoint placeholder pour une future action de maintenance (compaction, flush, etc.).
-pub async fn admin_compact(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn admin_compact(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if !is_admin_authorized(&state, &headers) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -66,9 +60,12 @@ pub async fn admin_compact(
     // }
 
     // 👉 Pour l’instant, on renvoie juste un JSON-noop
-    (StatusCode::OK, Json(json!({
-        "status": "ok",
-        "action": "compact",
-        "message": "noop (compaction not implemented yet)"
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "action": "compact",
+            "message": "noop (compaction not implemented yet)"
+        })),
+    )
 }

@@ -7,8 +7,12 @@ fn x25519_sk_hex_fallback_without_mnemonic_is_stable() -> Result<()> {
     let w1 = Wallet::from_seed(&[10u8; 32], None).unwrap();
     assert!(w1.mnemonic_words.is_none());
 
-    let sk1 = w1.x25519_sk_hex().expect("x25519_sk_hex must be Some without mnemonic");
-    let sk1_bis = w1.x25519_sk_hex().expect("x25519_sk_hex must be Some without mnemonic");
+    let sk1 = w1
+        .x25519_sk_hex()
+        .expect("x25519_sk_hex must be Some without mnemonic");
+    let sk1_bis = w1
+        .x25519_sk_hex()
+        .expect("x25519_sk_hex must be Some without mnemonic");
 
     // Stable (déterministe)
     assert_eq!(sk1, sk1_bis);
@@ -19,7 +23,9 @@ fn x25519_sk_hex_fallback_without_mnemonic_is_stable() -> Result<()> {
 
     // Deux seeds différentes => clé différente
     let w2 = Wallet::from_seed(&[11u8; 32], None).unwrap();
-    let sk2 = w2.x25519_sk_hex().expect("x25519_sk_hex must be Some without mnemonic");
+    let sk2 = w2
+        .x25519_sk_hex()
+        .expect("x25519_sk_hex must be Some without mnemonic");
     assert_ne!(sk1, sk2);
 
     Ok(())

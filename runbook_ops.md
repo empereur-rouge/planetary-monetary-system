@@ -24,9 +24,9 @@ docker compose logs -f --tail 100 node
 ```
 
 **Check Metrics:**
-Requires `PMS_ADMIN_TOKEN_DEV` (Default: `pms_admin_secret`).
+Requires `PMS_ADMIN_TOKEN` (set in environment).
 ```bash
-curl -k -H "Authorization: Bearer pms_admin_secret" https://127.0.0.1:8080/metrics
+curl -k -H "Authorization: Bearer $PMS_ADMIN_TOKEN" https://127.0.0.1:8080/metrics
 ```
 *Key Metrics:*
 - `pms_blocks_total`: Total blocks in DAG.
@@ -103,7 +103,7 @@ Data is stored in the `docker_data/` directory (mounted content).
 
 **"Unauthorized" on /metrics:**
 -   Ensure you provided the Bearer token: `-H "Authorization: Bearer <token>"`.
--   Check `PMS_ADMIN_TOKEN_DEV` in `docker-compose.yml`.
+-   Check `PMS_ADMIN_TOKEN` in `docker-compose.yml` or environment.
 
 **Node Stuck "Starting":**
 -   Check logs: `docker compose logs node`.

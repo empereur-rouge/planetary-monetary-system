@@ -1,8 +1,8 @@
-use std::time::{Duration, Instant};
-use pms_storage::DagStorage;
 use anyhow::Result;
-use reqwest::StatusCode;
+use pms_storage::DagStorage;
 use pms_storage::rocks_store::store::RocksStore;
+use reqwest::StatusCode;
+use std::time::{Duration, Instant};
 
 pub async fn sync_after_submit(
     store: &RocksStore,

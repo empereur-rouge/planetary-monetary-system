@@ -1,5 +1,5 @@
-use std::collections::{HashSet, VecDeque};
 use crate::Dag;
+use std::collections::{HashSet, VecDeque};
 
 /// État finalité minimal : on garde l’id du dernier milestone + l’ensemble des blocs finalisés.
 #[derive(Default)]
@@ -12,10 +12,13 @@ pub struct FinalityState {
     pub depth_k: usize,
 }
 
-
 impl FinalityState {
     pub fn new(depth_k: usize) -> Self {
-        Self { finalized: HashSet::new(), last_milestone: None, depth_k }
+        Self {
+            finalized: HashSet::new(),
+            last_milestone: None,
+            depth_k,
+        }
     }
 
     pub fn is_final(&self, id: &str) -> bool {
@@ -41,26 +44,25 @@ pub fn has_k_confirmations_dag(dag: &Dag, b: &str, k: usize) -> bool {
     let mut seen: HashSet<String> = HashSet::new();
     let mut q = VecDeque::new();
 
-    // 1) Seed: tous les blocs dont `b` est un parent direct
-    for (id, blk) in dag.blocks.iter() {
-        if blk.parents.iter().any(|p| p == b) {
-            if seen.insert(id.clone()) {
-                q.push_back(id.clone());
+    // 1) Seed: tous les enfants directs de b
+    if let Some(children) = dag.children_idx.get(b) {
+        for child_id in children {
+            if seen.insert(child_id.clone()) {
+                q.push_back(child_id.clone());
             }
         }
     }
 
-    // 2) BFS descendants en suivant les parents
+    // 2) BFS descendants en suivant les enfants
     while let Some(x) = q.pop_front() {
         if seen.len() >= k {
             return true;
         }
 
-        // enfants de x = tous les blocs qui ont x dans leurs parents
-        for (id, blk) in dag.blocks.iter() {
-            if blk.parents.iter().any(|p| p == &x) {
-                if seen.insert(id.clone()) {
-                    q.push_back(id.clone());
+        if let Some(children) = dag.children_idx.get(&x) {
+            for child_id in children {
+                if seen.insert(child_id.clone()) {
+                    q.push_back(child_id.clone());
                 }
             }
         }

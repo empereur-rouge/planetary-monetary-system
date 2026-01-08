@@ -1,8 +1,8 @@
-use rand::RngCore;
-use x25519_dalek::{PublicKey, StaticSecret};
 use pms_core::Dag;
 use pms_types::{Block, EncryptedPayload, PayloadEnvelope, PlainPayload, TxOutput};
 use pms_utils::compute_block_id;
+use rand::RngCore;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 fn gen_keypair_hex() -> (String, String) {
     let mut sk_bytes = [0u8; 32];
@@ -33,9 +33,13 @@ fn test_export_dag_json() {
             Some(PayloadEnvelope::Encrypted(enc)),
             1,
             compute_block_id,
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let j = dag.export_json();
-    println!("=== BACKUP ===\n{}", serde_json::to_string_pretty(&j).unwrap());
+    println!(
+        "=== BACKUP ===\n{}",
+        serde_json::to_string_pretty(&j).unwrap()
+    );
 }

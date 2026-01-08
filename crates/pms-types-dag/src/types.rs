@@ -1,8 +1,8 @@
+use pms_network::DagAdapter;
+use pms_types_block::{Block, BlockId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use pms_network::DagAdapter;
-use pms_types_block::{Block, BlockId};
 
 /// État finalité minimal : on garde l’id du dernier milestone + l’ensemble des blocs finalisés.
 #[derive(Default)]

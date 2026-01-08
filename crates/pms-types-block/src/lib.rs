@@ -1,3 +1,3 @@
 mod block;
 
-pub use block::{Block, BlockId};
+pub use block::{Block, BlockId, BlockMetadata};

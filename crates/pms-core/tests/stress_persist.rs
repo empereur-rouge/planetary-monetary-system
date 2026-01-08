@@ -1,18 +1,16 @@
-use std::sync::Arc;
 use anyhow::Result;
-use rand::Rng;
-use tokio::sync::Mutex;
 use pms_config::load_config;
-use pms_core::{CoreAdapter, Dag};
+use pms_core::{ConcurrentDag, CoreAdapter};
 use pms_interface::NetDagAdapter;
 use pms_storage::{DagStorage, PutResult, StoredBlock};
 use pms_types::{Block, PayloadEnvelope};
 use pms_utils::compute_block_id;
+use rand::Rng;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-// 👉 helper commun (crate pms-testkit) pour ouvrir un RocksStore éphémère
 use pms_testkit::{forge_signed_wire_block_for_test, test_rocks_store};
 use pms_wallet::{SignerBackend, Wallet};
-use pms_wallet::signing_wire::canonical_wireblock_message;
 use pms_wire::WireMeta;
 
 #[tokio::test]
@@ -25,7 +23,7 @@ async fn stress_persist_2000_blocks_rocks() -> Result<()> {
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
 
-    // 1) Genesis en mémoire + persistance idempotente (avec méta complète)
+    // 1) Genesis en mémoire + persistance
     let genesis = Block::genesis(compute_block_id);
 
     let sb = StoredBlock {
@@ -37,33 +35,33 @@ async fn stress_persist_2000_blocks_rocks() -> Result<()> {
         protocol_version: meta.protocol_version as u16,
         signer_pk_hex: String::new(),
         signature_hex: String::new(),
+        metadata: None,
     };
     let _ = store.append_block_atomic(&sb).await?;
 
     // 2) DAG en RAM + adapter réel
-    let dag = Arc::new(Mutex::new(Dag::new_with_genesis(genesis.clone())));
+    let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
     let adapter_concrete = CoreAdapter::new(dag.clone(), store.clone());
     let adapter: Arc<dyn NetDagAdapter> = adapter_concrete.clone();
 
-    // 👉 On active la finalité k-depth pour ce test
+    // On active la finalité k-depth (synchronous RwLock)
     {
-        let mut d = dag.lock().await;
-        d.finality.depth_k = 5; // par ex. k = 5 confirmations
+        let mut f = dag.finality.write().unwrap();
+        f.depth_k = 5;
     }
 
-    // Wallet de test pour signer les blocs
-    let wallet = Wallet::from_seed(&[5u8; 32], None)
-        .expect("wallet seed pour test ne doit pas échouer");
+    // Wallet de test
+    let wallet =
+        Wallet::from_seed(&[5u8; 32], None).expect("wallet seed pour test ne doit pas échouer");
 
-    // 3) Insère 2000 blocs ultra-lights (payload=None, difficulté=0)
+    // 3) Insère 2000 blocs
     let n: usize = 2_000;
     let mut created_ids: Vec<String> = Vec::with_capacity(n);
 
     for i in 0..n {
-        // 1) Parents choisis d'après les tips RAM, sans garder le lock pendant l'await
+        // Parents choisis d'après les tips RAM, lock-free
         let parents = {
-            let d = dag.lock().await;
-            let mut tips = d.find_tips();
+            let mut tips = dag.find_tips();
             if tips.is_empty() {
                 tips.push(genesis.id.clone());
             }
@@ -72,19 +70,11 @@ async fn stress_persist_2000_blocks_rocks() -> Result<()> {
             tips
         };
 
-        // 2) Payload None
         let payload: Option<PayloadEnvelope> = None;
 
-        // 3) WireBlock “prépare tout sauf signature”
-        let wb = forge_signed_wire_block_for_test(
-            parents.clone(),
-            &meta,
-            &wallet,
-            i as u64,
-            payload
-        );
+        let wb =
+            forge_signed_wire_block_for_test(parents.clone(), &meta, &wallet, i as u64, payload);
 
-        // 7) Persistance via l’adapter (qui met à jour DAG + finalité + store)
         let res = adapter.persist_block(&wb).await?;
         assert!(
             matches!(res, PutResult::Inserted | PutResult::AlreadyExists),
@@ -99,14 +89,14 @@ async fn stress_persist_2000_blocks_rocks() -> Result<()> {
     }
 
     // ---- Invariants mémoire (DAG local) ----
-    {
-        let d = dag.lock().await;
-        assert_eq!(
-            d.blocks.len(),
-            1 + n,
-            "taille du DAG en mémoire incorrecte"
-        );
-    }
+    assert_eq!(
+        dag.blocks.len(),
+        1 + n,
+        "taille du DAG en mémoire incorrecte"
+    );
+
+    // Wait for background persist to complete (fire-and-forget architecture)
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     // ---- Vérifications store (échantillon) ----
     for sample in created_ids.iter().step_by(137).take(20) {
@@ -120,7 +110,7 @@ async fn stress_persist_2000_blocks_rocks() -> Result<()> {
         }
     }
 
-    // 2) tips plafonnés (respect de tip_limit initial du testkit = 128)
+    // tips plafonnés
     let tips = store.top_tips(256).await?;
     assert!(
         tips.len() <= 128,
@@ -128,61 +118,62 @@ async fn stress_persist_2000_blocks_rocks() -> Result<()> {
         tips.len()
     );
 
-    // 3) enfants store ~= enfants mémoire (échantillon)
+    // enfants store ~= enfants mémoire (échantillon)
     let mut rng = rand::rng();
-    {
-        let d = dag.lock().await;
-        for _ in 0..20 {
-            let idx = rng.random_range(0..created_ids.len());
-            let bid = &created_ids[idx];
-            let b = d.blocks.get(bid).unwrap();
-            if b.parents.is_empty() {
-                continue;
-            }
-            let p = &b.parents[0];
-
-            let mem = *d.children.get(p).unwrap_or(&0);
-            let store_cnt = store.children_count(p).await?;
-            assert_eq!(
-                store_cnt, mem,
-                "children_count mismatch pour parent {p}: store={store_cnt} mem={mem}"
-            );
+    for _ in 0..20 {
+        let idx = rng.random_range(0..created_ids.len());
+        let bid = &created_ids[idx];
+        let b = dag.blocks.get(bid).unwrap();
+        if b.parents.is_empty() {
+            continue;
         }
+        let p = &b.parents[0];
+
+        let mem = dag
+            .children_count
+            .get(p)
+            .map(|v| v.load(Ordering::SeqCst))
+            .unwrap_or(0);
+
+        let store_cnt = store.children_count(p).await?;
+        assert_eq!(
+            store_cnt, mem,
+            "children_count mismatch pour parent {p}: store={store_cnt} mem={mem}"
+        );
     }
 
-    // ---- ✅ Vérification des checkpoints / finalité ----
+    // ---- Vérification des checkpoints / finalité (synchronous RwLock) ----
     {
-        let d = dag.lock().await;
+        let f = dag.finality.read().unwrap();
 
-        // Il doit y avoir au moins un bloc marqué final
         assert!(
-            !d.finality.finalized.is_empty(),
+            !f.finalized.is_empty(),
             "aucun bloc finalisé après insertion de {n} blocs avec depth_k={}",
-            d.finality.depth_k
+            f.depth_k
         );
 
-        // On vérifie qu'au moins un id final est bien reconnu par is_final()
-        let some_final = d.finality.finalized.iter().next().unwrap().clone();
+        let some_final = f.finalized.iter().next().unwrap().clone();
+        drop(f);
+
+        // Synchronous is_final
         assert!(
-            d.is_final(&some_final),
+            dag.is_final(&some_final),
             "le bloc marqué final dans finality.finalized doit être is_final()"
         );
     }
 
-    // Et on vérifie la cohérence avec les checkpoints persistés en store
+    // Cohérence avec les checkpoints persistés en store
     let finals_store = store.load_final().await.unwrap_or_default();
     {
-        let d = dag.lock().await;
-        let finals_ram: Vec<String> = d.finality.finalized.iter().cloned().collect();
+        let f = dag.finality.read().unwrap();
+        let finals_ram: Vec<String> = f.finalized.iter().cloned().collect();
 
-        // Même nombre de checkpoints
         assert_eq!(
             finals_store.len(),
             finals_ram.len(),
             "nombre de checkpoints finalisés en store != RAM"
         );
 
-        // Tous les checkpoints du store doivent exister en RAM
         for fid in &finals_store {
             assert!(
                 finals_ram.contains(fid),
@@ -199,7 +190,6 @@ async fn atomic_persist_rejects_duplicate_rocks() -> Result<()> {
     let tr = test_rocks_store("dupl").await?;
     let store = tr.store.clone();
 
-    // On récupère network_id / protocol_version depuis les settings
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
 
@@ -212,6 +202,7 @@ async fn atomic_persist_rejects_duplicate_rocks() -> Result<()> {
         protocol_version: meta.protocol_version as u16,
         signer_pk_hex: String::new(),
         signature_hex: String::new(),
+        metadata: None,
     };
 
     let ok1 = store.append_block_atomic(&sb).await?;

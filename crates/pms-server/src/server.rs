@@ -14,15 +14,19 @@ use crate::rate::TokenBucket;
 use crate::stats::Stats;
 use dashmap::DashMap;
 use lru::LruCache;
+use pms_config::{ServerConfig, TlsConfig};
 use pms_interface::NetDagAdapter;
 use pms_network::messages::NetMsg;
+use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::store::PutResult;
+use pms_wallet::{SignerBackend, Wallet};
 use pms_wire::WireBlock;
 use rand::random;
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
-use std::path::Path;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::{Instant, sleep};
@@ -32,10 +36,6 @@ use tokio::{
     sync::mpsc,
 };
 use tokio_util::sync::CancellationToken;
-use pms_config::{NetworkMode, ServerConfig, Settings, TlsConfig};
-use pms_storage::rocks_store::store::RocksStore;
-use pms_storage::store::PutResult;
-use pms_wallet::{SignerBackend, Wallet};
 
 const SEEN_TTL: Duration = Duration::from_secs(60);
 
@@ -52,12 +52,16 @@ pub struct Server {
     adapter: Arc<dyn NetDagAdapter>,
     peers: DashMap<SocketAddr, PeerState>,
     pong_waiters: DashMap<SocketAddr, oneshot::Sender<()>>,
-    node_id: String,                               // ident local
-    seen_blocks: Mutex<LruCache<String, Instant>>, // LRU + horodatage pour TTL
-    inflight_fetch: Mutex<HashSet<String>>,
+    node_id: String,                             // ident local
+    seen_invs: Mutex<LruCache<String, Instant>>, // LRU pour les Inv (gossip)
+    inflight_fetch: Mutex<HashMap<String, Instant>>,
+    orphans: DashMap<String, WireBlock>,
+    parent_dependency: DashMap<String, Vec<String>>, // ParentID -> Vec<ChildID>
     network_id: String,
     protocol_version: u32,
     node_wallet: Arc<Wallet>,
+    /// Canal pour agréger les diffusions (batching)
+    broadcast_tx: mpsc::Sender<String>,
 }
 
 #[derive(Debug)]
@@ -68,37 +72,112 @@ struct PeerState {
     bucket: TokenBucket,
     /// Compteur d’erreurs de parsing JSON successives
     parse_errors: u32,
-    /// Octets lus dans la fenêtre courante (indicatif / debug)
-    bytes_in_window: u64,
-    /// Dernière activité vue (pour timeouts, stats)
-    last_seen: Instant,
+    /// True if peer connected to us (inbound), false if we connected to them (outbound)
+    is_inbound: bool,
 }
 
 impl Server {
     /// Construit un serveur autour d’un adapter.
     /// On retourne un `Arc<Self>` car on a besoin de cloner le serveur dans les tâches spawnées.
-    pub fn new(adapter: Arc<dyn NetDagAdapter>,network_id: impl Into<String>, protocol_version: u32, node_wallet: Arc<Wallet>,) -> Arc<Self> {
-        let node_id = node_wallet.encoded_public_key(); // ou hash de la clé, à toi de voir
-        
-        Arc::new(Self {
+    pub fn new(
+        adapter: Arc<dyn NetDagAdapter>,
+        network_id: impl Into<String>,
+        protocol_version: u32,
+        node_wallet: Arc<Wallet>,
+    ) -> Arc<Self> {
+        let node_id = node_wallet.encoded_public_key();
+
+        // Canal avec buffer pour les IDs à diffuser
+        let (broadcast_tx, broadcast_rx) = mpsc::channel(10000);
+
+        let this = Arc::new(Self {
             adapter,
             peers: DashMap::new(),
             pong_waiters: DashMap::new(),
-            node_id,
-            seen_blocks: Mutex::new(LruCache::new(SEEN_CAPACITY.try_into().unwrap())),
-            inflight_fetch: Mutex::new(HashSet::new()),
+            node_id: node_id.clone(),
+            seen_invs: Mutex::new(LruCache::new(SEEN_CAPACITY.try_into().unwrap())),
+            inflight_fetch: Mutex::new(HashMap::new()),
+            orphans: DashMap::new(),
+            parent_dependency: DashMap::new(),
             network_id: network_id.into(),
             protocol_version,
-            node_wallet
-        })
+            node_wallet,
+            broadcast_tx,
+        });
+
+        // Lancement du worker d'agrégation
+        this.clone().spawn_broadcast_worker(broadcast_rx);
+
+        this
+    }
+
+    /// Worker qui groupe les diffusions par lots pour économiser le réseau.
+    fn spawn_broadcast_worker(self: Arc<Self>, mut rx: mpsc::Receiver<String>) {
+        tokio::spawn(async move {
+            let mut buffer = Vec::with_capacity(100);
+            let flush_interval = Duration::from_millis(10);
+            let max_batch = 100;
+            let mut interval = tokio::time::interval(flush_interval);
+
+            loop {
+                tokio::select! {
+                    biased;  // prioritize recv over tick
+
+                    msg = rx.recv() => {
+                        match msg {
+                            Some(id) => {
+                                eprintln!("[SRV-WORKER] Received ID to broadcast: {}", &id[..8.min(id.len())]);
+                                buffer.push(id);
+                                if buffer.len() >= max_batch {
+                                    self.flush_broadcast_buffer(&mut buffer).await;
+                                }
+                            }
+                            None => {
+                                // Channel closed, flush remaining and exit
+                                if !buffer.is_empty() {
+                                    self.flush_broadcast_buffer(&mut buffer).await;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ = interval.tick() => {
+                        if !buffer.is_empty() {
+                            self.flush_broadcast_buffer(&mut buffer).await;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    async fn flush_broadcast_buffer(&self, buffer: &mut Vec<String>) {
+        if buffer.is_empty() {
+            return;
+        }
+        let ids = std::mem::take(buffer);
+        eprintln!("[SRV] Broadcasting Inv batch of {} ids", ids.len());
+        let _ = self.broadcast(&NetMsg::Inv { ids }).await;
     }
 
     pub fn adapter_arc(&self) -> Arc<dyn NetDagAdapter> {
         self.adapter.clone()
     }
+    /// Ajoute un ID de bloc à la file de diffusion.
+    /// Il sera groupé avec d'autres IDs pour optimiser le réseau.
+    pub async fn enqueue_broadcast(&self, id: String) {
+        eprintln!(
+            "[SRV] enqueue_broadcast called for: {}",
+            &id[..8.min(id.len())]
+        );
+        match self.broadcast_tx.send(id).await {
+            Ok(_) => eprintln!("[SRV] enqueue_broadcast: sent to channel OK"),
+            Err(e) => eprintln!("[SRV] enqueue_broadcast: channel send FAILED: {}", e),
+        }
+    }
 
-    pub fn node_identity_wallet(&self) -> &Wallet {
-        &self.node_wallet
+    pub fn node_identity_wallet(&self) -> Arc<Wallet> {
+        self.node_wallet.clone()
     }
 
     pub async fn run(
@@ -114,32 +193,100 @@ impl Server {
         // 1) Logger périodique des stats (persist / gossip)
         {
             let stats = stats.clone();
+            let srv_for_sync = self.clone();
             tokio::spawn(async move {
                 loop {
-                    sleep(Duration::from_secs(5)).await;
+                    sleep(Duration::from_millis(200)).await; // Super-Aggressive sync (200ms)
+                    // 1) Log stats (Throttle logs to every 2s to avoid spam)
+                    // ... actually we can just log every time or use a counter.
+                    // Let's keep it simple: log every iteration but the loop is fast.
+                    // Wait, logging every 200ms might spam. Let's use a counter.
+
                     let (ok, dup, err, go, gr, ge) = stats.snapshot();
-                    tracing::info!(
-                        target="pms_stats",
-                        ptr=?Arc::as_ptr(&stats),
-                        "📊 5s: persist ok={} dup={} err={} | gossip ok={} reject={} err={}",
-                        ok, dup, err, go, gr, ge
-                    );
+                    if random::<u8>() < 25 {
+                        // Log roughly every ~8-10 iterations (~2s)
+                        tracing::info!(
+                            target="pms_stats",
+                            ptr=?Arc::as_ptr(&stats),
+                            "📊 200ms: persist ok={} dup={} err={} | gossip ok={} reject={} err={}",
+                            ok, dup, err, go, gr, ge
+                        );
+                    }
+
+                    // 2) Retry Missing Parents for Orphans
+                    {
+                        let parents_needed: Vec<String> = srv_for_sync
+                            .parent_dependency
+                            .iter()
+                            .map(|entry| entry.key().clone())
+                            .collect();
+
+                        if !parents_needed.is_empty() {
+                            tracing::info!(
+                                "🔄 Retrying {} missing parents for orphans",
+                                parents_needed.len()
+                            );
+
+                            let mut to_fetch = Vec::new();
+                            {
+                                let mut inflight = srv_for_sync.inflight_fetch.lock().await;
+                                for pid in parents_needed {
+                                    if let Some(ts) = inflight.get(&pid) {
+                                        if ts.elapsed().as_millis() < 2000 {
+                                            continue;
+                                        }
+                                    }
+                                    inflight.insert(pid.clone(), Instant::now());
+                                    to_fetch.push(pid);
+                                    if to_fetch.len() >= 100 {
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if !to_fetch.is_empty() {
+                                if to_fetch.len() == 1 {
+                                    let _ = srv_for_sync
+                                        .broadcast(&NetMsg::GetBlock {
+                                            id: to_fetch[0].clone(),
+                                        })
+                                        .await;
+                                } else {
+                                    let _ = srv_for_sync
+                                        .broadcast(&NetMsg::GetBlocks { ids: to_fetch })
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+
+                    // 3) Active Sync: Broadcast GetTips with higher limit
+                    // Limit 1024 covers extremely wide DAGs (stress tests)
+                    let _ = srv_for_sync
+                        .broadcast(&NetMsg::GetTips { limit: 1024 })
+                        .await;
                 }
             });
         }
 
         // 2) Démarrage de l’API HTTP (TLS ou non, la logique est dans run_api)
         {
-            let srv           = self.clone();
-            let addr          = cfg.api_addr.clone();
-            let cfg_for_api   = cfg.clone();
+            let srv = self.clone();
+            let addr = cfg.api_addr.clone();
+            let cfg_for_api = cfg.clone();
             let stats_for_api = stats.clone();
             let ready_for_api = ready.clone();
             let store_for_api = store.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = srv
-                    .run_api(addr, cfg_for_api, ready_for_api, stats_for_api, store_for_api)
+                    .run_api(
+                        addr,
+                        cfg_for_api,
+                        ready_for_api,
+                        stats_for_api,
+                        store_for_api,
+                    )
                     .await
                 {
                     eprintln!("[API] error: {e}");
@@ -165,7 +312,7 @@ impl Server {
 
         let res = if let Some(tls) = cfg.tls.clone() {
             let cert_exists = Path::new(&tls.cert_pem).exists();
-            let key_exists  = Path::new(&tls.key_pem).exists();
+            let key_exists = Path::new(&tls.key_pem).exists();
 
             if mode.is_prod() {
                 // 🔐 En prod: TLS obligatoire si configuré, et fichiers requis
@@ -184,16 +331,11 @@ impl Server {
                 if !cert_exists || !key_exists {
                     eprintln!(
                         "[P2P] TLS configuré mais fichiers absents en mode {:?}, fallback TCP clair sur {}",
-                        mode,
-                        bind_addr
+                        mode, bind_addr
                     );
                     self.listen(&cfg.bind_addr).await
                 } else {
-                    eprintln!(
-                        "[P2P] mode {:?} avec TLS → listen_tls({})",
-                        mode,
-                        bind_addr
-                    );
+                    eprintln!("[P2P] mode {:?} avec TLS → listen_tls({})", mode, bind_addr);
                     self.listen_tls(&cfg.bind_addr, tls).await
                 }
             }
@@ -218,18 +360,11 @@ impl Server {
         stats: Arc<Stats>,
         store: Arc<RocksStore>,
     ) -> anyhow::Result<()> {
-        static READY: once_cell::sync::Lazy<Arc<AtomicBool>> =
-            once_cell::sync::Lazy::new(|| Arc::new(AtomicBool::new(true)));
         api::serve_api(&addr, self, cfg, ready, stats, store).await?;
         Ok(())
     }
 
-
-    pub async fn listen_tls(
-        self: Arc<Self>,
-        bind: &str,
-        tls: TlsConfig,
-    ) -> anyhow::Result<()> {
+    pub async fn listen_tls(self: Arc<Self>, bind: &str, tls: TlsConfig) -> anyhow::Result<()> {
         use tokio::net::TcpListener;
         use tokio_rustls::TlsAcceptor;
 
@@ -295,7 +430,7 @@ impl Server {
         sa: SocketAddr,
     ) -> anyhow::Result<()> {
         let (r, w) = tokio::io::split(stream);
-        self.handle_new_peer_from_io(r, w, sa).await
+        self.handle_new_peer_from_io(r, w, sa, true).await // inbound = true
     }
 
     pub async fn handle_new_peer_tls(
@@ -304,7 +439,7 @@ impl Server {
         sa: SocketAddr,
     ) -> anyhow::Result<()> {
         let (r, w) = tokio::io::split(tls_stream);
-        self.handle_new_peer_from_io(r, w, sa).await
+        self.handle_new_peer_from_io(r, w, sa, true).await // inbound = true
     }
 
     /// Handles the initialization and management of a new peer connection.
@@ -366,38 +501,25 @@ impl Server {
         reader_io: R,
         mut writer_io: W,
         sa: SocketAddr,
+        is_inbound: bool,
     ) -> anyhow::Result<()>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        use tokio::io::BufReader;
-
         // On encapsule le reader dans un BufReader pour faire des `read_line` efficaces.
-        let mut reader = BufReader::with_capacity(MAX_LINE_BYTES, reader_io);
-
-        // Canal de sortie pour ce peer:
-        // - n’importe quelle partie du serveur peut envoyer un `NetMsg` à ce peer via `PeerState.tx`.
-        // - la tâche d’écriture ci-dessous consomme ce canal et pousse vers le socket.
         let (tx_out, mut rx_out) = mpsc::channel::<NetMsg>(PER_PEER_Q_CAP);
 
-        // On enregistre l’état de ce peer dans `self.peers`.
-        // - `bucket` = token bucket pour limiter le nombre de PONGs émis (anti-flood).
-        // - `parse_errors` = compteur d’erreurs de JSON, pour kick un peer qui spamme du garbage.
-        // - `bytes_in_window` + `last_seen` = base pour d’autres limites de débit si tu veux.
         self.peers.insert(
             sa,
             PeerState {
                 tx: tx_out,
                 bucket: TokenBucket::new(RATE_MSGS_PER_SEC, RATE_BURST),
                 parse_errors: 0,
-                bytes_in_window: 0,
-                last_seen: Instant::now(),
+                is_inbound,
             },
         );
 
-        // On envoie un Hello sortant dès qu’on accepte le peer.
-        // C’est la première étape du handshake.
         let hello = NetMsg::Hello {
             proto: 1,
             node_id: self.node_id.clone(),
@@ -406,40 +528,34 @@ impl Server {
         };
         let _ = self.unicast(&sa, hello).await;
 
-        // ========================
-        // 1) TÂCHE ÉCRITURE
-        // ========================
-        //
-        // Lit les NetMsg depuis `rx_out` (canal interne) et les écrit sur le socket en JSONL:
-        //   {json}\n{json}\n...
-        //
-        // Quand le canal est fermé (plus de sender), on ferme proprement le writer et on retire le peer.
-        let this = Arc::clone(self);
+        let this_w = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(m) = rx_out.recv().await {
                 if let Ok(s) = serde_json::to_string(&m) {
-                    let _ = writer_io.write_all(s.as_bytes()).await;
-                    let _ = writer_io.write_all(b"\n").await;
+                    if writer_io.write_all(s.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if writer_io.write_all(b"\n").await.is_err() {
+                        break;
+                    }
+                    // CRITICAL: Flush the TLS buffer to actually send the data
+                    if writer_io.flush().await.is_err() {
+                        break;
+                    }
                 }
             }
             let _ = writer_io.shutdown().await;
-            this.peers.remove(&sa);
+            this_w.peers.remove(&sa);
         });
 
-        // ========================
-        // 2) TÂCHE LECTURE
-        // ========================
-        //
-        // Cette tâche lit ligne par ligne, parse un `NetMsg`, vérifie le handshake,
-        // applique l’anti-abuse, et exécute la logique P2P / DAG pour chaque message.
         let mut handshaked = false;
         let handshake_deadline = Instant::now() + Duration::from_millis(HANDSHAKE_TIMEOUT_MS);
+        let mut reader = tokio::io::BufReader::new(reader_io);
 
         let this = Arc::clone(self);
         tokio::spawn(async move {
             let mut line = String::new();
 
-            // Boucle principale de lecture JSONL.
             while reader
                 .read_line(&mut line)
                 .await
@@ -447,24 +563,18 @@ impl Server {
                 .filter(|&n| n > 0)
                 .is_some()
             {
-                // 1) Timeout handshake:
-                //    Si on n’a pas encore handshaké et que le délai est dépassé, on coupe.
                 if !handshaked && Instant::now() > handshake_deadline {
-                    eprintln!("[SRV] {sa} handshake timeout");
                     this.peers.remove(&sa);
                     break;
                 }
 
-                // 2) Taille max de la ligne (borne dure anti-abuse).
                 if line.len() > MAX_LINE_BYTES {
                     this.peers.remove(&sa);
-                    break; // entrée trop longue -> kick
+                    break;
                 }
 
-                // 3) Parse JSON en `NetMsg`.
                 let parsed = serde_json::from_str::<NetMsg>(&line);
                 if parsed.is_err() {
-                    // Incrémente un compteur d’erreurs de parsing pour ce peer.
                     if let Some(mut pe) = this.peers.get_mut(&sa) {
                         pe.parse_errors = pe.parse_errors.saturating_add(1);
                         if pe.parse_errors > MAX_PARSE_ERRORS {
@@ -476,17 +586,9 @@ impl Server {
                 }
                 let msg = parsed.unwrap();
 
-                // ==================================
-                // 3.bis) GESTION HANDSHAKE
-                // ==================================
-                //
-                // Tant que `handshaked == false`, on n’accepte que:
-                //   - NetMsg::Hello
-                //   - NetMsg::HelloAck
-                // Tout autre message avant handshake est considéré comme suspect → on coupe.
                 if !handshaked {
                     match msg {
-                        NetMsg::Hello { proto, .. } => {
+                        NetMsg::Hello { proto, node_id, .. } => {
                             if proto != 1 {
                                 let _ = this
                                     .unicast(
@@ -494,6 +596,19 @@ impl Server {
                                         NetMsg::HelloAck {
                                             ok: false,
                                             reason: Some("bad proto".into()),
+                                        },
+                                    )
+                                    .await;
+                                this.peers.remove(&sa);
+                                break;
+                            }
+                            if node_id == this.node_id {
+                                let _ = this
+                                    .unicast(
+                                        &sa,
+                                        NetMsg::HelloAck {
+                                            ok: false,
+                                            reason: Some("loopback".into()),
                                         },
                                     )
                                     .await;
@@ -510,6 +625,7 @@ impl Server {
                                 )
                                 .await;
                             handshaked = true;
+                            let _ = this.unicast(&sa, NetMsg::GetTips { limit: 64 }).await;
                             line.clear();
                             continue;
                         }
@@ -518,43 +634,33 @@ impl Server {
                                 this.peers.remove(&sa);
                                 break;
                             }
-                            handshaked = true; // on considère que nous avons déjà envoyé Hello côté dialer
+                            handshaked = true;
+                            let _ = this.unicast(&sa, NetMsg::GetTips { limit: 64 }).await;
                             line.clear();
                             continue;
                         }
                         _ => {
-                            eprintln!("[SRV] {sa} msg avant handshake");
                             this.peers.remove(&sa);
                             break;
                         }
                     }
                 }
 
-                // ==================================
-                // 4) TRAITEMENT DES MESSAGES P2P
-                // ==================================
                 match msg {
-                    // --------- PING / PONG ----------
                     NetMsg::Ping => {
-                        // On ne limite pas la réception de Ping, mais on limite les Pongs émis.
                         let mut allow = false;
                         if let Some(mut pe) = this.peers.get_mut(&sa) {
-                            allow = pe.bucket.take(1); // token bucket: autorise X PONG/s
+                            allow = pe.bucket.take(1);
                         }
                         if allow {
                             let _ = this.unicast(&sa, NetMsg::Pong).await;
-                        } else {
-                            // drop silencieux: le test s'attend à moins de Pongs que de Pings.
                         }
                     }
                     NetMsg::Pong => {
-                        // Un Pong reçu débloque éventuellement un waiter (ping synchrone / healthcheck).
                         if let Some((_, waiter)) = this.pong_waiters.remove(&sa) {
                             let _ = waiter.send(());
                         }
                     }
-
-                    // --------- BLOC SIMPLE (chemin P2P direct) ----------
                     NetMsg::Block {
                         id,
                         parents,
@@ -564,20 +670,8 @@ impl Server {
                         protocol_version,
                         signer_pk_hex,
                         signature_hex,
+                        metadata,
                     } => {
-                        // 1) Anti-rejeu réseau (cache LRU): si on a déjà vu récemment cet id, on ignore.
-                        if this.seen_block_recently_and_mark(&id).await {
-                            line.clear();
-                            continue;
-                        }
-                        // 2) Si on a déjà ce bloc en store/DAG, inutile d’aller plus loin.
-                        if this.adapter.have_block(&id).await {
-                            line.clear();
-                            continue;
-                        }
-
-                        // 3) On reconstruit un `WireBlock` complet, avec les mêmes champs
-                        //    que ceux transportés dans NetMsg::Block (incluant réseau + signature).
                         let wb = WireBlock {
                             id,
                             parents,
@@ -587,255 +681,103 @@ impl Server {
                             protocol_version,
                             signer_pk_hex,
                             signature_hex,
+                            metadata,
                         };
-
-                        // 4) Persist via l’adapter:
-                        //    - vérifie `network_id` / `protocol_version` (doivent matcher local)
-                        //    - vérifie la signature (verify_block_signature)
-                        //    - applique des checks light structurels
-                        //    - persiste en Rocks + met à jour DAG RAM + finalité
-                        match this.adapter.persist_block(&wb).await {
-                            Ok(PutResult::Inserted) => {
-                                crate::metrics::BLOCKS_PERSISTED.inc();
-                                this.mark_block_seen(&wb.id).await; // évite l’écho
-                                // Re-gossip sous forme de `Inv` pour propagation légère aux autres peers.
-                                let _ = this
-                                    .broadcast_except(
-                                        &sa,
-                                        &NetMsg::Inv {
-                                            ids: vec![wb.id.clone()],
-                                        },
-                                    )
-                                    .await;
-                                crate::metrics::BLOCKS_BROADCAST.inc();
-                            }
-                            Ok(PutResult::AlreadyExists) => { /* déjà présent, rien à faire */ }
-                            Ok(PutResult::Rejected(reason)) => {
-                                eprintln!("[SRV] {sa} persist REJECT id={} reason={}", wb.id, reason);
-                                crate::metrics::BLOCKS_REJECTED.inc();
-                            }
-                            Err(e) => {
-                                eprintln!("[SRV] persist ERR id={} err={e}", wb.id);
-                            }
-                        }
+                        this.process_incoming_blocks(vec![wb], sa).await;
                     }
-
-                    // --------- HELLO / HELLOACK post-handshake (gestion GetTips côté dialer/accept) ----------
-                    NetMsg::Hello { proto, .. } => {
-                        eprintln!("[SRV] {sa} -> GetTips");
-                        if !handshaked {
-                            if proto != 1 {
-                                let _ = this
-                                    .unicast(
-                                        &sa,
-                                        NetMsg::HelloAck {
-                                            ok: false,
-                                            reason: Some("bad proto".into()),
-                                        },
-                                    )
-                                    .await;
-                                this.peers.remove(&sa);
-                                break;
-                            }
-                            let _ = this
-                                .unicast(
-                                    &sa,
-                                    NetMsg::HelloAck {
-                                        ok: true,
-                                        reason: None,
-                                    },
-                                )
-                                .await;
-                            handshaked = true;
-
-                            // Dès que le handshake est OK, on demande les tips pour se resynchroniser.
-                            let _ = this.unicast(&sa, NetMsg::GetTips { limit: 64 }).await;
-                            line.clear();
-                            continue;
-                        }
-                        // Si on est déjà handshaked, on ignore un Hello tardif.
-                    }
-                    NetMsg::HelloAck { ok, .. } => {
-                        eprintln!("[SRV] {sa} <- HelloAck(ok={ok})");
-                        eprintln!("[SRV] {sa} -> GetTips");
-                        if !handshaked {
-                            if !ok {
-                                this.peers.remove(&sa);
-                                break;
-                            }
-                            handshaked = true;
-
-                            // Côté dialer aussi, on déclenche un GetTips après ack.
-                            let _ = this.unicast(&sa, NetMsg::GetTips { limit: 64 }).await;
-                            line.clear();
-                            continue;
-                        }
-                        // Ack tardif: ignoré
-                    }
-
-                    // --------- SYNC / RATTRAPAGE ----------
-                    // 1) Le pair nous demande nos tips
-                    NetMsg::GetTips { limit } => {
-                        eprintln!("[SRV] {sa} <- GetTips({limit})");
-                        // Idéalement: on prend les tips depuis le store (plus robuste).
-                        let ids = this
-                            .adapter
-                            .top_tips(limit)
-                            .await
-                            .unwrap_or_else(|_| Vec::new());
-                        let _ = this.unicast(&sa, NetMsg::Tips { ids }).await;
-                    }
-
-                    // 2) Le pair nous envoie ses tips
-                    NetMsg::Tips { ids } => {
-                        eprintln!("[SRV] {sa} <- Tips(ids={})", ids.len());
-                        // Pour chaque tip, si on ne l’a pas, on envoie un GetBlock ciblé.
-                        for id in ids {
-                            if this.adapter.have_block(&id).await {
-                                continue;
-                            }
-                            if this.seen_block_recently_and_mark(&id).await {
-                                continue;
-                            }
-                            let mut inflight = this.inflight_fetch.lock().await;
-                            if inflight.len() >= MAX_INFLIGHT_GETBLOCK {
-                                break;
-                            }
-                            if inflight.insert(id.clone()) {
-                                eprintln!("[SRV] {sa} -> GetBlock({id})");
-                                let _ = this.unicast(&sa, NetMsg::GetBlock { id }).await;
-                            }
-                        }
-                    }
-
-                    // 3) Le pair nous annonce des ids (Inv = “j’ai ces blocs”)
                     NetMsg::Inv { ids } => {
+                        eprintln!("[SRV] {} <- Inv({} ids)", sa, ids.len());
+                        let mut to_fetch = Vec::with_capacity(ids.len());
                         for id in ids {
+                            // Check storage first (authoritative)
                             if this.adapter.have_block(&id).await {
                                 continue;
                             }
-                            if this.seen_block_recently_and_mark(&id).await {
-                                continue;
-                            }
+                            // Check gossip cache - DISABLED: was causing premature filtering
+                            // The inflight_fetch check below is sufficient to prevent spam
+                            // if this.seen_inv_recently_and_mark(&id).await {
+                            //     continue;
+                            // }
                             let mut inflight = this.inflight_fetch.lock().await;
-                            if inflight.len() >= MAX_INFLIGHT_GETBLOCK {
+                            if let Some(ts) = inflight.get(&id) {
+                                if ts.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS {
+                                    continue;
+                                }
+                            }
+                            if inflight.len() < MAX_INFLIGHT_GETBLOCK {
+                                inflight.insert(id.clone(), Instant::now());
+                                to_fetch.push(id.clone()); // Log clone
+                                eprintln!("[SRV] Requesting {} from {}", id, sa);
+                            } else {
                                 break;
                             }
-                            if inflight.insert(id.clone()) {
-                                let _ = this.unicast(&sa, NetMsg::GetBlock { id }).await;
+                        }
+                        if !to_fetch.is_empty() {
+                            if to_fetch.len() == 1 {
+                                let _ = this
+                                    .broadcast(&NetMsg::GetBlock {
+                                        id: to_fetch[0].clone(),
+                                    })
+                                    .await;
+                            } else {
+                                let _ = this.broadcast(&NetMsg::GetBlocks { ids: to_fetch }).await;
                             }
                         }
                     }
-
-                    // 4) Le pair nous demande un bloc précis
                     NetMsg::GetBlock { id } => {
-                        eprintln!("[SRV] {sa} <- GetBlock({id})");
-                        // On expose `adapter.get_block` qui renvoie un `WireBlock` complet s’il existe.
-                        match this.adapter.get_block(&id).await {
-                            Ok(Some(wb)) => {
-                                eprintln!("[SRV] {sa} -> Blocks(1) id={}", wb.id);
-                                // On répond toujours aux requêtes directes, sans regarder le cache anti-rejeu.
-                                let _ =
-                                    this.unicast(&sa, NetMsg::Blocks { blocks: vec![wb] }).await;
-                            }
-                            Ok(None) => {
-                                eprintln!("[SRV] {sa} get_block miss {id}");
-                                let mut inflight = this.inflight_fetch.lock().await;
-                                inflight.remove(&id);
-                            }
-                            Err(e) => {
-                                eprintln!("[SRV] get_block({id}) error: {e}");
-                                let mut inflight = this.inflight_fetch.lock().await;
-                                inflight.remove(&id);
+                        if let Ok(Some(wb)) = this.adapter.get_block(&id).await {
+                            let _ = this.unicast(&sa, NetMsg::Blocks { blocks: vec![wb] }).await;
+                        }
+                    }
+                    NetMsg::GetBlocks { ids } => {
+                        eprintln!("[SRV] {sa} -> GetBlocks({} ids)", ids.len());
+                        if let Ok(blocks) = this.adapter.get_blocks_by_ids(&ids).await {
+                            if !blocks.is_empty() {
+                                eprintln!("[SRV] Sending {} blocks to {}", blocks.len(), sa);
+                                let _ = this.unicast(&sa, NetMsg::Blocks { blocks }).await;
+                            } else {
+                                eprintln!("[SRV] GetBlocks returned empty for {} ids", ids.len());
                             }
                         }
                     }
-
-                    // 5) Le pair nous envoie un lot de blocs complets
                     NetMsg::Blocks { mut blocks } => {
-                        eprintln!("[SRV] {sa} <- Blocks(n={})", blocks.len());
-
-                        // Bouton panique: on tronque les batchs trop gros.
                         if blocks.len() > MAX_BLOCKS_BATCH {
                             blocks.truncate(MAX_BLOCKS_BATCH);
                         }
-
-                        for mut wb in blocks {
-                            // IMPORTANT:
-                            // - On force `network_id` et `protocol_version` à ceux du nœud local.
-                            //   Hypothèse: ce canal ne sert qu’au sync entre nœuds du même réseau.
-                            //   Si un nœud malveillant essaie de jouer avec ces champs, on ne lui fait pas confiance.
-                            wb.network_id = this.network_id.clone();
-                            wb.protocol_version = this.protocol_version as u16;
-
-                            // Était-il demandé explicitement ?
-                            let was_inflight = {
-                                let mut inflight = this.inflight_fetch.lock().await;
-                                inflight.remove(&wb.id)
-                            };
-
-                            // Si bloc non demandé et déjà vu récemment via `Inv`, on l’ignore.
-                            if !was_inflight && this.seen_block_recently_and_mark(&wb.id).await {
+                        this.process_incoming_blocks(blocks, sa).await;
+                    }
+                    NetMsg::GetTips { limit } => {
+                        let ids = this.adapter.top_tips(limit).await.unwrap_or_default();
+                        let _ = this.unicast(&sa, NetMsg::Tips { ids }).await;
+                    }
+                    NetMsg::Tips { ids } => {
+                        let mut to_fetch = Vec::new();
+                        for id in ids {
+                            if this.adapter.have_block(&id).await {
                                 continue;
                             }
-                            if this.adapter.have_block(&wb.id).await {
+                            if this.seen_inv_recently_and_mark(&id).await {
                                 continue;
                             }
-
-                            // Pipeline complet d’insert:
-                            match this.adapter.persist_block(&wb).await {
-                                Ok(PutResult::Inserted) => {
-                                    eprintln!("[SRV] {sa} persist OK id={}", wb.id);
-
-                                    // On informe les autres pairs via un `Inv` léger.
-                                    let _ = this
-                                        .broadcast_except(
-                                            &sa,
-                                            &NetMsg::Inv {
-                                                ids: vec![wb.id.clone()],
-                                            },
-                                        )
-                                        .await;
-
-                                    // On demande les parents manquants (GetBlock) pour rattraper le DAG.
-                                    for p in &wb.parents {
-                                        if this.adapter.have_block(p).await {
-                                            continue;
-                                        }
-                                        let mut inflight = this.inflight_fetch.lock().await;
-                                        if inflight.len() >= MAX_INFLIGHT_GETBLOCK {
-                                            break;
-                                        }
-                                        if inflight.insert(p.clone()) {
-                                            eprintln!("[SRV] {sa} -> GetBlock(parent={})", p);
-                                            let _ = this
-                                                .unicast(&sa, NetMsg::GetBlock { id: p.clone() })
-                                                .await;
-                                        }
-                                    }
+                            let mut inflight = this.inflight_fetch.lock().await;
+                            if let Some(ts) = inflight.get(&id) {
+                                if ts.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS {
+                                    continue;
                                 }
-                                Ok(PutResult::AlreadyExists) => {
-                                    eprintln!("[SRV] {sa} persist SKIP (dup) id={}", wb.id)
-                                }
-                                Ok(PutResult::Rejected(reason)) => {
-                                    eprintln!("[SRV] {sa} persist REJECT id={} reason={}", wb.id, reason);
-                                    crate::metrics::BLOCKS_REJECTED.inc();
-                                    // Ici, tu pourrais décider de couper la connexion si trop de blocs invalides.
-                                }
-                                Err(e) => {
-                                    eprintln!("[SRV] persist ERR id={} err={e}", wb.id);
-                                }
+                            }
+                            if inflight.len() < MAX_INFLIGHT_GETBLOCK {
+                                inflight.insert(id.clone(), Instant::now());
+                                to_fetch.push(id);
                             }
                         }
+                        if !to_fetch.is_empty() {
+                            let _ = this.unicast(&sa, NetMsg::GetBlocks { ids: to_fetch }).await;
+                        }
                     }
+                    NetMsg::Hello { .. } | NetMsg::HelloAck { .. } => {}
                 }
-
-                // On réinitialise le buffer pour la prochaine ligne JSONL.
                 line.clear();
             }
-
-            // Nettoyage best effort à la fin de la boucle (déconnexion, EOF, etc.).
-            // `peers.remove` est déjà fait côté writer, donc on ne double-pas ici.
             this.pong_waiters.remove(&sa);
         });
 
@@ -859,26 +801,52 @@ impl Server {
     /// - En cas d’erreur (pair lent/parti), on ignore.
     pub async fn broadcast(&self, msg: &NetMsg) -> anyhow::Result<()> {
         if let NetMsg::Block { id, .. } = msg {
-            self.mark_block_seen(id).await;
+            self.mark_inv_seen(id).await;
         }
+
+        // Send only to INBOUND peers - those are the connections where remotes are reading
+        // Outbound connections are where WE read from, sending there would go nowhere
         for pe in self.peers.iter() {
-            let _ = pe.tx.send(msg.clone()).await;
+            if pe.is_inbound {
+                let _ = pe.tx.send(msg.clone()).await;
+            }
         }
+
         Ok(())
     }
 
-    /// Variante : broadcast sauf `skip`.
+    /// Variante : broadcast sauf `skip`, only to inbound peers.
     pub async fn broadcast_except(&self, skip: &SocketAddr, msg: &NetMsg) -> anyhow::Result<()> {
         if let NetMsg::Block { id, .. } = msg {
-            self.mark_block_seen(id).await;
+            self.mark_inv_seen(id).await;
         }
         for pe in self.peers.iter() {
-            if pe.key() == skip {
+            if pe.key() == skip || !pe.is_inbound {
                 continue;
             }
             let _ = pe.tx.send(msg.clone()).await;
         }
         Ok(())
+    }
+
+    /// Déclenche une synchronisation globale (demande les tips à tous les pairs).
+    /// Utile pour rattraper d'éventuels blocs orphelins ou lors de la convergence.
+    pub async fn trigger_sync(&self) {
+        // 1) Cleanup inflight requests (TTL)
+        self.cleanup_inflight().await;
+
+        // 2) Trigger GetTips
+        let _ = self.broadcast(&NetMsg::GetTips { limit: 64 }).await;
+    }
+
+    /// Nettoie les requêtes inflight expirées.
+    /// Cela permet de relancer des demandes si un pair n'a pas répondu.
+    async fn cleanup_inflight(&self) {
+        let mut inflight = self.inflight_fetch.lock().await;
+        // Keep only requests younger than INFLIGHT_TTL_MS
+        inflight.retain(|_, start_time| {
+            start_time.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS
+        });
     }
 
     /// Connexion sortante : diale un serveur distant et le traite comme un pair entrant.
@@ -918,13 +886,242 @@ impl Server {
         Ok(())
     }
 
-    async fn seen_block_recently_and_mark(&self, id: &str) -> bool {
+    pub async fn connect_tls(
+        self: &Arc<Self>,
+        addr: &str,
+        client_config: Arc<rustls::ClientConfig>,
+    ) -> anyhow::Result<()> {
+        use tokio_rustls::TlsConnector;
+
+        // 1. TCP Connect
+        let stream = TcpStream::connect(addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("TCP connect failed to {}: {}", addr, e))?;
+
+        let sa = stream.peer_addr()?;
+
+        // 2. TLS Handshake
+        let connector = TlsConnector::from(client_config);
+
+        let host_str = addr.split(':').next().unwrap_or(addr);
+        let domain = rustls::pki_types::ServerName::try_from(host_str)
+            .map_err(|_| anyhow::anyhow!("Invalid DNS name: {}", host_str))?
+            .to_owned();
+
+        let tls_stream = connector
+            .connect(domain, stream)
+            .await
+            .map_err(|e| anyhow::anyhow!("TLS handshake failed to {}: {}", addr, e))?;
+
+        // 3. Handle Peer (outbound connection - we initiated it)
+        let (r, w) = tokio::io::split(tls_stream);
+        self.handle_new_peer_from_io(r, w, sa, false).await?; // inbound = false
+
+        // 4. Hello / Ping (Duplicate logic from dial - maybe refactor later)
+        let (tx, rx) = oneshot::channel::<()>();
+        self.pong_waiters.insert(sa, tx);
+
+        let _ = self
+            .unicast(
+                &sa,
+                NetMsg::Hello {
+                    proto: 1,
+                    node_id: self.node_id.clone(),
+                    nonce: random::<u64>(),
+                    ping_ms: PING_EVERY_MS,
+                },
+            )
+            .await;
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), rx).await;
+        let _ = self.unicast(&sa, NetMsg::GetTips { limit: 64 }).await;
+
+        Ok(())
+    }
+
+    /// Traite un lot de blocks (ou un seul) avec gestion récursive des orphelins.
+    pub async fn process_incoming_blocks(
+        &self,
+        blocks: impl Into<std::collections::VecDeque<WireBlock>>,
+        sa: SocketAddr,
+    ) {
+        let mut process_queue = blocks.into();
+
+        while let Some(mut wb) = process_queue.pop_front() {
+            wb.network_id = self.network_id.clone();
+            wb.protocol_version = self.protocol_version as u16;
+
+            let was_inflight = {
+                let mut inflight = self.inflight_fetch.lock().await;
+                inflight.remove(&wb.id).is_some()
+            };
+
+            /*
+            if !was_inflight && self.seen_inv_recently_and_mark(&wb.id).await {
+                continue; // déjà vu en gossip récemment et pas demandé explicitement
+            }
+            */
+            if self.adapter.have_block(&wb.id).await {
+                continue;
+            }
+
+            // OPTIMIZATION: Check parents existence BEFORE persist logic
+            // This detects ALL missing parents at once, avoiding round-trips for each one.
+            let mut missing_to_fetch = Vec::new();
+            let mut missing_any = false;
+
+            for p in &wb.parents {
+                if !self.adapter.have_block(p).await {
+                    missing_any = true;
+                    // If not in orphans, we need to fetch it.
+                    // If it IS in orphans, we are already waiting for its parents, so just depend on it.
+                    if !self.orphans.contains_key(p) {
+                        missing_to_fetch.push(p.clone());
+                    }
+
+                    // Register dependency: when 'p' arrives, re-process 'wb'
+                    self.parent_dependency
+                        .entry(p.clone())
+                        .or_default()
+                        .push(wb.id.clone());
+                }
+            }
+
+            if missing_any {
+                // ====== BENCHMARK: Log orphelin ======
+                tracing::info!(
+                    target = "pms_bench",
+                    event = "block_orphaned",
+                    block_id = %wb.id,
+                    missing_parents = missing_to_fetch.len(),
+                    "Block orphaned waiting for parents"
+                );
+                // =====================================
+                // eprintln!("[SRV] {sa} Orphan {} missing {} parents (fetching {})", wb.id, wb.parents.len(), missing_to_fetch.len());
+                self.orphans.insert(wb.id.clone(), wb.clone());
+
+                for pid in missing_to_fetch {
+                    let mut inflight = self.inflight_fetch.lock().await;
+                    if inflight.len() < crate::limits::MAX_INFLIGHT_GETBLOCK
+                        || inflight.contains_key(&pid)
+                    {
+                        inflight.insert(pid.clone(), Instant::now());
+                        drop(inflight);
+                        let _ = self.unicast(&sa, NetMsg::GetBlock { id: pid }).await;
+                    }
+                }
+                continue;
+            }
+
+            // ====== BENCHMARK: Timer persist ======
+            let persist_start = tokio::time::Instant::now();
+            // =======================================
+
+            match self.adapter.persist_block(&wb).await {
+                Ok(PutResult::Inserted) => {
+                    // ====== BENCHMARK: Log bloc validé ======
+                    let persist_ms = persist_start.elapsed().as_millis();
+                    tracing::info!(
+                        target = "pms_bench",
+                        event = "block_validated",
+                        block_id = %wb.id,
+                        persist_ms = persist_ms,
+                        "Block persisted"
+                    );
+                    // =========================================
+                    // eprintln!("[SRV] {sa} persist OK id={}", wb.id);
+                    let _ = self
+                        .broadcast_except(
+                            &sa,
+                            &NetMsg::Inv {
+                                ids: vec![wb.id.clone()],
+                            },
+                        )
+                        .await;
+
+                    // Unblock orphans
+                    if let Some((_, children)) = self.parent_dependency.remove(&wb.id) {
+                        for child_id in children {
+                            if let Some((_, child_wb)) = self.orphans.remove(&child_id) {
+                                // eprintln!("[SRV] Unblocking orphan {}", child_id);
+                                process_queue.push_back(child_wb);
+                            }
+                        }
+                    }
+                }
+                Ok(PutResult::AlreadyExists) => {
+                    // Check orphans just in case
+                    if let Some((_, children)) = self.parent_dependency.remove(&wb.id) {
+                        for child_id in children {
+                            if let Some((_, child_wb)) = self.orphans.remove(&child_id) {
+                                process_queue.push_back(child_wb);
+                            }
+                        }
+                    }
+                }
+                Ok(PutResult::Rejected(reason)) => {
+                    // ====== BENCHMARK: Log rejet ======
+                    tracing::info!(
+                        target = "pms_bench",
+                        event = "block_rejected",
+                        block_id = %wb.id,
+                        reason = %reason,
+                        "Block rejected"
+                    );
+                    // ==================================
+                    eprintln!("[SRV] {sa} persist REJECT id={} reason={}", wb.id, reason);
+
+                    if reason.contains("parent") && reason.contains("missing") {
+                        let parts: Vec<&str> = reason.split_whitespace().collect();
+                        if let Some(idx) = parts.iter().position(|&r| r == "parent") {
+                            if let Some(pid) = parts.get(idx + 1) {
+                                let pid_clean = pid.trim().to_string();
+                                if pid_clean.len() == 64 {
+                                    eprintln!(
+                                        "[SRV] {sa} -> GetBlock(missing parent={})",
+                                        pid_clean
+                                    );
+
+                                    // Save orphan & dep
+                                    self.orphans.insert(wb.id.clone(), wb.clone());
+                                    self.parent_dependency
+                                        .entry(pid_clean.clone())
+                                        .or_default()
+                                        .push(wb.id.clone());
+
+                                    // Request parent
+                                    let mut inflight = self.inflight_fetch.lock().await;
+                                    if inflight.len() < crate::limits::MAX_INFLIGHT_GETBLOCK
+                                        || inflight.contains_key(&pid_clean)
+                                    {
+                                        inflight.insert(pid_clean.clone(), Instant::now());
+                                        let _ = self
+                                            .broadcast(&NetMsg::GetBlock { id: pid_clean })
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        crate::metrics::BLOCKS_REJECTED.inc();
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[SRV] persist ERR id={} err={e}", wb.id);
+                }
+            }
+        }
+    }
+
+    /// Vérifie si on a déjà vu cet *Inv* récemment.
+    /// Renvoie true si déjà vu (donc à ignorer), false sinon (et le marque vu).
+    async fn seen_inv_recently_and_mark(&self, id: &str) -> bool {
         let now = Instant::now();
-        let mut cache = self.seen_blocks.lock().await;
+        let mut cache = self.seen_invs.lock().await;
 
         if let Some(ts) = cache.get(id) {
             if now.duration_since(*ts) < SEEN_TTL {
-                return true; // déjà vu récemment
+                return true;
             }
         }
         cache.put(id.to_string(), now);
@@ -934,8 +1131,8 @@ impl Server {
         false
     }
 
-    async fn mark_block_seen(&self, id: &str) {
-        let mut cache = self.seen_blocks.lock().await;
+    async fn mark_inv_seen(&self, id: &str) {
+        let mut cache = self.seen_invs.lock().await;
         cache.put(id.to_string(), Instant::now());
         while cache.len() > SEEN_CAPACITY {
             cache.pop_lru();

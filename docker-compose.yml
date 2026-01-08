@@ -1,43 +1,96 @@
 services:
-  node:
+  node1:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
     image: pms-node:latest
+    container_name: node1
     user: "pms"
     environment:
-      # Configurations écrasables par env
-      RUST_LOG: info,pms_stats=info
+      RUST_LOG: debug,pms_server=debug,pms_wallet=debug
       PMS_CONFIG: /home/pms/config/config.prod.toml
-      # Relax limits for load testing
-      PMS__LIMITS__RATE_LIMIT_RPS: 1000
-      PMS__LIMITS__BURST: 2000
-      PMS_ADMIN_TOKEN_DEV: pms_admin_secret
+      PMS__P2P__KNOWN_PEERS: "p2ps://node2:8443,p2ps://node3:8443"
+      PMS_P2P__BIND_ADDR: "0.0.0.0:8443"
+      PMS_ADMIN_TOKEN: pms_admin_secret
+      PMS__LIMITS__RATE_LIMIT_RPS: 5000
+      PMS__LIMITS__BURST: 5000
     volumes:
-      # Montage de la config (read-only)
-      - ./etc/config/config.prod.toml:/home/pms/config/config.prod.toml:ro
-      # Montage des clés/secrets
-      - ./etc/pms/node-identity.key:/home/pms/config/node-identity.key:ro
+      - ./etc/config/config.docker-test.toml:/home/pms/config/config.prod.toml:ro
+      - ./etc/pms/node1.key:/home/pms/config/node-identity.key:ro
       - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
       - ./secrets/tls:/home/pms/tls:ro
-      # Persistance (volume docker)
-      # Persistance (volume host pour tests, permet contrôle perms)
-      - ./docker_data:/home/pms/data
+      # Storage distinct
+      - ./docker_data/node1:/home/pms/data
     healthcheck:
-      # Note: wget n'est pas installé dans debian-slim par défaut si on ne l'ajoute pas.
-      # Le Dockerfile a ajouté 'openssl', on peut vérifier le port TCP ou utiliser le binaire si on ajoute un flag healthcheck.
-      # Ici on suppose que le binaire a une commande simple, ou on garde wget si installé.
-      # Dans le Dockerfile j'ai mis "CMD /usr/local/bin/pms-node --version", ici on fait un vrai check HTTP si possible.
-      # Vu que 'curl'/'wget' ne sont pas dans bookworm-slim par défaut sauf install explicite (j'ai mis ca-certificates/openssl).
-      # On va utiliser /dev/tcp bashism ou simplement pinger le port.
       test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1" ]
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 5
     ports:
-      - "8050:8050" # P2P
-      - "127.0.0.1:8080:8080" # API (Localhost only par sécu)
+      - "8080:8080" # API Node 1
+    restart: unless-stopped
+
+  node2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: pms-node:latest
+    container_name: node2
+    user: "pms"
+    environment:
+      RUST_LOG: debug,pms_server=debug,pms_wallet=debug
+      PMS_CONFIG: /home/pms/config/config.prod.toml
+      PMS__P2P__KNOWN_PEERS: "p2ps://node1:8443,p2ps://node3:8443"
+      PMS_P2P__BIND_ADDR: "0.0.0.0:8443"
+      PMS_ADMIN_TOKEN: pms_admin_secret
+      PMS__LIMITS__RATE_LIMIT_RPS: 5000
+      PMS__LIMITS__BURST: 5000
+    volumes:
+      - ./etc/config/config.docker-test.toml:/home/pms/config/config.prod.toml:ro
+      - ./etc/pms/node2.key:/home/pms/config/node-identity.key:ro
+      - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
+      - ./secrets/tls:/home/pms/tls:ro
+      - ./docker_data/node2:/home/pms/data
+    healthcheck:
+      test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "8081:8080" # API Node 2
+    restart: unless-stopped
+
+  node3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: pms-node:latest
+    container_name: node3
+    user: "pms"
+    environment:
+      RUST_LOG: debug,pms_server=debug,pms_wallet=debug
+      PMS_CONFIG: /home/pms/config/config.prod.toml
+      PMS__P2P__KNOWN_PEERS: "p2ps://node1:8443,p2ps://node2:8443"
+      PMS_P2P__BIND_ADDR: "0.0.0.0:8443"
+      PMS_ADMIN_TOKEN: pms_admin_secret
+      PMS__LIMITS__RATE_LIMIT_RPS: 5000
+      PMS__LIMITS__BURST: 5000
+    volumes:
+      - ./etc/config/config.docker-test.toml:/home/pms/config/config.prod.toml:ro
+      - ./etc/pms/node3.key:/home/pms/config/node-identity.key:ro
+      - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
+      - ./secrets/tls:/home/pms/tls:ro
+      - ./docker_data/node3:/home/pms/data
+    healthcheck:
+      test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "8082:8080" # API Node 3
     restart: unless-stopped
 
   caddy:
@@ -51,7 +104,11 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      node:
+      node1:
+        condition: service_healthy
+      node2:
+        condition: service_healthy
+      node3:
         condition: service_healthy
 
 volumes:

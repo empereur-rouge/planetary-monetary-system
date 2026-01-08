@@ -1,0 +1,20 @@
+[package]
+name = "pms-event"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Async broadcast channel pour le pub/sub
+tokio = { version = "1", features = ["sync"] }
+# Sérialisation pour les events (utile pour webhooks/logs)
+serde = { version = "1", features = ["derive"] }
+# Logging structuré
+tracing = "0.1"
+# Types NFT (réutilisés dans les events)
+pms-types-nft = { path = "../pms-types-nft" }
+
+[dev-dependencies]
+# Pour les tests async
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
+# Pour les tests de sérialisation
+serde_json = "1"

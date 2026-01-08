@@ -1,11 +1,21 @@
 use anyhow::Result;
-use tokio::time::{sleep, Duration};
 use pms_core::MAX_TIPS_CAP;
 use pms_storage::{DagStorage, StoredBlock};
 use pms_testkit::{test_rocks_store, test_rocks_store_with_limit};
+use tokio::time::{Duration, sleep};
 
 fn sb(id: &str) -> StoredBlock {
-    StoredBlock { id: id.into(), parents: vec![], payload_json: None, nonce: 0, network_id: "".to_string(), protocol_version: 0, signer_pk_hex: "".to_string(), signature_hex: "".to_string() }
+    StoredBlock {
+        id: id.into(),
+        parents: vec![],
+        payload_json: None,
+        nonce: 0,
+        network_id: "".to_string(),
+        protocol_version: 0,
+        signer_pk_hex: "".to_string(),
+        signature_hex: "".to_string(),
+        metadata: None,
+    }
 }
 
 #[tokio::test]

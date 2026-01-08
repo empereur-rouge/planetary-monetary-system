@@ -1,8 +1,8 @@
-use pms_wallet::{pick_index_from_balances};
+use anyhow::Result;
+use pms_wallet::pick_index_from_balances;
+use rand::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use rand::prelude::*;
-use anyhow::Result;
 
 #[test]
 fn weighted_selection_prefers_low_balance_real() -> Result<()> {

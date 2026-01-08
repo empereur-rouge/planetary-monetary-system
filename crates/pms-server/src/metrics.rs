@@ -29,6 +29,7 @@ pub static BLOCKS_PERSISTED: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!("pms_blocks_persisted_total", "Blocs validés et persistés").unwrap()
 });
 
+#[allow(dead_code)]
 pub static BLOCKS_BROADCAST: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "pms_blocks_broadcast_total",
@@ -44,6 +45,7 @@ pub static PMS_BLOCKS_TOTAL: Lazy<IntGauge> = Lazy::new(|| {
     )
     .unwrap()
 });
+#[allow(dead_code)]
 pub static PMS_TIPS_COUNT: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
         // Gauge car ça peut monter et descendre

@@ -1,10 +1,9 @@
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use hex;
-use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-use sha2::{Digest, Sha256};
+use k256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use pms_wallet::signing_wire::canonical_wireblock_message;
-use pms_wire::{WireBlock};
+use pms_wire::WireBlock;
 
 /// Vérifie la signature ECDSA secp256k1 d’un `WireBlock`.
 ///
@@ -60,8 +59,8 @@ pub fn verify_block_signature(wb: &WireBlock) -> Result<()> {
     //
     // signer_pk_hex est une string hexadécimale (ex: "02ab...").
     // On la convertit en tableau de bytes bruts pour la librairie k256.
-    let pk_bytes = hex::decode(&wb.signer_pk_hex)
-        .context("invalid signer_pk_hex (not valid hex)")?;
+    let pk_bytes =
+        hex::decode(&wb.signer_pk_hex).context("invalid signer_pk_hex (not valid hex)")?;
 
     // --- 2) Construire la clé publique secp256k1 ---------------------------
     //

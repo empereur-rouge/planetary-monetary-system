@@ -33,19 +33,35 @@ rustls = { workspace = true }
 tokio-util = "0.7.17"
 tokio-rustls = { workspace = true }
 rust_decimal = "1.38.0"
-tower-http = { version = "0.6.6", features = ["limit", "timeout", "trace"] }
+tower-http = { version = "0.6.6", features = [
+    "limit",
+    "timeout",
+    "trace",
+    "cors",
+] }
 tower_governor = "0.8.0"
 base64 = "0.22.1"
 hex = "0.4.3"
 k256 = "0.13.4"
 tower = { version = "0.5.2", features = ["limit"] }
 pms-types = { path = "../pms-types" }
+pms-token = { path = "../pms-token" }
+sha2 = "0.10.8"
 http = "1.3.1"
+ipnetwork = "0.20" # For CIDR parsing in IP allowlist
 
 
 [dev-dependencies]
 tempfile = "3.23.0"
 pms-utils = { path = "../pms-utils" }
 pms-testkit = { path = "../pms-testkit" }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 dotenvy = "0.15.7"
+async-trait = "0.1.86"
+futures = "0.3" # Pour join_all - exécution parallèle des workers
+chrono = "0.4.42"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+pms-types-nft = { path = "../pms-types-nft" }

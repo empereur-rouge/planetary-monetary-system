@@ -1,15 +1,15 @@
 use anyhow::Result;
-use tokio::{time::{sleep, Duration, Instant}};
-use tempfile::tempdir;
 use pms_config::load_config;
 use pms_core::Dag;
 use pms_storage::{DagStorage, PutResult};
-use pms_testkit::{ephemeral_addr, spawn_node_generic_rocks};
+use pms_testkit::{ephemeral_addr, spawn_node_generic_rocks_with_seed};
 use pms_types::PayloadEnvelope;
 use pms_utils::compute_block_id;
-use pms_wallet::{SignerBackend, Wallet};
 use pms_wallet::signing_wire::canonical_wireblock_message;
+use pms_wallet::{SignerBackend, Wallet};
 use pms_wire::WireMeta;
+use tempfile::tempdir;
+use tokio::time::{Duration, Instant, sleep};
 
 #[tokio::test]
 async fn bootstrap_tips_then_fetch_chain_rocks() -> Result<()> {
@@ -19,34 +19,40 @@ async fn bootstrap_tips_then_fetch_chain_rocks() -> Result<()> {
     let db_a = dir_a.path().join("rocks-A");
     let db_b = dir_b.path().join("rocks-B");
 
-    let api_a  = ephemeral_addr();
+    let api_a = ephemeral_addr();
     let bind_a = ephemeral_addr();
 
-    let api_b  = ephemeral_addr();
+    let api_b = ephemeral_addr();
     let bind_b = ephemeral_addr();
     let tip_limit = 256usize;
 
+    // Use unique seeds to avoid loopback detection
+    let seed_a = [1u8; 32];
+    let seed_b = [2u8; 32];
+
     println!("[TEST] spawn A @ {bind_a}");
-    let (a_store, _a_dag, a_adapter, _a_srv, _a_jh) =
-        spawn_node_generic_rocks(
-            db_a.to_string_lossy().as_ref(),
-            "pms:test:A",
-            bind_a.as_str(),
-            api_a.as_str(),
-            tip_limit,
-            None,
-        ).await?;
+    let (a_store, _a_dag, a_adapter, _a_srv, _a_jh) = spawn_node_generic_rocks_with_seed(
+        db_a.to_string_lossy().as_ref(),
+        "pms:test:A",
+        bind_a.as_str(),
+        api_a.as_str(),
+        tip_limit,
+        None,
+        Some(seed_a),
+    )
+    .await?;
 
     println!("[TEST] spawn B @ {bind_b}");
-    let (b_store, _b_dag, _b_adapter, b_srv, _b_jh) =
-        spawn_node_generic_rocks(
-            db_b.to_string_lossy().as_ref(),
-            "pms:test:B",
-            bind_b.as_str(),
-            api_b.as_str(),
-            tip_limit,
-            None,
-        ).await?;
+    let (b_store, _b_dag, _b_adapter, b_srv, _b_jh) = spawn_node_generic_rocks_with_seed(
+        db_b.to_string_lossy().as_ref(),
+        "pms:test:B",
+        bind_b.as_str(),
+        api_b.as_str(),
+        tip_limit,
+        None,
+        Some(seed_b),
+    )
+    .await?;
 
     // Petit délai: listeners prêts
     println!("[TEST] sleep 150ms (startup listeners)");
@@ -57,9 +63,9 @@ async fn bootstrap_tips_then_fetch_chain_rocks() -> Result<()> {
     println!("[TEST] A va miner {want} blocs…");
 
     let settings = load_config().expect("settings");
-    let meta     = WireMeta::from(&settings);
+    let meta = WireMeta::from(&settings);
 
-    let wallet   = Wallet::from_seed(&[1u8; 32], None).unwrap();
+    let wallet = Wallet::from_seed(&[1u8; 32], None).unwrap();
     let signer_pk = wallet.encoded_public_key();
 
     for i in 0..want {
@@ -76,9 +82,7 @@ async fn bootstrap_tips_then_fetch_chain_rocks() -> Result<()> {
 
         // 2.2) Pas de payload pour ce test
         let payload: Option<PayloadEnvelope> = None;
-        let payload_json = payload
-            .as_ref()
-            .and_then(|p| serde_json::to_string(p).ok());
+        let payload_json = payload.as_ref().and_then(|p| serde_json::to_string(p).ok());
 
         // 2.3) WireBlock unsigned (id vide pour l'instant)
         let mut wb = pms_wire::WireBlock {
@@ -90,6 +94,7 @@ async fn bootstrap_tips_then_fetch_chain_rocks() -> Result<()> {
             protocol_version: meta.protocol_version as u16,
             signer_pk_hex: signer_pk.clone(),
             signature_hex: String::new(),
+            metadata: None,
         };
 
         // 2.4) Calcul ID comme en prod (il fait partie du message signé)
@@ -144,7 +149,9 @@ async fn bootstrap_tips_then_fetch_chain_rocks() -> Result<()> {
     let mut tick = 0usize;
     loop {
         let got = b_store.all_block_ids().await?.len();
-        if got >= want + 1 /* +genesis */ {
+        if got >= want + 1
+        /* +genesis */
+        {
             println!("[TEST] B a rattrapé: got={got} (>= {})", want + 1);
             break;
         }

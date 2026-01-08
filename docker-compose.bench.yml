@@ -1,0 +1,38 @@
+# Docker Compose for Benchmark - Single Node
+# Usage: docker compose -f docker-compose.bench.yml up -d --build
+
+services:
+  node-bench:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: pms-node:bench
+    container_name: node-bench
+    user: "pms"
+    environment:
+      # Enable benchmark tracing
+      RUST_LOG: warn,pms_bench=info
+      PMS_CONFIG: /home/pms/config/config.prod.toml
+      # No P2P peers - single node benchmark
+      PMS__P2P__KNOWN_PEERS: ""
+      PMS_P2P__BIND_ADDR: "0.0.0.0:8443"
+      PMS_ADMIN_TOKEN: pms_admin_secret
+      # High limits for benchmark stress
+      PMS__LIMITS__RATE_LIMIT_RPS: 50000
+      PMS__LIMITS__BURST: 50000
+    volumes:
+      - ./etc/config/config.prod.toml:/home/pms/config/config.prod.toml:ro
+      - ./etc/pms/node1.key:/home/pms/config/node-identity.key:ro
+      - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
+      - ./secrets/tls:/home/pms/tls:ro
+      # Dedicated storage for benchmark (can be wiped)
+      - ./docker_data/bench:/home/pms/data
+    healthcheck:
+      test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1" ]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "8080:8080" # API HTTPS
+    restart: "no"

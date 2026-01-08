@@ -1,5 +1,5 @@
-use pms_ledger::{pick_fee_recipient_address, ROUND_ROBIN_IDX};
 use anyhow::Result;
+use pms_ledger::{ROUND_ROBIN_IDX, pick_fee_recipient_address};
 
 #[test]
 fn fee_recipient_uniform_is_always_in_admin_list() -> anyhow::Result<()> {
@@ -30,6 +30,6 @@ fn fee_recipient_round_robin_cycles() -> anyhow::Result<()> {
         .map(|_| pick_fee_recipient_address(&s))
         .collect::<Result<_>>()?;
 
-    assert_eq!(picks, vec!["A","B","C","A","B","C","A"]);
+    assert_eq!(picks, vec!["A", "B", "C", "A", "B", "C", "A"]);
     Ok(())
 }

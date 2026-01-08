@@ -1,8 +1,8 @@
 // tests/history_core.rs
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 use pms_server::api_fn::history::PageResp;
-use pms_types_payload::{EncryptedPayload, PayloadEnvelope, AAD};
+use pms_types_payload::{AAD, EncryptedPayload, PayloadEnvelope};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 // Adaptez ces use selon vos crates
 use pms_wire::WireBlock;
 
@@ -27,13 +27,19 @@ struct FakeStore {
 }
 
 impl FakeStore {
-    fn new() -> Self { Self { idx: vec![], by_id: HashMap::new() } }
+    fn new() -> Self {
+        Self {
+            idx: vec![],
+            by_id: HashMap::new(),
+        }
+    }
 
     fn push(&mut self, id: &str, ts: i64, wb: WireBlock) {
         self.idx.push((id.to_string(), ts));
         self.by_id.insert(id.to_string(), wb);
         // on garde l'ordre ts desc puis id desc pour imiter le vrai
-        self.idx.sort_by(|a,b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+        self.idx
+            .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
     }
 }
 
@@ -47,24 +53,32 @@ impl Store for FakeStore {
         let mut start = 0usize;
         if let (Some(ts), aid) = (after_ts, after_id.clone()) {
             // positionner “strictement après” (ts desc / id desc)
-            for (i,(id,its)) in self.idx.iter().enumerate() {
-                if *its < ts { break; }
-                if *its > ts { start = i+1; continue; }
+            for (i, (id, its)) in self.idx.iter().enumerate() {
+                if *its < ts {
+                    break;
+                }
+                if *its > ts {
+                    start = i + 1;
+                    continue;
+                }
                 // égalité ts : on coupe après l'id passé
                 if let Some(ref a) = aid {
-                    if id == a { start = i+1; break; }
+                    if id == a {
+                        start = i + 1;
+                        break;
+                    }
                 }
-                start = i+1;
+                start = i + 1;
             }
         } else if let Some(aid) = after_id {
-            if let Some(pos) = self.idx.iter().position(|(id,_)| *id == aid) {
+            if let Some(pos) = self.idx.iter().position(|(id, _)| *id == aid) {
                 start = pos + 1;
             }
         }
 
         let end = (start + limit).min(self.idx.len());
         let slice = &self.idx[start..end];
-        let ids = slice.iter().map(|(id,_)| id.clone()).collect::<Vec<_>>();
+        let ids = slice.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
 
         let next = slice.last().map(|(last_id, last_ts)| {
             let has_more = end < self.idx.len();
@@ -75,7 +89,9 @@ impl Store for FakeStore {
     }
 
     fn get_blocks_by_ids(&self, ids: &[String]) -> Vec<WireBlock> {
-        ids.iter().filter_map(|id| self.by_id.get(id).cloned()).collect()
+        ids.iter()
+            .filter_map(|id| self.by_id.get(id).cloned())
+            .collect()
     }
 }
 
@@ -90,17 +106,24 @@ fn get_encrypted_history_core<S: Store>(
     let mut blocks = store.get_blocks_by_ids(&ids);
 
     // ne garder que les Encrypted
-    blocks.retain(|wb| wb.payload_json.as_ref()
-        .and_then(|s| serde_json::from_str::<PayloadEnvelope>(s).ok())
-        .map(|env| matches!(env, PayloadEnvelope::Encrypted(_)))
-        .unwrap_or(false)
-    );
+    blocks.retain(|wb| {
+        wb.payload_json
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<PayloadEnvelope>(s).ok())
+            .map(|env| matches!(env, PayloadEnvelope::Encrypted(_)))
+            .unwrap_or(false)
+    });
 
-    let (next_after_ts, next_after_id, has_more) =
-        next_cursor.map(|(ts,id,more)| (Some(ts), Some(id), more))
-            .unwrap_or((None, None, false));
+    let (next_after_ts, next_after_id, has_more) = next_cursor
+        .map(|(ts, id, more)| (Some(ts), Some(id), more))
+        .unwrap_or((None, None, false));
 
-    PageResp { items: blocks, next_after_ts, next_after_id, has_more }
+    PageResp {
+        items: blocks,
+        next_after_ts,
+        next_after_id,
+        has_more,
+    }
 }
 
 // --------- Un test ultra simple ---------
@@ -122,6 +145,7 @@ fn history_core_filters_and_paginates() {
             protocol_version: 1,
             signer_pk_hex: String::new(),
             signature_hex: String::new(),
+            metadata: None,
         }
     }
 

@@ -1,7 +1,7 @@
 use aes_gcm::aead::OsRng;
-use x25519_dalek::{StaticSecret as XSecret, PublicKey as XPublic};
 use pms_types_payload::{EncryptedPayload, PlainPayload};
 use pms_types_transaction::TxOutput;
+use x25519_dalek::{PublicKey as XPublic, StaticSecret as XSecret};
 
 #[test]
 fn mvp_encrypt_decrypt_confidential_type_only() {
@@ -32,6 +32,8 @@ fn mvp_encrypt_decrypt_confidential_type_only() {
         PlainPayload::Mint { .. } => println!("Type = Mint"),
         PlainPayload::TxUtxo(_) => println!("Type = TxUtxo"),
         PlainPayload::Milestone { .. } => println!("Type = Milestone"),
+        PlainPayload::Nft(_) => println!("Type = Nft"),
+        PlainPayload::ConfigUpdate(_) => println!("Type = ConfigUpdate"),
     }
 
     // Vérif : bien du bon type

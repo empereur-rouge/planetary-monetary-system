@@ -1,14 +1,14 @@
 use anyhow::Result;
-use rand::{SeedableRng, Rng};
-use rand::rngs::StdRng;
-use rust_decimal::Decimal;
-use rust_decimal::prelude::*;
-use rust_decimal_macros::dec;
 use futures::future::join_all;
 use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 // ----- Importe tes fonctions réelles -----
-use pms_wallet::{Wallet, decode_address, pick_admin_recipient, pick_admin_address_weighted};
+use pms_wallet::{Wallet, decode_address, pick_admin_address_weighted, pick_admin_recipient};
 
 // ---------------- Test helpers (déterministes) ----------------
 
@@ -18,10 +18,13 @@ fn compute_weights(balances: &[Decimal], epsilon: Decimal) -> Vec<f64> {
     let n = Decimal::from(balances.len() as u64);
     let avg = if n.is_zero() { Decimal::ZERO } else { sum / n };
 
-    balances.iter().map(|b| {
-        let need = (avg - *b).max(Decimal::ZERO) + epsilon;
-        need.to_f64().unwrap_or(0.0).max(0.0)
-    }).collect()
+    balances
+        .iter()
+        .map(|b| {
+            let need = (avg - *b).max(Decimal::ZERO) + epsilon;
+            need.to_f64().unwrap_or(0.0).max(0.0)
+        })
+        .collect()
 }
 
 /// Tire au sort N fois de manière déterministe avec un RNG seedé.
@@ -44,7 +47,9 @@ async fn empty_list_errors() {
     let epsilon = Decimal::new(1, 3); // 0.001
     let fetch = |_a: &str| async { Ok(Decimal::ZERO) };
 
-    let err = pick_admin_address_weighted(&addrs, fetch, epsilon).await.unwrap_err();
+    let err = pick_admin_address_weighted(&addrs, fetch, epsilon)
+        .await
+        .unwrap_err();
     assert!(format!("{err:#}").contains("admin.wallet_addresses est vide"));
 }
 
@@ -75,8 +80,16 @@ async fn underfunded_gets_higher_prob() -> Result<()> {
     let ws = compute_weights(&balances, epsilon);
     let counts = sample_counts(&ws, 20_000, 7);
 
-    assert!(counts[0] > counts[1] && counts[0] > counts[2], "expected A most selected, got {:?}", counts);
-    assert!(counts[1] > 0 && counts[2] > 0, "epsilon too small? counts={:?}", counts);
+    assert!(
+        counts[0] > counts[1] && counts[0] > counts[2],
+        "expected A most selected, got {:?}",
+        counts
+    );
+    assert!(
+        counts[1] > 0 && counts[2] > 0,
+        "epsilon too small? counts={:?}",
+        counts
+    );
     Ok(())
 }
 
@@ -121,18 +134,23 @@ async fn pick_admin_address_weighted_matches_manual_sampling() -> Result<()> {
                 };
                 async move { Ok(b) }
             },
-            epsilon
-        ).await?;
+            epsilon,
+        )
+        .await?;
         match addr.as_str() {
-            "A" => counts[0]+=1,
-            "B" => counts[1]+=1,
-            "C" => counts[2]+=1,
+            "A" => counts[0] += 1,
+            "B" => counts[1] += 1,
+            "C" => counts[2] += 1,
             _ => {}
         }
     }
 
     // La tendance doit respecter ws: A > B ≈ C (car B/C n’ont que epsilon)
-    assert!(counts[0] > counts[1] && counts[0] > counts[2], "counts={:?}", counts);
+    assert!(
+        counts[0] > counts[1] && counts[0] > counts[2],
+        "counts={:?}",
+        counts
+    );
     Ok(())
 }
 
@@ -156,6 +174,11 @@ async fn pick_admin_recipient_returns_xpk_and_matches_wallet_encoding() -> Resul
     // Stub: soldes = 0 -> sélection approx uniforme, mais on teste seulement que ça renvoie une XPK valide
     let xpk = pick_admin_recipient(&admin_addrs).await?;
     assert!(!xpk.is_empty());
-    assert_eq!(xpk.len(), 64, "X25519 hex length should be 64, got {}", xpk.len());
+    assert_eq!(
+        xpk.len(),
+        64,
+        "X25519 hex length should be 64, got {}",
+        xpk.len()
+    );
     Ok(())
 }

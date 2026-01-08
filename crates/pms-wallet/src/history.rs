@@ -171,3 +171,60 @@ pub async fn history_page_for_address(
     }
     Ok(out)
 }
+
+/// Scans recent blocks for **Plain** payloads (Mint, TxUtxo) involving an address.
+/// This does NOT require decryption - it's for transparent/public transactions.
+pub async fn history_plain_for_address(
+    store: &RocksStore,
+    addr: &str,
+    limit: usize,
+) -> Result<Vec<HistoryEntry>> {
+    if limit == 0 {
+        return Ok(vec![]);
+    }
+
+    // Get recent block IDs
+    let (ids, _cursor) = store.recent_ids_by_time(None, None, limit * 3).await?;
+
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Retrieve blocks
+    let blocks = store.get_blocks_by_ids(&ids).await?;
+
+    // Get timestamps
+    let id_ts = store.ts_for_ids(&ids).await?;
+
+    // Filter blocks with Plain payloads involving the address
+    let mut out = Vec::new();
+    for b in blocks {
+        let ts = *id_ts.get(&b.id).unwrap_or(&0);
+
+        if let Some(env) = b
+            .payload_json
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<PayloadEnvelope>(s).ok())
+        {
+            match env {
+                PayloadEnvelope::Plain(plain) => {
+                    if involves_address(&plain, addr) {
+                        out.push(HistoryEntry {
+                            id: b.id.clone(),
+                            ts_ms: ts,
+                            plain,
+                        });
+                    }
+                }
+                _ => {} // Skip Encrypted payloads
+            }
+        }
+    }
+
+    // Sort by timestamp (newest first) and limit
+    out.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms).then_with(|| b.id.cmp(&a.id)));
+    if out.len() > limit {
+        out.truncate(limit);
+    }
+    Ok(out)
+}

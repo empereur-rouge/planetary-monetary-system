@@ -2,23 +2,23 @@ use crate::UtxoDelta;
 use crate::checkpoint_rocks::rotate_checkpoints;
 use crate::helpers::{be_to_i64, key_time_index};
 use crate::helpers::{be_to_ts, le_to_u64, now_ms_i64, parse_time_index_key, ts_to_be, u64_to_le};
-use crate::{DagStorage, LedgerMutation, PutResult, StoredBlock};
+use crate::{DagStorage, PutResult, StoredBlock};
 use anyhow::{Context, Result};
 use pms_wire::WireBlock;
 use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options};
 use serde::Serialize;
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, MissedTickBehavior, interval, sleep};
+use tokio::time::{Duration, MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 
 pub struct RocksStore {
     /// handle RocksDB partagé
     pub db: Arc<DB>,
-    /// nombre max de tips qu’on garde (même rôle que RedisStore.tip_limit)
+    /// nombre max de tips qu'on garde (même rôle que RedisStore.tip_limit)
     pub tip_limit: usize,
     /// namespace logique (équivalent prefix Redis)
     pub prefix: String,
@@ -68,6 +68,12 @@ impl RocksStore {
             "utxo",
             "utxo_spent",
             "tx_applied",
+            "nft_ownership",     // NFT ownership tracking: token_id -> owner_address
+            "runtime_config",    // Current runtime config (single key "current")
+            "config_history",    // History of config changes (block_id -> entry)
+            "node_block_counts", // Block count per node: node_pk -> count
+            "node_fee_pool",     // Fee pool: single key "pool" -> amount (u64)
+            "node_reward_addresses", // Reward addresses: node_pk -> address
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -240,10 +246,6 @@ impl RocksStore {
         }
 
         // 4. Construit un set des IDs qu'on garde.
-        let keep: HashSet<&str> = tips[..self.tip_limit]
-            .iter()
-            .map(|(id, _)| id.as_str())
-            .collect();
 
         // 5. Supprime les autres dans cf_tips.
         for (id, _) in tips.into_iter().skip(self.tip_limit) {
@@ -251,21 +253,6 @@ impl RocksStore {
         }
 
         Ok(())
-    }
-
-    fn child_edge_key(parent: &str, child: &str) -> Vec<u8> {
-        let mut k = Vec::with_capacity(parent.len() + 1 + child.len());
-        k.extend_from_slice(parent.as_bytes());
-        k.push(0);
-        k.extend_from_slice(child.as_bytes());
-        k
-    }
-    fn child_edge_prefix(parent: &str) -> Vec<u8> {
-        // tout ce qui commence par parent + 0x00
-        let mut k = Vec::with_capacity(parent.len() + 1);
-        k.extend_from_slice(parent.as_bytes());
-        k.push(0);
-        k
     }
 
     /// Récupère les timestamps (ms) pour une liste d'ids via la CF `id2ts`.
@@ -380,7 +367,7 @@ impl RocksStore {
     pub async fn open_read_only(
         path: &str,
         tip_limit: usize,
-        prefix: &str,
+        _prefix: &str,
     ) -> anyhow::Result<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(false);
@@ -391,7 +378,6 @@ impl RocksStore {
 
         Ok(Self {
             db: std::sync::Arc::new(db),
-            // ... tes autres champs
             tip_limit,
             prefix: "".to_string(),
         })
@@ -435,6 +421,7 @@ impl RocksStore {
             "utxo",
             "utxo_spent",
             "tx_applied",
+            "nft_ownership",
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -806,10 +793,11 @@ impl DagStorage for RocksStore {
                         parents: sb.parents,
                         payload_json: sb.payload_json,
                         nonce: sb.nonce,
-                        network_id: String::new(),
-                        protocol_version: 0,
-                        signer_pk_hex: String::new(),
-                        signature_hex: String::new(),
+                        network_id: sb.network_id,
+                        protocol_version: sb.protocol_version,
+                        signer_pk_hex: sb.signer_pk_hex,
+                        signature_hex: sb.signature_hex,
+                        metadata: sb.metadata,
                     });
                 }
             }
@@ -856,21 +844,9 @@ impl DagStorage for RocksStore {
             let cf_utxo_spent = self.cf("utxo_spent");
 
             // SPENDS
-            // 1) delete from utxo (unspent)
-            // 2) put into utxo_spent
             for (txid, idx) in &d.spend {
                 let key = make_utxo_key(txid, *idx);
-
-                // Note: on pourrait vérifier ici l'existence préalable pour détecter une double dépense
-                // au moment du commit, ou on fait confiance à la validation DAG en amont.
-                // Dans un design "optimiste", le DAG layer a déjà checké.
-                // Si on veut être strict RocksDB, on fait un Get().
-
-                // Suppression de l'unspent
                 batch.delete_cf(cf_utxo, &key);
-
-                // Marquage spent (on stocke le block_id qui dépense, ou timestamp, ou juste "")
-                // Ici on met juste un marqueur vide pour dire "c'est dépensé".
                 batch.put_cf(cf_utxo_spent, &key, b.id.as_bytes());
             }
 
@@ -890,7 +866,7 @@ impl DagStorage for RocksStore {
             }
         }
 
-        // 1.b) Indices DAG (ton code existant d’append_block_atomic)
+        // 1.b) Indices DAG
         self.apply_dag_indices(&mut batch, b)?;
 
         // 2) write atomique
@@ -916,22 +892,4 @@ fn iter_cf_all<'a>(
         let (k, v) = res?;
         Ok((k, v))
     })
-}
-
-fn iter_cf_prefix<'a>(
-    db: &'a rocksdb::DB,
-    cf: &'a rocksdb::ColumnFamily,
-    prefix: Vec<u8>,
-) -> impl Iterator<Item = anyhow::Result<(Box<[u8]>, Box<[u8]>)>> + 'a {
-    db.iterator_cf(cf, IteratorMode::From(&prefix, Direction::Forward))
-        .take_while(move |res| {
-            match res {
-                Ok((k, _)) => k.starts_with(&prefix),
-                Err(_) => true, // propagera après
-            }
-        })
-        .map(|res| {
-            let (k, v) = res?;
-            Ok((k, v))
-        })
 }

@@ -31,29 +31,23 @@ pub enum ValidationError {
     CycleDetected,
     #[error("genesis invalide: {0}")]
     InvalidGenesis(String),
-    #[error("signature invalide")]
-    InvalidSignature,
+    #[error("signature invalide: {0}")]
+    InvalidSignature(String),
     #[error("double dépense")]
     DoubleSpend,
     #[error("fonds insuffisants")]
     InsufficientFunds,
     #[error("invalid amount: {reason}")]
-    InvalidAmount {
-        reason: String,
-    },
-    #[error("Invalid difficulty: {id} (expected at least 1 leading zero bit, got {required_bits} bits instead)")]
+    InvalidAmount { reason: String },
+    #[error(
+        "Invalid difficulty: {id} (expected at least 1 leading zero bit, got {required_bits} bits instead)"
+    )]
     InvalidDifficulty { id: String, required_bits: u8 },
     // Mint
     #[error("unauthorized mint for block {id}, signer={signer_pk_hex}")]
-    UnauthorizedMint {
-        id: String,
-        signer_pk_hex: String,
-    },
+    UnauthorizedMint { id: String, signer_pk_hex: String },
     #[error("mint amount too high for block {id}, max allowed={max_allowed}")]
-    MintAmountTooHigh {
-        id: String,
-        max_allowed: String,
-    },
+    MintAmountTooHigh { id: String, max_allowed: String },
     // Fees
     #[error("Fee too high: {fee} > {max} (max_fee_per_tx in policy)")]
     FeeTooHigh { fee: String, max: String },

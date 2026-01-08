@@ -1,13 +1,15 @@
+use pms_network::messages::NetMsg;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp;
-use pms_network::messages::NetMsg;
 
 // Handshake client simple:
 // 1) lit Hello du serveur
 // 2) envoie Hello
 // 3) lit HelloAck(ok=true)
-pub async fn do_handshake(r: &mut BufReader<tcp::OwnedReadHalf>,
-                      w: &mut tcp::OwnedWriteHalf) -> anyhow::Result<()> {
+pub async fn do_handshake(
+    r: &mut BufReader<tcp::OwnedReadHalf>,
+    w: &mut tcp::OwnedWriteHalf,
+) -> anyhow::Result<()> {
     let mut line = String::new();
 
     // 1) read server Hello

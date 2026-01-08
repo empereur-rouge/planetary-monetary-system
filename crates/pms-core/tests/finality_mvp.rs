@@ -1,16 +1,16 @@
-use std::sync::Arc;
-use pms_core::{CoreAdapter, Dag};
-use pms_utils::compute_block_id;
+// crates/pms-core/tests/finality_mvp.rs
+
 use anyhow::Result;
-use tokio::sync::Mutex;
 use pms_config::load_config;
+use pms_core::{ConcurrentDag, CoreAdapter};
 use pms_interface::NetDagAdapter;
 use pms_storage::{DagStorage, PutResult, StoredBlock};
 use pms_testkit::{forge_signed_wire_block_for_test, test_rocks_store};
 use pms_types::{Block, PayloadEnvelope, PlainPayload};
+use pms_utils::compute_block_id;
 use pms_wallet::{SignerBackend, Wallet};
-use pms_wallet::signing_wire::canonical_wireblock_message;
-use pms_wire::{WireMeta};
+use pms_wire::WireMeta;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn milestone_sets_seed_and_finalizes_rocks() -> Result<()> {
@@ -34,19 +34,19 @@ async fn milestone_sets_seed_and_finalizes_rocks() -> Result<()> {
         protocol_version: meta.protocol_version as u16,
         signer_pk_hex: String::new(),
         signature_hex: String::new(),
+        metadata: None,
     };
     let _ = store.append_block_atomic(&sb).await?;
 
-    // 4) DAG RAM à partir du genesis
-    let dag = Arc::new(Mutex::new(Dag::new_with_genesis(genesis.clone())));
+    // 4) DAG RAM à partir du genesis, lock-free
+    let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
 
-    // 5) Adapter prod-like (c’est lui qui va gérer store + DAG)
+    // 5) Adapter prod-like (c'est lui qui va gérer store + DAG)
     let adapter_concrete = CoreAdapter::new(dag.clone(), store.clone());
     let adapter: Arc<dyn NetDagAdapter> = adapter_concrete.clone();
 
     // 6) Wallet de test pour signer le milestone
-    let wallet = Wallet::from_seed(&[9u8; 32], None)
-        .expect("wallet seed ok");
+    let wallet = Wallet::from_seed(&[9u8; 32], None).expect("wallet seed ok");
 
     // 7) Choisir les parents pour le milestone
     let mut parents = store.top_tips(2).await?;
@@ -57,37 +57,32 @@ async fn milestone_sets_seed_and_finalizes_rocks() -> Result<()> {
     parents.dedup();
 
     // 8) Construire le payload Milestone
-    let plain_ms = PlainPayload::Milestone { approved: vec![] };
+    let plain_ms = PlainPayload::Milestone {
+        approved: vec![],
+        distribute_node_rewards: false,
+    };
     let env = PayloadEnvelope::Plain(plain_ms);
 
-    // 9) Construire un WireBlock *sans* signature mais avec tous les champs stables
-    let wb = forge_signed_wire_block_for_test(
-        parents.clone(),
-        &meta,
-        &wallet,
-        0,
-        Option::from(env)
-    );
+    // 9) Construire un WireBlock signé
+    let wb =
+        forge_signed_wire_block_for_test(parents.clone(), &meta, &wallet, 0, Option::from(env));
 
-    // 13) Persistance via l’adapter (chemin réel: validation + finalité + RAM)
+    // 10) Persistance via l'adapter
     let res = adapter.persist_block(&wb).await?;
     assert!(
         matches!(res, PutResult::Inserted | PutResult::AlreadyExists),
         "milestone persist_block doit réussir, got={res:?}"
     );
 
-    // 14) Lire l’état de finalité depuis le DAG mis à jour par l’adapter
-    let d = dag.lock().await;
+    // 11) Lire l'état de finalité (synchronous RwLock)
+    {
+        let f = dag.finality.read().unwrap();
+        assert_eq!(f.last_milestone.as_deref(), Some(wb.id.as_str()));
+    }
 
-    // Le milestone doit être bien enregistré comme dernier milestone
-    assert_eq!(
-        d.finality.last_milestone.as_deref(),
-        Some(wb.id.as_str())
-    );
-
-    // Et il doit être considéré comme final
+    // 12) Vérifier que le bloc est final (synchronous method)
     assert!(
-        d.is_final(&wb.id),
+        dag.is_final(&wb.id),
         "le milestone doit être final dès insertion"
     );
 
@@ -96,73 +91,52 @@ async fn milestone_sets_seed_and_finalizes_rocks() -> Result<()> {
 
 #[tokio::test]
 async fn k_depth_finalizes_blocks_rocks() -> anyhow::Result<()> {
-    // 1) Store RocksDB temporaire (namespace de test isolé)
+    // 1) Store RocksDB temporaire
     let tr = test_rocks_store("kdepth").await?;
     let store = tr.store.clone();
 
-    // 2) Charger la config réelle (config.prod.toml ou autre) puis construire WireMeta
-    //    WireMeta contient :
-    //      - network_id (ex: "pms-dev", "pms-mainnet")
-    //      - protocol_version (u16)
+    // 2) Config + meta
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
 
-    // 3) Construire un bloc genesis en mémoire (structure Block)
+    // 3) Genesis
     let genesis = Block::genesis(compute_block_id);
 
-    // 4) Persister ce genesis dans Rocks en tant que StoredBlock complet
-    //    On lui met des métadonnées réseau cohérentes, mais pas de signature.
+    // 4) Persister genesis
     let sb = StoredBlock {
         id: genesis.id.clone(),
-        parents: genesis.parents.clone(),                    // [] pour un genesis
+        parents: genesis.parents.clone(),
         payload_json: serde_json::to_string(&genesis.payload).ok(),
         nonce: genesis.nonce,
-
-        network_id:       meta.network_id.clone(),
+        network_id: meta.network_id.clone(),
         protocol_version: meta.protocol_version as u16,
-        signer_pk_hex:    String::new(),                     // sans importance pour genesis
-        signature_hex:    String::new(),                     // idem
+        signer_pk_hex: String::new(),
+        signature_hex: String::new(),
+        metadata: None,
     };
     let _ = store.append_block_atomic(&sb).await?;
 
-    // 5) Construire un DAG en RAM basé sur ce genesis
-    //    Important : le DAG ne “voit” que ce qu’on lui donne ici.
-    let dag = Arc::new(Mutex::new(Dag::new_with_genesis(genesis.clone())));
-
-    // 6) Créer un adapter “prod-like” :
-    //    - il connaît le DAG (Arc<Mutex<Dag>>)
-    //    - il connaît le store Rocks
-    //    - persist_block() met à jour Rocks + DAG + finalité
+    // 5) DAG + adapter
+    let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
     let adapter_concrete = CoreAdapter::new(dag.clone(), store.clone());
     let adapter: Arc<dyn NetDagAdapter> = adapter_concrete.clone();
 
-    // 7) Wallet de test (identité qui “signera” les blocs)
-    let wallet = Wallet::from_seed(&[3u8; 32], None)
-        .expect("wallet seed ok");
+    // 6) Wallet de test
+    let wallet = Wallet::from_seed(&[3u8; 32], None).expect("wallet seed ok");
 
-    // 8) Paramètre de finalité: profondeur k = 2
-    //    => un bloc devient final quand il est enterré par au moins 2 descendants
+    // 7) Paramètre de finalité: profondeur k = 2 (synchronous RwLock)
     {
-        let mut d = dag.lock().await;
-        d.finality.depth_k = 2;
-        d.finality.last_milestone = Some(genesis.id.clone());
+        let mut f = dag.finality.write().unwrap();
+        f.depth_k = 2;
+        f.last_milestone = Some(genesis.id.clone());
         println!(
             "[DEBUG][k_depth] seed finalité = {:?}, depth_k={}",
-            d.finality.last_milestone, d.finality.depth_k
+            f.last_milestone, f.depth_k
         );
     }
 
-    // 9) Insérer 3 nouveaux blocs signés via le pipeline prod-like :
-    //    POUR CHAQUE BLOC :
-    //      - choisir des parents (tips du store)
-    //      - fabriquer un WireBlock signé cohérent (helper mk_signed_block_for_test)
-    //      - appeler adapter.persist_block(&wb):
-    //            → store.append_block_atomic
-    //            → mise à jour DAG RAM
-    //            → update_finality_after_insert()
+    // 8) Insérer 3 blocs
     for i in 0..3 {
-        // 9.a) Parents = tips actuelles (vue store)
-        //      Si pas de tips (au tout début), on retombe sur le genesis.
         let mut parents = store.top_tips(2).await?;
         if parents.is_empty() {
             parents.push(genesis.id.clone());
@@ -170,39 +144,38 @@ async fn k_depth_finalizes_blocks_rocks() -> anyhow::Result<()> {
         parents.sort();
         parents.dedup();
 
-        // 9.b) Construire un WireBlock signé pour ces parents
-        let wb = forge_signed_wire_block_for_test(
-            parents,
-            &meta,
-            &wallet,
-            i as u64,
-            Option::from(None)
-        );
-        // 9.c) Pipeline prod : persist_block (Rocks + DAG + finality)
+        let wb =
+            forge_signed_wire_block_for_test(parents, &meta, &wallet, i as u64, Option::from(None));
+
         let res = adapter.persist_block(&wb).await?;
         assert!(
             matches!(res, PutResult::Inserted | PutResult::AlreadyExists),
             "persist_block doit insérer ou idempoter, got={res:?}"
         );
 
-        // DEBUG : état du DAG après chaque insertion
+        // DEBUG (synchronous RwLock)
         {
-            let d = dag.lock().await;
+            let f = dag.finality.read().unwrap();
             println!(
                 "[DEBUG][k_depth] après insert #{i}: blocks={}, finals={:?}, last_ms={:?}, depth_k={}",
-                d.blocks.len(),
-                d.finality.finalized,        // HashSet<String> en général
-                d.finality.last_milestone,   // Option<String>
-                d.finality.depth_k,
+                dag.blocks.len(),
+                f.finalized,
+                f.last_milestone,
+                f.depth_k,
             );
         }
     }
 
-    // 10) Relire le DAG en RAM pour vérifier la finalité
-    let d = dag.lock().await;
+    // 9) Vérifier finalité (synchronous method)
+    let keys: Vec<String> = dag.blocks.iter().map(|entry| entry.key().clone()).collect();
+    let mut any_final = false;
+    for id in keys {
+        if dag.is_final(&id) {
+            any_final = true;
+            break;
+        }
+    }
 
-    // On s’attend à ce qu’au moins un bloc soit finalisé selon la profondeur k
-    let any_final = d.blocks.keys().any(|id| d.is_final(id));
     assert!(
         any_final,
         "au moins un bloc devrait être finalisé par profondeur k"

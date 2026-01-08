@@ -1,13 +1,13 @@
 use anyhow::Result;
-use tokio::{
-    io::{AsyncWriteExt, AsyncBufReadExt, BufReader},
-    net::TcpStream,
-    time::{sleep, Duration, Instant},
-};
 use tempfile::tempdir;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::TcpStream,
+    time::{Duration, Instant, sleep},
+};
 
 use pms_network::messages::NetMsg;
-use pms_server::limits::{RATE_MSGS_PER_SEC, RATE_BURST, MAX_LINE_BYTES};
+use pms_server::limits::{MAX_LINE_BYTES, RATE_BURST, RATE_MSGS_PER_SEC};
 use pms_testkit::{ephemeral_addr, spawn_node_generic_rocks};
 use pms_utils::do_handshake;
 
@@ -34,8 +34,15 @@ async fn rate_limit_and_size_rocks() -> Result<()> {
     let tip_limit = 256usize;
 
     // Démarre un nœud Rocks (P2P + API sur la même adresse pour le test)
-    let (_store, _dag, _adapter, _srv, _jh) =
-        spawn_node_generic_rocks(&db_path_str, "pms:test:rls", addr.as_str(), api_addr.as_str(), tip_limit, None).await?;
+    let (_store, _dag, _adapter, _srv, _jh) = spawn_node_generic_rocks(
+        &db_path_str,
+        "pms:test:rls",
+        addr.as_str(),
+        api_addr.as_str(),
+        tip_limit,
+        None,
+    )
+    .await?;
 
     // Attendre que le listener P2P soit prêt
     wait_for_listen(addr.as_str(), 1000).await?;
@@ -46,6 +53,10 @@ async fn rate_limit_and_size_rocks() -> Result<()> {
     let mut br1 = BufReader::new(r1);
 
     do_handshake(&mut br1, &mut w1).await?;
+
+    // Server sends GetTips after handshake, consume it
+    let mut gettips_line = String::new();
+    let _ = br1.read_line(&mut gettips_line).await;
 
     let to_send = (RATE_MSGS_PER_SEC as usize) + (RATE_BURST as usize) + 20;
     for _ in 0..to_send {
@@ -77,7 +88,10 @@ async fn rate_limit_and_size_rocks() -> Result<()> {
             _ = tokio::time::sleep_until(deadline) => break,
         }
     }
-    assert!(got_pong < to_send, "rate-limit inactif: got_pong={got_pong} to_send={to_send}");
+    assert!(
+        got_pong < to_send,
+        "rate-limit inactif: got_pong={got_pong} to_send={to_send}"
+    );
 
     // -------- Phase 2 : oversize (nouvelle connexion) --------
     let s2 = TcpStream::connect(addr).await?;
@@ -86,32 +100,40 @@ async fn rate_limit_and_size_rocks() -> Result<()> {
 
     do_handshake(&mut br2, &mut w2).await?;
 
+    // Server sends GetTips after handshake, consume it
+    let mut gettips_line2 = String::new();
+    let _ = br2.read_line(&mut gettips_line2).await;
+
     // envoie un message volontairement trop gros + invalide
     let big = "X".repeat(MAX_LINE_BYTES + 16);
     let big_line = format!("\"{}\"\n", big);
     let _ = w2.write_all(big_line.as_bytes()).await;
     let _ = w2.flush().await;
 
-    // petit délai pour laisser le serveur fermer
-    sleep(Duration::from_millis(100)).await;
+    // Give server time to process and close connection
+    sleep(Duration::from_millis(200)).await;
 
     // (A) écriture après oversize — peut échouer si la socket est déjà fermée
     let write_res = w2.write_all(b"{\"Ping\":null}\n").await;
 
     // (B) tente de lire une ligne (EOF/Err si fermé)
     let mut line2 = String::new();
-    let read_res = tokio::time::timeout(Duration::from_millis(300), br2.read_line(&mut line2)).await;
+    let read_res =
+        tokio::time::timeout(Duration::from_millis(300), br2.read_line(&mut line2)).await;
 
     // Succès si : écriture en erreur OU lecture en EOF/erreur OU pas de réponse dans le délai
     let ok = match (write_res, read_res) {
-        (Err(_), _) => true,              // fermé à l’écriture
-        (_, Ok(Ok(0))) => true,          // EOF
-        (_, Ok(Err(_))) => true,         // erreur lecture
-        (_, Err(_timeout)) => true,      // silencieux (blackhole) → ok pour ce test
-        (_, Ok(Ok(_n))) => false,        // a répondu (pas attendu)
+        (Err(_), _) => true,        // fermé à l’écriture
+        (_, Ok(Ok(0))) => true,     // EOF
+        (_, Ok(Err(_))) => true,    // erreur lecture
+        (_, Err(_timeout)) => true, // silencieux (blackhole) → ok pour ce test
+        (_, Ok(Ok(_n))) => false,   // a répondu (pas attendu)
     };
 
-    assert!(ok, "la connexion devrait être fermée ou silencieuse après oversize");
+    assert!(
+        ok,
+        "la connexion devrait être fermée ou silencieuse après oversize"
+    );
 
     Ok(())
 }

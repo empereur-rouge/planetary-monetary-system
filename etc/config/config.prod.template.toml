@@ -1,0 +1,53 @@
+# Configuration Production PMS
+# =============================================================================
+# Ce fichier est un TEMPLATE. Copiez-le et remplacez les valeurs.
+
+[rocks]
+path = "/data/pms/rocks"
+prefix = "pms:main"           # MAINNET: pms:main | TESTNET: pms:test
+
+[network]
+mode = "mainnet"              # "dev" | "testnet" | "mainnet"
+network_id = "pms-mainnet-v1"
+protocol_version = 1
+
+[address]
+host = "0.0.0.0"
+port = 8080
+
+[admin]
+token = "CHANGE_ME_ADMIN_TOKEN_64_CHARS_MINIMUM_VERY_SECURE_RANDOM_STRING"
+
+[limits]
+max_block_size = 1048576      # 1 MB
+max_parents = 8
+rate_limit_rps = 1000
+burst = 2000
+max_concurrent_requests = 500
+request_timeout_ms = 30000
+
+[auth]
+allowed_ips = ["127.0.0.1"]   # IPs autorisées pour /admin/*
+
+[tls]
+cert_pem = "/etc/pms/tls/cert.pem"
+key_pem = "/etc/pms/tls/key.pem"
+
+[secrets]
+node_identity_key_path = "/etc/pms/node-identity.key"
+admin_wallet_file = "/etc/pms/admin-wallet.json"
+
+[validation]
+min_pow_leading_zero_bits = 8         # Difficulté PoW (8 = facile, 16 = dur)
+require_signature = true
+coordinator_public_key = ""           # Clé publique du Coordinator (laisser vide si pas de restrictions)
+
+[fees]
+rate_bps = 100                # 1% de frais
+platform_bps = 2000           # 20% des frais → plateforme
+node_bps = 3000               # 30% des frais → pool nœuds
+
+[p2p]
+bind_addr = "0.0.0.0:8443"
+known_peers = []              # ["p2ps://peer1.pms.network:8443", "p2ps://peer2.pms.network:8443"]
+heartbeat_interval_ms = 5000

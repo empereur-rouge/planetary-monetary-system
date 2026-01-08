@@ -1,6 +1,6 @@
-use axum::http::header::AUTHORIZATION;
-use axum::http::HeaderMap;
 use crate::api::AppState;
+use axum::http::HeaderMap;
+use axum::http::header::AUTHORIZATION;
 
 /// Résout une config de token admin.
 /// - "env:VAR" → lit VAR dans l’environnement
@@ -16,7 +16,7 @@ pub fn resolve_admin_token(spec: &str) -> Option<String> {
 /// Vérifie si la requête est autorisée en tant qu’admin.
 ///
 /// On accepte :
-////  - Authorization: Bearer <token>
+///  - Authorization: Bearer <token>
 ///  - X-Admin-Token: <token>
 pub fn is_admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     let expected = match &state.admin_token {

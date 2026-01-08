@@ -1,6 +1,5 @@
-use config::{Config, Environment, File};
 use serde::Deserialize;
-use std::path::PathBuf;
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -73,10 +72,18 @@ pub struct Client {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TlsConfig {
-    pub cert_pem: String, // chemin cert
-    pub key_pem: String,  // chemin clé (PKCS#8 ou EC SEC1)
+    pub cert_pem: String,       // chemin cert
+    pub key_pem: String,        // chemin clé (PKCS#8 ou EC SEC1)
+    pub ca_pem: Option<String>, // chemin CA root (pour client P2P)
     #[serde(default)]
     pub whitelist_fp256: Vec<String>, // empreintes SHA-256 autorisées (optionnel)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct P2pConfig {
+    #[serde(default)]
+    pub known_peers: String, // Comma separated list of peers env-friendly
+    pub bind_addr: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +100,11 @@ pub struct Auth {
     pub require_signed_submit: bool,
     /// Valeur "env:VAR_NAME" supportée
     pub admin_api_token: Option<String>,
+    /// Liste des IPs/CIDR autorisées pour les routes admin (/metrics, /admin/*)
+    /// Vide = autorise tout (dev), rempli = whitelist stricte (prod)
+    /// Ex: ["192.168.1.0/24", "10.0.0.5/32"]
+    #[serde(default)]
+    pub allowed_ips: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -127,18 +139,36 @@ pub struct ValidationSettings {
     pub enforce_fee_recipient: bool,
     #[serde(default)]
     pub allowed_fee_addresses: Vec<String>,
+    pub coordinator_public_key: Option<String>, // Pour Dev/Testnet custom
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeesSettings {
     pub epsilon: String, // "0.001"
-    pub scan_limit: u32, // ex 2000
+    #[serde(default = "default_fee_ratio")]
+    pub ratio: String, // "0.035"
+    #[serde(default = "default_base_fee")]
+    pub base_fee: String, // "0.0"
     pub mode: FeePickMode,
     pub seed: Option<u64>,
+    pub platform_address: Option<String>,
+    pub platform_address_signature: Option<String>,
+    #[serde(default = "default_platform_fee_ratio")]
+    pub platform_fee_ratio: String, // ex: "0.02" pour 2%
+}
+
+fn default_fee_ratio() -> String {
+    "0.035".to_string()
+}
+fn default_base_fee() -> String {
+    "0.001".to_string()
+}
+fn default_platform_fee_ratio() -> String {
+    "0.45".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "lowercase")]
 pub enum FeePickMode {
     Uniform,
     RoundRobin,

@@ -1,9 +1,9 @@
 use pms_config::Settings;
+use pms_errors::ValidationError;
+use pms_types::TxOutput;
 use pms_wire::WireBlock;
 use rust_decimal::Decimal;
 use std::str::FromStr;
-use pms_errors::ValidationError;
-use pms_types::TxOutput;
 
 /// Pour l'instant : plafond "en dur" avec TODO pour la config.
 /// Ex: 1_000_000 unités max par bloc de mint (string décimale).
@@ -62,9 +62,7 @@ pub fn validate_mint_policy(
         }
     } else {
         // Dev local sans liste admin → on laisse passer mais on log
-        eprintln!(
-            "[policy] validate_mint_policy: signer_pubkeys vide, bypass admin check (dev?)"
-        );
+        eprintln!("[policy] validate_mint_policy: signer_pubkeys vide, bypass admin check (dev?)");
     }
 
     // ============================================================
@@ -73,10 +71,7 @@ pub fn validate_mint_policy(
     check_mint_amount(outputs, &wb.id)
 }
 
-fn check_mint_amount(
-    outputs: &[TxOutput],
-    block_id: &str,
-) -> Result<(), ValidationError> {
+fn check_mint_amount(outputs: &[TxOutput], block_id: &str) -> Result<(), ValidationError> {
     let mut total = Decimal::ZERO;
 
     for out in outputs {

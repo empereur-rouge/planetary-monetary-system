@@ -1,10 +1,13 @@
 use anyhow::Result;
 use tempfile::tempdir;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep};
 
 use pms_network::messages::NetMsg;
 use pms_storage::{DagStorage, PutResult};
-use pms_testkit::{ephemeral_addr, forge_signed_wire_block_for_test, spawn_node_generic_rocks, test_meta_and_wallet};
+use pms_testkit::{
+    ephemeral_addr, forge_signed_wire_block_for_test, spawn_node_generic_rocks_with_seed,
+    test_meta_and_wallet,
+};
 use pms_types::{Block, PayloadEnvelope};
 use pms_utils::compute_block_id;
 use pms_wallet::SignerBackend;
@@ -12,10 +15,10 @@ use pms_wallet::signing_wire::canonical_wireblock_message;
 
 #[tokio::test]
 async fn two_nodes_share_blocks_debug_rocks() -> Result<()> {
-    let api_a  = ephemeral_addr();
+    let api_a = ephemeral_addr();
     let bind_a = ephemeral_addr();
 
-    let api_b  = ephemeral_addr();
+    let api_b = ephemeral_addr();
     let bind_b = ephemeral_addr();
     let tip_limit = 256usize;
 
@@ -25,12 +28,12 @@ async fn two_nodes_share_blocks_debug_rocks() -> Result<()> {
 
     // 1) Crée deux dossiers Rocks éphémères
     let dir_a = tempdir()?;
-    let db_a   = dir_a.path().join("rocks-a");
+    let db_a = dir_a.path().join("rocks-a");
     std::fs::create_dir_all(&db_a)?;
     let db_a_str = db_a.to_string_lossy();
 
     let dir_b = tempdir()?;
-    let db_b   = dir_b.path().join("rocks-b");
+    let db_b = dir_b.path().join("rocks-b");
     std::fs::create_dir_all(&db_b)?;
     let db_b_str = db_b.to_string_lossy();
 
@@ -38,27 +41,33 @@ async fn two_nodes_share_blocks_debug_rocks() -> Result<()> {
     let (meta, wallet) = test_meta_and_wallet();
 
     // 3) Spawn A et B avec le même genesis persisté
+    // Use unique seeds to avoid loopback detection
+    let seed_a = [1u8; 32];
+    let seed_b = [2u8; 32];
+
     println!("[TEST] spawn A @ {bind_a}");
-    let (a_store, _a_dag, a_adapter, a_srv, _ha) =
-        spawn_node_generic_rocks(
-            &db_a_str,
-            "pms:test:a",
-            bind_a.as_str(),
-            api_a.as_str(),
-            tip_limit,
-            Some(&shared_genesis),
-        ).await?;
+    let (a_store, _a_dag, a_adapter, a_srv, _ha) = spawn_node_generic_rocks_with_seed(
+        &db_a_str,
+        "pms:test:a",
+        bind_a.as_str(),
+        api_a.as_str(),
+        tip_limit,
+        Some(&shared_genesis),
+        Some(seed_a),
+    )
+    .await?;
 
     println!("[TEST] spawn B @ {bind_b}");
-    let (b_store, _b_dag, _b_adapter, b_srv, _hb) =
-        spawn_node_generic_rocks(
-            &db_b_str,
-            "pms:test:b",
-            bind_b.as_str(),
-            api_b.as_str(),
-            tip_limit,
-            Some(&shared_genesis),
-        ).await?;
+    let (b_store, _b_dag, _b_adapter, b_srv, _hb) = spawn_node_generic_rocks_with_seed(
+        &db_b_str,
+        "pms:test:b",
+        bind_b.as_str(),
+        api_b.as_str(),
+        tip_limit,
+        Some(&shared_genesis),
+        Some(seed_b),
+    )
+    .await?;
 
     // 4) Laisse le temps aux listeners de démarrer
     println!("[TEST] sleep 150ms (startup listeners)");
@@ -97,7 +106,7 @@ async fn two_nodes_share_blocks_debug_rocks() -> Result<()> {
             &meta,
             &wallet,
             i as u64 + 1,
-            payload
+            payload,
         );
 
         // 7.4 Calcul de l’ID comme en prod
@@ -149,6 +158,7 @@ async fn two_nodes_share_blocks_debug_rocks() -> Result<()> {
                 protocol_version: wb.protocol_version,
                 signature_hex: wb.signature_hex,
                 signer_pk_hex: wb.signer_pk_hex,
+                metadata: wb.metadata.clone(),
             })
             .await?;
 
@@ -173,6 +183,9 @@ async fn two_nodes_share_blocks_debug_rocks() -> Result<()> {
         sleep(Duration::from_millis(100)).await;
     }
 
-    println!("[TEST] ✅ OK: B a bien reçu >= {} blocs (incl. genesis)", n + 1);
+    println!(
+        "[TEST] ✅ OK: B a bien reçu >= {} blocs (incl. genesis)",
+        n + 1
+    );
     Ok(())
 }

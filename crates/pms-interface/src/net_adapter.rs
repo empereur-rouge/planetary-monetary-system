@@ -1,8 +1,7 @@
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use pms_storage::store::PutResult;
 use pms_wire::WireBlock;
-
 
 /// Trait que le serveur réseau utilisera pour interagir avec le core.
 #[async_trait]
@@ -17,4 +16,8 @@ pub trait NetDagAdapter: Send + Sync {
     async fn get_block(&self, id: &str) -> Result<Option<WireBlock>>;
     async fn recent_ids(&self, limit: usize) -> Result<Vec<String>>;
     async fn get_blocks_by_ids(&self, ids: &[String]) -> Result<Vec<WireBlock>>;
+    fn min_pow_leading_zero_bits(&self) -> u8;
+
+    /// Retourne le supply total en circulation et le nombre d'UTXOs.
+    async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64);
 }

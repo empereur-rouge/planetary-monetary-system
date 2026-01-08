@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Supprime les checkpoints RocksDB les plus anciens dans `backup_root`
 /// pour ne garder que `keep_last` snapshots au maximum.
@@ -36,9 +36,7 @@ pub fn rotate_checkpoints(backup_root: &str, keep_last: usize) -> Result<()> {
     // 1) Liste tous les enfants de backup_root
     // ------------------------------------------------------------
     let mut entries: Vec<PathBuf> = Vec::new();
-    for entry in fs::read_dir(&root)
-        .with_context(|| format!("read_dir({})", root.display()))?
-    {
+    for entry in fs::read_dir(&root).with_context(|| format!("read_dir({})", root.display()))? {
         let entry = entry?;
         let path = entry.path();
 
@@ -113,8 +111,7 @@ pub fn rotate_checkpoints(backup_root: &str, keep_last: usize) -> Result<()> {
     // ------------------------------------------------------------
     for path in old {
         eprintln!("[rocks] deleting old checkpoint: {}", path.display());
-        fs::remove_dir_all(path)
-            .with_context(|| format!("remove_dir_all({})", path.display()))?;
+        fs::remove_dir_all(path).with_context(|| format!("remove_dir_all({})", path.display()))?;
     }
 
     Ok(())

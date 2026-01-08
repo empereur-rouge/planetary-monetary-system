@@ -6,10 +6,12 @@ edition = "2024"
 [dependencies]
 pms-types-transaction = { path = "../pms-types-transaction" }
 pms-types-mint = { path = "../pms-types-mint" }
+pms-types-nft = { path = "../pms-types-nft" }
+pms-config = { path = "../pms-config" }
 serde = { version = "1.0.219", features = ["derive"] }
 rand = "0.9"
-aes-gcm = { version = "0.10", features=[] }
-x25519-dalek = { version = "2.0.1", features=["static_secrets"] }
+aes-gcm = { version = "0.10", features = [] }
+x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 hkdf = "0.12.4"
 sha2 = "0.10.4"
 base64 = "0.22.1"

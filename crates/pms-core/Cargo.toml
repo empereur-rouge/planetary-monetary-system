@@ -22,12 +22,19 @@ thiserror = "2.0.16"
 hex = "0.4.3"
 sha2 = "0.10.9"
 rust_decimal = "1.39.0"
+num-traits = "0.2"
+tracing = "0.1"
 tempfile = "3.23.0"
 base64 = "0.21.7"
 signature = "2.2.0"
 k256 = "0.13.4"
+dashmap = "6.1"
+rayon = "1.11.0"
+pms-consensus = { version = "0.1.0", path = "../pms-consensus" }
+pms-types-nft = { path = "../pms-types-nft" }
+pms-event = { path = "../pms-event" }
 
 [dev-dependencies]
 hex = "0.4.3"
-x25519-dalek = { version = "2.0.1", features=["static_secrets"] }
-pms-testkit = { path = "../pms-testkit"}
+x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
+pms-testkit = { path = "../pms-testkit" }

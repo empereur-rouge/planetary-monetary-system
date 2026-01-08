@@ -1,25 +1,25 @@
-use std::fs;
-use thiserror::Error;
+use crate::{Wallet, decode_address};
+use anyhow::{Result, bail};
+use futures::future::join_all;
+use pms_storage::rocks_store::store::RocksStore;
 use pms_token::{Amount, FeePolicy, PLANETARY_MONETARY_SYSTEM as PMS};
 use pms_types_transaction::{OutputId, Transaction, TxInput, TxOutput};
-use anyhow::{Result, bail, Context};
-use rust_decimal::Decimal;
-use rust_decimal::prelude::*;
 use rand::distributions::WeightedIndex;
 use rand::prelude::*;
-use futures::future::join_all;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
 use serde::{Deserialize, Serialize};
-use pms_config::Settings;
-use pms_storage::rocks_store::store::RocksStore;
-use crate::{decode_address, Wallet};
-use crate::utxo_store::gather_address_utxos_dec;
+use thiserror::Error;
 
 /// Erreurs possibles lors de la préparation d'une Transaction.
 #[derive(Debug, Error)]
 pub enum WalletTxError {
-    #[error("montant invalide")] InvalidAmount,
-    #[error("fee invalide")] FeeComputation,
-    #[error("inputs insuffisants")] InsufficientInputs,
+    #[error("montant invalide")]
+    InvalidAmount,
+    #[error("fee invalide")]
+    FeeComputation,
+    #[error("inputs insuffisants")]
+    InsufficientInputs,
 }
 
 pub struct Payment {
@@ -28,7 +28,10 @@ pub struct Payment {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct SelectedInput { pub id: OutputId, pub amount: String } // montant de l’UTXO
+pub struct SelectedInput {
+    pub id: OutputId,
+    pub amount: String,
+} // montant de l’UTXO
 
 pub fn build_utxo_tx_with_fee_checked(
     from_address: &str,
@@ -42,9 +45,14 @@ pub fn build_utxo_tx_with_fee_checked(
     for p in payments {
         let a = Amount::parse(&p.amount, PMS.decimals).map_err(|_| WalletTxError::InvalidAmount)?;
         sum_out.0 += a.0;
-        outs.push(TxOutput { address: p.to, amount: a.to_string() });
+        outs.push(TxOutput {
+            address: p.to,
+            amount: a.to_string(),
+        });
     }
-    let fee_str = fee_policy.compute_fee(&sum_out.to_string()).map_err(|_| WalletTxError::FeeComputation)?;
+    let fee_str = fee_policy
+        .compute_fee(&sum_out.to_string())
+        .map_err(|_| WalletTxError::FeeComputation)?;
     let fee = Amount::parse(&fee_str, PMS.decimals).map_err(|_| WalletTxError::FeeComputation)?;
 
     if !fee.0.is_zero() {
@@ -57,7 +65,8 @@ pub fn build_utxo_tx_with_fee_checked(
     let mut sum_in = Amount::parse("0", PMS.decimals).unwrap();
     let mut ins = Vec::with_capacity(inputs.len());
     for i in inputs {
-        let ai = Amount::parse(&i.amount, PMS.decimals).map_err(|_| WalletTxError::InvalidAmount)?;
+        let ai =
+            Amount::parse(&i.amount, PMS.decimals).map_err(|_| WalletTxError::InvalidAmount)?;
         sum_in.0 += ai.0;
         ins.push(TxInput { out: i.id });
     }
@@ -70,10 +79,18 @@ pub fn build_utxo_tx_with_fee_checked(
     // Change si nécessaire
     let change = sum_in.0 - (sum_out.0 + fee.0);
     if !change.is_zero() {
-        outs.push(TxOutput { address: from_address.to_string(), amount: Amount(change).to_string() });
+        outs.push(TxOutput {
+            address: from_address.to_string(),
+            amount: Amount(change).to_string(),
+        });
     }
 
-    Ok(Transaction { inputs: ins, outputs: outs, fee: fee.to_string(), unlocks: Vec::new() })
+    Ok(Transaction {
+        inputs: ins,
+        outputs: outs,
+        fee: fee.to_string(),
+        unlocks: Vec::new(),
+    })
 }
 
 /// Sélectionne une adresse admin avec proba ~ déficit vs moyenne, plancher epsilon.
@@ -92,9 +109,7 @@ where
     }
 
     // 1) Récupère tous les soldes en parallèle
-    let balances_res = join_all(
-        admin_addrs.iter().map(|a| fetch_balance(a)),
-    ).await;
+    let balances_res = join_all(admin_addrs.iter().map(|a| fetch_balance(a))).await;
 
     let mut balances = Vec::with_capacity(admin_addrs.len());
     for (i, br) in balances_res.into_iter().enumerate() {
@@ -118,8 +133,7 @@ where
 
     // Cas dégénéré: si tout égal et epsilon tout petit,
     // WeightedIndex gère tant que somme > 0.
-    let dist = WeightedIndex::new(&weights_f64)
-        .map_err(|_| anyhow::anyhow!("poids invalides"))?;
+    let dist = WeightedIndex::new(&weights_f64).map_err(|_| anyhow::anyhow!("poids invalides"))?;
     let mut rng = thread_rng();
     let idx = dist.sample(&mut rng);
 
@@ -137,8 +151,8 @@ where
     Fut: Future<Output = Result<Decimal>>,
 {
     let addr = pick_admin_address_weighted(admin_addrs, fetch_balance, epsilon).await?;
-    let (_, xpk) = decode_address(&addr)
-        .map_err(|e| anyhow::anyhow!("adresse admin invalide: {e}"))?;
+    let (_, xpk) =
+        decode_address(&addr).map_err(|e| anyhow::anyhow!("adresse admin invalide: {e}"))?;
     Ok(xpk)
 }
 
@@ -149,9 +163,7 @@ pub async fn pick_admin_recipient(admin_wallets: &[String]) -> Result<String> {
     let epsilon = Decimal::new(1, 3); // 0.001
 
     // Stub MVP: toujours 0. Remplace par un vrai fetch UTXO.
-    let fetch_balance = |_: &str| async move {
-        Ok(Decimal::ZERO)
-    };
+    let fetch_balance = |_: &str| async move { Ok(Decimal::ZERO) };
 
     pick_admin_xpk_weighted(admin_wallets, fetch_balance, epsilon).await
 }

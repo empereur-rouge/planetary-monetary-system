@@ -1,8 +1,8 @@
 // pms-core/tests/finality_kdepth.rs
 use anyhow::Result;
-use pms_utils::compute_block_id;
-use pms_core::{ Dag };
+use pms_core::Dag;
 use pms_types::Block;
+use pms_utils::compute_block_id;
 
 #[test]
 fn finality_by_k_depth() -> Result<()> {
@@ -14,7 +14,8 @@ fn finality_by_k_depth() -> Result<()> {
     dag.finality.depth_k = k;
 
     // garde l'id du genesis
-    let genesis = dag.blocks
+    let genesis = dag
+        .blocks
         .values()
         .find(|b| b.parents.is_empty())
         .expect("genesis présent")
@@ -44,4 +45,3 @@ fn finality_by_k_depth() -> Result<()> {
 
     Ok(())
 }
-

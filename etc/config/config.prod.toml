@@ -1,62 +1,53 @@
+# Configuration Production PMS
+# =============================================================================
+# Ce fichier est un TEMPLATE. Copiez-le et remplacez les valeurs.
+
 [rocks]
-path = "/home/pms/data/rocks" # mainnet redis://redis:6379/ et dev redis://127.0.0.1:6379/0
-prefix = "pms:test"
-tip_limit = 256
+path = "/data/pms/rocks"
+prefix = "pms:main"           # MAINNET: pms:main | TESTNET: pms:test
 
 [network]
-mode = "testnet"  # "dev" | "testnet" | "mainnet"
-network_id = "pms-test"
+mode = "mainnet"              # "dev" | "testnet" | "mainnet"
+network_id = "pms-mainnet-v1"
 protocol_version = 1
 
 [address]
-hrp = "8e"
+host = "0.0.0.0"
+port = 8080
 
 [admin]
-wallet_addresses = [
-    "8e1eqy642zaz5dsyzc3cf54ul642r9259kre2d40m3mp7q8h4fq4333yw0hjkw02e4lljjm4em8hqjc67p3m4esvq774n",
-]
-
-[client]
-bind_addr = "0.0.0.0:8443"      # listener P2P si tu en as
-api_addr  = "0.0.0.0:8080"    # API interne (exposed non-publicly in docker)
-allow_insecure_tls = true
-
-[tls]
-cert_pem = "/home/pms/tls/cert.pem"
-key_pem  = "/home/pms/tls/key.pem"
-# liste des empreintes SHA-256 autorisées (whitelist des pairs)
-whitelist_fp256 = []
+token = "dc1a68bac34e6182a20534f2f8389fae0b98319ce9cc809644417a0caa7b74b2"
 
 [limits]
-max_body_bytes = 262144
-request_timeout_ms = 4000
-rate_limit_rps = 50
-burst = 100
-
-[fees]
-epsilon = "0.001"
-scan_limit = 2000
-mode = "uniform"
-enforce_fee_recipient = true
+max_block_size = 1048576      # 1 MB
+max_parents = 8
+rate_limit_rps = 1000
+burst = 2000
+max_concurrent_requests = 500
+request_timeout_ms = 30000
 
 [auth]
-require_signed_submit = true
-admin_api_token = "env:PMS_ADMIN_TOKEN_DEV"
+allowed_ips = ["127.0.0.1"]   # IPs autorisées pour /admin/*
+
+[tls]
+cert_pem = "/etc/pms/tls/cert.pem"
+key_pem = "/etc/pms/tls/key.pem"
 
 [secrets]
-node_identity_key_path = "/home/pms/config/node-identity.key"
-admin_wallet_file      = "/home/pms/config/admin-wallet.json"
+node_identity_key_path = "/etc/pms/node-identity.key"
+admin_wallet_file = "/etc/pms/admin-wallet.json"
 
 [validation]
-min_pow_leading_zero_bits = 16  # exemple: 16 bits → léger coût CPU
-max_payload_bytes          = 65536   # 64 KB
-min_parents_after_boot     = 2
-max_parents                = 8
-require_unique_parents     = true
-forbid_self_parent         = true
-max_inputs                 = 64
-max_outputs                = 64
-max_tx_bytes               = 65536   # 64 KB
-max_fee_per_tx             = 1000
-enforce_parent_existence   = true
-enforce_fee_recipient      = true
+min_pow_leading_zero_bits = 8         # Difficulté PoW (8 = facile, 16 = dur)
+require_signature = true
+coordinator_public_key = ""           # Clé publique du Coordinator (laisser vide si pas de restrictions)
+
+[fees]
+rate_bps = 100                # 1% de frais
+platform_bps = 2000           # 20% des frais → plateforme
+node_bps = 3000               # 30% des frais → pool nœuds
+
+[p2p]
+bind_addr = "0.0.0.0:8443"
+known_peers = []              # ["p2ps://peer1.pms.network:8443", "p2ps://peer2.pms.network:8443"]
+heartbeat_interval_ms = 5000

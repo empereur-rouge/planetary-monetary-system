@@ -1,10 +1,13 @@
-use config::Source;
-use std::{env, fs};
-use std::path::{Path, PathBuf};
-use crate::{Address, Admin, Auth, Client, FeesSettings, Limits, LoadError, Network, NetworkMode, Rocks, SecretSettings, TlsConfig, ValidationSettings};
-use anyhow::{bail, Context, Result};
+use crate::{
+    Address, Admin, Auth, Client, FeesSettings, Limits, LoadError, Network, NetworkMode, P2pConfig,
+    Rocks, SecretSettings, TlsConfig, ValidationSettings,
+};
+use anyhow::{Result, bail};
+
 use config::{Config, ConfigError, Environment, File};
 use serde::Deserialize;
+use std::env;
+use std::path::{Path, PathBuf};
 
 const ROOT_CONFIG_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config");
 
@@ -21,33 +24,36 @@ pub struct Settings {
     pub secrets: SecretSettings,
     pub validation: ValidationSettings,
     pub fees: FeesSettings,
+    pub p2p: P2pConfig,
 }
 
 impl Settings {
     pub fn validate(&self) -> Result<()> {
         // 1) Prefix attendu selon le mode
         let expected_prefix = match self.network.mode {
-            NetworkMode::Dev     => "pms:dev",
+            NetworkMode::Dev => "pms:dev",
             NetworkMode::Testnet => "pms:test",
             NetworkMode::Mainnet => "pms:main",
         };
         if self.rocks.prefix != expected_prefix {
             bail!(
-            "Prefix incohérent pour {:?}: attendu '{}', reçu '{}'",
-            self.network.mode, expected_prefix, self.rocks.prefix
-        );
+                "Prefix incohérent pour {:?}: attendu '{}', reçu '{}'",
+                self.network.mode,
+                expected_prefix,
+                self.rocks.prefix
+            );
         }
 
         // 2) Client insecure TLS interdit en prod
-        if self.network.mode.is_prod() {
-            if let Some(c) = &self.client {
-                if c.allow_insecure_tls {
-                    bail!("Mainnet: client.allow_insecure_tls doit être false");
-                }
-                if !c.api_addr.starts_with("https://") {
-                    bail!("Mainnet: client.api_addr doit être HTTPS");
-                }
+        // NOTE: On utilise if-let combiné avec && pour satisfaire clippy::collapsible_if
+        if self.network.mode.is_prod()
+            && let Some(c) = &self.client
+        {
+            if c.allow_insecure_tls {
+                bail!("Mainnet: client.allow_insecure_tls doit être false");
             }
+            // Note: api_addr est une adresse de bind (ex: 0.0.0.0:8080), pas une URL.
+            // La sécurité HTTPS est assurée par le bloc [tls] obligatoire en mainnet.
         }
 
         // 3) TLS
@@ -59,13 +65,12 @@ impl Settings {
                 if !Path::new(&tls.key_pem).exists() {
                     bail!("TLS: fichier introuvable: {}", tls.key_pem);
                 }
-            } else {
-                if !Path::new(&tls.cert_pem).exists() || !Path::new(&tls.key_pem).exists() {
-                    eprintln!(
-                        "[config] ⚠ TLS files not found for mode {:?}, check ignoré (non-prod)",
-                        self.network.mode
-                    );
-                }
+            // NOTE: else if au lieu de else { if } pour satisfaire clippy::collapsible_else_if
+            } else if !Path::new(&tls.cert_pem).exists() || !Path::new(&tls.key_pem).exists() {
+                eprintln!(
+                    "[config] ⚠ TLS files not found for mode {:?}, check ignoré (non-prod)",
+                    self.network.mode
+                );
             }
         } else if self.network.mode.is_prod() {
             bail!("TLS: bloc [tls] obligatoire en mainnet");
@@ -78,14 +83,13 @@ impl Settings {
             let node_key = Path::new(&secrets.node_identity_key_path);
             let admin_file = Path::new(&secrets.admin_wallet_file);
 
-            if !(node_key.exists() && admin_file.exists()) {
-                if self.network.mode.is_prod() {
-                    bail!(
+            // NOTE: Condition combinée pour satisfaire clippy::collapsible_if
+            if !(node_key.exists() && admin_file.exists()) && self.network.mode.is_prod() {
+                bail!(
                     "Secrets manquants en prod : node_identity_key_path='{}', admin_wallet_file='{}'",
                     secrets.node_identity_key_path,
                     secrets.admin_wallet_file
                 );
-                }
             }
         }
 
@@ -106,7 +110,7 @@ impl Settings {
 ///
 /// Exemple ENV: PMS__NETWORK__MODE, PMS__TLS__CERT_PEM, etc.
 pub fn load_config() -> Result<Settings, ConfigError> {
-    use config::{Config, ConfigError, File};
+    use config::{Config, File};
     use std::{env, path::PathBuf};
 
     let mut b = Config::builder();
@@ -120,8 +124,7 @@ pub fn load_config() -> Result<Settings, ConfigError> {
 
         // 2) Répertoire "etc/config" à la racine du repo
         //    On remonte à la racine du repo à partir de crates/pms-config
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..");
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let etc_config_dir = repo_root.join("etc/config");
 
         let candidates = [
@@ -147,10 +150,11 @@ pub fn load_config() -> Result<Settings, ConfigError> {
         settings.network.network_id = "pms-dev".into();
     }
 
-    if settings.network.mode.is_prod() {
-        if let Some(c) = settings.client.as_mut() {
-            c.allow_insecure_tls = false;
-        }
+    // NOTE: if-let combiné pour satisfaire clippy::collapsible_if
+    if settings.network.mode.is_prod()
+        && let Some(c) = settings.client.as_mut()
+    {
+        c.allow_insecure_tls = false;
     }
 
     settings.validate().expect("Settings invalide");
@@ -166,6 +170,7 @@ pub fn load_config_with(arg: Option<&std::path::Path>) -> Result<Settings, LoadE
         .set_default("client.oracle_url", "https://127.0.0.1:8080")?
         .set_default("client.allow_insecure_tls", true)?
         .set_default("tip_limit", 200)?
+        .set_default("p2p.known_peers", String::new())?
         .add_source(Environment::with_prefix("PMS").separator("__"));
 
     if let Some(path) = arg {
@@ -197,10 +202,11 @@ pub fn load_config_with(arg: Option<&std::path::Path>) -> Result<Settings, LoadE
     let mut s: Settings = b.build()?.try_deserialize()?;
 
     // garde-fou production
-    if s.network.mode.is_prod() {
-        if let Some(c) = s.client.as_mut() {
-            c.allow_insecure_tls = false;
-        }
+    // NOTE: if-let combiné pour satisfaire clippy::collapsible_if
+    if s.network.mode.is_prod()
+        && let Some(c) = s.client.as_mut()
+    {
+        c.allow_insecure_tls = false;
     }
 
     Ok(s)

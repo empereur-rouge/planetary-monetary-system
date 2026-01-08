@@ -1,17 +1,15 @@
-use std::str::FromStr;
-use anyhow::{Result, anyhow};
-use std::sync::Arc;
+use anyhow::Result;
 use rust_decimal::Decimal;
+use std::str::FromStr;
 
 use pms_storage::{DagStorage, PutResult};
-use pms_interface::{NetDagAdapter};
-use pms_storage::rocks_store::store::RocksStore;
+
 use pms_types::{OutputId, PayloadEnvelope, PlainPayload, TxOutput};
-use pms_wire::{WireBlock, WireMeta};
 use pms_wallet::{SelectedInput, Wallet};
+use pms_wire::{WireBlock, WireMeta};
 
 // adapte à ton type
-use crate::{forge_signed_wire_block_for_test, TestCtx};
+use crate::{TestCtx, forge_signed_wire_block_for_test};
 
 pub async fn mint_to_wallet_and_get_inputs(
     ctx: &TestCtx,
@@ -26,7 +24,10 @@ pub async fn mint_to_wallet_and_get_inputs(
     let mut parents = ctx.store.top_tips(2).await?;
     if parents.is_empty() {
         let ids = ctx.store.all_block_ids().await?;
-        let g = ids.first().cloned().ok_or_else(|| anyhow::anyhow!("empty DAG"))?;
+        let g = ids
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("empty DAG"))?;
         parents = vec![g];
     }
     parents.sort();

@@ -1,7 +1,5 @@
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use pms_config::load_config;
-use pms_core::{CoreAdapter, Dag};
+use pms_core::{ConcurrentDag, CoreAdapter};
 use pms_interface::NetDagAdapter;
 use pms_storage::{DagStorage, PutResult, StoredBlock};
 use pms_testkit::{forge_signed_wire_block_for_test, test_rocks_store};
@@ -9,6 +7,7 @@ use pms_types::{Block, PayloadEnvelope};
 use pms_utils::compute_block_id;
 use pms_wallet::{SignerBackend, Wallet};
 use pms_wire::WireMeta;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn bootstrap_recovers_all_blocks_and_children_rocks() -> anyhow::Result<()> {
@@ -33,19 +32,20 @@ async fn bootstrap_recovers_all_blocks_and_children_rocks() -> anyhow::Result<()
         protocol_version: meta.protocol_version as u16,
         signer_pk_hex: String::new(),
         signature_hex: String::new(),
+        metadata: None,
     };
     let _ = store.append_block_atomic(&sb).await?;
 
     // 5) DAG en RAM
-    let dag = Arc::new(Mutex::new(Dag::new_with_genesis(genesis.clone())));
+    let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
 
     // 6) Adapter concret (prod-like)
     let adapter_concrete = CoreAdapter::new(dag.clone(), store.clone());
     let adapter: Arc<dyn NetDagAdapter> = adapter_concrete.clone();
 
     // 7) Wallet de test pour signer
-    let wallet = Wallet::from_seed(&[3u8; 32], None)
-        .expect("Wallet::from_seed ne doit pas fail en test");
+    let wallet =
+        Wallet::from_seed(&[3u8; 32], None).expect("Wallet::from_seed ne doit pas fail en test");
 
     // 8) Forge + persist N blocs via adapter, en respectant la même
     //    logique que la prod (id calculé AVANT signature).
@@ -63,13 +63,8 @@ async fn bootstrap_recovers_all_blocks_and_children_rocks() -> anyhow::Result<()
         let payload: Option<PayloadEnvelope> = None;
 
         // 3) Construire un WireBlock “unsigned” avec les bons champs réseau
-        let wb = forge_signed_wire_block_for_test(
-            parents.clone(),
-            &meta,
-            &wallet,
-            i as u64,
-            payload
-        );
+        let wb =
+            forge_signed_wire_block_for_test(parents.clone(), &meta, &wallet, i as u64, payload);
 
         // 7) Persister via adapter (qui appelle persist_block + verify_block_signature)
         let res = adapter.persist_block(&wb).await?;
@@ -80,7 +75,7 @@ async fn bootstrap_recovers_all_blocks_and_children_rocks() -> anyhow::Result<()
     }
 
     // 9) Bootstrap depuis le store et vérifs
-    let dag2 = Dag::bootstrap_from_store(&*store)
+    let dag2 = ConcurrentDag::bootstrap_from_store(&*store)
         .await
         .expect("bootstrap from rocks");
 
@@ -90,8 +85,9 @@ async fn bootstrap_recovers_all_blocks_and_children_rocks() -> anyhow::Result<()
         store_ids.len(),
         "nb blocks rechargés != store"
     );
+    // blocks is DashMap, iterate matches
     assert!(
-        dag2.blocks.values().any(|b| b.parents.is_empty()),
+        dag2.blocks.iter().any(|b| b.value().parents.is_empty()),
         "genesis manquant"
     );
 

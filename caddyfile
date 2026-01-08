@@ -31,8 +31,9 @@ pms.example.com {
     reverse_proxy node:8080
   }
 
-  # Proxy principal
-  reverse_proxy node:8080 {
+  # Proxy principal (Load Balancing)
+  reverse_proxy node1:8080 node2:8080 node3:8080 {
+    lb_policy round_robin
     transport http {
       dial_timeout 5s
       response_header_timeout 15s

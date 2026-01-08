@@ -12,23 +12,21 @@ use anyhow::Result;
 use dialoguer::{Input, Select, theme::ColorfulTheme};
 use owo_colors::OwoColorize;
 use pms_config::load_config;
-use pms_core::dag::Dag;
-use pms_core::{CoreAdapter, MAX_TIPS_CAP};
+use pms_core::{ConcurrentDag, CoreAdapter, MAX_TIPS_CAP};
 use pms_interface::NetDagAdapter;
 use pms_storage::DagStorage;
 use pms_storage::rocks_store::store::RocksStore;
 use pms_types_block::Block;
 use pms_utils::{compute_block_id, print_block_full, submit_block_http};
+use pms_wallet::signing_wire::canonical_wireblock_message;
 use pms_wallet::{SignerBackend, Wallet};
 use pms_wire::{WireBlock, WireMeta};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
-use pms_wallet::signing_wire::canonical_wireblock_message;
 
 /// Alias pratique
-pub type DagRef = Arc<Mutex<Dag>>;
-pub type StoreRef = Arc<dyn DagStorage>;
+pub type DagRef = Arc<ConcurrentDag>;
 
 pub struct CliState {
     pub wallets: Vec<Wallet>,
@@ -58,30 +56,36 @@ pub async fn run() -> Result<()> {
     let secondary_dir = format!("{}/cli-view", &settings.rocks.path);
 
     eprintln!("🔌 CLI -> RocksDB path='{}' ns='{}'", path, prefix);
-    // Pour lecture seule pendant que le nœud tourne :
-    let store = Arc::new(
-        RocksStore::open_secondary(
-            &settings.rocks.path,
-            &secondary_dir,
-            tip_limit,
-            &settings.rocks.prefix,
-        )
-        .await?,
-    );
 
-    // DAG
-    let dag = match Dag::bootstrap_from_store::<RocksStore>(&*store).await {
-        Ok(d) if !d.blocks.is_empty() => d,
-        _ => {
+    // Attempt to open DB (read-only)
+    let store_res = RocksStore::open_secondary(
+        &settings.rocks.path,
+        &secondary_dir,
+        tip_limit,
+        &settings.rocks.prefix,
+    )
+    .await;
+
+    let (store, dag, adapter) = match store_res {
+        Ok(s) => {
+            let store = Arc::new(s);
+            let dag_loaded = ConcurrentDag::bootstrap_from_store::<RocksStore>(&*store).await?;
+            let dag = Arc::new(dag_loaded);
+            let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+            (Some(store), Some(dag), Some(adapter))
+        }
+        Err(e) => {
             eprintln!(
-                "🟡 DB vide → création du genesis (mémoire, persist via submit/block côté nœud)."
+                "{}",
+                format!(
+                    "⚠️  Impossible d'ouvrir la DB: {}. Mode restreint actif.",
+                    e
+                )
+                .yellow()
             );
-            Dag::new_with_genesis(Block::genesis(compute_block_id))
+            (None, None, None)
         }
     };
-    let dag = Arc::new(Mutex::new(dag));
-
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
 
     // ---- Menu robuste (labels + enum) ----
     #[derive(Clone, Copy)]
@@ -105,45 +109,71 @@ pub async fn run() -> Result<()> {
         EncryptedHistory,
         WalletHistory,
         WalletBalance,
+        Keygen,
         Quit,
     }
 
-    let mut menu: Vec<(&'static str, Action)> = vec![
-        ("1. Statut DAG", Action::Status),
-        ("2. Lister les tips", Action::Tips),
-    ];
+    // Build Menu
+    let mut menu: Vec<(&'static str, Action)> = Vec::new();
 
-    if mode.is_non_prod() {
-        // dev/testnet uniquement
-        menu.push(("3. Miner & soumettre au nœud", Action::MineAndSubmit));
-        menu.push(("11. Créer un Mint (encrypté)", Action::MakeMint));
-        menu.push(("12. Créer une Transaction (encryptée)", Action::MakeTx));
-        menu.push(("4. Diffuser le dernier bloc", Action::BroadcastLast));
-        menu.push(("7. Wallet: créer", Action::WalletCreate));
-        menu.push(("8. Wallet: lister", Action::WalletList));
-        menu.push(("9. Wallet: sélectionner", Action::WalletSelect));
-        menu.push(("10. Wallet: courant", Action::WalletShow));
-        menu.push((
-            "13. Wallet: exporter mnemonic",
-            Action::WalletExportMnemonic,
-        ));
-        menu.push((
-            "14. Wallet: importer par mnemonic",
-            Action::WalletImportMnemonic,
-        ));
+    // Restricted / Keygen is always available
+    menu.push(("17. Générer clé Coordinateur", Action::Keygen));
+    menu.push(("0. Quitter", Action::Quit));
+
+    // Valid only if connected
+    if let (Some(_d), Some(_s)) = (&dag, &store) {
+        menu.insert(0, ("1. Statut DAG", Action::Status));
+        menu.insert(1, ("2. Lister les tips", Action::Tips));
+
+        if mode.is_non_prod() {
+            menu.push(("3. Miner & soumettre au nœud", Action::MineAndSubmit));
+            menu.push(("11. Créer un Mint (encrypté)", Action::MakeMint));
+            menu.push(("12. Créer une Transaction (encryptée)", Action::MakeTx));
+            menu.push(("4. Diffuser le dernier bloc", Action::BroadcastLast));
+            menu.push(("7. Wallet: créer", Action::WalletCreate));
+            menu.push(("8. Wallet: lister", Action::WalletList));
+            menu.push(("9. Wallet: sélectionner", Action::WalletSelect));
+            menu.push(("10. Wallet: courant", Action::WalletShow));
+            menu.push((
+                "13. Wallet: exporter mnemonic",
+                Action::WalletExportMnemonic,
+            ));
+            menu.push((
+                "14. Wallet: importer par mnemonic",
+                Action::WalletImportMnemonic,
+            ));
+        }
+
+        menu.extend_from_slice(&[
+            ("5. Lister tous les IDs", Action::ListIds),
+            ("6. Recharger le DAG", Action::ReloadDag),
+            ("3. Lister blocs 0..n", Action::ListRange),
+            ("7. Stream: derniers blocs", Action::StreamBlocks),
+            ("8. History chiffré (page)", Action::EncryptedHistory),
+            ("15. Wallet: historique (décrypté)", Action::WalletHistory),
+            ("16. Wallet: balance", Action::WalletBalance),
+        ]);
+    } else {
+        // Also allow Wallet creation offline? Yes.
+        menu.insert(0, ("7. Wallet: créer", Action::WalletCreate));
+        menu.insert(1, ("8. Wallet: lister", Action::WalletList));
+        menu.insert(2, ("9. Wallet: sélectionner", Action::WalletSelect));
+        menu.insert(3, ("10. Wallet: courant", Action::WalletShow));
+        menu.insert(
+            4,
+            (
+                "13. Wallet: exporter mnemonic",
+                Action::WalletExportMnemonic,
+            ),
+        );
+        menu.insert(
+            5,
+            (
+                "14. Wallet: importer par mnemonic",
+                Action::WalletImportMnemonic,
+            ),
+        );
     }
-
-    // commun (lecture seule)
-    menu.extend_from_slice(&[
-        ("5. Lister tous les IDs", Action::ListIds),
-        ("6. Recharger le DAG", Action::ReloadDag),
-        ("3. Lister blocs 0..n", Action::ListRange),
-        ("7. Stream: derniers blocs", Action::StreamBlocks),
-        ("8. History chiffré (page)", Action::EncryptedHistory),
-        ("15. Wallet: historique (décrypté)", Action::WalletHistory),
-        ("16. Wallet: balance", Action::WalletBalance),
-        ("0. Quitter", Action::Quit),
-    ]);
 
     let labels: Vec<&str> = menu.iter().map(|(label, _)| *label).collect();
 
@@ -185,19 +215,36 @@ pub async fn run() -> Result<()> {
         }
 
         match action {
-            Action::Status => run_unit!(action_status(&dag)),
-            Action::Tips => run_unit!(action_list_tips(&dag)),
-
-            Action::MineAndSubmit => {
-                if mode.is_prod() {
-                    eprintln!("{}", "⛔ Désactivé en production.".red().bold());
-                } else {
-                    // ta fonction existante (ne doit jamais paniquer).
-                    action_mine_block(&state, &dag, &store, &adapter).await;
+            Action::Status => {
+                if let Some(d) = &dag {
+                    run_unit!(action_status(d))
                 }
             }
-            Action::ListIds => run_unit!(action_list_ids(&store)),
-            Action::ReloadDag => run_unit!(action_reload_dag(&dag, &store)),
+            Action::Tips => {
+                if let Some(d) = &dag {
+                    run_unit!(action_list_tips(d))
+                }
+            }
+
+            Action::MineAndSubmit => {
+                if let (Some(d), Some(s), Some(a)) = (&dag, &store, &adapter) {
+                    if mode.is_prod() {
+                        eprintln!("{}", "⛔ Désactivé en production.".red().bold());
+                    } else {
+                        run_result!(action_mine_block(&state, d, s, a));
+                    }
+                }
+            }
+            Action::ListIds => {
+                if let Some(s) = &store {
+                    run_unit!(action_list_ids(s))
+                }
+            }
+            Action::ReloadDag => {
+                if let (Some(d), Some(s)) = (&dag, &store) {
+                    run_unit!(action_reload_dag(d, s))
+                }
+            }
             Action::WalletCreate => {
                 run_result!(action_create_wallet(&state, &settings.address.hrp))
             }
@@ -206,12 +253,20 @@ pub async fn run() -> Result<()> {
                 run_result!(action_select_wallet(&state, &settings.address.hrp))
             }
             Action::WalletShow => run_result!(action_show_current(&state, &settings.address.hrp)),
-            Action::MakeMint => run_result!(action_make_mint(&state, &dag, &store, &adapter)),
-            Action::MakeTx => run_result!(action_send_tokens(&state, &dag, &store)),
+            Action::MakeMint => {
+                if let (Some(d), Some(s), Some(a)) = (&dag, &store, &adapter) {
+                    run_result!(action_make_mint(&state, d, s, a))
+                }
+            }
+            Action::MakeTx => {
+                if let (Some(d), Some(s)) = (&dag, &store) {
+                    run_result!(action_send_tokens(&state, d, s))
+                }
+            }
 
             Action::ListRange => {
                 // paramètres interactifs
-                let start: usize = Input::with_theme(&ColorfulTheme::default())
+                let idx: usize = Input::with_theme(&ColorfulTheme::default())
                     .with_prompt("Offset (start)")
                     .default(0)
                     .interact_text()?;
@@ -219,20 +274,47 @@ pub async fn run() -> Result<()> {
                     .with_prompt("Combien de blocs")
                     .default(10)
                     .interact_text()?;
-                action_list_blocks(&dag, start, count).await;
+                if let Some(d) = &dag {
+                    action_list_blocks(d, idx, count).await;
+                }
             }
 
-            Action::StreamBlocks => run_result!(action_stream_blocks(&store)),
-            Action::EncryptedHistory => run_result!(action_encrypted_history(&store)),
-            Action::WalletHistory => run_result!(action_wallet_history(&state, &store)),
-            Action::WalletBalance => run_result!(action_wallet_balance(&state, &store)),
+            Action::StreamBlocks => {
+                if let Some(s) = &store {
+                    run_result!(action_stream_blocks(s))
+                }
+            }
+            Action::EncryptedHistory => {
+                if let Some(s) = &store {
+                    run_result!(action_encrypted_history(s))
+                }
+            }
+            Action::WalletHistory => {
+                if let Some(s) = &store {
+                    run_result!(action_wallet_history(&state, s))
+                }
+            }
+            Action::WalletBalance => {
+                if let Some(s) = &store {
+                    run_result!(action_wallet_balance(&state, s))
+                }
+            }
 
-            Action::BroadcastLast => {}
+            Action::BroadcastLast => {
+                if let (Some(d), Some(s), Some(a)) = (&dag, &store, &adapter) {
+                    run_unit!(action_broadcast_last_block(d, s, a))
+                }
+            }
             Action::WalletExportMnemonic => {
                 run_result!(action_wallet_export_mnemonic(&state, &settings.address.hrp))
             }
             Action::WalletImportMnemonic => {
                 run_result!(action_wallet_import_mnemonic(&state, &settings.address.hrp))
+            }
+
+            Action::Keygen => {
+                crate::keygen::run_keygen();
+                wait_enter();
             }
 
             Action::Quit => {
@@ -249,17 +331,16 @@ pub async fn run() -> Result<()> {
 
 // Action 1: Statut DAG (déjà OK)
 pub async fn action_status(dag: &DagRef) {
-    let d = dag.lock().await;
-    let tips = d.find_tips();
+    let tips = dag.find_tips();
     println!(
         "{}",
-        format!("Blocs: {} | Tips: {}", d.blocks.len(), tips.len()).green()
+        format!("Blocs: {} | Tips: {}", dag.len(), tips.len()).green()
     );
 }
 
 // Action 2: Lister tips (déjà OK)
 pub async fn action_list_tips(dag: &DagRef) {
-    let mut tips = dag.lock().await.find_tips();
+    let mut tips = dag.find_tips();
     tips.sort();
     println!("{}", format!("Tips ({}): {:?}", tips.len(), tips).cyan());
 }
@@ -294,12 +375,9 @@ pub async fn action_mine_block(
 
     // 2) Miner localement dans le DAG du CLI (sans persist)
     let mined = {
-        let mut d = dag.lock().await;
-        match d.add_payload_auto_parents_mined(
-            None,               // pas de payload pour ce test
-            difficulty,
-            compute_block_id,
-        ) {
+        // Mock payload? None for now.
+        // Difficulty passed to forge_block.
+        match dag.forge_block(None, difficulty, compute_block_id) {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("❌ Minage RAM: {e:#}");
@@ -325,6 +403,7 @@ pub async fn action_mine_block(
         protocol_version: meta.protocol_version as u16,
         signer_pk_hex: w.encoded_public_key(),
         signature_hex: String::new(),
+        metadata: None,
     };
 
     // 4) Message canonique + signature ECDSA via le wallet courant
@@ -360,13 +439,12 @@ pub async fn action_mine_block(
 // Action 4: Diffuser dernier bloc — ne jamais crash
 pub async fn action_broadcast_last_block(
     dag: &DagRef,
-    store: &Arc<StoreRef>,
+    store: &Arc<RocksStore>,
     adapter: &Arc<dyn NetDagAdapter>,
 ) {
-    // On essaye d'abord via les tips (plus “récent” logique), sinon dernier id du store trié.
+    // On essaye d'abord via les tips (plus "récent" logique), sinon dernier id du store trié.
     let last_id = {
-        let d = dag.lock().await;
-        let mut tips = d.find_tips();
+        let mut tips = dag.find_tips();
         tips.sort();
         tips.pop()
     };
@@ -402,6 +480,7 @@ pub async fn action_broadcast_last_block(
                     protocol_version: sb.protocol_version,
                     signer_pk_hex: sb.signer_pk_hex,
                     signature_hex: sb.signature_hex,
+                    metadata: sb.metadata.clone(),
                 };
                 if let Err(e) = adapter.broadcast_block(&wb).await {
                     eprintln!(
@@ -446,32 +525,32 @@ pub async fn action_list_ids(store: &Arc<RocksStore>) {
     }
 }
 
-// Action 6: Reload DAG — ne jamais crash
+// Action 6: Reload DAG
 pub async fn action_reload_dag<S>(dag: &DagRef, store: &Arc<S>)
 where
     S: DagStorage + Send + Sync + 'static,
 {
-    let new = Dag::bootstrap_from_store::<S>(&**store)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!(
-                "{} {}",
-                "⚠️  Store vide/invalide, recréation genesis:"
-                    .yellow()
-                    .bold(),
-                format!("{e:#}").bright_black()
-            );
-            Dag::new_with_genesis(Block::genesis(compute_block_id))
-        });
+    // Not strictly "reload" replacing the Arc, but we can clear and re-bootstrap if needed.
+    // For concurrent dag, replacing inplace is hard.
+    // We will just re-bootstrap a new temporary one to verify store,
+    // but updating the main 'dag' reference isn't possible as it is an Arc.
+    // So for now, we just print a warning.
+    eprintln!(
+        "{}",
+        "⚠️  Reload DAG inplace not supported with ConcurrentDag yet.".yellow()
+    );
 
-    *dag.lock().await = new;
-    println!("{}", "🔄 DAG rechargé depuis le store".green());
+    // Optional: could manually clear maps and re-insert.
+    // dag.blocks.clear(); dag.children_count.clear(); ...
+    // let new_dag = ConcurrentDag::bootstrap_from_store(...).await?;
+    // for r in new_dag.blocks { dag.insert_block(r.value().clone()); }
+
+    println!("{}", "🔄 (Reload skipped)".green());
 }
 
 pub async fn action_list_blocks(dag: &DagRef, start: usize, count: usize) {
-    let d = dag.lock().await;
-
-    let mut ids: Vec<String> = d.blocks.keys().cloned().collect();
+    // Iterate over DashMap keys
+    let mut ids: Vec<String> = dag.blocks.iter().map(|kv| kv.key().clone()).collect();
     ids.sort();
 
     if ids.is_empty() {
@@ -492,7 +571,8 @@ pub async fn action_list_blocks(dag: &DagRef, start: usize, count: usize) {
     );
 
     for id in &ids[start..end] {
-        if let Some(b) = d.blocks.get(id) {
+        if let Some(b) = dag.blocks.get(id) {
+            let b = b.value();
             println!(
                 "{}",
                 "---------------- BLOCK ----------------".bright_black()

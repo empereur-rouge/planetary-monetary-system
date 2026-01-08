@@ -1,43 +1,27 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use dialoguer::{Confirm, Input, Select};
+use crate::helpers::wait_enter;
+use crate::repl::{CliState, DagRef};
+use crate::utils::sync::sync_after_submit;
+use anyhow::Result;
+use dialoguer::Input;
 use dialoguer::theme::ColorfulTheme;
 use owo_colors::OwoColorize;
-use tokio::sync::Mutex;
-use pms_types::{EncryptedPayload, OutputId, PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput, Unlock};
-use crate::helpers::{wait_enter};
-use anyhow::{bail, Result};
-use rust_decimal::Decimal;
-use serde_json::json;
-use pms_config::{load_config, NetworkMode, Settings};
-use pms_core::{to_wire, Dag};
+use pms_config::{NetworkMode, load_config};
+use pms_core::{ConcurrentDag, to_wire};
 use pms_interface::NetDagAdapter;
 use pms_storage::DagStorage;
 use pms_storage::rocks_store::store::RocksStore;
+use pms_types::{
+    EncryptedPayload, OutputId, PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput,
+    Unlock,
+};
 use pms_types_block::Block;
-use pms_utils::{build_http_client, compute_block_id, submit_block_http};
-use pms_wallet::{decode_address, make_address, pick_admin_recipient, SignError, SignerBackend, Wallet};
+use pms_utils::{compute_block_id, submit_block_http};
 use pms_wallet::signing_wire::canonical_wireblock_message;
 use pms_wallet::utxo_store::{gather_wallet_utxos_dec, select_utxos_dec};
-use pms_wire::WireBlock;
-use crate::repl::{action_reload_dag, CliState, DagRef};
-use crate::utils::sync::sync_after_submit;
-
-#[derive(serde::Deserialize)]
-struct SubmitResp {
-    id: String,
-}
-
-/// Wrapper local pour le compute id
-fn compute_id_from_wb(wb: &WireBlock) -> String {
-    compute_block_id(
-        &wb.parents,
-        &wb.payload_json
-            .as_ref()
-            .and_then(|json| serde_json::from_str(json).ok()),
-        wb.nonce,
-    )
-}
+use pms_wallet::{SignerBackend, Wallet, decode_address, make_address};
+use rust_decimal::Decimal;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Forge un bloc (sans modifier le DAG) + affiche un log standardisé.
 /// `kind` sert juste au log ("Mint", "Tx", …).
@@ -53,25 +37,22 @@ pub async fn forge_block_with(
         NetworkMode::Mainnet => 2, // à ajuster
     };
 
-    let mut d = dag.lock().await;
-    let b = d.forge_block(payload, difficulty, |wb| compute_id_from_wb(wb));
+    let b = dag.forge_block(payload, difficulty, compute_block_id)?;
     Ok(b)
 }
 
-pub async fn reload_dag_after_submit(
-    dag: &Arc<Mutex<Dag>>,
-    store: &Arc<RocksStore>,
-) {
-    match Dag::bootstrap_from_store::<RocksStore>(&*store).await {
-        Ok(new_dag) => {
-            let mut d = dag.lock().await;
-            *d = new_dag;
-            println!("{}", "🔄 DAG rechargé depuis le store".bright_blue());
-        }
-        Err(e) => {
-            eprintln!("{} {}", "⚠️ Échec du rechargement DAG:".yellow(), e);
-        }
-    }
+pub async fn reload_dag_after_submit(dag: &Arc<ConcurrentDag>, store: &Arc<RocksStore>) {
+    // Reload logic for ConcurrentDag (skipped or clear-and-insert)
+    // For now we assume no-op or just log warning as in repl.rs
+    // To truely reload, we'd need to clear 'dag' and re-feed it.
+    // dag.blocks.clear(); ...
+    // let fresh = ConcurrentDag::bootstrap_from_store(store).await...
+    // But since 'dag' is Arc, we can't replace it easily in caller unless RwLock.
+    // We'll leave it as no-op/log for now.
+    println!(
+        "{}",
+        "⚠️  Reload DAG inplace not supported with ConcurrentDag yet.".yellow()
+    );
 }
 
 /// Forge un bloc avec un payload chiffré, signe le WireBlock avec le `wallet`,
@@ -83,10 +64,10 @@ pub async fn reload_dag_after_submit(
 /// - `dag`: DAG en RAM (Arc<Mutex<Dag>>), utilisé pour choisir les parents + forger le bloc.
 /// - `store`: RocksStore local (peut être secondaire).
 /// - `wallet`: wallet secp256k1 qui signe le bloc (signer_pk_hex + signature).
-/// - `payload`: payload déjà prêt (généralement `PayloadEnvelope::Encrypted(...)`).
+/// - `payload`: payload déjà prêt.
 /// - `label`: juste un tag lisible pour les logs ("Mint", "TxUtxo", etc.).
 /// - `network_id`, `protocol_version`: issus de ta config (settings.network.*).
-async fn submit_encrypted_block_from_cli(
+async fn submit_block_from_cli(
     dag: &DagRef,
     store: &Arc<RocksStore>,
     wallet: &Wallet,
@@ -112,7 +93,7 @@ async fn submit_encrypted_block_from_cli(
     let mut wb = to_wire(&forged);
 
     // 3) Injecte les métadonnées réseau (ce que le nœud attend pour filtrer).
-    wb.network_id       = network_id.to_string();
+    wb.network_id = network_id.to_string();
     wb.protocol_version = protocol_version;
 
     // 4) Clé publique du signataire (secp256k1, encodée en hex)
@@ -161,12 +142,11 @@ async fn submit_encrypted_block_from_cli(
     //     - toutes les nouvelles arêtes/enfants/finalités sont reflétées dans le CLI.
     reload_dag_after_submit(dag, store).await;
     {
-        let d = dag.lock().await;
-        let tips = d.find_tips();
+        let tips = dag.find_tips();
         println!(
             "[CLI][AFTER_RELOAD][{}] blocks_ram={}, tips_ram={:?}",
             label,
-            d.blocks.len(),
+            dag.len(),
             tips
         );
     }
@@ -209,9 +189,9 @@ pub async fn action_make_mint(
     };
 
     // 2) Config (HRP + réseau + admin)
-    let settings  = load_config()?;
-    let hrp       = settings.address.hrp.clone();
-    let admin_xpk = pick_admin_recipient(&settings.admin.wallet_addresses).await?;
+    let settings = load_config()?;
+    let hrp = settings.address.hrp.clone();
+    // let admin_xpk = pick_admin_recipient(&settings.admin.wallet_addresses).await?; // Unused since Mint is transparent
 
     // 3) Montant
     let amount: String = Input::with_theme(&ColorfulTheme::default())
@@ -219,28 +199,25 @@ pub async fn action_make_mint(
         .default("1000".into())
         .interact_text()?;
 
-    // 4) Payload Mint → chiffrage pour (moi + admin)
+    // 4) Payload Mint → TRANSPARENT (pas de chiffrement)
     let plain = PlainPayload::Mint {
         outputs: vec![TxOutput {
             address: w.get_address(&hrp),
             amount: amount.clone(),
         }],
     };
-    let recipients = vec![w.x25519_pub_hex.clone(), admin_xpk];
-    let enc = EncryptedPayload::encrypt_for_plain(&plain, &recipients)
-        .map_err(|e| anyhow::anyhow!(e))?;
 
-    // 5) Forge + sign + submit + reload via helper unifié
-    submit_encrypted_block_from_cli(
+    // Modification: on passe directement en Plain
+    submit_block_from_cli(
         dag,
         store,
         &w,
-        PayloadEnvelope::Encrypted(enc),
+        PayloadEnvelope::Plain(plain),
         "Mint",
         &settings.network.network_id,
         settings.network.protocol_version as u16,
     )
-        .await?;
+    .await?;
 
     wait_enter();
     Ok(())
@@ -287,10 +264,9 @@ pub async fn action_send_tokens(
         .interact_text()?;
 
     // 3) Parse montants
-    let want = Decimal::from_str_exact(&amount_str)
-        .map_err(|_| anyhow::anyhow!("Montant invalide"))?;
-    let fee = Decimal::from_str_exact(&fee_str)
-        .map_err(|_| anyhow::anyhow!("Frais invalides"))?;
+    let want =
+        Decimal::from_str_exact(&amount_str).map_err(|_| anyhow::anyhow!("Montant invalide"))?;
+    let fee = Decimal::from_str_exact(&fee_str).map_err(|_| anyhow::anyhow!("Frais invalides"))?;
 
     // 4) UTXO du wallet
     let utxos = gather_wallet_utxos_dec(&*store, &w_pub, &w_xpk, &w_xsk, &hrp, 5_000).await?;
@@ -355,7 +331,7 @@ pub async fn action_send_tokens(
         .map_err(|e| anyhow::anyhow!(e))?;
 
     // 9) Forge + sign + submit + reload via helper unifié
-    submit_encrypted_block_from_cli(
+    submit_block_from_cli(
         dag,
         store,
         &w,
@@ -364,7 +340,7 @@ pub async fn action_send_tokens(
         &settings.network.network_id,
         settings.network.protocol_version as u16,
     )
-        .await?;
+    .await?;
 
     println!(
         "{} {}",

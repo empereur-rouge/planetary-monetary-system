@@ -13,11 +13,12 @@ pub enum AmountError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Amount(
-    #[serde(with = "rust_decimal::serde::str")] pub Decimal
-);
+pub struct Amount(#[serde(with = "rust_decimal::serde::str")] pub Decimal);
 
 impl Amount {
+    /// Parse une chaîne en Amount, avec validation du nombre de décimales.
+    /// Voir chapitre 10.2 du Rust Book sur les traits pour comprendre pourquoi
+    /// on implémente Display plutôt que to_string() directement.
     pub fn parse(s: &str, max_decimals: u32) -> Result<Self, AmountError> {
         let d = s.parse::<Decimal>().map_err(|_| AmountError::Parse)?;
         if d.is_sign_negative() {
@@ -28,8 +29,14 @@ impl Amount {
         }
         Ok(Self(d))
     }
+}
 
-    pub fn to_string(&self) -> String {
-        self.0.normalize().to_string()
+/// Implémentation du trait Display pour Amount.
+/// Cela fournit automatiquement la méthode to_string() via le trait ToString
+/// qui est implémenté pour tout type implémentant Display.
+impl std::fmt::Display for Amount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // normalize() supprime les zéros trailing (ex: "1.00" -> "1")
+        write!(f, "{}", self.0.normalize())
     }
 }

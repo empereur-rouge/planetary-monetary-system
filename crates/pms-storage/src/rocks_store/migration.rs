@@ -1,6 +1,6 @@
-use anyhow::anyhow;
-use crate::{DagStorage, MigError, CURRENT_VER};
 use crate::rocks_store::store::RocksStore;
+use crate::{CURRENT_VER, DagStorage, MigError};
+use anyhow::anyhow;
 
 impl RocksStore {
     // --- helpers internes versionning ------------------------------------
@@ -57,10 +57,12 @@ impl RocksStore {
 
         // Avant: .map_err(MigError::Any)?
         // Après: closure qui convertit rocksdb::Error -> anyhow::Error -> MigError
-        self.db.put_cf(cf_idx, b"__init__", b"")
+        self.db
+            .put_cf(cf_idx, b"__init__", b"")
             .map_err(|e| MigError::Any(anyhow!(e)))?;
 
-        self.db.delete_cf(cf_idx, b"__init__")
+        self.db
+            .delete_cf(cf_idx, b"__init__")
             .map_err(|e| MigError::Any(anyhow!(e)))?;
 
         Ok(())

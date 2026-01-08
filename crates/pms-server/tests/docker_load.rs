@@ -66,9 +66,14 @@ async fn docker_load_test() -> Result<()> {
                 // Mining
                 // Use huge random space to avoid collision
                 let mut nonce: u64 = rand::random();
-                let mut block =
-                    Block::new(parents.as_ref().clone(), payload, nonce, compute_block_id)
-                        .expect("block creation");
+                let mut block = Block::new(
+                    parents.as_ref().clone(),
+                    payload,
+                    nonce,
+                    None,
+                    compute_block_id,
+                )
+                .expect("block creation");
 
                 loop {
                     if block.id.starts_with("0000") {
@@ -89,6 +94,7 @@ async fn docker_load_test() -> Result<()> {
                     protocol_version: 1,
                     signer_pk_hex: wallet.encoded_public_key(),
                     signature_hex: String::new(),
+                    metadata: None,
                 };
                 let msg = canonical_wireblock_message(&wb);
                 wb.signature_hex = wallet.sign(&msg).unwrap();

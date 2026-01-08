@@ -201,37 +201,57 @@ impl Wallet {
     pub fn load_from_node_key_file(path: &str) -> Result<Self> {
         let p = Path::new(path);
 
-        // 1) Lire les bytes du fichier
-        let data =
+        // 1) Lire le fichier (trim whitespace)
+        let raw_data =
             fs::read(p).map_err(|e| anyhow::anyhow!("read node key file {}: {e}", p.display()))?;
+        let content_str = String::from_utf8(raw_data.clone()).unwrap_or_default();
+        let trimmed = content_str.trim();
 
-        // 2) Décoder le contenu selon TON format
-        //
-        // Exemple A: tu stockes un JSON avec un champ `seed` (32 bytes)
-        // #[derive(serde::Deserialize)]
-        // struct NodeKeyFile { seed: [u8; 32] }
-        //
-        // let node_file: NodeKeyFile = serde_json::from_slice(&data)
-        //     .map_err(|e| anyhow::anyhow!("parse node key file JSON: {e}"))?;
-        // let wallet = Wallet::from_seed(&node_file.seed, None)
-        //     .map_err(|e| anyhow::anyhow!("Wallet::from_seed failed: {e}"))?;
-        //
-        // Exemple B: tu stockes directement la seed brute 32 octets:
-        if data.len() != 32 {
-            return Err(anyhow::anyhow!(
-                "node key file {} must be 32 bytes, got {}",
-                p.display(),
-                data.len()
-            ));
+        // CAS A: Clé Privée Hexadécimale (64 chars) - Format 'keygen'
+        // C'est ce qu'on attend pour le Coordinateur.
+        if trimmed.len() == 64 {
+            if let Ok(priv_bytes) = hex::decode(trimmed) {
+                // On a une clé privée brute.
+                // On reconstruit le wallet SANS dérivation BIP39.
+                // Note: On encode en Base64 car c'est le format interne de Wallet.
+                let priv_b64 = STANDARD.encode(&priv_bytes);
+
+                // Dérive la PubKey ECDSA
+                let signing_key = k256::ecdsa::SigningKey::from_slice(&priv_bytes)
+                    .map_err(|e| anyhow::anyhow!("Invalid ECDSA private key from file: {e}"))?;
+                let verify_key = signing_key.verifying_key();
+                let pub_hex = hex::encode(verify_key.to_sec1_bytes());
+
+                let mut w = Wallet {
+                    private_key_b64: priv_b64,
+                    public_key_hex: pub_hex,
+                    x25519_pub_hex: String::new(),
+                    mnemonic_words: None,
+                };
+
+                // Dérive X25519 (toujours utile pour le chifrrement)
+                if let Some((_, pk)) = w.derive_x25519_pair_from_private_key_b64() {
+                    w.x25519_pub_hex = pk;
+                }
+
+                return Ok(w);
+            }
         }
 
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(&data);
+        // CAS B: Seed Binaire (32 octets) - Format historique
+        if raw_data.len() == 32 {
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&raw_data);
+            let wallet = Wallet::from_seed(&seed, None)
+                .map_err(|e| anyhow::anyhow!("Wallet::from_seed failed: {e}"))?;
+            return Ok(wallet);
+        }
 
-        let wallet = Wallet::from_seed(&seed, None)
-            .map_err(|e| anyhow::anyhow!("Wallet::from_seed failed: {e}"))?;
-
-        Ok(wallet)
+        // CAS C: Erreur
+        Err(anyhow::anyhow!(
+            "Invalid key file format. Expected 64 hex chars (Private Key) or 32 raw bytes (Seed). Got size {}",
+            raw_data.len()
+        ))
     }
 
     pub fn x25519_pub_hex(&self) -> &str {

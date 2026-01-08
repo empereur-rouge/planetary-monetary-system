@@ -1,0 +1,141 @@
+# Changelog
+
+All notable changes to the PMS DAG will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+---
+
+## [0.3.0] - 2026-01-08
+
+### Added
+- **Mainnet Configuration**
+  - Network mode `mainnet` with `pms:main` prefix
+  - Strict TLS validation (`allow_insecure_tls = false`)
+  - Production-ready validation rules
+
+- **IOTA-style Genesis Bootstrap**
+  - Genesis can be used as supplementary parent during DAG bootstrap
+  - Maintains `min_parents = 2` while allowing network to start
+  - Automatic genesis parent injection in `/wallet/tx/send` API
+
+- **Security Enhancements**
+  - Renamed `PMS_ADMIN_TOKEN_DEV` → `PMS_ADMIN_TOKEN`
+  - Added CORS layer to API (permissive for SDK development)
+  - Fixed validation: removed incorrect `api_addr` HTTPS check (bind address ≠ URL)
+
+### Performance
+- **🚀 4028 TPS** (mainnet mode, Docker benchmark)
+  - 10 workers × 1000 tx = 10,000 transactions
+  - Duration: 2.48s
+  - 0 failures
+
+### Changed
+- Parent validation now considers available tips count
+- API automatically adds genesis as 2nd parent when < 2 tips available
+
+---
+
+## [Unreleased - Previous]
+
+### Added
+- **Phase 1: Parallel Benchmark** (IOTA-like optimization)
+  - 10 parallel workers with independent UTXO chains
+  - HTTP connection pooling (`pool_max_idle_per_host`)
+  - Detailed comments explaining ownership, async/await, and concurrency
+
+- **Phase 2: Server Optimizations**
+  - `parents_exist_in_store()` - validates parents against RocksDB instead of RAM
+  - Fixed race condition where tips selected from RocksDB were validated against RAM
+  - Removed redundant RAM-based parent check in `validate_block()`
+
+- **Phase 3: Lock-Free DAG (IOTA-like architecture)**
+  - Added `dashmap = "6.1"` dependency for concurrent HashMap
+  - Created `ConcurrentDag` module with `DashMap<BlockId, Block>` for lock-free storage
+  - Added `DashSet` for concurrent spent outpoint tracking
+  - Bypassed locked `validate_block()` that was causing 27-280ms latency per block
+  - Parents validated via `parents_exist_in_store()` (lock-free)
+  - Double-spend checked via `ShardedUtxoSet` (lock-free)
+
+### Performance
+- **🚀 Phase 3 Result: 2437 TPS** (50x improvement!)
+  - Before: 48 TPS (DAG lock contention)
+  - After: 2437 TPS (lock-free)
+  - Duration for 10k tx: 220s → **4.1s**
+  - DAG insert time: 20ms → **2-3µs**
+
+### Planned
+- Phase 4: Background persistence (RocksDB writes async)
+- Phase 5: P2P gossip optimization
+
+---
+
+## [0.2.0] - 2025-12-31
+
+### Added
+- **Benchmark infrastructure**
+  - `docker-compose.bench.yml` for single-node benchmark
+  - `docker_bench_single.rs` test (10,000 tx stress test)
+  - `benchmark_local.sh` script with `--docker` mode
+  - Tracing instrumentation (`pms_bench` target) in `server.rs`
+
+### Performance
+- Baseline TPS: **22.35 tx/sec** (single node, 1 tx/bloc with PoW `0000`)
+
+---
+
+## [0.1.0] - 2025-12-27
+
+### Added
+- **Core DAG**
+  - Block structure with parents, payload, nonce, signature
+  - UTXO ledger with atomic updates
+  - Tips selection algorithm
+  - Orphan block handling with parent dependency tracking
+
+- **P2P Network**
+  - TLS mutual authentication
+  - Gossip protocol for block propagation
+  - `GetTips`, `GetBlock`, `Inv`, `Blocks` messages
+  - Rate limiting and anti-flood protection
+  - Parallel parent fetching for orphans
+
+- **Storage**
+  - RocksDB persistence with column families
+  - Background maintenance (flush, compaction)
+  - Crash recovery support
+
+- **API**
+  - REST endpoints: `/submit/block`, `/wallet/tx/send`, `/wallet/balance`
+  - Health checks: `/live`, `/ready`, `/healthz`
+  - Metrics endpoint: `/metrics`
+  - Admin routes with token authentication
+
+- **Wallet**
+  - Ed25519 + X25519 keypair generation
+  - Bech32 address encoding
+  - Transaction signing
+  - UTXO scanning and balance calculation
+
+- **Security**
+  - Payload encryption (X25519 + ChaCha20-Poly1305)
+  - Block signature verification
+  - IP-based rate limiting
+  - Proof-of-Work validation
+
+### Infrastructure
+- Docker multi-node setup (3 nodes + Caddy)
+- TLS certificate generation scripts
+- Configuration management (TOML)
+
+---
+
+## Version History
+
+| Version | Date | Highlights |
+|---------|------|------------|
+| 0.2.0 | 2025-12-31 | Benchmark infrastructure |
+| 0.1.0 | 2025-12-27 | Initial DAG implementation |

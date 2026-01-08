@@ -18,7 +18,13 @@ members = [
     "crates/pms-crypto",
     "crates/tools-cli",
     "crates/pms-config",
-    "crates/pms-testkit", "crates/pms-types-dag", "crates/pms-errors", "crates/pms-ledger",
+    "crates/pms-testkit",
+    "crates/pms-types-dag",
+    "crates/pms-errors",
+    "crates/pms-ledger",
+    "crates/pms-consensus",
+    "crates/pms-event",
+    "crates/pms-types-nft",
 ]
 
 resolver = "2"

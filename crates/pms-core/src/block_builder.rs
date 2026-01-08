@@ -44,14 +44,16 @@ where
 
     /// Mine le nonce et retourne (nonce, id).
     pub fn mine(&self) -> (u64, BlockId) {
-        use rand::{rng, Rng};
+        use rand::{Rng, rng};
         let mut parents = self.parents.clone();
         if self.canonicalize_parents {
             parents.sort();
         }
 
         let ok_pow = |hex_id: &str, diff: u8| -> bool {
-            if diff == 0 { return true; }
+            if diff == 0 {
+                return true;
+            }
             let zeros_nibbles = hex_id.chars().take_while(|&c| c == '0').count() as u8;
             zeros_nibbles * 4 >= diff
         };
@@ -93,6 +95,14 @@ where
             parents.sort();
         }
 
-        Block { id, parents, payload, nonce }
+        Block {
+            id,
+            parents,
+            payload,
+            nonce,
+            metadata: None,
+            signer_pk: None,
+            signature: None,
+        }
     }
 }

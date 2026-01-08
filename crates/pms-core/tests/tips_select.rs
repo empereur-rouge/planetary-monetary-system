@@ -122,6 +122,9 @@ fn mk_dag_with_seed(seed: Option<&str>, finalized: &[&str]) -> Dag {
             parents: vec![genesis_id.clone()],
             payload: None,
             nonce: 0,
+            metadata: None,
+            signer_pk: None,
+            signature: None,
         };
         dag.blocks.insert(id.to_string(), b);
         *dag.children.entry(genesis_id.clone()).or_default() += 1;

@@ -1,12 +1,11 @@
 use std::sync::Arc;
 // utils/spawn_node_rocks.rs
 use anyhow::Result;
-use pms_config::{Network, NetworkMode, ServerConfig, load_config};
-use pms_core::{CoreAdapter, Dag, ValidatePolicy};
+use pms_config::{ServerConfig, load_config};
+use pms_core::{ConcurrentDag, CoreAdapter, ValidatePolicy};
 use pms_interface::NetDagAdapter;
 use pms_server::Server;
 use pms_storage::DagStorage;
-use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 // adapte les imports à ton projet
 use pms_storage::rocks_store::store::RocksStore;
@@ -18,6 +17,8 @@ use pms_wallet::{SignerBackend, Wallet};
 /// - `prefix`: namespace logique (ex: "pms:test:A")
 /// - `bind_addr`: ex "127.0.0.1:7401" (p2p)
 /// - `api_addr`:  ex "127.0.0.1:7401" (HTTP, si nécessaire dans ton Server)
+/// - `node_seed`: optional seed for unique node identity (default: [1u8; 32])
+/// - `forced_genesis`: optional genesis block to inject
 ///
 /// Retourne: (store, dag_ref, adapter, server, join_handle)
 pub async fn spawn_node_generic_rocks(
@@ -29,7 +30,36 @@ pub async fn spawn_node_generic_rocks(
     forced_genesis: Option<&Block>,
 ) -> Result<(
     Arc<RocksStore>,
-    Arc<Mutex<Dag>>,
+    Arc<ConcurrentDag>,
+    Arc<dyn NetDagAdapter>,
+    Arc<Server>,
+    JoinHandle<Result<()>>,
+)> {
+    // Delegate to the new function with default seed
+    spawn_node_generic_rocks_with_seed(
+        db_path,
+        prefix,
+        bind_addr,
+        api_addr,
+        tip_limit,
+        forced_genesis,
+        None,
+    )
+    .await
+}
+
+/// Same as spawn_node_generic_rocks but with custom wallet seed for unique node_id
+pub async fn spawn_node_generic_rocks_with_seed(
+    db_path: &str,
+    prefix: &str,
+    bind_addr: &str,
+    api_addr: &str,
+    tip_limit: usize,
+    forced_genesis: Option<&Block>,
+    node_seed: Option<[u8; 32]>,
+) -> Result<(
+    Arc<RocksStore>,
+    Arc<ConcurrentDag>,
     Arc<dyn NetDagAdapter>,
     Arc<Server>,
     JoinHandle<Result<()>>,
@@ -40,8 +70,10 @@ pub async fn spawn_node_generic_rocks(
 
     let mut net_id = settings.network.network_id.clone();
     let mut proto = settings.network.protocol_version;
-    let node_wallet =
-        Wallet::from_seed(&[1u8; 32], None).expect("wallet de test ne doit pas échouer");
+
+    // Use provided seed or default [1u8; 32]
+    let seed = node_seed.unwrap_or([1u8; 32]);
+    let node_wallet = Wallet::from_seed(&seed, None).expect("wallet de test ne doit pas échouer");
     let node_wallet = Arc::new(node_wallet);
     if net_id.is_empty() {
         net_id = "pms-dev".into();
@@ -72,8 +104,7 @@ pub async fn spawn_node_generic_rocks(
     }
 
     // 2) DAG depuis le store (qui contient maintenant un genesis valide)
-    let dag_loaded = Dag::bootstrap_from_store::<RocksStore>(&*store).await?;
-    let dag: Arc<Mutex<Dag>> = Arc::new(Mutex::new(dag_loaded));
+    let dag = Arc::new(ConcurrentDag::bootstrap_from_store::<RocksStore>(&*store).await?);
 
     // 3) Adapter + serveur
     let mut policy = ValidatePolicy::from_global_config();
@@ -96,6 +127,7 @@ pub async fn spawn_node_generic_rocks(
         auth: pms_config::Auth {
             require_signed_submit: false,
             admin_api_token: None,
+            allowed_ips: vec![], // Tests: allow all IPs
         },
     });
 

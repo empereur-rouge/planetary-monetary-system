@@ -16,10 +16,10 @@ pms-utils = { path = "../crates/pms-utils" }
 pms-config = { path = "../crates/pms-config" }
 pms-wire = { path = "../crates/pms-wire" }
 pms-wallet = { path = "../crates/pms-wallet" }
-tokio = "1.47.1" # + "tls" si tu veux
+tokio = "1.47.1"
 owo-colors = "4"
 tracing-log = "0.2.0"
 dotenvy = "0.15"
 rustls-pemfile = "2.2.0"
-rustls = { workspace = true }       # même si tu n'importes rien de rustls
+rustls = { workspace = true }                                               # même si tu n'importes rien de rustls
 clap = { version = "4.5.51", features = ["derive"] }

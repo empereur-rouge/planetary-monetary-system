@@ -1,0 +1,72 @@
+# Configuration pour les tests Docker (Testnet mode - Coordinator-only minting)
+# Cette config est utilisée par docker_stress_sync.rs
+
+[rocks]
+path = "/home/pms/data/rocks"
+prefix = "pms:test"
+tip_limit = 256
+
+[network]
+mode = "testnet"        # TESTNET MODE - Coordinator check enabled
+network_id = "pms-test"
+protocol_version = 1
+
+[address]
+hrp = "8e"
+
+[admin]
+wallet_addresses = [
+    "8e1eqy642zaz5dsyzc3cf54ul642r9259kre2d40m3mp7q8h4fq4333yw0hjkw02e4lljjm4em8hqjc67p3m4esvq774n",
+]
+
+[client]
+bind_addr = "0.0.0.0:8443"
+api_addr = "0.0.0.0:8080"
+allow_insecure_tls = true
+
+[p2p]
+known_peers = ""
+
+[tls]
+cert_pem = "/home/pms/tls/cert.pem"
+key_pem = "/home/pms/tls/key.pem"
+ca_pem = "/home/pms/tls/ca-cert.pem"
+whitelist_fp256 = []
+
+[limits]
+max_body_bytes = 262144
+request_timeout_ms = 4000
+rate_limit_rps = 5000
+burst = 5000
+
+[fees]
+epsilon = "0.001"
+scan_limit = 2000
+mode = "uniform"
+enforce_fee_recipient = false # Désactivé pour les tests
+
+[auth]
+require_signed_submit = true
+admin_api_token = "env:PMS_ADMIN_TOKEN_DEV"
+
+[secrets]
+node_identity_key_path = "/home/pms/config/node-identity.key"
+admin_wallet_file = "/home/pms/config/admin-wallet.json"
+
+[validation]
+min_pow_leading_zero_bits = 0    # Désactivé pour les tests (performance)
+max_payload_bytes = 65536
+min_parents_after_boot = 1       # Réduit pour les tests
+max_parents = 8
+require_unique_parents = true
+forbid_self_parent = true
+max_inputs = 64
+max_outputs = 64
+max_tx_bytes = 65536
+max_fee_per_tx = 1000
+enforce_parent_existence = false # Désactivé pour les tests
+enforce_fee_recipient = false    # Désactivé pour les tests
+
+# COORDINATOR PUBLIC KEY - Dérivée de node1.key
+# Seul Node 1 peut minter car il a la clé privée correspondante
+coordinator_public_key = "03a1829d324538dee1265c879b720e42e15d19a4dbf464f0943a03b5d29aad02ff"

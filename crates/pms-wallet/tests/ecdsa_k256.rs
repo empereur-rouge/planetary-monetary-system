@@ -1,4 +1,3 @@
-
 use pms_wallet::{SignError, SignerBackend, VerifyError, Wallet};
 
 #[test]
@@ -71,7 +70,6 @@ fn test_from_mnemonic_sign_verify() {
 
     // Restaure un nouveau wallet depuis cette liste
     let recovered = Wallet::from_word_list(&word_refs).expect("restore from word list");
-
 
     // Vérifie que les clés sont identiques
     assert_eq!(wallet.public_key_hex, recovered.public_key_hex);

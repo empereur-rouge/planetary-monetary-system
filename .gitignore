@@ -28,5 +28,28 @@ wallet-seed-*.json
 # Configuration spécifique (à adapter si besoin)
 etc/pms/admin-wallet.json
 etc/pms/node-identity.key
+etc/pms/node*.key
+
 # On ignore les fichiers de config locaux pour ne pas écraser la prod
 etc/config/config.dev.toml
+benchmark_results/
+
+# Test data (large files)
+big.json
+*.bak
+
+# Docker data (persistent volumes)
+docker_data/
+
+# Node_modules
+**/node_modules/
+
+# Environment files
+.env
+.env.*
+.env.production
+!.env.example
+
+# Production configs with secrets
+Caddyfile.prod
+docker-compose.prod.yml

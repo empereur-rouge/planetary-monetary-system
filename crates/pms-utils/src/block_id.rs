@@ -1,7 +1,7 @@
 use pms_types::{BlockId, EncryptedPayload, PayloadEnvelope, PlainPayload};
+use pms_wire::WireBlock;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use pms_wire::WireBlock;
 
 #[derive(Serialize)]
 struct EnvelopeHeader {
@@ -41,6 +41,8 @@ pub fn compute_block_id(
                 PlainPayload::Mint { .. } => "Mint",
                 PlainPayload::TxUtxo(_) => "Transaction",
                 PlainPayload::Milestone { .. } => "Milestone",
+                PlainPayload::Nft(_) => "Nft",
+                PlainPayload::ConfigUpdate(_) => "ConfigUpdate",
             }
             .to_string();
 
@@ -103,9 +105,10 @@ pub fn compute_block_id_sorted(
 }
 
 pub fn compute_id_adapter(wb: &WireBlock) -> String {
-    let payload = wb.payload_json
+    let payload = wb
+        .payload_json
         .as_ref()
-        .and_then(|s| serde_json::from_str(&s).ok());
+        .and_then(|s| serde_json::from_str(s).ok());
 
     compute_block_id(&wb.parents, &payload, wb.nonce)
 }

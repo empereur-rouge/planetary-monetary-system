@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use anyhow::Result;
-use pms_storage::{StoredBlock};
+use async_trait::async_trait;
+use pms_storage::StoredBlock;
 
 #[async_trait]
 pub trait DagAdapter: Send + Sync + 'static {

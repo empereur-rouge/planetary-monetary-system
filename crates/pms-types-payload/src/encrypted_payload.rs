@@ -1,3 +1,4 @@
+use crate::PlainPayload;
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::Engine;
@@ -8,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
-use crate::PlainPayload;
 
 pub const SCHEME_AES256GCM: &str = "x25519+aes256gcm";
 pub const KEY_VERSION_CURRENT: u32 = 1;
@@ -26,16 +26,16 @@ pub struct EncryptedPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AAD {
-    pub len_hint: u32,        // taille (ou padding) pour heuristiques
+    pub len_hint: u32, // taille (ou padding) pour heuristiques
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeyWrap {
     // ⚠️ plus de recipient_pub : identifiant opaque
-    pub kid: String,              // 16 bytes dérivés du shared, hex
-    pub ephem_pub: String,        // pk éphémère (hex)
-    pub wrapped_key_b64: String,  // DEK chiffrée via KEK(shared)
-    pub kw_nonce_b64: String,     // nonce GCM du wrap
+    pub kid: String,             // 16 bytes dérivés du shared, hex
+    pub ephem_pub: String,       // pk éphémère (hex)
+    pub wrapped_key_b64: String, // DEK chiffrée via KEK(shared)
+    pub kw_nonce_b64: String,    // nonce GCM du wrap
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -79,9 +79,7 @@ impl EncryptedPayload {
         rng.fill_bytes(&mut nonce);
 
         // 2) Chiffre le payload
-        let aad_struct = AAD {
-            len_hint,
-        };
+        let aad_struct = AAD { len_hint };
         let aad_bytes = serde_json::to_vec(&aad_struct).map_err(|e| e.to_string())?;
         let cipher = Aes256Gcm::new_from_slice(&dek).map_err(|e| e.to_string())?;
         let ct = cipher
@@ -116,21 +114,28 @@ impl EncryptedPayload {
 
             // KEK pour enrober la DEK
             let mut kek = [0u8; 32];
-            hk.expand(b"kek-v1", &mut kek).map_err(|_| "hkdf expand kek")?;
+            hk.expand(b"kek-v1", &mut kek)
+                .map_err(|_| "hkdf expand kek")?;
 
             // NEW: kid (opaque, 16 bytes)
             let mut kid16 = [0u8; 16];
-            hk.expand(b"kid-v1", &mut kid16).map_err(|_| "hkdf expand kid")?;
+            hk.expand(b"kid-v1", &mut kid16)
+                .map_err(|_| "hkdf expand kid")?;
             let kid = hex::encode(kid16);
 
             // Wrap DEK avec AAD = kid (pas la pubkey)
             let mut kw_nonce = [0u8; 12];
             rng.fill_bytes(&mut kw_nonce);
             let kw_cipher = Aes256Gcm::new_from_slice(&kek).map_err(|e| e.to_string())?;
-            let wrapped = kw_cipher.encrypt(
-                Nonce::from_slice(&kw_nonce),
-                Payload { msg: &dek, aad: kid.as_bytes() },
-            ).map_err(|e| format!("wrap enc: {e}"))?;
+            let wrapped = kw_cipher
+                .encrypt(
+                    Nonce::from_slice(&kw_nonce),
+                    Payload {
+                        msg: &dek,
+                        aad: kid.as_bytes(),
+                    },
+                )
+                .map_err(|e| format!("wrap enc: {e}"))?;
 
             recipients.push(KeyWrap {
                 kid,
@@ -183,22 +188,30 @@ impl EncryptedPayload {
             // HKDF pour KEK + kid attendu
             let hk = Hkdf::<Sha256>::new(Some(b"pms-dek-wrap"), shared.as_bytes());
             let mut kek = [0u8; 32];
-            hk.expand(b"kek-v1", &mut kek).map_err(|_| "hkdf expand kek")?;
+            hk.expand(b"kek-v1", &mut kek)
+                .map_err(|_| "hkdf expand kek")?;
 
             let mut kid16 = [0u8; 16];
-            hk.expand(b"kid-v1", &mut kid16).map_err(|_| "hkdf expand kid")?;
+            hk.expand(b"kid-v1", &mut kid16)
+                .map_err(|_| "hkdf expand kid")?;
             let expect_kid = hex::encode(kid16);
 
             // si le kid ne matche pas, continue
-            if expect_kid != w.kid { kek.zeroize(); continue; }
+            if expect_kid != w.kid {
+                kek.zeroize();
+                continue;
+            }
 
             let kw_nonce = b64dec(&w.kw_nonce_b64)?;
-            let wrapped  = b64dec(&w.wrapped_key_b64)?;
+            let wrapped = b64dec(&w.wrapped_key_b64)?;
             let kw_cipher = Aes256Gcm::new_from_slice(&kek).map_err(|e| e.to_string())?;
 
             if let Ok(d) = kw_cipher.decrypt(
                 Nonce::from_slice(&kw_nonce),
-                Payload { msg: &wrapped, aad: w.kid.as_bytes() },
+                Payload {
+                    msg: &wrapped,
+                    aad: w.kid.as_bytes(),
+                },
             ) {
                 dek = Some(d);
                 kek.zeroize();
@@ -243,10 +256,7 @@ impl EncryptedPayload {
     }
 
     /// Déchiffre et retourne directement un `PlainPayload`.
-    pub fn decrypt_plain_with(
-        &self,
-        recipient_sk_hex: &str,
-    ) -> Result<PlainPayload, String> {
+    pub fn decrypt_plain_with(&self, recipient_sk_hex: &str) -> Result<PlainPayload, String> {
         let pt = self.decrypt_with(recipient_sk_hex)?;
         serde_json::from_slice(&pt).map_err(|e| e.to_string())
     }
@@ -254,8 +264,8 @@ impl EncryptedPayload {
     // Déchiffre et désérialise directement en `PlainPayload`.
     pub fn decrypt_as_payload(&self, recipient_sk_hex: &str) -> Result<PlainPayload, String> {
         let pt = self.decrypt_with(recipient_sk_hex)?;
-        let payload: PlainPayload = serde_json::from_slice(&pt)
-            .map_err(|e| format!("serde decode: {e}"))?;
+        let payload: PlainPayload =
+            serde_json::from_slice(&pt).map_err(|e| format!("serde decode: {e}"))?;
         Ok(payload)
     }
 }

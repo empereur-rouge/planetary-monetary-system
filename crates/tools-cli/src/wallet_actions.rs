@@ -1,23 +1,21 @@
-use std::sync::Arc;
-use dialoguer::{Input, Select};
-use dialoguer::theme::ColorfulTheme;
-use owo_colors::OwoColorize;
-use qrcode::QrCode;
-use qrcode::render::unicode;
-use tokio::sync::Mutex;
-use pms_wallet::{SignerBackend, Wallet};
 use crate::helpers::wait_enter;
 use crate::repl::CliState;
 use anyhow::Result;
-use pms_config::{load_config};
+use dialoguer::theme::ColorfulTheme;
+use dialoguer::{Input, Select};
+use owo_colors::OwoColorize;
+use pms_config::load_config;
 use pms_storage::rocks_store::store::RocksStore;
+use pms_wallet::{SignerBackend, Wallet};
+use qrcode::QrCode;
+use qrcode::render::unicode;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub fn print_qr(addr: &str) {
     match QrCode::new(addr.as_bytes()) {
         Ok(code) => {
-            let img = code.render::<unicode::Dense1x2>()
-                .quiet_zone(false)
-                .build();
+            let img = code.render::<unicode::Dense1x2>().quiet_zone(false).build();
             println!("\n{}", "QR code:".bright_blue().bold());
             println!("{img}");
         }
@@ -35,7 +33,9 @@ pub async fn action_create_wallet(state: &Arc<Mutex<CliState>>, hrp: &str) -> Re
     let w = Wallet::generate();
     {
         let mut st = state.lock().await;
-        if st.current.is_none() { st.current = Some(0); }
+        if st.current.is_none() {
+            st.current = Some(0);
+        }
         st.wallets.push(w);
     }
 
@@ -48,9 +48,14 @@ pub async fn action_create_wallet(state: &Arc<Mutex<CliState>>, hrp: &str) -> Re
 
     println!("{}", "✅ Wallet généré".green().bold());
     println!("Adresse    : {}", addr.cyan());
-    println!("Fingerprint: {}", addr.chars().take(14).collect::<String>().bright_black());
+    println!(
+        "Fingerprint: {}",
+        addr.chars().take(14).collect::<String>().bright_black()
+    );
     println!("Public     : {}", pubhex.yellow());
-    if !name.is_empty() { println!("Alias      : {}", name); }
+    if !name.is_empty() {
+        println!("Alias      : {}", name);
+    }
 
     // QR code ASCII
     print_qr(&addr);
@@ -86,7 +91,8 @@ pub async fn action_select_wallet(state: &Arc<Mutex<CliState>>, hrp: &str) -> an
             println!("{}", "Aucun wallet à sélectionner".red());
             return Ok(());
         }
-        items = st.wallets
+        items = st
+            .wallets
             .iter()
             .enumerate()
             .map(|(i, w)| format!("{}. {}", i, w.get_address(hrp)))
@@ -102,7 +108,10 @@ pub async fn action_select_wallet(state: &Arc<Mutex<CliState>>, hrp: &str) -> an
     {
         let mut st = state.lock().await;
         st.current = Some(idx);
-        println!("✅ Wallet courant: {}", st.wallets[idx].encoded_public_key().green());
+        println!(
+            "✅ Wallet courant: {}",
+            st.wallets[idx].encoded_public_key().green()
+        );
     }
     Ok(())
 }
@@ -123,7 +132,10 @@ pub async fn action_show_current(state: &Arc<Mutex<CliState>>, hrp: &str) -> any
 
     println!("{}", "Wallet courant".bright_blue().bold());
     println!("Adresse    : {}", addr.cyan());
-    println!("Fingerprint: {}", addr.chars().take(14).collect::<String>().bright_black());
+    println!(
+        "Fingerprint: {}",
+        addr.chars().take(14).collect::<String>().bright_black()
+    );
     println!("Public     : {}", pubhex.yellow());
 
     // QR code ASCII
@@ -139,14 +151,19 @@ pub async fn action_wallet_balance(
 ) -> Result<()> {
     let (wallet, hrp) = {
         let st = state.lock().await;
-        let w = st.current_wallet()
+        let w = st
+            .current_wallet()
             .ok_or_else(|| anyhow::anyhow!("Aucun wallet sélectionné"))?;
         let settings = load_config()?;
         (w.clone(), settings.address.hrp.clone())
     };
 
     let bal = wallet.balance(store, &hrp, 1000).await?;
-    println!("💰 Balance du wallet {} = {} tokens", wallet.short_address(&hrp), bal);
+    println!(
+        "💰 Balance du wallet {} = {} tokens",
+        wallet.short_address(&hrp),
+        bal
+    );
 
     wait_enter();
     Ok(())

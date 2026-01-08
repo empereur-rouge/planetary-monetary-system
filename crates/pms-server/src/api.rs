@@ -2,12 +2,17 @@
 use crate::Server;
 use crate::admin::{admin_compact, admin_ping};
 pub use crate::api_fn::blocks::submit_block;
+use crate::api_fn::dag::get_tips;
+use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
+use crate::api_fn::nft::get_nft;
 use crate::api_fn::stream_blocks::stream_blocks;
+use crate::api_fn::supply::get_circulating_supply;
 use crate::api_fn::transaction::wallet_send_tx;
+use crate::api_fn::wallet::wallet_balance;
 use crate::helper::resolve_admin_token;
 use crate::stats::Stats;
 use crate::tls::load_tls;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -21,7 +26,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use pms_config::{ServerConfig, Settings, load_config};
 use pms_storage::rocks_store::store::RocksStore;
 use pms_wallet::Wallet;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{
     Arc,
@@ -29,11 +34,15 @@ use std::sync::{
 };
 use std::time::Duration;
 use tokio::time::sleep;
-use tower::ServiceBuilder;
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
-use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    limit::RequestBodyLimitLayer,
+    timeout::TimeoutLayer,
+    trace::TraceLayer,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -43,12 +52,21 @@ pub struct AppState {
     pub stats: Arc<Stats>,
     pub store: Arc<RocksStore>,
     /// Token admin déjà résolu (valeur réelle, pas "env:XXX").
-    /// None = pas d’API admin active.
+    /// None = pas d'API admin active.
     pub admin_token: Option<String>,
     pub node_wallet: Arc<Wallet>,
+    /// Settings for API handlers (fees, admin addresses, etc.)
+    pub settings: Arc<Settings>,
+    /// Parsed IP networks for admin access (from allowed_ips config)
+    /// Empty = allow all with token, non-empty = whitelist mode
+    pub allowed_networks: Vec<ipnetwork::IpNetwork>,
 }
 
-/// Middleware to check if request is local (127.0.0.1) or has valid Admin Token
+/// Middleware to check if request is allowed for admin routes.
+/// Logic:
+/// 1. Allow localhost always
+/// 2. If allowed_ips is configured (non-empty), check IP is in whitelist
+/// 3. Require valid admin token
 async fn require_local_or_admin(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -56,12 +74,26 @@ async fn require_local_or_admin(
     request: axum::extract::Request,
     next: Next,
 ) -> impl IntoResponse {
-    // 1. Allow Localhost
-    if addr.ip().is_loopback() {
+    let client_ip = addr.ip();
+
+    // 1. Always allow localhost
+    if client_ip.is_loopback() {
         return next.run(request).await;
     }
 
-    // 2. Allow Admin Token
+    // 2. Check IP allowlist (if configured)
+    if !state.allowed_networks.is_empty() {
+        let ip_allowed = state
+            .allowed_networks
+            .iter()
+            .any(|net| net.contains(client_ip));
+        if !ip_allowed {
+            tracing::warn!("Admin access denied: IP {} not in allowlist", client_ip);
+            return (StatusCode::FORBIDDEN, "IP not allowed").into_response();
+        }
+    }
+
+    // 3. Require valid Admin Token
     if let Some(token) = &state.admin_token {
         if let Some(auth_header) = headers.get("Authorization") {
             if let Ok(auth_str) = auth_header.to_str() {
@@ -97,7 +129,6 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     // Endpoint: /healthz (Check DB + Ready)
     let healthz = {
         let r = state._ready.clone();
-        let s = state.store.clone();
         Router::new().route(
             "/healthz",
             get(move || async move {
@@ -147,9 +178,24 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     let submit = Router::new().route("/submit/block", post(submit_block));
     // TODO: enforce signature logic inside submit_block if not already present
 
-    let wallet = Router::new().route("/wallet/tx/send", post(wallet_send_tx));
+    let wallet = Router::new()
+        .route("/wallet/tx/send", post(wallet_send_tx))
+        .route("/wallet/balance", post(wallet_balance))
+        .route("/wallet/history", post(get_wallet_history));
 
     let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
+
+    let supply = Router::new().route("/v1/supply", get(get_circulating_supply));
+
+    let history = Router::new()
+        .route("/v1/history/encrypted", get(get_encrypted_history))
+        .route("/v1/history/plain", get(get_plain_history));
+
+    let dag_routes = Router::new().route("/v1/dag/tips", post(get_tips));
+
+    // Endpoint: /v1/nft/:token_id (Query NFT ownership)
+    // NOTE: Axum 0.7+ utilise {param} au lieu de :param pour les captures de route
+    let nft_routes = Router::new().route("/v1/nft/{token_id}", get(get_nft));
 
     let debug = Router::new().route("/debug/slow", get(debug_slow));
 
@@ -164,6 +210,10 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .merge(submit)
         .merge(wallet)
         .merge(blocks)
+        .merge(supply)
+        .merge(history)
+        .merge(dag_routes)
+        .merge(nft_routes)
         .merge(debug)
         .with_state(state)
         // GLOBAL LAYERS (Reverse Order: Bottom executed first)
@@ -179,6 +229,13 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         ))
         // 2. Concurrency Limit (256)
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
+        // 1.5 CORS (allow any origin for frontend flexibility)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         // 1. Tracing (Top)
         .layer(TraceLayer::new_for_http())
 }
@@ -194,16 +251,7 @@ pub async fn serve_api(
     // 🔹 Charge la config applicative complète
     let settings = load_config()?;
 
-    let node_wallet = Arc::new(
-        Wallet::load_from_node_key_file(&settings.secrets.node_identity_key_path)
-            .map_err(anyhow::Error::msg)
-            .with_context(|| {
-                format!(
-                    "loading node identity from {}",
-                    settings.secrets.node_identity_key_path
-                )
-            })?,
-    );
+    let node_wallet = srv.node_identity_wallet();
 
     // 🔹 Résout le token admin
     let admin_token = settings
@@ -211,6 +259,26 @@ pub async fn serve_api(
         .admin_api_token
         .as_deref()
         .and_then(resolve_admin_token);
+
+    // 🔹 Parse allowed_ips into IpNetwork for fast lookup
+    let allowed_networks: Vec<ipnetwork::IpNetwork> = settings
+        .auth
+        .allowed_ips
+        .iter()
+        .filter_map(|ip_str| {
+            ip_str.parse().ok().or_else(|| {
+                tracing::warn!("Invalid IP/CIDR in allowed_ips: {}", ip_str);
+                None
+            })
+        })
+        .collect();
+
+    if !allowed_networks.is_empty() {
+        tracing::info!(
+            "Admin IP allowlist enabled: {} networks",
+            allowed_networks.len()
+        );
+    }
 
     let state = AppState {
         srv,
@@ -220,6 +288,8 @@ pub async fn serve_api(
         store,
         admin_token,
         node_wallet,
+        settings: Arc::new(settings.clone()),
+        allowed_networks,
     };
 
     // 🔹 Construit le Router complet

@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use dialoguer::{Input, Select, theme::ColorfulTheme};
 use owo_colors::OwoColorize;
-use pms_config::{load_config, Settings};
+use pms_config::{Settings, load_config};
+use std::sync::Arc;
 #[derive(serde::Deserialize)]
 pub struct PageResp<T> {
     pub items: Vec<T>,
@@ -11,18 +11,21 @@ pub struct PageResp<T> {
 }
 
 // We'll use our local definition instead of the imported one for the HTTP case
-use pms_storage::{DagStorage};
+use crate::helpers::{make_http_client, wait_enter};
+use crate::repl::CliState;
+use pms_storage::DagStorage;
 use pms_storage::rocks_store::store::RocksStore;
 use pms_types::{PayloadEnvelope, PlainPayload};
 use pms_types_block::Block;
 use pms_utils::print_block_full;
-use pms_wallet::{address_candidates, make_address};
-use pms_wallet::history::{involves_any_address};
+use pms_wallet::address_candidates;
+use pms_wallet::history::involves_any_address;
 use pms_wire::WireBlock;
-use crate::helpers::{make_http_client, wait_enter};
-use crate::repl::CliState;
 
-enum FetchMode { Local, Http }
+enum FetchMode {
+    Local,
+    Http,
+}
 
 fn choose_mode(prompt: &str) -> FetchMode {
     let items = ["Local (direct Redis)", "HTTP GET (serveur)"];
@@ -32,7 +35,11 @@ fn choose_mode(prompt: &str) -> FetchMode {
         .default(0)
         .interact()
         .unwrap();
-    if i == 0 { FetchMode::Local } else { FetchMode::Http }
+    if i == 0 {
+        FetchMode::Local
+    } else {
+        FetchMode::Http
+    }
 }
 
 fn api_base_from_settings(s: &Settings) -> String {
@@ -59,22 +66,40 @@ pub fn print_wire_page(page: &PageResp<WireBlock>) {
         }
     );
     if let Some(ts) = page.next_after_ts {
-        println!("{} {}", "next_after_ts:".bright_black(), ts.to_string().yellow());
+        println!(
+            "{} {}",
+            "next_after_ts:".bright_black(),
+            ts.to_string().yellow()
+        );
     } else {
-        println!("{} {}", "next_after_ts:".bright_black(), "none".bright_black());
+        println!(
+            "{} {}",
+            "next_after_ts:".bright_black(),
+            "none".bright_black()
+        );
     }
     if let Some(id) = page.next_after_id.as_ref() {
         println!("{} {}", "next_after_id:".bright_black(), id.cyan());
     } else {
-        println!("{} {}", "next_after_id:".bright_black(), "none".bright_black());
+        println!(
+            "{} {}",
+            "next_after_id:".bright_black(),
+            "none".bright_black()
+        );
     }
 
-    println!("{}", "---------------- ITEMS ----------------".bright_black());
+    println!(
+        "{}",
+        "---------------- ITEMS ----------------".bright_black()
+    );
     for wb in &page.items {
         let b: Block = wb.clone().into();
         print_block_full(&b);
     }
-    println!("{}", "======================================\n".bright_black());
+    println!(
+        "{}",
+        "======================================\n".bright_black()
+    );
 }
 
 pub async fn action_stream_blocks(store: &Arc<RocksStore>) -> anyhow::Result<()> {
@@ -102,9 +127,11 @@ pub async fn action_stream_blocks(store: &Arc<RocksStore>) -> anyhow::Result<()>
             let txt = client
                 .get(&url)
                 .query(&[("limit", limit.to_string())])
-                .send().await?
+                .send()
+                .await?
                 .error_for_status()?
-                .text().await?;
+                .text()
+                .await?;
 
             // côté HTTP, on reçoit du JSON (WireBlock[])
             let blocks: Vec<WireBlock> = serde_json::from_str(&txt)?;
@@ -135,7 +162,11 @@ pub async fn action_encrypted_history(store: &Arc<RocksStore>) -> anyhow::Result
         .with_prompt("after_id (vide = none)")
         .default(String::new())
         .interact_text()?;
-    let after_id = if after_id.trim().is_empty() { None } else { Some(after_id) };
+    let after_id = if after_id.trim().is_empty() {
+        None
+    } else {
+        Some(after_id)
+    };
 
     let limit: usize = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("limit")
@@ -144,8 +175,9 @@ pub async fn action_encrypted_history(store: &Arc<RocksStore>) -> anyhow::Result
 
     match mode {
         FetchMode::Local => {
-            let (ids, next_cursor) =
-                store.recent_ids_by_time(after_ts, after_id.clone(), limit).await?;
+            let (ids, next_cursor) = store
+                .recent_ids_by_time(after_ts, after_id.clone(), limit)
+                .await?;
             let mut items: Vec<WireBlock> = store.get_blocks_by_ids(&ids).await?;
 
             // ne garder que les blocs Encrypted
@@ -206,7 +238,6 @@ pub async fn action_encrypted_history(store: &Arc<RocksStore>) -> anyhow::Result
     Ok(())
 }
 
-
 pub async fn action_wallet_history(
     state: &Arc<tokio::sync::Mutex<CliState>>,
     store: &Arc<RocksStore>,
@@ -215,7 +246,8 @@ pub async fn action_wallet_history(
     let (candidates, sk_hex, shown_addr) = {
         let st = state.lock().await;
         let wallet = st.current_wallet();
-        let w = wallet.as_ref()
+        let w = wallet
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Aucun wallet sélectionné"))?;
 
         let settings = load_config()?; // pour hrp
@@ -243,7 +275,9 @@ pub async fn action_wallet_history(
     let mut after_id: Option<String> = None;
 
     loop {
-        let (ids, next) = store.recent_ids_by_time(after_ts, after_id.clone(), limit).await?;
+        let (ids, next) = store
+            .recent_ids_by_time(after_ts, after_id.clone(), limit)
+            .await?;
         if ids.is_empty() {
             println!("(aucun bloc)");
             break;
@@ -259,7 +293,9 @@ pub async fn action_wallet_history(
         for b in blocks {
             let ts = *id_ts.get(&b.id).unwrap_or(&0);
             if let Some(s) = &b.payload_json {
-                if let Ok(PayloadEnvelope::Encrypted(enc)) = serde_json::from_str::<PayloadEnvelope>(s) {
+                if let Ok(PayloadEnvelope::Encrypted(enc)) =
+                    serde_json::from_str::<PayloadEnvelope>(s)
+                {
                     if let Some(sk) = sk_hex.as_ref() {
                         if let Ok(plain) = enc.decrypt_as_payload(sk) {
                             dec_ok += 1;
@@ -273,7 +309,7 @@ pub async fn action_wallet_history(
         }
 
         // Tri (ts desc, id desc)
-        hits.sort_by(|a,b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
 
         println!("\n=== Transactions pour {} ===", shown_addr.cyan());
         println!("(candidats: {})", candidates.len());
@@ -281,7 +317,10 @@ pub async fn action_wallet_history(
             println!("(0 match). Déchiffrés OK: {} / page={}.", dec_ok, ids.len());
         } else {
             for (ts, id, p) in &hits {
-                println!("{}", "----------------------------------------".bright_black());
+                println!(
+                    "{}",
+                    "----------------------------------------".bright_black()
+                );
                 println!("ts: {}  id: {}", ts, id.cyan());
                 if let Ok(js) = serde_json::to_string_pretty(p) {
                     println!("{js}");
@@ -289,18 +328,25 @@ pub async fn action_wallet_history(
                     println!("{:#?}", p);
                 }
             }
-            println!("{}", "----------------------------------------".bright_black());
+            println!(
+                "{}",
+                "----------------------------------------".bright_black()
+            );
         }
 
         if let Some((ts, id, has_more)) = next {
             after_ts = Some(ts);
             after_id = Some(id);
-            if !has_more { break; }
+            if !has_more {
+                break;
+            }
             let cont: String = Input::with_theme(&ColorfulTheme::default())
                 .with_prompt("Continuer ? (o/N)")
                 .default(String::new())
                 .interact_text()?;
-            if cont.trim().to_lowercase() != "o" { break; }
+            if cont.trim().to_lowercase() != "o" {
+                break;
+            }
         } else {
             break;
         }
