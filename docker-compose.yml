@@ -1,5 +1,5 @@
 # =============================================================================
-# Production Docker Compose - Single Node
+# Production Docker Compose - Single Node + Caddy (Let's Encrypt)
 # =============================================================================
 services:
   node:
@@ -30,10 +30,25 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    ports:
-      - "8080:8080" # API
-      - "8443:8443" # P2P
+    # Pas de ports exposés directement - Caddy fait le proxy
     restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: pms-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80" # HTTP (Let's Encrypt challenge)
+      - "443:443" # HTTPS
+    volumes:
+      - ./caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      node:
+        condition: service_healthy
 
 volumes:
   pms_data:
+  caddy_data:
+  caddy_config:

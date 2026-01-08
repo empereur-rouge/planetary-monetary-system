@@ -72,10 +72,11 @@ fi
 echo "🔑 Génération des clés (si nécessaire)..."
 mkdir -p etc/pms secrets/tls
 
-# Clé du nœud
-if [ ! -f etc/pms/node.key ]; then
-    openssl ecparam -name secp256k1 -genkey -noout -out etc/pms/node.key 2>/dev/null
-    echo "   ✓ node.key créée"
+# Clé du nœud (format hex - 64 caractères)
+if [ ! -f etc/pms/node.key ] || [ \$(stat -c%s etc/pms/node.key 2>/dev/null || echo 0) -gt 100 ]; then
+    # Générer 32 bytes aléatoires et les convertir en hex
+    openssl rand -hex 32 > etc/pms/node.key
+    echo "   ✓ node.key créée (format hex)"
 fi
 
 # Fixer les permissions

@@ -1,42 +1,50 @@
-# Admin Subdomain (Protected)
-# Remplace par ton vrai sous-domaine
-admin.pms.example.com {
-  tls internal
-  reverse_proxy node:8080
+# =============================================================================
+# Caddyfile Production - pms-network.com
+# =============================================================================
+# Caddy gère automatiquement Let's Encrypt (renouvellement inclus)
+
+# API Endpoint (principal)
+api.pms-network.com {
+    # TLS automatique via Let's Encrypt
+    
+    # Headers de sécurité
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        # CORS pour le SDK/navigateurs
+        Access-Control-Allow-Origin "*"
+        Access-Control-Allow-Methods "GET, POST, OPTIONS"
+        Access-Control-Allow-Headers "Content-Type, Authorization"
+    }
+
+    # Compression
+    encode gzip zstd
+
+    # Health check sans logs
+    @health path /livez /healthz
+    handle @health {
+        reverse_proxy node:8080 {
+            transport http {
+                tls_insecure_skip_verify
+            }
+        }
+    }
+
+    # Proxy vers le nœud PMS
+    reverse_proxy node:8080 {
+        transport http {
+            tls_insecure_skip_verify
+        }
+    }
 }
 
-# Public Domain
-pms.example.com {
-  tls internal
-  encode gzip zstd
+# Redirection du domaine principal vers l'API
+pms-network.com {
+    redir https://api.pms-network.com{uri} permanent
+}
 
-  # Sécurité headers (proxy)
-  header {
-    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-    X-Content-Type-Options "nosniff"
-    X-Frame-Options "DENY"
-    Referrer-Policy "no-referrer"
-  }
-
-  # Health endpoints (corrigés: /live, /ready)
-  @health path /live /ready
-  log {
-    format json
-  }
-
-  # /metrics (Allowlist IP recommandée ici)
-  @metrics path /metrics
-  handle @metrics {
-    # remote_ip 1.2.3.4/32
-    reverse_proxy node:8080
-  }
-
-  # Proxy principal (Load Balancing)
-  reverse_proxy node1:8080 node2:8080 node3:8080 {
-    lb_policy round_robin
-    transport http {
-      dial_timeout 5s
-      response_header_timeout 15s
-    }
-  }
+www.pms-network.com {
+    redir https://api.pms-network.com{uri} permanent
 }
