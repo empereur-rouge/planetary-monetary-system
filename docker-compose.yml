@@ -19,8 +19,7 @@ services:
     volumes:
       # Configuration
       - ./etc/config/config.prod.toml:/home/pms/config/config.prod.toml:ro
-      - ./etc/pms/node.key:/home/pms/config/node-identity.key:ro
-      - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
+      - ./etc/pms:/home/pms/config/pms:rw
       - ./secrets/tls:/home/pms/tls:ro
       # Persistent storage
       - pms_data:/home/pms/data

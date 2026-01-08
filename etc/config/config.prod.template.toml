@@ -47,8 +47,8 @@ admin_api_token = "REPLACE_WITH_YOUR_SECRET_TOKEN"
 allowed_ips = []
 
 [secrets]
-node_identity_key_path = "/home/pms/config/node-identity.key"
-admin_wallet_file = "/home/pms/config/admin-wallet.json"
+node_identity_key_path = "/home/pms/config/pms/node.key"
+admin_wallet_file = "/home/pms/config/pms/admin-wallet.json"
 
 [validation]
 min_pow_leading_zero_bits = 8
