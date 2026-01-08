@@ -23,8 +23,8 @@ RUN cargo build --release -p bin -p tools-cli
 # ------------------------------------------------------------------------------
 # 2. RUNTIME: Minimal production image
 # ------------------------------------------------------------------------------
-# Debian 12 (Bookworm) - stable release with recent GLIBC
-FROM debian:bookworm-slim AS runtime
+# Debian 13 (Trixie) - has GLIBC 2.38+ required by nightly Rust
+FROM debian:trixie-slim AS runtime
 
 # Install runtime dependencies (OpenSSL, CA certs)
 RUN apt-get update && apt-get install -y \
