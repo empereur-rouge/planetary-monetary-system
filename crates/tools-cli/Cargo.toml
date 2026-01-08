@@ -18,7 +18,6 @@ reqwest = { version = "0.12", default-features = false, features = [
     "http2",
     "json",
 ] }
-
 # remplace par tes vrais crates locaux
 pms-core = { path = "../pms-core" }
 pms-server = { path = "../pms-server" }
@@ -42,3 +41,4 @@ tokio-rustls = { workspace = true }
 serde = { version = "1.0.226", features = ["derive"] }
 hex = "0.4.3"
 k256 = { version = "0.13", features = ["ecdsa"] }
+base64 = "0.22"

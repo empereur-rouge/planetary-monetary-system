@@ -14,7 +14,7 @@ use anyhow::Result;
 mod block_submission;
 mod helpers;
 mod history_actions;
-mod keygen;
+pub mod keygen;
 mod repl;
 mod utils;
 mod wallet_actions;

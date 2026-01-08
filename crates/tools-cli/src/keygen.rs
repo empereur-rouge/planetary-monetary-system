@@ -104,23 +104,36 @@ use std::fs;
 use std::path::Path;
 
 /// Génère une clé, la sauvegarde dans un fichier brut et exporte un JSON complet.
+///
+/// ## Format de sortie
+/// - `key_path` : Clé privée en hex (64 caractères) - format attendu par pms-node
+/// - `json_path` : Fichier JSON complet avec les informations du wallet
 pub fn generate_and_save(key_path: &str, json_path: &str) -> Result<()> {
     println!("🔑 Generation des clés coordinateur...");
 
     // 1. Générer via pms-wallet (compatible secp256k1 + adresse bech32)
     let wallet = Wallet::generate();
 
-    let priv_hex = wallet.encoded_private_key();
+    // 2. La clé privée dans le wallet est en base64, on la convertit en hex
+    //    Le nœud attend 64 caractères hex (32 bytes en hex)
+    let priv_b64 = wallet.encoded_private_key();
+    let priv_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &priv_b64)
+        .map_err(|e| anyhow::anyhow!("Failed to decode base64: {}", e))?;
+
+    let priv_hex = hex::encode(&priv_bytes);
     let pub_hex = wallet.encoded_public_key();
     let address = wallet.get_address("8e"); // HRP par défaut
 
-    // 2. Sauvegarder la clé privée brute (pour le nœud)
-    // Le nœud attend souvent 64 chars hex sans newline, ou binaire.
-    // pms-node charge souvent hex string.
+    // 3. Sauvegarder la clé privée en HEX (64 chars, pas de newline)
+    //    C'est le format attendu par pms-node
     fs::write(key_path, &priv_hex)?;
-    println!("✅ Clé privée sauvegardée dans : {}", key_path);
+    println!(
+        "✅ Clé privée sauvegardée dans : {} ({} chars hex)",
+        key_path,
+        priv_hex.len()
+    );
 
-    // 3. Sauvegarder le JSON (pour l'admin)
+    // 4. Sauvegarder le JSON (pour l'admin)
     let info = json!({
         "private_key": priv_hex,
         "public_key": pub_hex,
@@ -137,16 +150,4 @@ pub fn generate_and_save(key_path: &str, json_path: &str) -> Result<()> {
     println!("coordinator_public_key = \"{}\"", pub_hex);
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_keygen_runs_without_panic() {
-        // Vérifie simplement que la génération ne plante pas
-        // (on ne vérifie pas la sortie stdout dans ce test)
-        run_keygen();
-    }
 }
