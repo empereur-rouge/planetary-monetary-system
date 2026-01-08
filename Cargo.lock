@@ -4016,6 +4016,7 @@ dependencies = [
  "pms-wire",
  "qrcode",
  "rand 0.9.2",
+ "regex",
  "reqwest",
  "rust_decimal",
  "rust_decimal_macros",

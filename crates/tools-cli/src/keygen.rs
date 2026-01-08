@@ -108,10 +108,78 @@ use std::path::Path;
 /// ## Format de sortie
 /// - `key_path` : Clé privée en hex (64 caractères) - format attendu par pms-node
 /// - `json_path` : Fichier JSON complet avec les informations du wallet
-pub fn generate_and_save(key_path: &str, json_path: &str) -> Result<()> {
-    println!("🔑 Generation des clés coordinateur...");
+/// - `config_path` : Optionnel - met à jour automatiquement coordinator_public_key dans le config
+pub fn generate_and_save(key_path: &str, json_path: &str, config_path: Option<&str>) -> Result<()> {
+    use dialoguer::Confirm;
 
-    // 1. Générer via pms-wallet (compatible secp256k1 + adresse bech32)
+    println!("🔑 Generation des clés coordinateur...");
+    println!();
+
+    // Vérifier si des fichiers existants seront écrasés
+    let mut files_to_overwrite = Vec::new();
+
+    // Vérifier node.key
+    if Path::new(key_path).exists() {
+        if let Ok(content) = fs::read_to_string(key_path) {
+            if !content.trim().is_empty() {
+                files_to_overwrite.push(format!("🔑 {} (clé privée existante)", key_path));
+            }
+        }
+    }
+
+    // Vérifier admin-wallet.json
+    if Path::new(json_path).exists() {
+        if let Ok(content) = fs::read_to_string(json_path) {
+            // Considérer non-vide si ce n'est pas juste "{}" ou vide
+            let trimmed = content.trim();
+            if !trimmed.is_empty() && trimmed != "{}" {
+                files_to_overwrite.push(format!("👛 {} (wallet existant)", json_path));
+            }
+        }
+    }
+
+    // Vérifier coordinator_public_key dans le config
+    if let Some(cfg_path) = config_path {
+        if Path::new(cfg_path).exists() {
+            if let Ok(content) = fs::read_to_string(cfg_path) {
+                // Chercher coordinator_public_key = "xxx" où xxx n'est pas vide
+                let re = regex::Regex::new(r#"coordinator_public_key\s*=\s*"([^"]*)""#).ok();
+                if let Some(re) = re {
+                    if let Some(caps) = re.captures(&content) {
+                        if let Some(key) = caps.get(1) {
+                            if !key.as_str().is_empty() {
+                                files_to_overwrite.push(format!(
+                                    "📋 {} (coordinator_public_key déjà défini)",
+                                    cfg_path
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Demander confirmation si des fichiers seront écrasés
+    if !files_to_overwrite.is_empty() {
+        println!("⚠️  ATTENTION: Les fichiers suivants seront écrasés:");
+        for f in &files_to_overwrite {
+            println!("   {}", f);
+        }
+        println!();
+
+        let confirm = Confirm::new()
+            .with_prompt("Voulez-vous continuer et écraser ces fichiers ?")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+
+        if !confirm {
+            println!("❌ Génération annulée.");
+            return Ok(());
+        }
+        println!();
+    }
     let wallet = Wallet::generate();
 
     // 2. La clé privée dans le wallet est en base64, on la convertit en hex
@@ -145,9 +213,38 @@ pub fn generate_and_save(key_path: &str, json_path: &str) -> Result<()> {
     fs::write(json_path, serde_json::to_string_pretty(&info)?)?;
     println!("✅ Infos Wallet sauvegardées dans : {}", json_path);
 
+    // 5. Optionnel: mettre à jour le fichier config avec la clé publique
+    if let Some(cfg_path) = config_path {
+        update_config_coordinator_key(cfg_path, &pub_hex)?;
+        println!("✅ Config mise à jour : {}", cfg_path);
+    }
+
     println!();
-    println!("📋 INFORMATION PUBLIQUE (à mettre dans config.toml) :");
+    println!("📋 INFORMATION PUBLIQUE :");
     println!("coordinator_public_key = \"{}\"", pub_hex);
+
+    Ok(())
+}
+
+/// Met à jour la valeur de coordinator_public_key dans un fichier TOML
+fn update_config_coordinator_key(config_path: &str, public_key: &str) -> Result<()> {
+    let content = fs::read_to_string(config_path)
+        .map_err(|e| anyhow::anyhow!("Impossible de lire {}: {}", config_path, e))?;
+
+    // Utiliser une regex pour remplacer la valeur de coordinator_public_key
+    // Pattern: coordinator_public_key = "..." (avec guillemets)
+    let re = regex::Regex::new(r#"coordinator_public_key\s*=\s*"[^"]*""#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    let new_content = re
+        .replace(
+            &content,
+            format!("coordinator_public_key = \"{}\"", public_key),
+        )
+        .to_string();
+
+    fs::write(config_path, new_content)
+        .map_err(|e| anyhow::anyhow!("Impossible d'écrire {}: {}", config_path, e))?;
 
     Ok(())
 }

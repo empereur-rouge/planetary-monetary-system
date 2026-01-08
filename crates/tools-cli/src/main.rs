@@ -26,13 +26,17 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() > 1 && args[1] == "gen-coordinator" {
-        if args.len() != 4 {
-            eprintln!("Usage: tools-cli gen-coordinator <key_file> <json_file>");
+        if args.len() < 4 || args.len() > 5 {
+            eprintln!("Usage: tools-cli gen-coordinator <key_file> <json_file> [config_file]");
+            eprintln!(
+                "  config_file: optionnel, met à jour coordinator_public_key automatiquement"
+            );
             std::process::exit(1);
         }
         let key_path = &args[2];
         let json_path = &args[3];
-        keygen::generate_and_save(key_path, json_path)?;
+        let config_path = args.get(4).map(|s| s.as_str());
+        keygen::generate_and_save(key_path, json_path, config_path)?;
         return Ok(());
     }
 
