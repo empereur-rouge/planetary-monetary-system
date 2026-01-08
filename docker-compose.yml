@@ -1,117 +1,39 @@
+# =============================================================================
+# Production Docker Compose - Single Node
+# =============================================================================
 services:
-  node1:
+  node:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
     image: pms-node:latest
-    container_name: node1
+    container_name: pms-node
     user: "pms"
     environment:
-      RUST_LOG: debug,pms_server=debug,pms_wallet=debug
+      RUST_LOG: info,pms_server=info
       PMS_CONFIG: /home/pms/config/config.prod.toml
-      PMS__P2P__KNOWN_PEERS: "p2ps://node2:8443,p2ps://node3:8443"
-      PMS_P2P__BIND_ADDR: "0.0.0.0:8443"
-      PMS_ADMIN_TOKEN: pms_admin_secret
-      PMS__LIMITS__RATE_LIMIT_RPS: 5000
-      PMS__LIMITS__BURST: 5000
+      PMS_ADMIN_TOKEN: "${PMS_ADMIN_TOKEN:-changeme}"
+      PMS__LIMITS__RATE_LIMIT_RPS: 1000
+      PMS__LIMITS__BURST: 2000
     volumes:
-      - ./etc/config/config.docker-test.toml:/home/pms/config/config.prod.toml:ro
-      - ./etc/pms/node1.key:/home/pms/config/node-identity.key:ro
+      # Configuration
+      - ./etc/config/config.prod.toml:/home/pms/config/config.prod.toml:ro
+      - ./etc/pms/node.key:/home/pms/config/node-identity.key:ro
       - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
       - ./secrets/tls:/home/pms/tls:ro
-      # Storage distinct
-      - ./docker_data/node1:/home/pms/data
+      # Persistent storage
+      - pms_data:/home/pms/data
     healthcheck:
       test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1" ]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
     ports:
-      - "8080:8080" # API Node 1
+      - "8080:8080" # API
+      - "8443:8443" # P2P
     restart: unless-stopped
-
-  node2:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime
-    image: pms-node:latest
-    container_name: node2
-    user: "pms"
-    environment:
-      RUST_LOG: debug,pms_server=debug,pms_wallet=debug
-      PMS_CONFIG: /home/pms/config/config.prod.toml
-      PMS__P2P__KNOWN_PEERS: "p2ps://node1:8443,p2ps://node3:8443"
-      PMS_P2P__BIND_ADDR: "0.0.0.0:8443"
-      PMS_ADMIN_TOKEN: pms_admin_secret
-      PMS__LIMITS__RATE_LIMIT_RPS: 5000
-      PMS__LIMITS__BURST: 5000
-    volumes:
-      - ./etc/config/config.docker-test.toml:/home/pms/config/config.prod.toml:ro
-      - ./etc/pms/node2.key:/home/pms/config/node-identity.key:ro
-      - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
-      - ./secrets/tls:/home/pms/tls:ro
-      - ./docker_data/node2:/home/pms/data
-    healthcheck:
-      test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1" ]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    ports:
-      - "8081:8080" # API Node 2
-    restart: unless-stopped
-
-  node3:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime
-    image: pms-node:latest
-    container_name: node3
-    user: "pms"
-    environment:
-      RUST_LOG: debug,pms_server=debug,pms_wallet=debug
-      PMS_CONFIG: /home/pms/config/config.prod.toml
-      PMS__P2P__KNOWN_PEERS: "p2ps://node1:8443,p2ps://node2:8443"
-      PMS_P2P__BIND_ADDR: "0.0.0.0:8443"
-      PMS_ADMIN_TOKEN: pms_admin_secret
-      PMS__LIMITS__RATE_LIMIT_RPS: 5000
-      PMS__LIMITS__BURST: 5000
-    volumes:
-      - ./etc/config/config.docker-test.toml:/home/pms/config/config.prod.toml:ro
-      - ./etc/pms/node3.key:/home/pms/config/node-identity.key:ro
-      - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
-      - ./secrets/tls:/home/pms/tls:ro
-      - ./docker_data/node3:/home/pms/data
-    healthcheck:
-      test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1" ]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    ports:
-      - "8082:8080" # API Node 3
-    restart: unless-stopped
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./caddyfile:/etc/caddy/Caddyfile
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      node1:
-        condition: service_healthy
-      node2:
-        condition: service_healthy
-      node3:
-        condition: service_healthy
 
 volumes:
-  caddy_data:
-  caddy_config:
-  node_data:
+  pms_data:
