@@ -53,7 +53,7 @@ git push 2>/dev/null || echo "   (Rien à pusher)"
 # =============================================================================
 echo ""
 echo "🐳 Déploiement sur le VPS..."
-ssh $VPS_USER@$VPS_IP << EOF
+ssh $VPS_USER@$VPS_IP << EOFREMOTE
 set -e
 
 echo "📁 Préparation des dossiers..."
@@ -66,15 +66,7 @@ if [ -d ".git" ]; then
     git pull
 else
     echo "📥 Clonage du repo..."
-    # Si le repo existe déjà, on fait juste un pull
-    if [ -f "docker-compose.yml" ]; then
-        git init
-        git remote add origin https://github.com/empereur-rouge/planetary-monetary-system.git 2>/dev/null || true
-        git fetch origin
-        git reset --hard origin/main
-    else
-        git clone https://github.com/empereur-rouge/planetary-monetary-system.git .
-    fi
+    git clone https://github.com/empereur-rouge/planetary-monetary-system.git .
 fi
 
 echo "🔑 Génération des clés (si nécessaire)..."
@@ -86,6 +78,9 @@ if [ ! -f etc/pms/node.key ]; then
     echo "   ✓ node.key créée"
 fi
 
+# Fixer les permissions
+chmod 644 etc/pms/node.key
+
 # Certificats TLS
 if [ ! -f secrets/tls/cert.pem ]; then
     openssl req -x509 -newkey rsa:4096 -keyout secrets/tls/key.pem \
@@ -94,15 +89,20 @@ if [ ! -f secrets/tls/cert.pem ]; then
     echo "   ✓ Certificats TLS créés"
 fi
 
+# Fixer permissions TLS
+chmod 644 secrets/tls/*.pem
+
 # Admin wallet vide si absent
 if [ ! -f etc/pms/admin-wallet.json ]; then
     echo '{}' > etc/pms/admin-wallet.json
     echo "   ✓ admin-wallet.json créé"
 fi
+chmod 644 etc/pms/admin-wallet.json
 
 echo "📝 Configuration prod avec token admin..."
 cp etc/config/config.prod.template.toml etc/config/config.prod.toml
-sed -i 's/REPLACE_WITH_YOUR_SECRET_TOKEN/$ADMIN_TOKEN/' etc/config/config.prod.toml
+sed -i 's/REPLACE_WITH_YOUR_SECRET_TOKEN/${ADMIN_TOKEN}/' etc/config/config.prod.toml
+chmod 644 etc/config/config.prod.toml
 
 echo "🛑 Arrêt des anciens conteneurs..."
 docker compose down 2>/dev/null || true
@@ -120,7 +120,12 @@ echo ""
 echo "📊 Statut:"
 docker compose ps
 
-EOF
+echo ""
+echo "📜 Derniers logs:"
+sleep 3
+docker compose logs --tail 10
+
+EOFREMOTE
 
 echo ""
 echo "=================================================="
