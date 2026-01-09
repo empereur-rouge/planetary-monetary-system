@@ -110,6 +110,7 @@ pub async fn run() -> Result<()> {
         WalletHistory,
         WalletBalance,
         Keygen,
+        CheckCoordinator,
         Quit,
     }
 
@@ -118,6 +119,7 @@ pub async fn run() -> Result<()> {
 
     // Restricted / Keygen is always available
     menu.push(("17. Générer clé Coordinateur", Action::Keygen));
+    menu.push(("18. Vérifier statut Coordinateur", Action::CheckCoordinator));
     menu.push(("0. Quitter", Action::Quit));
 
     // Valid only if connected
@@ -314,6 +316,26 @@ pub async fn run() -> Result<()> {
 
             Action::Keygen => {
                 crate::keygen::run_keygen();
+                wait_enter();
+            }
+
+            Action::CheckCoordinator => {
+                // Demander les chemins vers les fichiers
+                let key_path: String = dialoguer::Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Chemin vers la clé privée du nœud")
+                    .default("/home/pms/config/pms/node.key".to_string())
+                    .interact_text()
+                    .unwrap_or_default();
+
+                let config_path: String = dialoguer::Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Chemin vers le fichier config")
+                    .default("/home/pms/config/config.prod.toml".to_string())
+                    .interact_text()
+                    .unwrap_or_default();
+
+                if let Err(e) = crate::keygen::check_is_coordinator(&key_path, &config_path) {
+                    eprintln!("{} {}", "❌ Erreur:".red().bold(), e);
+                }
                 wait_enter();
             }
 
