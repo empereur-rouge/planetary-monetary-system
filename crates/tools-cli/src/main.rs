@@ -40,5 +40,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Commande pour vérifier si ce nœud est le coordinateur
+    if args.len() > 1 && args[1] == "check-coordinator" {
+        if args.len() != 4 {
+            eprintln!("Usage: tools-cli check-coordinator <key_file> <config_file>");
+            eprintln!("  Vérifie si la clé privée correspond au coordinator_public_key du config");
+            std::process::exit(1);
+        }
+        let key_path = &args[2];
+        let config_path = &args[3];
+        keygen::check_is_coordinator(key_path, config_path)?;
+        return Ok(());
+    }
+
     repl::run().await
 }

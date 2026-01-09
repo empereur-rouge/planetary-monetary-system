@@ -248,3 +248,90 @@ fn update_config_coordinator_key(config_path: &str, public_key: &str) -> Result<
 
     Ok(())
 }
+
+/// Vérifie si la clé privée du nœud correspond au coordinator_public_key du config.
+///
+/// ## Explication
+/// Pour être coordinateur, la clé publique dérivée de la clé privée du nœud
+/// doit correspondre exactement à la `coordinator_public_key` définie dans le config.
+///
+/// ## Sortie
+/// Affiche un message clair indiquant si le nœud est coordinateur ou non.
+pub fn check_is_coordinator(key_path: &str, config_path: &str) -> Result<()> {
+    use k256::ecdsa::SigningKey;
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+
+    println!("🔍 Vérification du statut coordinateur...");
+    println!();
+
+    // 1. Lire la clé privée du nœud
+    let priv_hex = fs::read_to_string(key_path)
+        .map_err(|e| anyhow::anyhow!("Impossible de lire {}: {}", key_path, e))?;
+    let priv_hex = priv_hex.trim();
+
+    if priv_hex.len() != 64 {
+        anyhow::bail!(
+            "Format de clé invalide dans {}. Attendu: 64 chars hex, trouvé: {}",
+            key_path,
+            priv_hex.len()
+        );
+    }
+
+    // 2. Décoder la clé privée hex
+    let priv_bytes =
+        hex::decode(priv_hex).map_err(|e| anyhow::anyhow!("Clé privée hex invalide: {}", e))?;
+
+    // 3. Créer la clé de signature et dériver la clé publique
+    let signing_key = SigningKey::from_slice(&priv_bytes)
+        .map_err(|e| anyhow::anyhow!("Clé privée invalide: {}", e))?;
+    let verifying_key = signing_key.verifying_key();
+
+    // Clé publique non-compressée (65 bytes, commence par 04)
+    let node_pubkey = hex::encode(verifying_key.to_encoded_point(false).as_bytes());
+
+    // 4. Lire le coordinator_public_key du config
+    let config_content = fs::read_to_string(config_path)
+        .map_err(|e| anyhow::anyhow!("Impossible de lire {}: {}", config_path, e))?;
+
+    let re = regex::Regex::new(r#"coordinator_public_key\s*=\s*"([^"]*)""#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    let config_pubkey = match re.captures(&config_content) {
+        Some(caps) => caps
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default(),
+        None => {
+            println!(
+                "⚠️  Aucun coordinator_public_key trouvé dans {}",
+                config_path
+            );
+            println!("   Ce nœud ne peut pas être coordinateur.");
+            return Ok(());
+        }
+    };
+
+    if config_pubkey.is_empty() {
+        println!("⚠️  coordinator_public_key est vide dans {}", config_path);
+        println!("   Ce nœud ne peut pas être coordinateur.");
+        return Ok(());
+    }
+
+    // 5. Comparer les clés
+    println!("📋 Clé publique du nœud   : {}", &node_pubkey[..20]);
+    println!(
+        "📋 Clé coordinateur config: {}",
+        &config_pubkey[..20.min(config_pubkey.len())]
+    );
+    println!();
+
+    if node_pubkey == config_pubkey {
+        println!("✅ CE NŒUD EST LE COORDINATEUR !");
+        println!("   Il a le pouvoir de minter des tokens.");
+    } else {
+        println!("❌ Ce nœud N'EST PAS le coordinateur.");
+        println!("   Les clés ne correspondent pas.");
+    }
+
+    Ok(())
+}
