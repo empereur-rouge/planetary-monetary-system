@@ -15,9 +15,9 @@ protocol_version = 1
 hrp = "8e"
 
 [admin]
-wallet_addresses = [
-    "8e1eqy642zaz5dsyzc3cf54ul642r9259kre2d40m3mp7q8h4fq4333yw0hjkw02e4lljjm4em8hqjc67p3m4esvq774n",
-]
+# Treasury wallets loaded from signed JSON file (verified against coordinator key)
+# Selection: pseudo-random for fees, first wallet for block rewards
+treasury_wallets_file = "/home/pms/config/treasury-wallets.json"
 
 [client]
 bind_addr = "0.0.0.0:8443"

@@ -1,0 +1,6 @@
+{
+  "wallets": [
+    "8e1example_treasury_wallet_address_here"
+  ],
+  "signature": "UNSIGNED_RUN_pms_treasury_sign_TO_GENERATE"
+}

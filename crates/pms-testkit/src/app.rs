@@ -1,5 +1,5 @@
 use axum::Router;
-use pms_config::{ServerConfig, load_config};
+use pms_config::{ServerConfig, TreasuryWallets, load_config};
 use pms_core::ConcurrentDag;
 use pms_interface::NetDagAdapter;
 use pms_server::api::{AppState, build_api_router};
@@ -87,6 +87,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         node_wallet,
         settings: Arc::new(settings.clone()),
         allowed_networks: vec![], // Tests: allow all IPs
+        treasury_wallets: TreasuryWallets::empty(),
     };
 
     // 10) Router axum
@@ -174,6 +175,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         node_wallet: node_wallet.clone(), // ✅ pour wallet_send_tx
         settings: Arc::new(settings.clone()),
         allowed_networks: vec![], // Tests: allow all IPs
+        treasury_wallets: TreasuryWallets::empty(),
     };
 
     // 10) Router
@@ -270,6 +272,7 @@ pub async fn make_test_ctx_with_admin(
         node_wallet: node_wallet.clone(),
         settings: Arc::new(settings.clone()),
         allowed_networks: vec![], // Tests: allow all IPs
+        treasury_wallets: TreasuryWallets::empty(),
     };
 
     // 10) Router

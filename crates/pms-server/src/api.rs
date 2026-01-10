@@ -8,7 +8,7 @@ use crate::api_fn::nft::get_nft;
 use crate::api_fn::stream_blocks::stream_blocks;
 use crate::api_fn::supply::get_circulating_supply;
 use crate::api_fn::transaction::wallet_send_tx;
-use crate::api_fn::wallet::wallet_balance;
+use crate::api_fn::wallet::{balance_by_address, wallet_balance};
 use crate::helper::resolve_admin_token;
 use crate::stats::Stats;
 use crate::tls::load_tls;
@@ -23,7 +23,7 @@ use axum::{
 };
 use axum_server::bind_rustls;
 use axum_server::tls_rustls::RustlsConfig;
-use pms_config::{ServerConfig, Settings, load_config};
+use pms_config::{ServerConfig, Settings, TreasuryWallets, load_config, load_treasury_wallets};
 use pms_storage::rocks_store::store::RocksStore;
 use pms_wallet::Wallet;
 use std::net::SocketAddr;
@@ -60,6 +60,8 @@ pub struct AppState {
     /// Parsed IP networks for admin access (from allowed_ips config)
     /// Empty = allow all with token, non-empty = whitelist mode
     pub allowed_networks: Vec<ipnetwork::IpNetwork>,
+    /// Verified treasury wallet addresses (signed by coordinator)
+    pub treasury_wallets: TreasuryWallets,
 }
 
 /// Middleware to check if request is allowed for admin routes.
@@ -181,7 +183,8 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     let wallet = Router::new()
         .route("/wallet/tx/send", post(wallet_send_tx))
         .route("/wallet/balance", post(wallet_balance))
-        .route("/wallet/history", post(get_wallet_history));
+        .route("/wallet/history", post(get_wallet_history))
+        .route("/v1/balance", post(balance_by_address));
 
     let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
 
@@ -280,6 +283,40 @@ pub async fn serve_api(
         );
     }
 
+    // 🔹 Load and verify treasury wallets (if configured)
+    let treasury_wallets = if let Some(ref path) = settings.admin.treasury_wallets_file {
+        // Get coordinator public key for verification
+        let coord_pk = settings
+            .validation
+            .coordinator_public_key
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!("coordinator_public_key required to verify treasury wallets")
+            })?;
+
+        match load_treasury_wallets(path, coord_pk) {
+            Ok(tw) => {
+                tracing::info!(
+                    "✅ Treasury wallets loaded: {} addresses, signature verified",
+                    tw.len()
+                );
+                tw
+            }
+            Err(e) => {
+                // In dev mode, warn but continue; in prod, fail
+                if cfg.network.mode.is_prod() {
+                    anyhow::bail!("Failed to load treasury wallets: {}", e);
+                } else {
+                    tracing::warn!("⚠️ Treasury wallets not loaded (dev mode): {}", e);
+                    TreasuryWallets::empty()
+                }
+            }
+        }
+    } else {
+        tracing::info!("Treasury wallets file not configured, using admin.wallet_addresses");
+        TreasuryWallets::empty()
+    };
+
     let state = AppState {
         srv,
         _cfg: cfg.clone(),
@@ -290,6 +327,7 @@ pub async fn serve_api(
         node_wallet,
         settings: Arc::new(settings.clone()),
         allowed_networks,
+        treasury_wallets,
     };
 
     // 🔹 Construit le Router complet

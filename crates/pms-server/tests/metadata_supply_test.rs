@@ -56,6 +56,7 @@ async fn test_metadata_persistence_and_supply() {
         description: Some("Test Block".to_string()),
         tags: vec!["test".to_string(), "supply".to_string()],
         extra: None,
+        signer_x25519_hex: None,
     };
     block.metadata = Some(meta.clone());
 

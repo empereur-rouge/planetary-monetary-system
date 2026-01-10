@@ -43,6 +43,8 @@ pub fn compute_block_id(
                 PlainPayload::Milestone { .. } => "Milestone",
                 PlainPayload::Nft(_) => "Nft",
                 PlainPayload::ConfigUpdate(_) => "ConfigUpdate",
+                PlainPayload::Reward { .. } => "Reward",
+                PlainPayload::EncryptedReward { .. } => "EncryptedReward",
             }
             .to_string();
 

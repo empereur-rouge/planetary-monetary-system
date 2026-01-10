@@ -295,6 +295,50 @@ pub fn validate_block(
                     ));
                 }
             }
+            PlainPayload::Reward { .. } => {
+                // SECURITY: Only Coordinator can create Reward blocks
+                // This prevents malicious nodes from minting tokens via fake rewards
+                if let Some(coord_pk) = &policy.coordinator_public_key {
+                    if let Some(spk) = &b.signer_pk {
+                        if spk != coord_pk {
+                            return Err(ValidationError::InvalidSignature(format!(
+                                "Reward signed by unauthorized key: {}. Expected Coordinator: {}",
+                                spk, coord_pk
+                            )));
+                        }
+                    } else {
+                        return Err(ValidationError::InvalidSignature(
+                            "Reward block must be signed by Coordinator".into(),
+                        ));
+                    }
+                } else {
+                    return Err(ValidationError::Other(
+                        "Reward not enabled (no coordinator_public_key configured)",
+                    ));
+                }
+            }
+            PlainPayload::EncryptedReward { .. } => {
+                // SECURITY: Same rules as Reward - only Coordinator can create
+                // EncryptedReward contains encrypted outputs for privacy
+                if let Some(coord_pk) = &policy.coordinator_public_key {
+                    if let Some(spk) = &b.signer_pk {
+                        if spk != coord_pk {
+                            return Err(ValidationError::InvalidSignature(format!(
+                                "EncryptedReward signed by unauthorized key: {}. Expected Coordinator: {}",
+                                spk, coord_pk
+                            )));
+                        }
+                    } else {
+                        return Err(ValidationError::InvalidSignature(
+                            "EncryptedReward block must be signed by Coordinator".into(),
+                        ));
+                    }
+                } else {
+                    return Err(ValidationError::Other(
+                        "EncryptedReward not enabled (no coordinator_public_key configured)",
+                    ));
+                }
+            }
         },
         Some(PayloadEnvelope::Encrypted(_ep)) => {
             // MVP privé : on ne peut pas valider le contenu → on se limite à la structure.

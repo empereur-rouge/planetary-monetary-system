@@ -2315,7 +2315,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "config",
+ "hex",
+ "k256",
+ "rand 0.8.5",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.17",
 ]
 
@@ -2459,6 +2464,7 @@ dependencies = [
  "pms-testkit",
  "pms-token",
  "pms-types",
+ "pms-types-block",
  "pms-types-nft",
  "pms-types-payload",
  "pms-utils",
@@ -2482,6 +2488,7 @@ dependencies = [
  "tower_governor",
  "tracing",
  "tracing-subscriber",
+ "x25519-dalek",
 ]
 
 [[package]]

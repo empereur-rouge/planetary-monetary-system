@@ -34,6 +34,8 @@ fn mvp_encrypt_decrypt_confidential_type_only() {
         PlainPayload::Milestone { .. } => println!("Type = Milestone"),
         PlainPayload::Nft(_) => println!("Type = Nft"),
         PlainPayload::ConfigUpdate(_) => println!("Type = ConfigUpdate"),
+        PlainPayload::Reward { .. } => println!("Type = Reward"),
+        PlainPayload::EncryptedReward { .. } => println!("Type = EncryptedReward"),
     }
 
     // Vérif : bien du bon type

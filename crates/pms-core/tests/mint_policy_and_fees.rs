@@ -228,6 +228,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
         admin: Admin {
             wallet_addresses: vec![],
             signer_pubkeys: vec!["04deadbeef".into()],
+            treasury_wallets_file: None,
         },
         client: None,
         tls: None,
@@ -271,6 +272,15 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             platform_address: None,
             platform_address_signature: None,
             platform_fee_ratio: "0.45".to_string(),
+            // Fee distribution fields
+            treasury_fee_percent: 15,
+            creator_fee_percent: 45,
+            parents_fee_percent: 40,
+            block_reward: "0.1".to_string(),
+            annual_inflation_percent: 2.0,
+            creator_reward_percent: 70,
+            treasury_reward_percent: 20,
+            burn_percent: 10,
         },
         p2p: P2pConfig {
             known_peers: String::new(),

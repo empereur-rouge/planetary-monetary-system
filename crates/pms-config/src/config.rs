@@ -55,11 +55,14 @@ pub struct Address {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Admin {
     #[serde(default)]
-    pub wallet_addresses: Vec<String>, // liste Bech32m
+    pub wallet_addresses: Vec<String>, // liste Bech32m (obsolète, voir treasury_wallets_file)
     /// Liste des clés publiques ECDSA hex autorisées à signer les blocs de mint.
     /// Si vide → en dev on bypass le check, en prod tu pourras le rendre obligatoire.
     #[serde(default)]
     pub signer_pubkeys: Vec<String>,
+    /// Chemin vers le fichier JSON des wallets Treasury signés par le Coordinator
+    #[serde(default)]
+    pub treasury_wallets_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,6 +158,38 @@ pub struct FeesSettings {
     pub platform_address_signature: Option<String>,
     #[serde(default = "default_platform_fee_ratio")]
     pub platform_fee_ratio: String, // ex: "0.02" pour 2%
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Fee Distribution (Treasury Tax + Fee Sharing)
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Percentage of fees going to treasury (admin wallets). Default: 15%
+    #[serde(default = "default_treasury_fee_percent")]
+    pub treasury_fee_percent: u8,
+    /// Percentage of fees going to block creator. Default: 45%
+    #[serde(default = "default_creator_fee_percent")]
+    pub creator_fee_percent: u8,
+    /// Percentage of fees going to parent block signers (split equally). Default: 40%
+    #[serde(default = "default_parents_fee_percent")]
+    pub parents_fee_percent: u8,
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Block Rewards (Inflation)
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Base reward per block (e.g., "0.1" PMS). Set to "0" to disable.
+    #[serde(default = "default_block_reward")]
+    pub block_reward: String,
+    /// Annual inflation rate percentage. Default: 3.0%
+    #[serde(default = "default_annual_inflation_percent")]
+    pub annual_inflation_percent: f64,
+    /// Percentage of block reward to treasury. Default: 20%
+    #[serde(default = "default_treasury_reward_percent")]
+    pub treasury_reward_percent: u8,
+    /// Percentage of block reward to block creator. Default: 70%
+    #[serde(default = "default_creator_reward_percent")]
+    pub creator_reward_percent: u8,
+    /// Percentage of block reward to burn (deflationary pressure). Default: 10%
+    #[serde(default = "default_burn_percent")]
+    pub burn_percent: u8,
 }
 
 fn default_fee_ratio() -> String {
@@ -165,6 +200,34 @@ fn default_base_fee() -> String {
 }
 fn default_platform_fee_ratio() -> String {
     "0.45".to_string()
+}
+
+// Fee distribution defaults
+fn default_treasury_fee_percent() -> u8 {
+    15
+}
+fn default_creator_fee_percent() -> u8 {
+    45
+}
+fn default_parents_fee_percent() -> u8 {
+    40
+}
+
+// Block reward defaults
+fn default_block_reward() -> String {
+    "0.1".to_string()
+}
+fn default_annual_inflation_percent() -> f64 {
+    3.0
+}
+fn default_treasury_reward_percent() -> u8 {
+    20
+}
+fn default_creator_reward_percent() -> u8 {
+    70
+}
+fn default_burn_percent() -> u8 {
+    10
 }
 
 #[derive(Debug, Clone, Deserialize)]

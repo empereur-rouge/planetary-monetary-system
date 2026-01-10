@@ -68,3 +68,25 @@ pub async fn wallet_balance(
         utxos: list,
     }))
 }
+
+/// Simple balance query by address only (no keys needed)
+/// Uses the RAM UTXO set directly
+#[derive(serde::Deserialize)]
+pub struct SimpleBalanceReq {
+    address: String,
+}
+#[derive(serde::Serialize)]
+pub struct SimpleBalanceResp {
+    balance: String,
+}
+
+pub async fn balance_by_address(
+    State(app): State<AppState>,
+    Json(req): Json<SimpleBalanceReq>,
+) -> Result<Json<SimpleBalanceResp>, (StatusCode, String)> {
+    let balance: rust_decimal::Decimal =
+        app.srv.adapter_arc().balance_by_address(&req.address).await;
+    Ok(Json(SimpleBalanceResp {
+        balance: balance.to_string(),
+    }))
+}

@@ -103,6 +103,28 @@ impl ShardedUtxoSet {
         }
         (total, count)
     }
+
+    /// Calcule la balance d'une adresse en parcourant tous les UTXOs.
+    ///
+    /// **Note**: Opération potentiellement lente car elle lock tous les shards.
+    pub async fn balance_by_address(&self, address: &str) -> rust_decimal::Decimal {
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let mut total = Decimal::ZERO;
+
+        for shard in &self.shards {
+            let locked = shard.read().await;
+            for (_outpoint, output) in locked.iter() {
+                if output.address == address {
+                    if let Ok(amount) = Decimal::from_str(&output.amount) {
+                        total += amount;
+                    }
+                }
+            }
+        }
+        total
+    }
 }
 
 impl Default for ShardedUtxoSet {

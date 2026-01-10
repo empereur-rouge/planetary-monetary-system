@@ -40,6 +40,16 @@ burst = 2000
 [fees]
 epsilon = "0.001"
 mode = "uniform"
+# Fee Distribution (Treasury Tax + Fee Sharing)
+treasury_fee_percent = 15 # 15% to admin/treasury wallets
+creator_fee_percent = 45  # 45% to block creator
+parents_fee_percent = 40  # 40% split between parent signers
+# Block Rewards (Inflation)
+block_reward = "0.1"           # PMS per block (set to "0" to disable)
+annual_inflation_percent = 3.0
+treasury_reward_percent = 20   # 20% of block reward to treasury
+creator_reward_percent = 70    # 70% of block reward to creator
+burn_percent = 10              # 10% burned (deflationary pressure)
 
 [auth]
 require_signed_submit = true

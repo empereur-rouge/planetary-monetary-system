@@ -1,5 +1,5 @@
 mod block_id;
-mod check_pow;
+pub mod check_pow;
 mod handshake;
 mod helpers;
 mod http;

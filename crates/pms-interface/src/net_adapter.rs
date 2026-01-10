@@ -20,4 +20,10 @@ pub trait NetDagAdapter: Send + Sync {
 
     /// Retourne le supply total en circulation et le nombre d'UTXOs.
     async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64);
+
+    /// Retourne la balance d'une adresse (somme des UTXOs non dépensés).
+    async fn balance_by_address(&self, address: &str) -> rust_decimal::Decimal;
+
+    /// Ajoute un UTXO manuellement (utilisé par le coordinateur pour les EncryptedReward)
+    async fn add_utxo(&self, txid: String, index: u32, address: String, amount: String);
 }

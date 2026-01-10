@@ -28,6 +28,11 @@ pub struct BlockMetadata {
     /// Données additionnelles JSON (extensibilité future)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
+
+    /// Signer's X25519 public key hex for fee distribution
+    /// Used to derive the complete address (H20 + X25519) for sending fees
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_x25519_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

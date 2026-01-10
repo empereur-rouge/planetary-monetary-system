@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Treasury Fee Distribution**
+  - Reward blocks automatically created after each transaction
+  - Fee split: 15% Treasury, 45% Creator, 40% Parents
+  - Block reward split: 70% Creator, 20% Treasury, 10% Burn
+  - New `/v1/balance` API endpoint for address-only balance queries
+
+- **Encrypted Reward Blocks** (Privacy Enhancement)
+  - Each reward output encrypted individually for [recipient, coordinator]
+  - Uses `PlainPayload::EncryptedReward` with `EncryptedRewardOutput`
+  - X25519 key extracted from bech32 address for encryption
+  - Only recipient and coordinator can see transaction details
+  - Coordinator manually creates UTXOs after block creation
+
+- **Balance Query API**
+  - `balance_by_address()` method in `ShardedUtxoSet`
+  - `NetDagAdapter::balance_by_address()` and `add_utxo()` trait methods
+  - Works without private keys (useful for treasury audits)
+
+### Tests
+- `fee_distribution_e2e_test.rs` - E2E verification of treasury fee distribution
+
 ---
 
 ## [0.3.0] - 2026-01-08

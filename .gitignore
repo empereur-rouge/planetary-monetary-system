@@ -29,6 +29,7 @@ wallet-seed-*.json
 etc/pms/admin-wallet.json
 etc/pms/node-identity.key
 etc/pms/node*.key
+etc/pms/treasury-keys/
 
 # On ignore les fichiers de config locaux pour ne pas écraser la prod
 etc/config/config.dev.toml

@@ -457,6 +457,39 @@ where
                 Some(UtxoDelta { spend, create })
             }
 
+            Some(PayloadEnvelope::Plain(PlainPayload::Reward {
+                fee_outputs,
+                reward_outputs,
+                ..
+            })) => {
+                // Reward = create outputs for fee distribution + block rewards (no inputs)
+                // fee_outputs: treasury, creator, parent signers
+                // reward_outputs: creator, treasury
+                let mut create = Vec::new();
+                let mut idx = 0u32;
+
+                // Add fee distribution outputs
+                for out in fee_outputs {
+                    create.push((sb.id.clone(), idx, out.address.clone(), out.amount.clone()));
+                    idx += 1;
+                }
+
+                // Add block reward outputs
+                for out in reward_outputs {
+                    create.push((sb.id.clone(), idx, out.address.clone(), out.amount.clone()));
+                    idx += 1;
+                }
+
+                if create.is_empty() {
+                    None
+                } else {
+                    Some(UtxoDelta {
+                        spend: vec![],
+                        create,
+                    })
+                }
+            }
+
             _ => None,
         };
 
@@ -758,5 +791,16 @@ where
     async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) {
         let (dec, count) = self.utxos.circulating_supply().await;
         (dec, count as u64)
+    }
+
+    async fn balance_by_address(&self, address: &str) -> rust_decimal::Decimal {
+        self.utxos.balance_by_address(address).await
+    }
+
+    async fn add_utxo(&self, txid: String, index: u32, address: String, amount: String) {
+        use pms_types::{OutputId, TxOutput};
+        self.utxos
+            .add(OutputId { txid, index }, TxOutput { address, amount })
+            .await;
     }
 }

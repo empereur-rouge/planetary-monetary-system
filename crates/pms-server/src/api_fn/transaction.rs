@@ -1,11 +1,16 @@
-use crate::api::AppState;
+use crate::{
+    api::AppState,
+    fee_distribution::{
+        BlockRewardConfig, FeeDistributionConfig, compute_block_reward_outputs, compute_fee_outputs,
+    },
+};
 use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use http::StatusCode;
 use pms_storage::{DagStorage, PutResult};
 use pms_token::FeePolicy;
-use pms_types::{Block, Transaction};
+use pms_types::{Block, Transaction, TxOutput};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use pms_utils::{check_pow_leading_zero_bits, compute_block_id};
 use pms_wallet::SignerBackend;
@@ -182,12 +187,19 @@ pub async fn wallet_send_tx(
     // ============================================================
     // 5) Forge bloc + WireBlock + signature + persist
     // ============================================================
+    // Include signer's X25519 public key in metadata for fee distribution
+    // This allows parent block creators to receive their share of fees
+    let block_metadata = pms_types_block::BlockMetadata {
+        signer_x25519_hex: Some(state.node_wallet.x25519_pub_hex().to_string()),
+        ..Default::default()
+    };
+
     let mut block = Block {
         id: String::new(),
         parents: parents.clone(),
         payload: payload.clone(),
         nonce: 0,
-        metadata: None, // Pas de métadonnées pour les transactions normales
+        metadata: Some(block_metadata),
         signer_pk: None,
         signature: None,
     };
@@ -271,6 +283,186 @@ pub async fn wallet_send_tx(
         PutResult::Inserted => {
             // Announce the new block to the network for gossip propagation
             state.srv.enqueue_broadcast(wb.id.clone()).await;
+
+            // ============================================================
+            // 6) CREATE REWARD BLOCK (Fee Distribution + Block Rewards)
+            // ============================================================
+            // SECURITY: Only Coordinator creates Reward blocks
+            // This prevents unauthorized token creation
+
+            // Check if this node is the Coordinator
+            let is_coordinator = if let Some(coord_pk) = &settings.validation.coordinator_public_key
+            {
+                // Compare node's public key with configured coordinator key
+                node_wallet.encoded_public_key() == *coord_pk
+            } else {
+                // Dev mode: no coordinator check
+                true
+            };
+
+            if is_coordinator {
+                // Crée un bloc de reward séparé qui distribue:
+                // - 15% Treasury, 45% Creator, 40% Parents (des tx fees)
+                // - 70% Creator, 20% Treasury, 10% Burn (block rewards)
+
+                // Config depuis settings
+                let fee_config = FeeDistributionConfig::from_percents(
+                    settings.fees.treasury_fee_percent,
+                    settings.fees.creator_fee_percent,
+                    settings.fees.parents_fee_percent,
+                );
+
+                let creator_address = node_wallet.get_address("8e");
+
+                // Get treasury addresses: prefer signed list from AppState, fallback to config
+                let treasury_addrs: Vec<String> = if !state.treasury_wallets.is_empty() {
+                    tracing::debug!(
+                        "Using {} treasury wallets from signed list",
+                        state.treasury_wallets.len()
+                    );
+                    state.treasury_wallets.list.clone()
+                } else {
+                    tracing::debug!(
+                        "Treasury wallets empty, using {} admin addresses as fallback",
+                        settings.admin.wallet_addresses.len()
+                    );
+                    settings.admin.wallet_addresses.clone()
+                };
+                tracing::debug!(
+                    "Treasury distribution to {} addresses",
+                    treasury_addrs.len()
+                );
+
+                // Calcul des fee outputs (15% treasury, 45% creator, 40% parents)
+                let fee_outputs_raw = compute_fee_outputs(
+                    fee_dec,
+                    &treasury_addrs,
+                    &creator_address,
+                    &parents,
+                    &state.store,
+                    "8e",
+                    &fee_config,
+                )
+                .await;
+
+                // Calcul des block reward outputs (70% creator, 20% treasury, 10% burn)
+                let reward_config = BlockRewardConfig::default();
+                let treasury_addr = state
+                    .treasury_wallets
+                    .first()
+                    .cloned()
+                    .or_else(|| settings.admin.wallet_addresses.first().cloned())
+                    .unwrap_or_else(|| creator_address.clone());
+                let (reward_outputs_raw, burned_amount) =
+                    compute_block_reward_outputs(&creator_address, &treasury_addr, &reward_config);
+
+                // Log fee distribution details for debugging
+                tracing::info!(
+                    "Fee distribution: {} fee outputs, {} reward outputs, {} treasury addrs",
+                    fee_outputs_raw.len(),
+                    reward_outputs_raw.len(),
+                    treasury_addrs.len()
+                );
+                for fo in &fee_outputs_raw {
+                    tracing::info!(
+                        "  Fee output: {} -> {}",
+                        &fo.address[..20.min(fo.address.len())],
+                        fo.amount
+                    );
+                }
+
+                // Si on a des outputs à distribuer, créer un reward block
+                if !fee_outputs_raw.is_empty() || !reward_outputs_raw.is_empty() {
+                    // Convertir en TxOutput
+                    let fee_txouts: Vec<TxOutput> = fee_outputs_raw
+                        .iter()
+                        .map(|fo| TxOutput {
+                            address: fo.address.clone(),
+                            amount: fo.amount.clone(),
+                        })
+                        .collect();
+
+                    let reward_txouts: Vec<TxOutput> = reward_outputs_raw
+                        .iter()
+                        .map(|fo| TxOutput {
+                            address: fo.address.clone(),
+                            amount: fo.amount.clone(),
+                        })
+                        .collect();
+
+                    // Payload Reward
+                    let reward_payload = PlainPayload::Reward {
+                        fee_outputs: fee_txouts,
+                        reward_outputs: reward_txouts,
+                        burned: burned_amount.to_string(),
+                        tx_block_id: wb.id.clone(),
+                    };
+
+                    // Créer le bloc de reward (parent = le bloc TX qu'on vient de créer)
+                    let mut reward_block = Block {
+                        id: String::new(),
+                        parents: vec![wb.id.clone()],
+                        payload: Some(PayloadEnvelope::Plain(reward_payload)),
+                        nonce: 0,
+                        metadata: Some(pms_types_block::BlockMetadata {
+                            signer_x25519_hex: Some(state.node_wallet.x25519_pub_hex().to_string()),
+                            description: Some("Reward distribution".to_string()),
+                            ..Default::default()
+                        }),
+                        signer_pk: None,
+                        signature: None,
+                    };
+                    reward_block.id = compute_block_id(
+                        &reward_block.parents,
+                        &reward_block.payload,
+                        reward_block.nonce,
+                    );
+
+                    // PoW (minimal pour reward blocks)
+                    let min_bits = state.srv.adapter_arc().min_pow_leading_zero_bits();
+                    if min_bits > 0 {
+                        while !check_pow_leading_zero_bits(&reward_block.id, min_bits) {
+                            reward_block.nonce += 1;
+                            reward_block.id = compute_block_id(
+                                &reward_block.parents,
+                                &reward_block.payload,
+                                reward_block.nonce,
+                            );
+                        }
+                    }
+
+                    // Build WireBlock pour le reward
+                    let reward_payload_json = serde_json::to_string(&reward_block.payload).ok();
+                    let mut reward_wb = WireBlock {
+                        id: reward_block.id.clone(),
+                        parents: reward_block.parents.clone(),
+                        payload_json: reward_payload_json,
+                        nonce: reward_block.nonce,
+                        network_id: meta.network_id.clone(),
+                        protocol_version: meta.protocol_version as u16,
+                        signer_pk_hex: node_wallet.encoded_public_key(),
+                        signature_hex: String::new(),
+                        metadata: reward_block.metadata.clone(),
+                    };
+
+                    // Signer
+                    let reward_msg = canonical_wireblock_message(&reward_wb);
+                    if let Ok(sig) = node_wallet.sign(&reward_msg) {
+                        reward_wb.signature_hex = sig;
+
+                        // Persister
+                        if let Ok(PutResult::Inserted) = adapter.persist_block(&reward_wb).await {
+                            state.srv.enqueue_broadcast(reward_wb.id.clone()).await;
+                            tracing::info!(
+                                "📦 Reward block created: {} (fees distributed from TX {})",
+                                &reward_wb.id[..16],
+                                &wb.id[..16]
+                            );
+                        }
+                    }
+                }
+            } // End of if is_coordinator
+
             (
                 StatusCode::CREATED,
                 Json(json!({ "id": wb.id, "status": "inserted" })),
