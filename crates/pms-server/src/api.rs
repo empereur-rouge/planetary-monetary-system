@@ -4,7 +4,9 @@ use crate::admin::{admin_compact, admin_ping};
 pub use crate::api_fn::blocks::submit_block;
 use crate::api_fn::dag::get_tips;
 use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
+use crate::api_fn::milestone::{distribute_fees, get_fee_pool_status};
 use crate::api_fn::nft::get_nft;
+use crate::api_fn::nodes::{list_nodes, node_heartbeat, register_node};
 use crate::api_fn::stream_blocks::stream_blocks;
 use crate::api_fn::supply::get_circulating_supply;
 use crate::api_fn::transaction::wallet_send_tx;
@@ -62,6 +64,10 @@ pub struct AppState {
     pub allowed_networks: Vec<ipnetwork::IpNetwork>,
     /// Verified treasury wallet addresses (signed by coordinator)
     pub treasury_wallets: TreasuryWallets,
+    /// Dynamic node registry for distributed TX processing
+    pub node_registry: crate::node_registry::SharedNodeRegistry,
+    /// Fee pool for accumulating fees until Milestone distribution
+    pub fee_pool: crate::fee_pool::SharedFeePool,
 }
 
 /// Middleware to check if request is allowed for admin routes.
@@ -170,6 +176,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     let admin = Router::new()
         .route("/admin/ping", get(admin_ping))
         .route("/admin/compact", post(admin_compact))
+        .route("/admin/distribute_fees", post(distribute_fees))
         // TODO: /admin/stats
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -188,7 +195,9 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
 
     let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
 
-    let supply = Router::new().route("/v1/supply", get(get_circulating_supply));
+    let supply = Router::new()
+        .route("/v1/supply", get(get_circulating_supply))
+        .route("/v1/fee_pool", get(get_fee_pool_status));
 
     let history = Router::new()
         .route("/v1/history/encrypted", get(get_encrypted_history))
@@ -199,6 +208,12 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     // Endpoint: /v1/nft/:token_id (Query NFT ownership)
     // NOTE: Axum 0.7+ utilise {param} au lieu de :param pour les captures de route
     let nft_routes = Router::new().route("/v1/nft/{token_id}", get(get_nft));
+
+    // Node registry endpoints for distributed TX processing
+    let node_routes = Router::new()
+        .route("/v1/register", post(register_node))
+        .route("/v1/nodes", get(list_nodes))
+        .route("/v1/heartbeat", post(node_heartbeat));
 
     let debug = Router::new().route("/debug/slow", get(debug_slow));
 
@@ -217,6 +232,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .merge(history)
         .merge(dag_routes)
         .merge(nft_routes)
+        .merge(node_routes)
         .merge(debug)
         .with_state(state)
         // GLOBAL LAYERS (Reverse Order: Bottom executed first)
@@ -328,6 +344,8 @@ pub async fn serve_api(
         settings: Arc::new(settings.clone()),
         allowed_networks,
         treasury_wallets,
+        node_registry: crate::node_registry::create_registry(),
+        fee_pool: crate::fee_pool::create_fee_pool(),
     };
 
     // 🔹 Construit le Router complet

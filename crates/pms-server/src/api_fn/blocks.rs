@@ -60,6 +60,35 @@ pub async fn submit_block(
         }
     }
 
+    // 0c) Coordinator Filter: Reject regular TXs if configured (force use of Worker Nodes)
+    if st.settings.validation.coordinator_tx_only {
+        let is_privileged = if let Some(ref json) = wb.payload_json {
+            if let Ok(envelope) = serde_json::from_str::<PayloadEnvelope>(json) {
+                match envelope {
+                    PayloadEnvelope::Plain(PlainPayload::Milestone { .. })
+                    | PayloadEnvelope::Plain(PlainPayload::ConfigUpdate(_)) => true,
+                    _ => false,
+                }
+            } else {
+                false // Unparseable or empty -> treat as non-privileged/invalid
+            }
+        } else {
+            false // No payload -> treat as non-privileged
+        };
+
+        if !is_privileged {
+            tracing::warn!(
+                "⛔️ Coordinator rejected non-privileged block from {}",
+                &wb.signer_pk_hex
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                "Coordinator only accepts Milestones. Use a Worker Node.",
+            )
+                .into_response();
+        }
+    }
+
     // 1) Persist block
     match st.srv.adapter_arc().persist_block(&wb).await {
         Ok(PutResult::Inserted) => {
@@ -70,10 +99,12 @@ pub async fn submit_block(
             crate::metrics::PMS_BLOCKS_TOTAL.inc();
 
             // ============================================================
-            // CREATE REWARD BLOCK (Fee Distribution + Block Rewards)
+            // FEE POOL ACCUMULATION (Distributed TX Processing)
             // ============================================================
-            // Only Coordinator creates Reward blocks to prevent unauthorized minting
-            create_reward_block_if_coordinator(&st, &wb).await;
+            // Instead of creating a reward block immediately, we accumulate
+            // fees in the pool. Distribution happens via Milestone.
+            // This removes the Coordinator bottleneck for horizontal scaling.
+            accumulate_fee_if_tx(&st, &wb).await;
 
             StatusCode::ACCEPTED.into_response()
         }
@@ -94,8 +125,52 @@ pub async fn submit_block(
     }
 }
 
-/// Creates a reward block if this node is the Coordinator and the block contains a transaction
-async fn create_reward_block_if_coordinator(st: &AppState, wb: &WireBlock) {
+/// Accumulates transaction fee in the pool for later Milestone distribution
+/// This replaces immediate reward block creation for horizontal scaling
+async fn accumulate_fee_if_tx(st: &AppState, wb: &WireBlock) {
+    // Extract transaction fee from payload
+    let fee = match extract_tx_fee(wb) {
+        Some(f) if f > Decimal::ZERO => f,
+        _ => return, // No tx or no fee, nothing to accumulate
+    };
+
+    // Get the block signer (node that created/submitted this block)
+    let signer_pk = if wb.signer_pk_hex.is_empty() {
+        "unknown".to_string()
+    } else {
+        wb.signer_pk_hex.clone()
+    };
+
+    // Add fee to pool with node contribution tracking
+    {
+        let mut pool = st.fee_pool.write().await;
+        pool.add_fee(fee, &signer_pk);
+        tracing::debug!(
+            "💰 Fee accumulated: {} PMS from node {}... (pool total: {} PMS, {} txs)",
+            fee,
+            &signer_pk[..20.min(signer_pk.len())],
+            pool.total_fees,
+            pool.tx_count
+        );
+    }
+
+    // Also increment block count in node registry for this signer
+    {
+        let mut registry = st.node_registry.write().await;
+        registry.increment_block_count(&signer_pk);
+    }
+}
+
+// ============================================================================
+// LEGACY: create_reward_block_if_coordinator is no longer used
+// Rewards are now distributed via Milestone with distribute_node_rewards=true
+// ============================================================================
+
+/// [LEGACY] Creates a reward block if this node is the Coordinator
+/// This function is kept for reference but no longer called.
+/// Rewards are now accumulated in FeePool and distributed via Milestone.
+#[allow(dead_code)]
+async fn _create_reward_block_if_coordinator_legacy(st: &AppState, wb: &WireBlock) {
     // Extract transaction fee from payload
     let fee = match extract_tx_fee(wb) {
         Some(f) if f > Decimal::ZERO => f,

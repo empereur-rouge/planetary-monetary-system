@@ -15,12 +15,12 @@
 set -e
 
 VPS_IP="${1:-}"
-VPS_USER="${2:-pms}"
+VPS_USER="${2:-root}"
 ADMIN_TOKEN="${3:-}"
 
 if [ -z "$VPS_IP" ]; then
     echo "Usage: $0 <VPS_IP> [USER] [ADMIN_TOKEN]"
-    echo "Example: $0 87.106.50.82 pms mon_token_secret"
+    echo "Example: $0 87.106.50.82 root mon_token_secret"
     exit 1
 fi
 

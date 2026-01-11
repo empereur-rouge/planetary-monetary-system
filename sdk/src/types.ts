@@ -161,24 +161,51 @@ export interface BalanceInfo {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Node Registry Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Info sur un noeud du réseau */
+export interface NodeInfo {
+    /** Clé publique du noeud */
+    node_pk: string;
+    /** URL de l'API */
+    api_url: string;
+    /** Nombre de blocs produits */
+    block_count: number;
+    /** Timestamp dernière activité */
+    last_seen: number;
+}
+
+/** Réponse de liste des noeuds */
+export interface NodeListResponse {
+    nodes: NodeInfo[];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Client Configuration
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** Configuration du client PMS */
 export interface PmsClientConfig {
-    /** URL du nœud (ex: "https://node.pms.network") */
+    /** URL du nœud principal (ex: "https://node.pms.network") */
     nodeUrl: string;
+    /** URLs des noeuds seeds (optionnel, pour racing et fallback) */
+    seedNodes?: string[];
     /** ID du réseau (défaut: "pms-mainnet") */
     networkId?: string;
     /** Version du protocole (défaut: 1) */
     protocolVersion?: number;
     /** Timeout en ms (défaut: 30000) */
     timeout?: number;
+    /** Activer le mode racing (envoie à tous les noeuds connus) (défaut: true) */
+    enableRacing?: boolean;
 }
 
 /** Configuration par défaut */
-export const DEFAULT_CONFIG: Required<Omit<PmsClientConfig, "nodeUrl">> = {
+export const DEFAULT_CONFIG: Required<Omit<PmsClientConfig, "nodeUrl" | "seedNodes">> & { seedNodes: string[] } = {
     networkId: "pms-mainnet",
     protocolVersion: 1,
     timeout: 30000,
+    seedNodes: [],
+    enableRacing: true,
 };

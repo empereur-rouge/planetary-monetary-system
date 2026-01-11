@@ -203,12 +203,18 @@ function isValidMnemonic(mnemonic) {
 var DEFAULT_CONFIG = {
   networkId: "pms-mainnet",
   protocolVersion: 1,
-  timeout: 3e4
+  timeout: 3e4,
+  seedNodes: [],
+  enableRacing: true
 };
 
 // src/client.ts
 var PmsClient = class {
   config;
+  knownNodes = /* @__PURE__ */ new Set();
+  lastNodeRefresh = 0;
+  NODE_REFRESH_INTERVAL = 6e4;
+  // 1 min
   /**
    * Crée un nouveau client PMS.
    * @param config - Configuration du client
@@ -216,8 +222,18 @@ var PmsClient = class {
   constructor(config) {
     this.config = {
       ...DEFAULT_CONFIG,
+      seedNodes: config.seedNodes ?? [],
+      enableRacing: config.enableRacing ?? true,
       ...config
     };
+    this.addKnownNode(this.config.nodeUrl);
+    this.config.seedNodes.forEach((url) => this.addKnownNode(url));
+  }
+  addKnownNode(url) {
+    const normalized = url.replace(/\/$/, "");
+    if (normalized.startsWith("http")) {
+      this.knownNodes.add(normalized);
+    }
   }
   // ═══════════════════════════════════════════════════════════════════════
   // Méthodes de lecture (GET)
@@ -279,12 +295,66 @@ var PmsClient = class {
   // ═══════════════════════════════════════════════════════════════════════
   /**
    * Soumet un bloc au réseau.
+   * Utilise le racing pattern si activé pour envoyer à plusieurs noeuds.
    */
   async submitBlock(wireBlock) {
+    if (this.config.enableRacing) {
+      return this.submitBlockRacing(wireBlock);
+    }
     return this.fetch("/v1/submit", {
       method: "POST",
       body: JSON.stringify(wireBlock)
     });
+  }
+  /**
+   * Discovery & Racing Pattern:
+   * 1. Refresh node list if stale
+   * 2. Send to all known nodes in parallel
+   * 3. Return first success
+   */
+  async submitBlockRacing(wireBlock) {
+    this.refreshNodeList().catch((err) => console.debug("Node refresh failed:", err));
+    const targets = Array.from(this.knownNodes);
+    if (targets.length === 0) {
+      targets.push(this.config.nodeUrl.replace(/\/$/, ""));
+    }
+    const body = JSON.stringify(wireBlock);
+    const controller = new AbortController();
+    const promises = targets.map(async (baseUrl) => {
+      try {
+        const res = await this.fetchUrl(baseUrl, "/v1/submit", {
+          method: "POST",
+          body,
+          signal: controller.signal
+        });
+        return res;
+      } catch (err) {
+        throw err;
+      }
+    });
+    try {
+      const result = await Promise.any(promises);
+      controller.abort();
+      return result;
+    } catch (error) {
+      throw new Error(`Submit failed on all ${targets.length} nodes: ${error}`);
+    }
+  }
+  /**
+   * Rafraîchit la liste des noeuds connus depuis le registre
+   */
+  async refreshNodeList() {
+    if (Date.now() - this.lastNodeRefresh < this.NODE_REFRESH_INTERVAL) {
+      return;
+    }
+    try {
+      const res = await this.fetch("/v1/nodes");
+      res.nodes.forEach((node) => {
+        if (node.api_url) this.addKnownNode(node.api_url);
+      });
+      this.lastNodeRefresh = Date.now();
+    } catch (e) {
+    }
   }
   /**
    * Envoie des tokens à une adresse.
@@ -349,9 +419,13 @@ var PmsClient = class {
   // Helper HTTP
   // ═══════════════════════════════════════════════════════════════════════
   async fetch(path, init) {
-    const url = `${this.config.nodeUrl}${path}`;
+    return this.fetchUrl(this.config.nodeUrl, path, init);
+  }
+  async fetchUrl(baseUrl, path, init) {
+    const url = `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.timeout);
+    const signal = init?.signal || controller.signal;
     try {
       const res = await fetch(url, {
         ...init,
@@ -359,11 +433,11 @@ var PmsClient = class {
           "Content-Type": "application/json",
           ...init?.headers
         },
-        signal: controller.signal
+        signal
       });
       if (!res.ok) {
         const text = await res.text();
-        throw new Error(`HTTP ${res.status}: ${text}`);
+        throw new Error(`HTTP ${res.status} (${url}): ${text}`);
       }
       return res.json();
     } finally {

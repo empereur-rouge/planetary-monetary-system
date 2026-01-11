@@ -88,6 +88,8 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         settings: Arc::new(settings.clone()),
         allowed_networks: vec![], // Tests: allow all IPs
         treasury_wallets: TreasuryWallets::empty(),
+        node_registry: pms_server::node_registry::create_registry(),
+        fee_pool: pms_server::fee_pool::create_fee_pool(),
     };
 
     // 10) Router axum
@@ -176,6 +178,8 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         settings: Arc::new(settings.clone()),
         allowed_networks: vec![], // Tests: allow all IPs
         treasury_wallets: TreasuryWallets::empty(),
+        node_registry: pms_server::node_registry::create_registry(),
+        fee_pool: pms_server::fee_pool::create_fee_pool(),
     };
 
     // 10) Router
@@ -273,6 +277,8 @@ pub async fn make_test_ctx_with_admin(
         settings: Arc::new(settings.clone()),
         allowed_networks: vec![], // Tests: allow all IPs
         treasury_wallets: TreasuryWallets::empty(),
+        node_registry: pms_server::node_registry::create_registry(),
+        fee_pool: pms_server::fee_pool::create_fee_pool(),
     };
 
     // 10) Router

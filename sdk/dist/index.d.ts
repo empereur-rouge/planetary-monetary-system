@@ -269,19 +269,40 @@ interface BalanceInfo {
     /** Liste des UTXOs */
     utxos: Utxo[];
 }
+/** Info sur un noeud du réseau */
+interface NodeInfo {
+    /** Clé publique du noeud */
+    node_pk: string;
+    /** URL de l'API */
+    api_url: string;
+    /** Nombre de blocs produits */
+    block_count: number;
+    /** Timestamp dernière activité */
+    last_seen: number;
+}
+/** Réponse de liste des noeuds */
+interface NodeListResponse {
+    nodes: NodeInfo[];
+}
 /** Configuration du client PMS */
 interface PmsClientConfig {
-    /** URL du nœud (ex: "https://node.pms.network") */
+    /** URL du nœud principal (ex: "https://node.pms.network") */
     nodeUrl: string;
+    /** URLs des noeuds seeds (optionnel, pour racing et fallback) */
+    seedNodes?: string[];
     /** ID du réseau (défaut: "pms-mainnet") */
     networkId?: string;
     /** Version du protocole (défaut: 1) */
     protocolVersion?: number;
     /** Timeout en ms (défaut: 30000) */
     timeout?: number;
+    /** Activer le mode racing (envoie à tous les noeuds connus) (défaut: true) */
+    enableRacing?: boolean;
 }
 /** Configuration par défaut */
-declare const DEFAULT_CONFIG: Required<Omit<PmsClientConfig, "nodeUrl">>;
+declare const DEFAULT_CONFIG: Required<Omit<PmsClientConfig, "nodeUrl" | "seedNodes">> & {
+    seedNodes: string[];
+};
 
 /**
  * PmsClient - Client HTTP pour interagir avec un nœud PMS.
@@ -308,11 +329,15 @@ declare const DEFAULT_CONFIG: Required<Omit<PmsClientConfig, "nodeUrl">>;
  */
 declare class PmsClient {
     private readonly config;
+    private knownNodes;
+    private lastNodeRefresh;
+    private readonly NODE_REFRESH_INTERVAL;
     /**
      * Crée un nouveau client PMS.
      * @param config - Configuration du client
      */
     constructor(config: PmsClientConfig);
+    private addKnownNode;
     /**
      * Récupère les tips actuels du DAG.
      */
@@ -339,8 +364,20 @@ declare class PmsClient {
     getBalanceInfo(address: string): Promise<BalanceInfo>;
     /**
      * Soumet un bloc au réseau.
+     * Utilise le racing pattern si activé pour envoyer à plusieurs noeuds.
      */
     submitBlock(wireBlock: WireBlock): Promise<SubmitResponse>;
+    /**
+     * Discovery & Racing Pattern:
+     * 1. Refresh node list if stale
+     * 2. Send to all known nodes in parallel
+     * 3. Return first success
+     */
+    private submitBlockRacing;
+    /**
+     * Rafraîchit la liste des noeuds connus depuis le registre
+     */
+    private refreshNodeList;
     /**
      * Envoie des tokens à une adresse.
      * Construit automatiquement la transaction, la signe et la soumet.
@@ -352,6 +389,7 @@ declare class PmsClient {
         memo?: string;
     }): Promise<SubmitResponse>;
     private fetch;
+    private fetchUrl;
 }
 
 /**
@@ -380,4 +418,4 @@ declare function parseAmount(amount: string): bigint;
  */
 declare function formatAmount(sats: bigint): string;
 
-export { type BalanceInfo, type Block, type ConfigUpdate, DEFAULT_CONFIG, type EncryptedPayload, type MilestonePayload, type MintPayload, type NftAction, type OutputRef, type PayloadEnvelope, type PlainPayload, PmsClient, type PmsClientConfig, PmsWallet, type SubmitResponse, type SupplyInfo, type TxOutput, type TxUtxo, type Utxo, type WireBlock, checkPowBits, computeBlockId, formatAmount, fromHex, isValidMnemonic, parseAmount, toHex };
+export { type BalanceInfo, type Block, type ConfigUpdate, DEFAULT_CONFIG, type EncryptedPayload, type MilestonePayload, type MintPayload, type NftAction, type NodeInfo, type NodeListResponse, type OutputRef, type PayloadEnvelope, type PlainPayload, PmsClient, type PmsClientConfig, PmsWallet, type SubmitResponse, type SupplyInfo, type TxOutput, type TxUtxo, type Utxo, type WireBlock, checkPowBits, computeBlockId, formatAmount, fromHex, isValidMnemonic, parseAmount, toHex };

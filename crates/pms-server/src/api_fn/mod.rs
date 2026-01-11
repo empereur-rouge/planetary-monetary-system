@@ -1,7 +1,9 @@
 pub mod blocks;
 pub mod dag;
 pub mod history;
+pub mod milestone;
 pub mod nft;
+pub mod nodes;
 pub mod stream_blocks;
 pub mod supply;
 pub mod transaction;

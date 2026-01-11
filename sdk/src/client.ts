@@ -29,6 +29,7 @@ import type {
     TxOutput,
     TxUtxo,
     PayloadEnvelope,
+    NodeListResponse,
 } from "./types";
 import { DEFAULT_CONFIG, type BalanceInfo } from "./types";
 import { PmsWallet } from "./wallet";
@@ -39,6 +40,9 @@ import { computeBlockId, encodeUtf8, parseAmount, formatAmount } from "./utils";
  */
 export class PmsClient {
     private readonly config: Required<PmsClientConfig>;
+    private knownNodes: Set<string> = new Set();
+    private lastNodeRefresh = 0;
+    private readonly NODE_REFRESH_INTERVAL = 60_000; // 1 min
 
     /**
      * Crée un nouveau client PMS.
@@ -47,8 +51,22 @@ export class PmsClient {
     constructor(config: PmsClientConfig) {
         this.config = {
             ...DEFAULT_CONFIG,
+            seedNodes: config.seedNodes ?? [],
+            enableRacing: config.enableRacing ?? true,
             ...config,
         };
+
+        // Initialize known nodes with seeds and main node
+        this.addKnownNode(this.config.nodeUrl);
+        this.config.seedNodes.forEach(url => this.addKnownNode(url));
+    }
+
+    private addKnownNode(url: string) {
+        // Normalize URL: remove trailing slash
+        const normalized = url.replace(/\/$/, "");
+        if (normalized.startsWith("http")) {
+            this.knownNodes.add(normalized);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -59,8 +77,11 @@ export class PmsClient {
      * Récupère les tips actuels du DAG.
      */
     async getTips(): Promise<string[]> {
-        const res = await this.fetch<{ tips: string[] }>("/v1/tips");
-        return res.tips;
+        const res = await this.fetch<string[]>("/v1/dag/tips", {
+            method: "POST",
+            body: JSON.stringify({ limit: 10 })
+        });
+        return res;
     }
 
     /**
@@ -119,12 +140,87 @@ export class PmsClient {
 
     /**
      * Soumet un bloc au réseau.
+     * Utilise le racing pattern si activé pour envoyer à plusieurs noeuds.
      */
     async submitBlock(wireBlock: WireBlock): Promise<SubmitResponse> {
-        return this.fetch("/v1/submit", {
+        if (this.config.enableRacing) {
+            return this.submitBlockRacing(wireBlock);
+        }
+
+        return this.fetch("/submit/block", {
             method: "POST",
             body: JSON.stringify(wireBlock),
         });
+    }
+
+    /**
+     * Discovery & Racing Pattern:
+     * 1. Refresh node list if stale
+     * 2. Send to all known nodes in parallel
+     * 3. Return first success
+     */
+    private async submitBlockRacing(wireBlock: WireBlock): Promise<SubmitResponse> {
+        // 1. Refresh nodes (optimistic - don't block if fails)
+        this.refreshNodeList().catch(err => console.debug("Node refresh failed:", err));
+
+        // 2. Prepare targets (Main + Seeds + Discovered)
+        // Shuffle to distribute load if we had too many (limit to top 5 for efficiency?)
+        // For now, use all known nodes (assuming < 20)
+        const targets = Array.from(this.knownNodes);
+
+        if (targets.length === 0) {
+            targets.push(this.config.nodeUrl.replace(/\/$/, ""));
+        }
+
+        // 3. Race!
+        const body = JSON.stringify(wireBlock);
+        const controller = new AbortController();
+
+        const promises = targets.map(async (baseUrl) => {
+            try {
+                const res = await this.fetchUrl<SubmitResponse>(baseUrl, "/submit/block", {
+                    method: "POST",
+                    body,
+                    signal: controller.signal
+                });
+                return res;
+            } catch (err) {
+                throw err;
+            }
+        });
+
+        try {
+            // First success wins
+            const result = await Promise.any(promises);
+
+            // Abort others to save bandwidth (optional, currently fetch wrapper creates its own controller)
+            controller.abort();
+
+            return result;
+        } catch (error) {
+            // If all failed
+            throw new Error(`Submit failed on all ${targets.length} nodes: ${error}`);
+        }
+    }
+
+    /**
+     * Rafraîchit la liste des noeuds connus depuis le registre
+     */
+    private async refreshNodeList() {
+        if (Date.now() - this.lastNodeRefresh < this.NODE_REFRESH_INTERVAL) {
+            return;
+        }
+
+        try {
+            const res = await this.fetch<NodeListResponse>("/v1/nodes");
+            res.nodes.forEach(node => {
+                if (node.api_url) this.addKnownNode(node.api_url);
+            });
+            this.lastNodeRefresh = Date.now();
+        } catch (e) {
+            // Should verify this doesn't crash the app, just log debug
+            // console.debug("Failed to refresh node list (ignoring)", e);
+        }
     }
 
     /**
@@ -223,10 +319,19 @@ export class PmsClient {
     // ═══════════════════════════════════════════════════════════════════════
 
     private async fetch<T>(path: string, init?: RequestInit): Promise<T> {
-        const url = `${this.config.nodeUrl}${path}`;
+        // Use primary node URL by default
+        return this.fetchUrl(this.config.nodeUrl, path, init);
+    }
+
+    private async fetchUrl<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
+        // Ensure no double slash if baseUrl ends with / and path starts with /
+        const url = `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
 
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), this.config.timeout);
+
+        // Merge signals if init provied one
+        const signal = init?.signal || controller.signal;
 
         try {
             const res = await fetch(url, {
@@ -235,12 +340,12 @@ export class PmsClient {
                     "Content-Type": "application/json",
                     ...init?.headers,
                 },
-                signal: controller.signal,
+                signal,
             });
 
             if (!res.ok) {
                 const text = await res.text();
-                throw new Error(`HTTP ${res.status}: ${text}`);
+                throw new Error(`HTTP ${res.status} (${url}): ${text}`);
             }
 
             return res.json() as Promise<T>;

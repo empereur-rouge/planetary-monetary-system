@@ -47,7 +47,7 @@ enforce_fee_recipient = false # Désactivé pour les tests
 
 [auth]
 require_signed_submit = true
-admin_api_token = "env:PMS_ADMIN_TOKEN_DEV"
+admin_api_token = "env:PMS_ADMIN_TOKEN"
 
 [secrets]
 node_identity_key_path = "/home/pms/config/node-identity.key"

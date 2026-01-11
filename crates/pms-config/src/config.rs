@@ -143,6 +143,8 @@ pub struct ValidationSettings {
     #[serde(default)]
     pub allowed_fee_addresses: Vec<String>,
     pub coordinator_public_key: Option<String>, // Pour Dev/Testnet custom
+    #[serde(default)]
+    pub coordinator_tx_only: bool, // If true, node rejects non-privileged TXs
 }
 
 #[derive(Debug, Clone, Deserialize)]
