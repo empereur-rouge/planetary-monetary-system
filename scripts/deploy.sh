@@ -100,9 +100,15 @@ if [ ! -f etc/pms/admin-wallet.json ]; then
 fi
 chmod 644 etc/pms/admin-wallet.json
 
-echo "📝 Configuration prod avec token admin..."
-cp etc/config/config.prod.template.toml etc/config/config.prod.toml
-sed -i 's/REPLACE_WITH_YOUR_SECRET_TOKEN/${ADMIN_TOKEN}/' etc/config/config.prod.toml
+echo "📝 Configuration prod..."
+if [ -f etc/config/config.prod.toml ]; then
+    echo "   ✓ config.prod.toml existe déjà, conservation des modifications"
+else
+    echo "   → Création depuis le template..."
+    cp etc/config/config.prod.template.toml etc/config/config.prod.toml
+    sed -i 's/REPLACE_WITH_YOUR_SECRET_TOKEN/${ADMIN_TOKEN}/' etc/config/config.prod.toml
+    echo "   ✓ config.prod.toml créée"
+fi
 chmod 644 etc/config/config.prod.toml
 
 echo "🛑 Arrêt des anciens conteneurs..."

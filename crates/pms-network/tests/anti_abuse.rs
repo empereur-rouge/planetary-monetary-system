@@ -92,6 +92,20 @@ impl NetDagAdapter for DummyAdapter {
     async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) {
         (rust_decimal::Decimal::ZERO, 0)
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Méthodes UTXO (dummy implementations pour les tests)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Retourne le solde d'une adresse (toujours 0 pour le DummyAdapter)
+    async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
+        rust_decimal::Decimal::ZERO
+    }
+
+    /// Ajoute un UTXO (no-op pour le DummyAdapter)
+    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String) {
+        // Dummy: on ne stocke pas les UTXOs dans ce mock
+    }
 }
 
 async fn start_server(addr: &str) -> Arc<Server> {

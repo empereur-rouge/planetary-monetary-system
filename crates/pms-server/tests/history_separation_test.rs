@@ -52,6 +52,9 @@ async fn history_separation_test() -> anyhow::Result<()> {
         node_wallet: wallet.clone(),
         settings: Arc::new(settings),
         allowed_networks: vec![], // Tests: allow all IPs
+        treasury_wallets: pms_config::TreasuryWallets::empty(),
+        node_registry: pms_server::node_registry::create_registry(),
+        fee_pool: pms_server::fee_pool::create_fee_pool(),
     };
 
     // 4) Insert Blocks manually into Store (to bypass validation/mining for speed)

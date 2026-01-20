@@ -14,12 +14,15 @@ use tokio::sync::RwLock;
 /// Pool de fees accumulées en attente de distribution
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct FeePool {
-    /// Total des fees accumulées (en PMS)
+    /// Total des fees accumulées (en PMS) - pour distribution aux nœuds
     pub total_fees: Decimal,
     /// Contributions par nœud: node_pk -> nombre de blocs créés
     pub node_contributions: HashMap<String, u64>,
     /// Compteur total de transactions traitées (pour stats)
     pub tx_count: u64,
+    /// Refunds de burn en attente: wallet_address -> montant total
+    /// Ces refunds sont distribués directement aux wallets utilisateurs
+    pub burn_refunds: HashMap<String, Decimal>,
 }
 
 impl FeePool {
@@ -28,10 +31,12 @@ impl FeePool {
             total_fees: Decimal::ZERO,
             node_contributions: HashMap::new(),
             tx_count: 0,
+            burn_refunds: HashMap::new(),
         }
     }
 
     /// Ajoute une fee au pool et incrémente le compteur du nœud
+    /// Utilisé pour les fees de transactions (distribuées aux nœuds)
     pub fn add_fee(&mut self, fee: Decimal, node_pk: &str) {
         self.total_fees += fee;
         self.tx_count += 1;
@@ -39,6 +44,29 @@ impl FeePool {
             .node_contributions
             .entry(node_pk.to_string())
             .or_insert(0) += 1;
+    }
+
+    /// Ajoute un refund de burn pour un wallet utilisateur
+    /// Ces refunds sont séparés des fees de nœuds et vont directement aux wallets
+    pub fn add_burn_refund(&mut self, wallet_address: &str, amount: Decimal) {
+        *self
+            .burn_refunds
+            .entry(wallet_address.to_string())
+            .or_insert(Decimal::ZERO) += amount;
+    }
+
+    /// Retourne les refunds de burn en attente: Vec<(wallet_address, amount)>
+    pub fn get_burn_refunds(&self) -> Vec<(String, Decimal)> {
+        self.burn_refunds
+            .iter()
+            .filter(|(_, amount)| **amount > Decimal::ZERO)
+            .map(|(addr, amount)| (addr.clone(), *amount))
+            .collect()
+    }
+
+    /// Total des refunds de burn en attente
+    pub fn total_burn_refunds(&self) -> Decimal {
+        self.burn_refunds.values().copied().sum()
     }
 
     /// Calcule les parts proportionnelles de chaque nœud
@@ -65,11 +93,12 @@ impl FeePool {
         self.total_fees = Decimal::ZERO;
         self.node_contributions.clear();
         self.tx_count = 0;
+        self.burn_refunds.clear();
     }
 
-    /// Retourne true si le pool a des fees à distribuer
+    /// Retourne true si le pool a des fees ou refunds à distribuer
     pub fn has_fees(&self) -> bool {
-        self.total_fees > Decimal::ZERO
+        self.total_fees > Decimal::ZERO || !self.burn_refunds.is_empty()
     }
 }
 

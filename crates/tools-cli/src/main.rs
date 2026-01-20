@@ -40,6 +40,21 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Commande pour dériver les clés coordinateur d'une clé privée existante et mettre à jour le config
+    if args.len() > 1 && args[1] == "derive-coordinator" {
+        if args.len() != 4 {
+            eprintln!("Usage: tools-cli derive-coordinator <private_key_hex> <config_file>");
+            eprintln!(
+                "  Dérive les clés publiques (secp256k1 et x25519) et met à jour le fichier de config."
+            );
+            std::process::exit(1);
+        }
+        let priv_hex = &args[2];
+        let config_path = &args[3];
+        keygen::derive_and_update_config(priv_hex, config_path)?;
+        return Ok(());
+    }
+
     // Commande pour vérifier si ce nœud est le coordinateur
     if args.len() > 1 && args[1] == "check-coordinator" {
         if args.len() != 4 {

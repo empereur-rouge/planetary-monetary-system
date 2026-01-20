@@ -57,6 +57,12 @@ impl pms_interface::NetDagAdapter for MockAdapter {
     async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) {
         (rust_decimal::Decimal::ZERO, 0)
     }
+    async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
+        rust_decimal::Decimal::ZERO
+    }
+    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String) {
+        // Mock: no-op
+    }
 }
 
 #[tokio::test]

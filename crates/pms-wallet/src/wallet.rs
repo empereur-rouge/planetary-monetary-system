@@ -139,7 +139,7 @@ impl Wallet {
     }
 
     /// Recalcule (sk_hex, pk_hex) X25519 depuis private_key_b64.
-    pub(crate) fn derive_x25519_pair_from_private_key_b64(&self) -> Option<(String, String)> {
+    pub fn derive_x25519_pair_from_private_key_b64(&self) -> Option<(String, String)> {
         let ecdsa_priv = STANDARD.decode(&self.private_key_b64).ok()?;
 
         let hk = Hkdf::<Sha256>::new(None, &ecdsa_priv);

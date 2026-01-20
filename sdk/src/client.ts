@@ -24,16 +24,22 @@ import type {
     WireBlock,
     SupplyInfo,
     SubmitResponse,
+    MintCubeResponse,
+    BurnNftResponse,
+    CubeAttributes,
     Utxo,
     OutputRef,
     TxOutput,
     TxUtxo,
     PayloadEnvelope,
     NodeListResponse,
+    NftMetadata,
+    CoordinatorInfoResponse,
 } from "./types";
 import { DEFAULT_CONFIG, type BalanceInfo } from "./types";
 import { PmsWallet } from "./wallet";
-import { computeBlockId, encodeUtf8, parseAmount, formatAmount } from "./utils";
+import { computeBlockId, encodeUtf8, parseAmount, formatAmount, fromHex } from "./utils";
+
 
 /**
  * Client pour interagir avec l'API REST d'un nœud PMS.
@@ -47,6 +53,9 @@ export class PmsClient {
     /**
      * Crée un nouveau client PMS.
      * @param config - Configuration du client
+     * @param config.nodeUrl - URL du nœud principal
+     * @param config.enableRacing - Activer le racing pattern
+     * @param config.seedNodes - Liste des nœuds de seed
      */
     constructor(config: PmsClientConfig) {
         this.config = {
@@ -85,6 +94,13 @@ export class PmsClient {
     }
 
     /**
+     * Récupère les informations publiques du coordinateur (clés).
+     */
+    async getCoordinatorInfo(): Promise<CoordinatorInfoResponse> {
+        return this.fetch<CoordinatorInfoResponse>("/v1/coordinator/info");
+    }
+
+    /**
      * Récupère un bloc par son ID.
      */
     async getBlock(blockId: string): Promise<Block> {
@@ -109,13 +125,15 @@ export class PmsClient {
     /**
      * Récupère la balance d'une adresse.
      */
+    /**
+     * Récupère la balance d'une adresse.
+     */
     async getBalance(address: string): Promise<string> {
-        const utxos = await this.getUtxos(address);
-        let total = 0n;
-        for (const utxo of utxos) {
-            total += parseAmount(utxo.amount);
-        }
-        return formatAmount(total);
+        const res = await this.fetch<{ balance: string }>("/v1/balance", {
+            method: "POST",
+            body: JSON.stringify({ address }),
+        });
+        return res.balance;
     }
 
     /**
@@ -132,6 +150,26 @@ export class PmsClient {
             balance: formatAmount(total),
             utxos,
         };
+    }
+
+    /**
+     * Récupère la liste des NFTs appartenant à une adresse.
+     * 
+     * @param address - Adresse publique (hex) du propriétaire
+     * @returns Liste des token_ids possédés par cette adresse
+     * 
+     * @example
+     * ```typescript
+     * const myNfts = await client.getNfts(myWallet.address);
+     * console.log(`Vous possédez ${myNfts.length} NFT(s)`);
+     * for (const tokenId of myNfts) {
+     *     console.log(`- ${tokenId}`);
+     * }
+     * ```
+     */
+    async getNfts(address: string): Promise<string[]> {
+        const res = await this.fetch<{ token_ids: string[] }>(`/v1/wallet/${address}/nfts`);
+        return res.token_ids ?? [];
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -198,8 +236,11 @@ export class PmsClient {
 
             return result;
         } catch (error) {
-            // If all failed
-            throw new Error(`Submit failed on all ${targets.length} nodes: ${error}`);
+            // If all failed - extract individual errors for debugging
+            const aggregateError = error as AggregateError;
+            const errors = aggregateError.errors || [];
+            const errorMessages = errors.map((e: Error) => e.message || String(e)).join("; ");
+            throw new Error(`Submit failed on all ${targets.length} nodes. Errors: ${errorMessages}`);
         }
     }
 
@@ -313,6 +354,204 @@ export class PmsClient {
         // 9. Soumettre
         return this.submitBlock(wireBlock);
     }
+
+
+
+
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Méthodes NFT Cube (Burn et Mint spécialisé)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Brûle (détruit) un NFT existant.
+     * 
+     * Seul le propriétaire du NFT peut le brûler.
+     * Une fois brûlé, le NFT est supprimé définitivement.
+     * 
+     * Pour les Cubes authentiques (avec signature Authority valide), 
+     * un remboursement est calculé selon la formule:
+     * `(weight * size * density) / 10000` PMS
+     * 
+     * @param params - Paramètres du burn
+     * @param params.tokenId - Identifiant du NFT à brûler
+     * @param params.wallet - Wallet PMS du propriétaire (doit être l'owner actuel)
+     * @returns BurnNftResponse avec refund preview si cube authentique
+     * 
+     * @example
+     * ```typescript
+     * const result = await client.burnNft({
+     *     tokenId: "abc123def456...",
+     *     wallet: myWallet,
+     * });
+     * 
+     * if (result.refund) {
+     *     console.log(`Remboursement: ${result.refund.amount} PMS`);
+     * }
+     * ```
+     */
+    async burnNft(params: {
+        tokenId: string;
+        wallet: PmsWallet;
+    }): Promise<BurnNftResponse> {
+        const { tokenId, wallet } = params;
+
+        // 1. Récupérer les tips du DAG (parents du nouveau bloc)
+        const tips = await this.getTips();
+        const parents = tips.slice(0, 2);
+
+        // 2. Construire le payload NFT Burn
+        //    Format: { Plain: { Nft: { Burn: { token_id, burner } } } }
+        //    Le "burner" est l'adresse du wallet signataire (doit être le propriétaire)
+        const payload: PayloadEnvelope = {
+            Plain: {
+                Nft: {
+                    Burn: {
+                        token_id: tokenId,
+                        burner: wallet.address,
+                    }
+                }
+            }
+        };
+        const payloadJson = JSON.stringify(payload);
+
+        // 3. Calculer le block ID
+        const nonce = 0;
+        const blockId = computeBlockId(parents, payloadJson, nonce);
+
+        // 4. Construire le message canonique à signer (comme dag-pms canonical_wireblock_message)
+        //    IMPORTANT: L'ordre des champs doit être exactement le même que dans Rust
+        //    Le message est un JSON du WireBlock SANS la signature
+        const canonicalView = {
+            id: blockId,
+            parents: parents,
+            payload_json: payloadJson,
+            nonce: nonce,
+            network_id: this.config.networkId,
+            protocol_version: this.config.protocolVersion,
+            signer_pk_hex: wallet.publicKeyHex,
+        };
+        const messageToSign = JSON.stringify(canonicalView);
+
+        // 5. Signer le message canonique
+        const signatureHex = wallet.sign(encodeUtf8(messageToSign));
+
+        // 6. Convertir signature hex -> base64 (dag-pms attend du base64)
+        const signatureBytes = fromHex(signatureHex);
+        const signatureB64 = btoa(String.fromCharCode(...signatureBytes));
+
+        // 7. Construire le request body avec signature en base64
+        const burnRequest = {
+            id: blockId,
+            parents,
+            payload_json: payloadJson,
+            nonce,
+            network_id: this.config.networkId,
+            protocol_version: this.config.protocolVersion,
+            signer_pk_hex: wallet.publicKeyHex,
+            signature_hex: signatureB64,  // base64 malgré le nom "hex"
+        };
+
+        // 8. Soumettre à /v1/nft/burn (endpoint spécialisé avec refund preview)
+        return this.fetch<BurnNftResponse>("/v1/nft/burn", {
+            method: "POST",
+            body: JSON.stringify(burnRequest),
+        });
+    }
+
+    /**
+     * Mint un NFT via le Coordinateur (Server-Side Signing).
+     * Le client génère l'ID et les métadonnées, mais c'est le serveur qui signe et chiffre.
+     */
+    async mintNft(params: {
+        wallet: PmsWallet;
+        metadata: NftMetadata;
+        tokenId?: string;
+    }): Promise<SubmitResponse & { token_id: string }> {
+        const { wallet, metadata } = params;
+        const tokenId = params.tokenId || this.generateRandomHex(32);
+
+        // Appel au endpoint générique du serveur
+        const response = await this.fetch<SubmitResponse>("/v1/nft/mint", {
+            method: "POST",
+            body: JSON.stringify({
+                token_id: tokenId,
+                owner_address: wallet.address,
+                owner_x25519_pubkey: wallet.x25519PublicKeyHex,
+                metadata: metadata,
+            }),
+        });
+
+        return { ...response, token_id: tokenId };
+    }
+
+    /**
+     * Mint un Cube avec des attributs générés et signés par le backend Authority.
+     * @param params.wallet - Wallet PMS du propriétaire
+     * @param params.generatorUrl - URL du backend générateur de cubes (ex: "http://localhost:3000")
+     */
+    async mintCube(params: {
+        wallet: PmsWallet;
+        generatorUrl: string;
+    }): Promise<MintCubeResponse> {
+        const { wallet, generatorUrl } = params;
+
+        // 1. Fetch cube attributes and signature from backend
+        const cubeResponse = await fetch(`${generatorUrl}/api/cube/generate`, {
+            method: "POST",
+        });
+        if (!cubeResponse.ok) {
+            const text = await cubeResponse.text();
+            throw new Error(`Cube generation failed: ${cubeResponse.status} - ${text}`);
+        }
+        const cubeData = await cubeResponse.json() as {
+            rarity: string;
+            attributes: CubeAttributes;
+            roll: number;
+            signature: string;
+        };
+
+        // 2. Générer le tokenId
+        const tokenId = this.generateRandomHex(32);
+
+        // 3. Construire les métadonnées avec la signature
+        const metadata: NftMetadata = {
+            name: `Cube ${cubeData.rarity}`,
+            description: `A ${cubeData.rarity} cube with unique properties.`,
+            nft_type: "cube",
+            extra: JSON.stringify({
+                rarity: cubeData.rarity,
+                attributes: cubeData.attributes,
+                roll: cubeData.roll,
+                signature: cubeData.signature, // Authority signature
+            }),
+        };
+
+        // 4. Appel générique pour mint
+        const submitResult = await this.mintNft({
+            wallet,
+            metadata,
+            tokenId,
+        });
+
+        return {
+            ...submitResult,
+            rarity: cubeData.rarity as MintCubeResponse["rarity"],
+            roll: cubeData.roll,
+            attributes: cubeData.attributes,
+        };
+    }
+
+    /**
+     * Génère une chaîne hexadécimale aléatoire de la longueur spécifiée (en bytes).
+     * Utilise crypto.getRandomValues pour la sécurité cryptographique.
+     */
+    private generateRandomHex(bytes: number): string {
+        const array = new Uint8Array(bytes);
+        crypto.getRandomValues(array);
+        return Array.from(array).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
 
     // ═══════════════════════════════════════════════════════════════════════
     // Helper HTTP

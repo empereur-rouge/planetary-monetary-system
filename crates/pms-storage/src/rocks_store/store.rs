@@ -69,6 +69,8 @@ impl RocksStore {
             "utxo_spent",
             "tx_applied",
             "nft_ownership",     // NFT ownership tracking: token_id -> owner_address
+            "nfts_by_owner",     // Reverse index: owner_address -> list of token_ids (JSON)
+            "nft_metadata",      // NFT metadata storage: token_id -> NftMetadata (JSON)
             "runtime_config",    // Current runtime config (single key "current")
             "config_history",    // History of config changes (block_id -> entry)
             "node_block_counts", // Block count per node: node_pk -> count
@@ -422,6 +424,8 @@ impl RocksStore {
             "utxo_spent",
             "tx_applied",
             "nft_ownership",
+            "nfts_by_owner",
+            "nft_metadata",
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))

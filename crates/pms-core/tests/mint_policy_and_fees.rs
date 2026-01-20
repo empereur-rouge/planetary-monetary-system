@@ -262,6 +262,8 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             enforce_fee_recipient: false,
             allowed_fee_addresses: vec![],
             coordinator_public_key: None,
+            coordinator_x25519_public_key: None,
+            coordinator_tx_only: false,
         },
         fees: FeesSettings {
             epsilon: "0.001".to_string(),
@@ -281,6 +283,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             creator_reward_percent: 70,
             treasury_reward_percent: 20,
             burn_percent: 10,
+            authority_public_keys: vec![],
         },
         p2p: P2pConfig {
             known_peers: String::new(),

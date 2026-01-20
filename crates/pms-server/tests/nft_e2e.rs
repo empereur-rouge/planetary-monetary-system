@@ -330,3 +330,214 @@ async fn nft_unauthorized_transfer_rejected() -> Result<()> {
 
     Ok(())
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests pour get_by_owner (indexation par propriétaire)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Test: get_by_owner retourne les NFTs après mint
+#[tokio::test]
+async fn nft_get_by_owner_after_mint() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("rocks-nft-byowner");
+
+    let store = Arc::new(
+        RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:nft-byowner").await?,
+    );
+
+    let settings = load_config()?;
+    let meta = WireMeta::from(&settings);
+
+    let genesis = Block::genesis(compute_block_id);
+    let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis));
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+
+    let wallet = Wallet::from_seed(&[60u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
+    let owner_pk = wallet.encoded_public_key();
+
+    // Vérifier que la liste est vide au départ
+    let initial = store.get_by_owner(&owner_pk)?;
+    assert!(initial.is_empty(), "Liste devrait être vide initialement");
+
+    // Mint 2 NFTs pour le même owner
+    for i in 1..=2 {
+        let token_id = format!("nft-byowner-{:03}", i);
+        let mint = NftAction::Mint {
+            token_id: token_id.clone(),
+            creator: owner_pk.clone(),
+            metadata: NftMetadata::default(),
+        };
+        let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(mint)));
+        let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
+        let wb = forge_signed_wire_block_for_test(
+            block.parents.clone(),
+            &meta,
+            &wallet,
+            block.nonce,
+            payload,
+        );
+        adapter.persist_block(&wb).await?;
+    }
+
+    // Vérifier que get_by_owner retourne les 2 NFTs
+    let nfts = store.get_by_owner(&owner_pk)?;
+    assert_eq!(nfts.len(), 2, "Owner devrait avoir 2 NFTs");
+    assert!(nfts.contains(&"nft-byowner-001".to_string()));
+    assert!(nfts.contains(&"nft-byowner-002".to_string()));
+
+    println!("✅ NFT get_by_owner after mint: {} NFTs found", nfts.len());
+
+    Ok(())
+}
+
+/// Test: get_by_owner est mis à jour après transfer
+#[tokio::test]
+async fn nft_get_by_owner_updates_on_transfer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("rocks-nft-transfer-list");
+
+    let store = Arc::new(
+        RocksStore::new(
+            db_path.to_string_lossy().as_ref(),
+            256,
+            "pms:nft-transfer-list",
+        )
+        .await?,
+    );
+
+    let settings = load_config()?;
+    let meta = WireMeta::from(&settings);
+
+    let genesis = Block::genesis(compute_block_id);
+    let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis));
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+
+    let wallet_a = Wallet::from_seed(&[61u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
+    let wallet_b = Wallet::from_seed(&[62u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
+    let owner_a_pk = wallet_a.encoded_public_key();
+    let owner_b_pk = wallet_b.encoded_public_key();
+
+    let token_id = "nft-transfer-list-001".to_string();
+
+    // Phase 1: Mint pour wallet_a
+    let mint = NftAction::Mint {
+        token_id: token_id.clone(),
+        creator: owner_a_pk.clone(),
+        metadata: NftMetadata::default(),
+    };
+    let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(mint)));
+    let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
+    let wb = forge_signed_wire_block_for_test(
+        block.parents.clone(),
+        &meta,
+        &wallet_a,
+        block.nonce,
+        payload,
+    );
+    adapter.persist_block(&wb).await?;
+
+    // Vérifier que A a le NFT, B n'a rien
+    assert_eq!(store.get_by_owner(&owner_a_pk)?, vec![token_id.clone()]);
+    assert!(store.get_by_owner(&owner_b_pk)?.is_empty());
+
+    // Phase 2: Transfer de A vers B
+    let transfer = NftAction::Transfer {
+        token_id: token_id.clone(),
+        from: owner_a_pk.clone(),
+        to: owner_b_pk.clone(),
+    };
+    let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(transfer)));
+    let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
+    let wb = forge_signed_wire_block_for_test(
+        block.parents.clone(),
+        &meta,
+        &wallet_a,
+        block.nonce,
+        payload,
+    );
+    adapter.persist_block(&wb).await?;
+
+    // Vérifier que A n'a plus rien, B a le NFT
+    assert!(
+        store.get_by_owner(&owner_a_pk)?.is_empty(),
+        "A ne devrait plus avoir de NFTs après transfer"
+    );
+    assert_eq!(
+        store.get_by_owner(&owner_b_pk)?,
+        vec![token_id.clone()],
+        "B devrait avoir le NFT après transfer"
+    );
+
+    println!("✅ NFT get_by_owner updates correctly on transfer");
+
+    Ok(())
+}
+
+/// Test: get_by_owner est vidé après burn
+#[tokio::test]
+async fn nft_get_by_owner_clears_on_burn() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("rocks-nft-burn-list");
+
+    let store = Arc::new(
+        RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:nft-burn-list").await?,
+    );
+
+    let settings = load_config()?;
+    let meta = WireMeta::from(&settings);
+
+    let genesis = Block::genesis(compute_block_id);
+    let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis));
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+
+    let wallet = Wallet::from_seed(&[63u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
+    let owner_pk = wallet.encoded_public_key();
+
+    let token_id = "nft-burn-list-001".to_string();
+
+    // Phase 1: Mint
+    let mint = NftAction::Mint {
+        token_id: token_id.clone(),
+        creator: owner_pk.clone(),
+        metadata: NftMetadata::default(),
+    };
+    let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(mint)));
+    let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
+    let wb = forge_signed_wire_block_for_test(
+        block.parents.clone(),
+        &meta,
+        &wallet,
+        block.nonce,
+        payload,
+    );
+    adapter.persist_block(&wb).await?;
+
+    // Vérifier présence
+    assert_eq!(store.get_by_owner(&owner_pk)?, vec![token_id.clone()]);
+
+    // Phase 2: Burn
+    let burn = NftAction::Burn {
+        token_id: token_id.clone(),
+        burner: owner_pk.clone(),
+    };
+    let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(burn)));
+    let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
+    let wb = forge_signed_wire_block_for_test(
+        block.parents.clone(),
+        &meta,
+        &wallet,
+        block.nonce,
+        payload,
+    );
+    adapter.persist_block(&wb).await?;
+
+    // Vérifier que la liste est vide
+    assert!(
+        store.get_by_owner(&owner_pk)?.is_empty(),
+        "Liste devrait être vide après burn"
+    );
+
+    println!("✅ NFT get_by_owner clears correctly on burn");
+
+    Ok(())
+}

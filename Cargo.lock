@@ -258,6 +258,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-macros"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "604fde5e028fea851ce1d8570bbdc034bec850d157f7569d10f347d06808c05c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
 name = "axum-server"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2353,8 +2364,10 @@ dependencies = [
  "pms-wallet",
  "pms-wire",
  "rand 0.9.2",
+ "rand_core 0.6.4",
  "rayon",
  "rust_decimal",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "signature 2.2.0",
@@ -2442,6 +2455,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "axum-macros",
  "axum-server",
  "base64 0.22.1",
  "chrono",

@@ -1,6 +1,7 @@
 pub mod amount;
 pub mod apply;
 pub mod check;
+pub mod cube_authority; // Validation de signature Authority pour les Cubes
 pub mod fees;
 mod impls;
 pub mod mint; // Validation de sécurité du Minting (Coordinateur Only)

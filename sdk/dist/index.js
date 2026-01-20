@@ -1,6 +1,8 @@
 // src/wallet.ts
 import { secp256k1 } from "@noble/curves/secp256k1";
+import { x25519 } from "@noble/curves/ed25519";
 import { sha256 as sha2562 } from "@noble/hashes/sha2";
+import { hkdf } from "@noble/hashes/hkdf";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
 
@@ -58,10 +60,14 @@ function formatAmount(sats) {
 
 // src/wallet.ts
 var PmsWallet = class _PmsWallet {
-  /** Clé privée (32 bytes) */
+  /** Clé privée secp256k1 (32 bytes) - pour signatures */
   _privateKey;
-  /** Clé publique non compressée (65 bytes: 04 + x + y) */
+  /** Clé publique secp256k1 non compressée (65 bytes: 04 + x + y) */
   _publicKey;
+  /** Clé privée X25519 (32 bytes) - pour chiffrement */
+  _x25519PrivateKey;
+  /** Clé publique X25519 (32 bytes) */
+  _x25519PublicKey;
   /** Phrase mnémonique (24 mots) si générée/importée */
   _mnemonic;
   /**
@@ -70,6 +76,16 @@ var PmsWallet = class _PmsWallet {
   constructor(privateKey, mnemonic) {
     this._privateKey = privateKey;
     this._publicKey = secp256k1.getPublicKey(privateKey, false);
+    this._x25519PrivateKey = hkdf(
+      sha2562,
+      privateKey,
+      new TextEncoder().encode("pms-x25519"),
+      // salt
+      new TextEncoder().encode("encryption"),
+      // info
+      32
+    );
+    this._x25519PublicKey = x25519.getPublicKey(this._x25519PrivateKey);
     this._mnemonic = mnemonic;
   }
   // ═══════════════════════════════════════════════════════════════════════
@@ -142,6 +158,23 @@ var PmsWallet = class _PmsWallet {
    */
   get mnemonic() {
     return this._mnemonic;
+  }
+  // ═══════════════════════════════════════════════════════════════════════
+  // Clés X25519 (pour chiffrement)
+  // ═══════════════════════════════════════════════════════════════════════
+  /**
+   * Clé publique X25519 en hex (pour chiffrement).
+   * Utiliser cette clé comme destinataire pour encryptPayload().
+   */
+  get x25519PublicKeyHex() {
+    return toHex(this._x25519PublicKey);
+  }
+  /**
+   * Clé privée X25519 en hex (pour déchiffrement).
+   * ⚠️ Ne pas exposer cette clé publiquement !
+   */
+  get x25519PrivateKeyHex() {
+    return toHex(this._x25519PrivateKey);
   }
   // ═══════════════════════════════════════════════════════════════════════
   // Méthodes de signature
@@ -218,6 +251,9 @@ var PmsClient = class {
   /**
    * Crée un nouveau client PMS.
    * @param config - Configuration du client
+   * @param config.nodeUrl - URL du nœud principal
+   * @param config.enableRacing - Activer le racing pattern
+   * @param config.seedNodes - Liste des nœuds de seed
    */
   constructor(config) {
     this.config = {
@@ -242,8 +278,17 @@ var PmsClient = class {
    * Récupère les tips actuels du DAG.
    */
   async getTips() {
-    const res = await this.fetch("/v1/tips");
-    return res.tips;
+    const res = await this.fetch("/v1/dag/tips", {
+      method: "POST",
+      body: JSON.stringify({ limit: 10 })
+    });
+    return res;
+  }
+  /**
+   * Récupère les informations publiques du coordinateur (clés).
+   */
+  async getCoordinatorInfo() {
+    return this.fetch("/v1/coordinator/info");
   }
   /**
    * Récupère un bloc par son ID.
@@ -267,13 +312,15 @@ var PmsClient = class {
   /**
    * Récupère la balance d'une adresse.
    */
+  /**
+   * Récupère la balance d'une adresse.
+   */
   async getBalance(address) {
-    const utxos = await this.getUtxos(address);
-    let total = 0n;
-    for (const utxo of utxos) {
-      total += parseAmount(utxo.amount);
-    }
-    return formatAmount(total);
+    const res = await this.fetch("/v1/balance", {
+      method: "POST",
+      body: JSON.stringify({ address })
+    });
+    return res.balance;
   }
   /**
    * Récupère la balance complète avec les UTXOs.
@@ -290,6 +337,25 @@ var PmsClient = class {
       utxos
     };
   }
+  /**
+   * Récupère la liste des NFTs appartenant à une adresse.
+   * 
+   * @param address - Adresse publique (hex) du propriétaire
+   * @returns Liste des token_ids possédés par cette adresse
+   * 
+   * @example
+   * ```typescript
+   * const myNfts = await client.getNfts(myWallet.address);
+   * console.log(`Vous possédez ${myNfts.length} NFT(s)`);
+   * for (const tokenId of myNfts) {
+   *     console.log(`- ${tokenId}`);
+   * }
+   * ```
+   */
+  async getNfts(address) {
+    const res = await this.fetch(`/v1/wallet/${address}/nfts`);
+    return res.token_ids ?? [];
+  }
   // ═══════════════════════════════════════════════════════════════════════
   // Méthodes d'écriture (POST)
   // ═══════════════════════════════════════════════════════════════════════
@@ -301,7 +367,7 @@ var PmsClient = class {
     if (this.config.enableRacing) {
       return this.submitBlockRacing(wireBlock);
     }
-    return this.fetch("/v1/submit", {
+    return this.fetch("/submit/block", {
       method: "POST",
       body: JSON.stringify(wireBlock)
     });
@@ -322,7 +388,7 @@ var PmsClient = class {
     const controller = new AbortController();
     const promises = targets.map(async (baseUrl) => {
       try {
-        const res = await this.fetchUrl(baseUrl, "/v1/submit", {
+        const res = await this.fetchUrl(baseUrl, "/submit/block", {
           method: "POST",
           body,
           signal: controller.signal
@@ -337,7 +403,10 @@ var PmsClient = class {
       controller.abort();
       return result;
     } catch (error) {
-      throw new Error(`Submit failed on all ${targets.length} nodes: ${error}`);
+      const aggregateError = error;
+      const errors = aggregateError.errors || [];
+      const errorMessages = errors.map((e) => e.message || String(e)).join("; ");
+      throw new Error(`Submit failed on all ${targets.length} nodes. Errors: ${errorMessages}`);
     }
   }
   /**
@@ -416,6 +485,149 @@ var PmsClient = class {
     return this.submitBlock(wireBlock);
   }
   // ═══════════════════════════════════════════════════════════════════════
+  // Méthodes NFT Cube (Burn et Mint spécialisé)
+  // ═══════════════════════════════════════════════════════════════════════
+  /**
+   * Brûle (détruit) un NFT existant.
+   * 
+   * Seul le propriétaire du NFT peut le brûler.
+   * Une fois brûlé, le NFT est supprimé définitivement.
+   * 
+   * Pour les Cubes authentiques (avec signature Authority valide), 
+   * un remboursement est calculé selon la formule:
+   * `(weight * size * density) / 10000` PMS
+   * 
+   * @param params - Paramètres du burn
+   * @param params.tokenId - Identifiant du NFT à brûler
+   * @param params.wallet - Wallet PMS du propriétaire (doit être l'owner actuel)
+   * @returns BurnNftResponse avec refund preview si cube authentique
+   * 
+   * @example
+   * ```typescript
+   * const result = await client.burnNft({
+   *     tokenId: "abc123def456...",
+   *     wallet: myWallet,
+   * });
+   * 
+   * if (result.refund) {
+   *     console.log(`Remboursement: ${result.refund.amount} PMS`);
+   * }
+   * ```
+   */
+  async burnNft(params) {
+    const { tokenId, wallet } = params;
+    const tips = await this.getTips();
+    const parents = tips.slice(0, 2);
+    const payload = {
+      Plain: {
+        Nft: {
+          Burn: {
+            token_id: tokenId,
+            burner: wallet.address
+          }
+        }
+      }
+    };
+    const payloadJson = JSON.stringify(payload);
+    const nonce = 0;
+    const blockId = computeBlockId(parents, payloadJson, nonce);
+    const canonicalView = {
+      id: blockId,
+      parents,
+      payload_json: payloadJson,
+      nonce,
+      network_id: this.config.networkId,
+      protocol_version: this.config.protocolVersion,
+      signer_pk_hex: wallet.publicKeyHex
+    };
+    const messageToSign = JSON.stringify(canonicalView);
+    const signatureHex = wallet.sign(encodeUtf8(messageToSign));
+    const signatureBytes = fromHex(signatureHex);
+    const signatureB64 = btoa(String.fromCharCode(...signatureBytes));
+    const burnRequest = {
+      id: blockId,
+      parents,
+      payload_json: payloadJson,
+      nonce,
+      network_id: this.config.networkId,
+      protocol_version: this.config.protocolVersion,
+      signer_pk_hex: wallet.publicKeyHex,
+      signature_hex: signatureB64
+      // base64 malgré le nom "hex"
+    };
+    return this.fetch("/v1/nft/burn", {
+      method: "POST",
+      body: JSON.stringify(burnRequest)
+    });
+  }
+  /**
+   * Mint un NFT via le Coordinateur (Server-Side Signing).
+   * Le client génère l'ID et les métadonnées, mais c'est le serveur qui signe et chiffre.
+   */
+  async mintNft(params) {
+    const { wallet, metadata } = params;
+    const tokenId = params.tokenId || this.generateRandomHex(32);
+    const response = await this.fetch("/v1/nft/mint", {
+      method: "POST",
+      body: JSON.stringify({
+        token_id: tokenId,
+        owner_address: wallet.address,
+        owner_x25519_pubkey: wallet.x25519PublicKeyHex,
+        metadata
+      })
+    });
+    return { ...response, token_id: tokenId };
+  }
+  /**
+   * Mint un Cube avec des attributs générés et signés par le backend Authority.
+   * @param params.wallet - Wallet PMS du propriétaire
+   * @param params.generatorUrl - URL du backend générateur de cubes (ex: "http://localhost:3000")
+   */
+  async mintCube(params) {
+    const { wallet, generatorUrl } = params;
+    const cubeResponse = await fetch(`${generatorUrl}/api/cube/generate`, {
+      method: "POST"
+    });
+    if (!cubeResponse.ok) {
+      const text = await cubeResponse.text();
+      throw new Error(`Cube generation failed: ${cubeResponse.status} - ${text}`);
+    }
+    const cubeData = await cubeResponse.json();
+    const tokenId = this.generateRandomHex(32);
+    const metadata = {
+      name: `Cube ${cubeData.rarity}`,
+      description: `A ${cubeData.rarity} cube with unique properties.`,
+      nft_type: "cube",
+      extra: JSON.stringify({
+        rarity: cubeData.rarity,
+        attributes: cubeData.attributes,
+        roll: cubeData.roll,
+        signature: cubeData.signature
+        // Authority signature
+      })
+    };
+    const submitResult = await this.mintNft({
+      wallet,
+      metadata,
+      tokenId
+    });
+    return {
+      ...submitResult,
+      rarity: cubeData.rarity,
+      roll: cubeData.roll,
+      attributes: cubeData.attributes
+    };
+  }
+  /**
+   * Génère une chaîne hexadécimale aléatoire de la longueur spécifiée (en bytes).
+   * Utilise crypto.getRandomValues pour la sécurité cryptographique.
+   */
+  generateRandomHex(bytes) {
+    const array = new Uint8Array(bytes);
+    crypto.getRandomValues(array);
+    return Array.from(array).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  // ═══════════════════════════════════════════════════════════════════════
   // Helper HTTP
   // ═══════════════════════════════════════════════════════════════════════
   async fetch(path, init) {
@@ -445,15 +657,144 @@ var PmsClient = class {
     }
   }
 };
+
+// src/crypto.ts
+import { x25519 as x255192 } from "@noble/curves/ed25519";
+import { gcm } from "@noble/ciphers/aes.js";
+import { hkdf as hkdf2 } from "@noble/hashes/hkdf";
+import { sha256 as sha2563 } from "@noble/hashes/sha2";
+import { randomBytes, bytesToHex as bytesToHex2, hexToBytes as hexToBytes2 } from "@noble/hashes/utils";
+import { base64 } from "@scure/base";
+var SCHEME = "x25519+aes256gcm";
+var KEY_VERSION = 1;
+var HKDF_SALT = new TextEncoder().encode("pms-dek-wrap");
+var HKDF_INFO_KEK = new TextEncoder().encode("kek-v1");
+var HKDF_INFO_KID = new TextEncoder().encode("kid-v1");
+function toBase64(data) {
+  return base64.encode(data);
+}
+function fromBase64(str) {
+  return base64.decode(str);
+}
+function sha256Hex(data) {
+  return bytesToHex2(sha2563(data));
+}
+function encryptPayload(plaintext, recipientPublicKeysHex) {
+  const plaintextBytes = typeof plaintext === "string" ? new TextEncoder().encode(plaintext) : plaintext;
+  const dek = randomBytes(32);
+  const nonce = randomBytes(12);
+  const aad = { len_hint: plaintextBytes.length };
+  const aadBytes = new TextEncoder().encode(JSON.stringify(aad));
+  const cipher = gcm(dek, nonce, aadBytes);
+  const ciphertext = cipher.encrypt(plaintextBytes);
+  const commitment = sha256Hex(plaintextBytes);
+  const ephemeralPrivateKey = randomBytes(32);
+  const ephemeralPublicKey = x255192.getPublicKey(ephemeralPrivateKey);
+  const ephemeralPublicKeyHex = bytesToHex2(ephemeralPublicKey);
+  const recipients = [];
+  for (const recipientPkHex of recipientPublicKeysHex) {
+    const recipientPk = hexToBytes2(recipientPkHex);
+    const sharedSecret = x255192.getSharedSecret(ephemeralPrivateKey, recipientPk);
+    const kek = hkdf2(sha2563, sharedSecret, HKDF_SALT, HKDF_INFO_KEK, 32);
+    const kidBytes = hkdf2(sha2563, sharedSecret, HKDF_SALT, HKDF_INFO_KID, 16);
+    const kid = bytesToHex2(kidBytes);
+    const kwNonce = randomBytes(12);
+    const kwCipher = gcm(kek, kwNonce, new TextEncoder().encode(kid));
+    const wrappedKey = kwCipher.encrypt(dek);
+    recipients.push({
+      kid,
+      ephem_pub: ephemeralPublicKeyHex,
+      wrapped_key_b64: toBase64(wrappedKey),
+      kw_nonce_b64: toBase64(kwNonce)
+    });
+  }
+  return {
+    scheme: SCHEME,
+    key_version: KEY_VERSION,
+    aad,
+    commitment,
+    ciphertext_b64: toBase64(ciphertext),
+    recipients,
+    nonce_b64: toBase64(nonce)
+  };
+}
+function decryptPayload(encrypted, recipientPrivateKeyHex) {
+  if (encrypted.scheme !== SCHEME) {
+    throw new Error(`Sch\xE9ma non support\xE9: ${encrypted.scheme}`);
+  }
+  const recipientSk = hexToBytes2(recipientPrivateKeyHex);
+  let dek = null;
+  for (const wrap of encrypted.recipients) {
+    const ephemeralPk = hexToBytes2(wrap.ephem_pub);
+    const sharedSecret = x255192.getSharedSecret(recipientSk, ephemeralPk);
+    const kek = hkdf2(sha2563, sharedSecret, HKDF_SALT, HKDF_INFO_KEK, 32);
+    const kidBytes = hkdf2(sha2563, sharedSecret, HKDF_SALT, HKDF_INFO_KID, 16);
+    const expectedKid = bytesToHex2(kidBytes);
+    if (expectedKid !== wrap.kid) {
+      continue;
+    }
+    try {
+      const kwNonce = fromBase64(wrap.kw_nonce_b64);
+      const wrappedKey = fromBase64(wrap.wrapped_key_b64);
+      const kwCipher = gcm(kek, kwNonce, new TextEncoder().encode(wrap.kid));
+      dek = kwCipher.decrypt(wrappedKey);
+      break;
+    } catch {
+      continue;
+    }
+  }
+  if (!dek) {
+    throw new Error("Aucun destinataire correspondant trouv\xE9 ou d\xE9ballage \xE9chou\xE9");
+  }
+  const nonce = fromBase64(encrypted.nonce_b64);
+  const ciphertext = fromBase64(encrypted.ciphertext_b64);
+  const aadBytes = new TextEncoder().encode(JSON.stringify(encrypted.aad));
+  const cipher = gcm(dek, nonce, aadBytes);
+  const plaintext = cipher.decrypt(ciphertext);
+  const gotCommitment = sha256Hex(plaintext);
+  if (gotCommitment !== encrypted.commitment) {
+    throw new Error("Commitment mismatch - donn\xE9es corrompues");
+  }
+  return new TextDecoder().decode(plaintext);
+}
+function generateX25519Keypair() {
+  const privateKey = randomBytes(32);
+  const publicKey = x255192.getPublicKey(privateKey);
+  return {
+    privateKey: bytesToHex2(privateKey),
+    publicKey: bytesToHex2(publicKey)
+  };
+}
+function deriveX25519PublicKey(privateKeyHex) {
+  const privateKey = hexToBytes2(privateKeyHex);
+  const publicKey = x255192.getPublicKey(privateKey);
+  return bytesToHex2(publicKey);
+}
+function formatCubeAttributesMessage(weight, size, density) {
+  return `weight:${weight},size:${size},density:${density}`;
+}
+function signCubeAttributes(weight, size, density, authorityWallet) {
+  const message = formatCubeAttributesMessage(weight, size, density);
+  const messageBytes = new TextEncoder().encode(message);
+  const signatureHex = authorityWallet.sign(messageBytes);
+  const signatureBytes = hexToBytes2(signatureHex);
+  return toBase64(signatureBytes);
+}
 export {
   DEFAULT_CONFIG,
   PmsClient,
   PmsWallet,
   checkPowBits,
   computeBlockId,
+  decryptPayload,
+  deriveX25519PublicKey,
+  encryptPayload,
   formatAmount,
+  formatCubeAttributesMessage,
   fromHex,
+  generateX25519Keypair,
   isValidMnemonic,
   parseAmount,
+  signCubeAttributes,
   toHex
 };

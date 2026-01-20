@@ -55,3 +55,6 @@ docker_data/
 etc/config/config.prod.toml
 Caddyfile.prod
 docker-compose.prod.yml
+
+docker_data/
+docker_bin/

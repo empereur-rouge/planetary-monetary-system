@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **NFT Burn-to-Mint & Refund**
+  - Implemented `burn_refund` logic: "Cube" NFTs trigger refund `(weight * size * density) / 100`
+  - Added signature verification for NFT attributes using `authority_public_key`
+  - Extended `NftMetadata` with `extra` field for generic attributes
+  - Renamed "Game Authority" to "Authority" in config and code
+
+- **NFT Management & Queries**
+  - **Retrieve by Owner**: New API `/v1/wallet/:address/nfts`
+  - Added `get_by_owner` to `pms-storage` with dual-write to `nfts` and `nfts_by_owner` column families
+  - Updated SDK with `getNfts(address)` method
+
+- **Minting Security & SDK**
+  - **Coordinator-Only Minting**: Restricted `Mint` action to Coordinator public key
+  - **Encrypted Minting**: Added `mintCube` to SDK with payload encryption for Owner + Coordinator
+  - **SDK Enhancements**: Added `encryptNftPayload` supporting multiple recipients, and `mintEncryptedNft`
+
+- **Docker & Config**
+  - Exposed Docker backend ports for local network access
+  - Updated `tools-cli` to derive and update Coordinator X25519 keys automatically
 - **Treasury Fee Distribution**
   - Reward blocks automatically created after each transaction
   - Fee split: 15% Treasury, 45% Creator, 40% Parents

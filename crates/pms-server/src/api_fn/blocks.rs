@@ -106,6 +106,12 @@ pub async fn submit_block(
             // This removes the Coordinator bottleneck for horizontal scaling.
             accumulate_fee_if_tx(&st, &wb).await;
 
+            // ============================================================
+            // BURN REFUND PROCESSING (Cube NFT -> Token Conversion)
+            // ============================================================
+            // Check if this block contains a valid cube burn and process refund
+            process_burn_refund_if_applicable(&st, &wb).await;
+
             StatusCode::ACCEPTED.into_response()
         }
         Ok(PutResult::AlreadyExists) => {
@@ -135,7 +141,19 @@ async fn accumulate_fee_if_tx(st: &AppState, wb: &WireBlock) {
     };
 
     // Get the block signer (node that created/submitted this block)
+    // Si absent, on utilise "unknown" mais on logue un warning car c'est anormal.
     let signer_pk = if wb.signer_pk_hex.is_empty() {
+        // ⚠️ ALERTE SÉCURITÉ : Un bloc de transaction sans signer est suspect !
+        // En production, tous les blocs devraient être signés.
+        // Cela peut indiquer :
+        //   1. Un bug côté client SDK
+        //   2. Une tentative de soumission anonyme
+        //   3. Une configuration require_signed_submit=false en dev
+        tracing::warn!(
+            "⚠️ SECURITY: TX block {} has no signer_pk! Fee credited to 'unknown'. \
+             This should not happen in production.",
+            &wb.id[..16.min(wb.id.len())]
+        );
         "unknown".to_string()
     } else {
         wb.signer_pk_hex.clone()
@@ -158,6 +176,68 @@ async fn accumulate_fee_if_tx(st: &AppState, wb: &WireBlock) {
     {
         let mut registry = st.node_registry.write().await;
         registry.increment_block_count(&signer_pk);
+    }
+}
+
+/// Processes burn refunds for cube NFTs if applicable
+/// Adds validated refunds to the fee pool for later distribution
+async fn process_burn_refund_if_applicable(st: &AppState, wb: &WireBlock) {
+    // 1. Parse payload for NFT Burn action
+    let burn_action = match extract_nft_burn_action(wb) {
+        Some(action) => action,
+        None => return, // Not an NFT burn, nothing to do
+    };
+
+    // 2. Get authority public keys from config
+    let authority_pks = &st.settings.fees.authority_public_keys;
+
+    // 3. Calculate refund (if valid cube with valid signature)
+    let refund = match crate::burn_refund::calculate_burn_refund(
+        &burn_action.token_id,
+        &burn_action.burner,
+        st.store.as_ref(),
+        authority_pks,
+    ) {
+        Ok(Some(r)) => r,
+        Ok(None) => return, // No refund (not a cube, invalid sig, etc.)
+        Err(e) => {
+            tracing::warn!("Burn refund calculation failed: {}", e);
+            return;
+        }
+    };
+
+    // 4. Add refund to fee pool (will be distributed via Milestone)
+    {
+        let mut pool = st.fee_pool.write().await;
+        pool.add_fee(refund.amount, &refund.recipient);
+        tracing::info!(
+            "🔥 Cube burn refund queued: {} -> {} PMS (token: {})",
+            &refund.recipient[..20.min(refund.recipient.len())],
+            refund.amount,
+            &refund.token_id[..16.min(refund.token_id.len())]
+        );
+    }
+}
+
+/// Simple struct to hold extracted burn action data
+struct NftBurnAction {
+    token_id: String,
+    burner: String,
+}
+
+/// Extract NFT Burn action from WireBlock payload if present
+fn extract_nft_burn_action(wb: &WireBlock) -> Option<NftBurnAction> {
+    let payload_json = wb.payload_json.as_ref()?;
+    let envelope: PayloadEnvelope = serde_json::from_str(payload_json).ok()?;
+
+    match envelope {
+        PayloadEnvelope::Plain(PlainPayload::Nft(action)) => match action {
+            pms_types_nft::NftAction::Burn { token_id, burner } => {
+                Some(NftBurnAction { token_id, burner })
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 

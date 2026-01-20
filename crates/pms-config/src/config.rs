@@ -30,7 +30,7 @@ pub struct Network {
     pub protocol_version: u32, // 1
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkMode {
     Dev,
@@ -143,6 +143,7 @@ pub struct ValidationSettings {
     #[serde(default)]
     pub allowed_fee_addresses: Vec<String>,
     pub coordinator_public_key: Option<String>, // Pour Dev/Testnet custom
+    pub coordinator_x25519_public_key: Option<String>, // Clé chiffrement du Coordinator
     #[serde(default)]
     pub coordinator_tx_only: bool, // If true, node rejects non-privileged TXs
 }
@@ -192,6 +193,25 @@ pub struct FeesSettings {
     /// Percentage of block reward to burn (deflationary pressure). Default: 10%
     #[serde(default = "default_burn_percent")]
     pub burn_percent: u8,
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Authority (Cube Signature Verification)
+    // ═══════════════════════════════════════════════════════════════════════
+    /// List of public keys (hex, SEC1) of Authorities that can sign cube attributes.
+    /// Each key represents a different application (game backend) allowed to generate Cubes.
+    /// NFTs with valid signatures from ANY of these keys are eligible for burn refunds.
+    /// If empty, Cube minting bypasses Authority validation (dev mode warning).
+    #[serde(default)]
+    pub authority_public_keys: Vec<String>,
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // TÂCHE 6: Audit des clés Authority - rotation recommandée
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Date de dernière rotation des clés Authority (format ISO 8601: "2025-01-15")
+    /// Utilisé pour logger un warning si la rotation n'a pas été faite depuis > 90 jours.
+    /// Bonne pratique sécurité: rotation tous les 90 jours minimum.
+    #[serde(default)]
+    pub authority_keys_last_rotation: Option<String>,
 }
 
 fn default_fee_ratio() -> String {

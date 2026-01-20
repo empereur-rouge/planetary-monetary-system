@@ -215,7 +215,9 @@ pub fn generate_and_save(key_path: &str, json_path: &str, config_path: Option<&s
 
     // 5. Optionnel: mettre à jour le fichier config avec la clé publique
     if let Some(cfg_path) = config_path {
-        update_config_coordinator_key(cfg_path, &pub_hex)?;
+        // We calculate x25519_pub_hex from the wallet
+        let x25519_hex = wallet.x25519_pub_hex();
+        update_config_coordinator_keys(cfg_path, &pub_hex, &x25519_hex)?;
         println!("✅ Config mise à jour : {}", cfg_path);
     }
 
@@ -226,22 +228,89 @@ pub fn generate_and_save(key_path: &str, json_path: &str, config_path: Option<&s
     Ok(())
 }
 
-/// Met à jour la valeur de coordinator_public_key dans un fichier TOML
-fn update_config_coordinator_key(config_path: &str, public_key: &str) -> Result<()> {
+/// Dérive les clés publiques depuis une clé privée hex et met à jour le config.
+pub fn derive_and_update_config(priv_hex: &str, config_path: &str) -> Result<()> {
+    // 1. Décode et dérive
+    // Wallet::from_private_key n'existe pas, on reconstruit le wallet manuellement
+    // On utilise une logique similaire à load_from_node_key_file mais en mémoire
+    let priv_bytes = hex::decode(priv_hex).map_err(|e| anyhow::anyhow!("Invalid hex: {}", e))?;
+
+    // On utilise k256 pour dériver la pubkey
+    let signing_key = k256::ecdsa::SigningKey::from_slice(&priv_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid ECDSA private key: {}", e))?;
+    let verify_key = signing_key.verifying_key();
+    let pub_hex = hex::encode(verify_key.to_sec1_bytes());
+
+    // On crée une instance temporaire juste pour dériver x25519
+    // On doit encoder la clé privée en base64 pour le constructeur Wallet
+    let priv_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &priv_bytes);
+
+    let mut wallet = Wallet {
+        private_key_b64: priv_b64,
+        public_key_hex: pub_hex.clone(),
+        x25519_pub_hex: String::new(),
+        mnemonic_words: None,
+    };
+
+    // Dériver x25519
+    if let Some((_, pk)) = wallet.derive_x25519_pair_from_private_key_b64() {
+        wallet.x25519_pub_hex = pk;
+    }
+
+    let x25519_hex = wallet.x25519_pub_hex();
+
+    println!("🔑 Clés dérivées :");
+    println!("   Secp256k1 : {}", pub_hex);
+    println!("   X25519    : {}", x25519_hex);
+
+    // 2. Mise à jour config
+    update_config_coordinator_keys(config_path, &pub_hex, &x25519_hex)?;
+    println!("✅ Fichier config mis à jour : {}", config_path);
+
+    Ok(())
+}
+
+/// Met à jour coordinator_public_key et coordinator_x25519_public_key dans un fichier TOML
+fn update_config_coordinator_keys(
+    config_path: &str,
+    public_key: &str,
+    x25519_key: &str,
+) -> Result<()> {
     let content = fs::read_to_string(config_path)
         .map_err(|e| anyhow::anyhow!("Impossible de lire {}: {}", config_path, e))?;
 
-    // Utiliser une regex pour remplacer la valeur de coordinator_public_key
-    // Pattern: coordinator_public_key = "..." (avec guillemets)
-    let re = regex::Regex::new(r#"coordinator_public_key\s*=\s*"[^"]*""#)
+    // 1. Update coordinator_public_key
+    let re_pub = regex::Regex::new(r#"coordinator_public_key\s*=\s*"[^"]*""#)
         .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
 
-    let new_content = re
+    let mut new_content = re_pub
         .replace(
             &content,
             format!("coordinator_public_key = \"{}\"", public_key),
         )
         .to_string();
+
+    // 2. Update coordinator_x25519_public_key
+    // Si la ligne existe, on remplace
+    if new_content.contains("coordinator_x25519_public_key") {
+        let re_x255 = regex::Regex::new(r#"coordinator_x25519_public_key\s*=\s*"[^"]*""#)
+            .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+        new_content = re_x255
+            .replace(
+                &new_content,
+                format!("coordinator_x25519_public_key = \"{}\"", x25519_key),
+            )
+            .to_string();
+    } else {
+        // Sinon on l'ajoute juste après coordinator_public_key
+        new_content = new_content.replace(
+            &format!("coordinator_public_key = \"{}\"", public_key),
+            &format!(
+                "coordinator_public_key = \"{}\"\ncoordinator_x25519_public_key = \"{}\"",
+                public_key, x25519_key
+            ),
+        );
+    }
 
     fs::write(config_path, new_content)
         .map_err(|e| anyhow::anyhow!("Impossible d'écrire {}: {}", config_path, e))?;

@@ -2,10 +2,11 @@
 use crate::Server;
 use crate::admin::{admin_compact, admin_ping};
 pub use crate::api_fn::blocks::submit_block;
+use crate::api_fn::coordinator::get_coordinator_info;
 use crate::api_fn::dag::get_tips;
 use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
 use crate::api_fn::milestone::{distribute_fees, get_fee_pool_status};
-use crate::api_fn::nft::get_nft;
+use crate::api_fn::nft::{burn_nft, get_nft, get_nfts_by_owner, mint_nft};
 use crate::api_fn::nodes::{list_nodes, node_heartbeat, register_node};
 use crate::api_fn::stream_blocks::stream_blocks;
 use crate::api_fn::supply::get_circulating_supply;
@@ -205,9 +206,40 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
 
     let dag_routes = Router::new().route("/v1/dag/tips", post(get_tips));
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // TÂCHE 5: Rate-limiting strict pour les endpoints NFT sensibles
+    // ═══════════════════════════════════════════════════════════════════════
+    // Les opérations mint/burn sont critiques et potentiellement coûteuses.
+    // On applique un rate-limit plus strict que le global (5 req/s, burst 10)
+    // pour éviter les abus et les attaques par épuisement de ressources.
+    //
+    // Voir tower-governor documentation pour les détails de configuration.
+    let nft_sensitive_governor = Box::new(
+        GovernorConfigBuilder::default()
+            .per_second(5) // 5 requêtes par seconde max (vs 50 global)
+            .burst_size(10) // Burst de 10 (vs 100 global)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .unwrap(),
+    );
+
     // Endpoint: /v1/nft/:token_id (Query NFT ownership)
     // NOTE: Axum 0.7+ utilise {param} au lieu de :param pour les captures de route
-    let nft_routes = Router::new().route("/v1/nft/{token_id}", get(get_nft));
+    let nft_routes = Router::new()
+        .route("/v1/nft/{token_id}", get(get_nft))
+        // Endpoint: /v1/wallet/{address}/nfts (List NFTs by owner)
+        .route("/v1/wallet/{address}/nfts", get(get_nfts_by_owner))
+        // Endpoint: /v1/nft/mint (Generic mint signed by Coordinator)
+        // Rate-limited plus strictement via layer ci-dessous
+        .route("/v1/nft/mint", post(mint_nft))
+        // Endpoint: /v1/nft/burn (Burn NFT signed by owner)
+        // Rate-limited plus strictement via layer ci-dessous
+        .route("/v1/nft/burn", post(burn_nft))
+        // Appliquer le rate-limiter strict aux routes NFT sensibles
+        .layer(GovernorLayer::new(nft_sensitive_governor));
+
+    // Endpoint: /v1/coordinator/info (Get coordinator public keys)
+    let coordinator_routes = Router::new().route("/v1/coordinator/info", get(get_coordinator_info));
 
     // Node registry endpoints for distributed TX processing
     let node_routes = Router::new()
@@ -232,6 +264,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .merge(history)
         .merge(dag_routes)
         .merge(nft_routes)
+        .merge(coordinator_routes)
         .merge(node_routes)
         .merge(debug)
         .with_state(state)
@@ -269,6 +302,53 @@ pub async fn serve_api(
 ) -> Result<()> {
     // 🔹 Charge la config applicative complète
     let settings = load_config()?;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // TÂCHE 6: Audit des clés Authority - vérification de rotation
+    // ═══════════════════════════════════════════════════════════════════════
+    // Bonne pratique sécurité: les clés Authority doivent être rotées
+    // régulièrement (tous les 90 jours minimum) pour limiter les risques
+    // en cas de compromission.
+    if !settings.fees.authority_public_keys.is_empty() {
+        match &settings.fees.authority_keys_last_rotation {
+            Some(date_str) => {
+                // Parser la date ISO 8601 et vérifier si > 90 jours
+                if let Ok(last_rotation) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                    let today = chrono::Utc::now().date_naive();
+                    let days_since_rotation = (today - last_rotation).num_days();
+
+                    if days_since_rotation > 90 {
+                        tracing::warn!(
+                            "🔑 SECURITY: Authority keys haven't been rotated in {} days! \
+                             Last rotation: {}. Recommended: rotate every 90 days.",
+                            days_since_rotation,
+                            date_str
+                        );
+                    } else {
+                        tracing::info!(
+                            "🔑 Authority keys rotation OK: {} days since last rotation ({})",
+                            days_since_rotation,
+                            date_str
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        "🔑 SECURITY: Invalid authority_keys_last_rotation format: '{}'. \
+                         Expected ISO 8601 (YYYY-MM-DD).",
+                        date_str
+                    );
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "🔑 SECURITY: authority_keys_last_rotation not configured! \
+                     {} Authority keys are active but rotation date is unknown. \
+                     Add 'authority_keys_last_rotation' to config for security audit.",
+                    settings.fees.authority_public_keys.len()
+                );
+            }
+        }
+    }
 
     let node_wallet = srv.node_identity_wallet();
 

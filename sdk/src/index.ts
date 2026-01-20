@@ -42,3 +42,16 @@ export {
     toHex,
     fromHex,
 } from "./utils";
+
+// Crypto (encryption)
+export {
+    encryptPayload,
+    decryptPayload,
+
+    generateX25519Keypair,
+    deriveX25519PublicKey,
+
+    // Authority signing (for burn-to-mint)
+    formatCubeAttributesMessage,
+    signCubeAttributes,
+} from "./crypto";

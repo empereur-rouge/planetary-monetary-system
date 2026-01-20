@@ -137,6 +137,29 @@ impl ValidatePolicy {
         // Config override takes priority (for testing flexibility)
         // Otherwise, use hardcoded values based on network mode
         if let Some(ref custom_key) = settings.validation.coordinator_public_key {
+            // ═══════════════════════════════════════════════════════════════
+            // TÂCHE 4: SÉCURITÉ - Empêcher l'utilisation des clés Prod en Dev
+            // ═══════════════════════════════════════════════════════════════
+            // En mode Dev, on ne doit JAMAIS utiliser les clés Mainnet/Testnet.
+            // Cela évite une confusion accidentelle ou une tentative de fraude
+            // où quelqu'un utiliserait le mode Dev (moins de validations) avec
+            // des clés de production.
+            //
+            // Voir chapitre 9 du Rust Book : Error Handling
+            if settings.network.mode == pms_config::NetworkMode::Dev {
+                let is_mainnet_key = custom_key == pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET;
+                let is_testnet_key = custom_key == pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET;
+
+                if is_mainnet_key || is_testnet_key {
+                    panic!(
+                        "🚨 SECURITY ALERT: Cannot use {} coordinator key in Dev mode! \
+                         This is a critical misconfiguration that could lead to security issues. \
+                         Either switch to the appropriate network mode or use a Dev-only key.",
+                        if is_mainnet_key { "MAINNET" } else { "TESTNET" }
+                    );
+                }
+            }
+
             // Config specifies a custom coordinator key (useful for tests)
             p.coordinator_public_key = Some(custom_key.clone());
         } else {
@@ -271,8 +294,26 @@ pub fn validate_block(
                 }
             }
             PlainPayload::Nft(_action) => {
-                // NFT validation : vérification que le signer est autorisé
-                // TODO: Implémenter validation NFT (ownership, existence, etc.)
+                // ═══════════════════════════════════════════════════════════
+                // NFT VALIDATION : Vérification basique dans le flow sync
+                // ═══════════════════════════════════════════════════════════
+                //
+                // La validation complète (ownership, existence via store) est
+                // effectuée dans net_adapter.rs lors du persist_block, où on
+                // a accès au NftStorage (RocksDB).
+                //
+                // Ici on ne fait que les checks basiques sans accès au store :
+                // - Le bloc doit être signé (toute action NFT requiert une signature)
+                //
+                // Voir chapitre 4.2 du Rust Book : Références et Emprunt
+                // pour comprendre pourquoi on ne peut pas facilement passer
+                // un trait object `&dyn NftStorage` ici.
+
+                if b.signer_pk.is_none() {
+                    return Err(ValidationError::InvalidSignature(
+                        "NFT action block must be signed".into(),
+                    ));
+                }
             }
             PlainPayload::ConfigUpdate(_update) => {
                 // ConfigUpdate : seulement le Coordinator peut modifier la config

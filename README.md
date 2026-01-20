@@ -142,6 +142,66 @@ Le nœud est instrumenté pour Prometheus et Grafana.
 
 ---
 
+## 🔥 Configuration Authority (Burn-to-Mint)
+
+Pour activer la fonctionnalité de **remboursement lors du burn de Cubes**, une "Authority" doit être configurée. Elle certifie les attributs des NFTs Cubes via une signature cryptographique.
+
+### 1. Générer une paire de clés Authority
+Utilisez le SDK pour générer une clé privée (pour votre serveur de jeu) et une clé publique (pour le nœud).
+
+```typescript
+import { PmsWallet } from "@pms/sdk";
+
+const authority = PmsWallet.generate();
+console.log("Private Key (Garder SECRET pour le serveur de jeu):", authority.privateKey);
+console.log("Public Key (Pour config.toml):", authority.publicKeyHex);
+```
+
+### 2. Configurer le Nœud
+Ajoutez la clé publique dans le fichier `config.toml` de vos nœuds :
+
+```toml
+[fees]
+# ... autres configs fees ...
+authority_public_key = "04abc..." # Votre Public Key Hex ici
+```
+
+### 3. Signer des Cubes (Côté Serveur de Jeu)
+Lors de la création d'un NFT Cube, le serveur doit signer ses attributs. Cette signature doit être incluse dans le champ `extra` des métadonnées.
+
+```typescript
+import { PmsWallet, signCubeAttributes } from "@pms/sdk";
+
+// 1. Initialiser le wallet Authority avec la clé privée
+const authorityWallet = PmsWallet.fromPrivateKey("VOTRE_PRIVATE_KEY_HEX");
+
+// 2. Définir les attributs du Cube
+const weight = 50;
+const size = 50;
+const density = 50;
+
+// 3. Générer la signature
+const signature = signCubeAttributes(weight, size, density, authorityWallet);
+
+// 4. Inclure dans les métadonnées NFT
+const metadata = {
+    name: "Cube #123",
+    nft_type: "cube",
+    extra: JSON.stringify({
+        rarity: "Legendary",
+        attributes: { weight, size, density },
+        roll: 50,
+        signature: signature // <--- La signature ici
+    })
+    // ...
+};
+
+// 5. Minter le NFT via le SDK
+await client.mintCube({ ... });
+```
+
+---
+
 ## 🌐 Déploiement VPS (Production)
 
 ### Déploiement Automatisé

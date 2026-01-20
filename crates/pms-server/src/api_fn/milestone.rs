@@ -23,10 +23,11 @@ use pms_wallet::{SignerBackend, decode_address};
 use pms_wire::WireBlock;
 
 /// Request to trigger fee distribution via Milestone
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DistributeFeesRequest {
-    /// Parent block ID for the reward block (usually current tip)
-    pub parent_id: String,
+    /// Parent block ID (optionnel - si absent, récupère automatiquement un tip)
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 /// Response from distribution
@@ -66,8 +67,34 @@ pub async fn distribute_fees(
         );
     }
 
-    // Read fee pool
-    let (total_fees, shares) = {
+    // ========================================================================
+    // 0. RESOLVE PARENT: Get tip if parent_id not provided
+    // ========================================================================
+    let parent_id = match &req.parent_id {
+        Some(id) if !id.is_empty() => id.clone(),
+        _ => {
+            // Fetch current tip from DAG
+            match st.srv.adapter_arc().top_tips(1).await {
+                Ok(tips) if !tips.is_empty() => tips[0].clone(),
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(DistributeFeesResponse {
+                            success: false,
+                            reward_block_id: None,
+                            total_distributed: "0".to_string(),
+                            num_recipients: 0,
+                        }),
+                    );
+                }
+            }
+        }
+    };
+
+    // ========================================================================
+    // 1. READ FEE POOL: Collect burn refunds and node fees
+    // ========================================================================
+    let (total_node_fees, shares, burn_refunds, total_burn_refunds) = {
         let pool = st.fee_pool.read().await;
         if !pool.has_fees() {
             return (
@@ -80,29 +107,62 @@ pub async fn distribute_fees(
                 }),
             );
         }
-        (pool.total_fees, pool.calculate_shares())
+        (
+            pool.total_fees,
+            pool.calculate_shares(),
+            pool.get_burn_refunds(),
+            pool.total_burn_refunds(),
+        )
     };
 
-    // Get node addresses from registry
-    let node_addresses: Vec<(String, Decimal)> = {
+    // ========================================================================
+    // 2. BUILD OUTPUTS: Burn refunds + Node fees
+    // ========================================================================
+    let coordinator_x25519 = st.node_wallet.x25519_pub_hex().to_string();
+    let mut all_outputs: Vec<TxOutput> = Vec::new();
+    let mut total_distributed = Decimal::ZERO;
+
+    // 2a. BURN REFUNDS: Direct outputs to user wallets
+    for (wallet_address, amount) in &burn_refunds {
+        if *amount <= Decimal::ZERO {
+            continue;
+        }
+        all_outputs.push(TxOutput {
+            address: wallet_address.clone(),
+            amount: amount.to_string(),
+        });
+        total_distributed += *amount;
+        tracing::info!(
+            "💰 Burn refund output: {} -> {} PMS",
+            &wallet_address[..20.min(wallet_address.len())],
+            amount
+        );
+    }
+
+    // 2b. NODE FEES: Look up node addresses from registry (if any)
+    {
         let registry = st.node_registry.read().await;
         let nodes = registry.get_active_nodes();
 
-        shares
-            .iter()
-            .filter_map(|(node_pk, _, amount)| {
-                // Try to find node's API URL (which might contain their receiving address)
-                // For now, use the node_pk as a placeholder
-                // In production, nodes should register with their reward address
-                nodes
-                    .iter()
-                    .find(|n| n.node_pk == *node_pk)
-                    .map(|n| (n.api_url.clone(), *amount))
-            })
-            .collect()
-    };
+        for (node_pk, _share_pct, share_amount) in &shares {
+            if *share_amount <= Decimal::ZERO {
+                continue;
+            }
+            // Try to find node's reward address from registry
+            if let Some(node) = nodes.iter().find(|n| &n.node_pk == node_pk) {
+                // TODO: Use node's registered reward_address instead of api_url
+                // For now, we skip node rewards if they haven't registered a proper address
+                tracing::debug!(
+                    "Found node {} with api_url {}, but no reward address yet",
+                    &node_pk[..16.min(node_pk.len())],
+                    node.api_url
+                );
+            }
+        }
+    }
 
-    if node_addresses.is_empty() {
+    // If no outputs to distribute, return early
+    if all_outputs.is_empty() {
         return (
             StatusCode::OK,
             Json(DistributeFeesResponse {
@@ -114,55 +174,28 @@ pub async fn distribute_fees(
         );
     }
 
-    // Create reward outputs
-    // Note: For simplicity, we use node_pk as placeholder.
-    // In production, nodes should register with their bech32 reward address.
-    let coordinator_x25519 = st.node_wallet.x25519_pub_hex().to_string();
-    let mut encrypted_outputs = Vec::new();
+    let num_recipients = all_outputs.len();
 
-    for (node_pk, _share_pct, share_amount) in &shares {
-        if *share_amount <= Decimal::ZERO {
-            continue;
-        }
+    // ========================================================================
+    // 3. CREATE MINT BLOCK: Direct token distribution
+    // ========================================================================
+    // We use a Mint payload to create new tokens for refunds
+    // Mint expects outputs: Vec<TxOutput> which creates actual UTXOs
 
-        // Note: In production, look up node's bech32 address from registry
-        // For now, skip encryption since we don't have proper addresses
-        let output_data = serde_json::json!({
-            "node_pk": node_pk,
-            "amount": share_amount.to_string()
-        });
-        let output_bytes = serde_json::to_vec(&output_data).unwrap_or_default();
-
-        // Encrypt for coordinator only (node should provide their x25519 key)
-        let recipients = vec![coordinator_x25519.clone()];
-        match EncryptedPayload::encrypt_for(&output_bytes, &recipients, output_bytes.len() as u32) {
-            Ok(encrypted) => {
-                encrypted_outputs.push(EncryptedRewardOutput { encrypted });
-            }
-            Err(e) => {
-                tracing::warn!("Failed to encrypt output for {}: {}", node_pk, e);
-            }
-        }
-    }
-
-    // Create reward block
-    let reward_payload = PlainPayload::EncryptedReward {
-        encrypted_outputs,
-        burned: "0".to_string(),
-        tx_block_id: req.parent_id.clone(),
+    let mint_payload = PlainPayload::Mint {
+        outputs: all_outputs.clone(),
     };
 
     let mut reward_block = Block {
         id: String::new(),
-        parents: vec![req.parent_id.clone()],
-        payload: Some(PayloadEnvelope::Plain(reward_payload)),
+        parents: vec![parent_id.clone()],
+        payload: Some(PayloadEnvelope::Plain(mint_payload)),
         nonce: 0,
         metadata: Some(pms_types_block::BlockMetadata {
-            signer_x25519_hex: Some(coordinator_x25519),
+            signer_x25519_hex: Some(coordinator_x25519.clone()),
             description: Some(format!(
-                "Fee distribution: {} PMS to {} nodes",
-                total_fees,
-                shares.len()
+                "Burn refunds: {} PMS to {} wallets",
+                total_distributed, num_recipients
             )),
             ..Default::default()
         }),
@@ -210,6 +243,23 @@ pub async fn distribute_fees(
         if let Ok(PutResult::Inserted) = st.srv.adapter_arc().persist_block(&reward_wb).await {
             let _ = st.srv.enqueue_broadcast(reward_wb.id.clone()).await;
 
+            // ================================================================
+            // 4. CREATE UTXOs: Directly add to UTXO set for each recipient
+            // ================================================================
+            let mut idx = 0u32;
+            for output in &all_outputs {
+                st.srv
+                    .adapter_arc()
+                    .add_utxo(
+                        reward_wb.id.clone(),
+                        idx,
+                        output.address.clone(),
+                        output.amount.clone(),
+                    )
+                    .await;
+                idx += 1;
+            }
+
             // Reset fee pool after successful distribution
             {
                 let mut pool = st.fee_pool.write().await;
@@ -217,9 +267,9 @@ pub async fn distribute_fees(
             }
 
             tracing::info!(
-                "📦 Fee distribution complete: {} PMS to {} nodes (block: {})",
-                total_fees,
-                shares.len(),
+                "📦 Burn refunds distributed: {} PMS to {} wallets (block: {})",
+                total_distributed,
+                num_recipients,
                 &reward_wb.id[..16]
             );
 
@@ -228,8 +278,8 @@ pub async fn distribute_fees(
                 Json(DistributeFeesResponse {
                     success: true,
                     reward_block_id: Some(reward_wb.id),
-                    total_distributed: total_fees.to_string(),
-                    num_recipients: shares.len(),
+                    total_distributed: total_distributed.to_string(),
+                    num_recipients,
                 }),
             );
         }
@@ -253,6 +303,8 @@ pub async fn get_fee_pool_status(State(st): State<AppState>) -> impl IntoRespons
 
     Json(serde_json::json!({
         "total_fees": pool.total_fees.to_string(),
+        "total_burn_refunds": pool.total_burn_refunds().to_string(),
+        "burn_refund_count": pool.burn_refunds.len(),
         "tx_count": pool.tx_count,
         "num_contributors": pool.node_contributions.len(),
     }))

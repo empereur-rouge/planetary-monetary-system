@@ -22,7 +22,9 @@
  */
 
 import { secp256k1 } from "@noble/curves/secp256k1";
+import { x25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha2";
+import { hkdf } from "@noble/hashes/hkdf";
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
 import { toHex, fromHex } from "./utils";
@@ -31,11 +33,17 @@ import { toHex, fromHex } from "./utils";
  * Wallet PMS avec gestion des clés cryptographiques.
  */
 export class PmsWallet {
-    /** Clé privée (32 bytes) */
+    /** Clé privée secp256k1 (32 bytes) - pour signatures */
     private readonly _privateKey: Uint8Array;
 
-    /** Clé publique non compressée (65 bytes: 04 + x + y) */
+    /** Clé publique secp256k1 non compressée (65 bytes: 04 + x + y) */
     private readonly _publicKey: Uint8Array;
+
+    /** Clé privée X25519 (32 bytes) - pour chiffrement */
+    private readonly _x25519PrivateKey: Uint8Array;
+
+    /** Clé publique X25519 (32 bytes) */
+    private readonly _x25519PublicKey: Uint8Array;
 
     /** Phrase mnémonique (24 mots) si générée/importée */
     private readonly _mnemonic?: string;
@@ -46,6 +54,19 @@ export class PmsWallet {
     private constructor(privateKey: Uint8Array, mnemonic?: string) {
         this._privateKey = privateKey;
         this._publicKey = secp256k1.getPublicKey(privateKey, false); // false = uncompressed
+
+        // Dérive une clé X25519 depuis la même seed via HKDF
+        // Cela permet d'avoir une seule phrase mnémonique pour tout
+        // (signatures secp256k1 ET chiffrement X25519)
+        this._x25519PrivateKey = hkdf(
+            sha256,
+            privateKey,
+            new TextEncoder().encode("pms-x25519"),  // salt
+            new TextEncoder().encode("encryption"),  // info
+            32
+        );
+        this._x25519PublicKey = x25519.getPublicKey(this._x25519PrivateKey);
+
         this._mnemonic = mnemonic;
     }
 
@@ -138,6 +159,26 @@ export class PmsWallet {
      */
     get mnemonic(): string | undefined {
         return this._mnemonic;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Clés X25519 (pour chiffrement)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Clé publique X25519 en hex (pour chiffrement).
+     * Utiliser cette clé comme destinataire pour encryptPayload().
+     */
+    get x25519PublicKeyHex(): string {
+        return toHex(this._x25519PublicKey);
+    }
+
+    /**
+     * Clé privée X25519 en hex (pour déchiffrement).
+     * ⚠️ Ne pas exposer cette clé publiquement !
+     */
+    get x25519PrivateKeyHex(): string {
+        return toHex(this._x25519PrivateKey);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

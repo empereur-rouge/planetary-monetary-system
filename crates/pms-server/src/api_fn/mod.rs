@@ -1,4 +1,5 @@
 pub mod blocks;
+pub mod coordinator;
 pub mod dag;
 pub mod history;
 pub mod milestone;
