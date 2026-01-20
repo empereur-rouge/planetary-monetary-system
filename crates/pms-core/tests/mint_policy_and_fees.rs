@@ -284,6 +284,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             treasury_reward_percent: 20,
             burn_percent: 10,
             authority_public_keys: vec![],
+            authority_keys_last_rotation: None,
         },
         p2p: P2pConfig {
             known_peers: String::new(),
