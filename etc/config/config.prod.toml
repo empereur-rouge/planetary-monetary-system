@@ -1,29 +1,35 @@
 [rocks]
-path = "/data/pms/rocks"
+path = "/home/pms/data/rocks"
 prefix = "pms:main"           # MAINNET: pms:main | TESTNET: pms:test
-tip_limit = 256               # ✅ NOUVEAU: Limite des tips DAG en mémoire
+tip_limit = 256               # Limite des tips DAG en mémoire
+
 [network]
 mode = "mainnet"              # "dev" | "testnet" | "mainnet"
 network_id = "pms-mainnet-v1"
 protocol_version = 1
+
 [address]
-hrp = "8e"                    # ✅ NOUVEAU: Human-Readable Prefix pour les adresses
+hrp = "8e"                    # Human-Readable Prefix pour les adresses
+
 [admin]
-# ✅ MODIFIÉ: Nouveau système de treasury wallets
+# Nouveau système de treasury wallets
 # Les wallets sont chargés depuis un fichier JSON signé (vérifié contre la clé coordinator)
 # Sélection: pseudo-aléatoire pour les frais, premier wallet pour les récompenses de bloc
 treasury_wallets_file = "/home/pms/config/treasury-wallets.json"
+
 [client]
-# ✅ NOUVELLE SECTION: Configuration du serveur/client
+# Configuration du serveur/client
 bind_addr = "0.0.0.0:8443"           # Adresse P2P TLS
 api_addr = "0.0.0.0:8080"            # Adresse API HTTP
 allow_insecure_tls = false           # ⚠️  false en production !
+
 [p2p]
 known_peers = ""                     # Format: "p2ps://peer1:8443,p2ps://peer2:8443"
+
 [tls]
-cert_pem = "/etc/pms/tls/cert.pem"
-key_pem = "/etc/pms/tls/key.pem"
-ca_pem = "/etc/pms/tls/ca-cert.pem"  # ✅ NOUVEAU: Certificat CA
+cert_pem = "/home/pms/tls/cert.pem"
+key_pem = "/home/pms/tls/key.pem"
+# ca_pem = "/home/pms/tls/ca-cert.pem"  # Commenté car auto-signé par défaut
 whitelist_fp256 = []                  # ✅ NOUVEAU: Fingerprints autorisés (vide = tous)
 [limits]
 max_body_bytes = 262144               # ✅ NOUVEAU: 256 KB max pour le body
