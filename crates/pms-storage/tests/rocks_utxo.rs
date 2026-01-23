@@ -20,7 +20,7 @@ async fn mk_store(prefix: &str, tip_limit: usize) -> Result<TestStore> {
         .join(format!("rocks-utxo-{}", nanoid::nanoid!(5)));
     std::fs::create_dir_all(&path)?;
     let path_str = path.to_string_lossy().to_string();
-    let store = Arc::new(RocksStore::new(&path_str, tip_limit, prefix).await?);
+    let store = Arc::new(RocksStore::new(&path_str, tip_limit, prefix, None).await?);
     Ok(TestStore {
         _dir: dir,
         path: path_str,

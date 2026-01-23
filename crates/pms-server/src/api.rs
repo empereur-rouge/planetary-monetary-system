@@ -1,12 +1,12 @@
 // pms-server/src/api
 use crate::Server;
 use crate::admin::{admin_compact, admin_ping};
-pub use crate::api_fn::blocks::submit_block;
+use crate::api_fn::blocks::{submit_block, get_block_by_id};
 use crate::api_fn::coordinator::get_coordinator_info;
 use crate::api_fn::dag::get_tips;
 use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
 use crate::api_fn::milestone::{distribute_fees, get_fee_pool_status};
-use crate::api_fn::nft::{burn_nft, get_nft, get_nfts_by_owner, mint_nft};
+use crate::api_fn::nft::{burn_nft, get_nft, get_nfts_by_owner, mint_nft, prepare_nft_transfer};
 use crate::api_fn::nodes::{list_nodes, node_heartbeat, register_node};
 use crate::api_fn::stream_blocks::stream_blocks;
 use crate::api_fn::supply::get_circulating_supply;
@@ -194,7 +194,8 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/wallet/history", post(get_wallet_history))
         .route("/v1/balance", post(balance_by_address));
 
-    let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
+    let blocks = Router::new()
+        .route("/blocks/stream", get(stream_blocks));
 
     let supply = Router::new()
         .route("/v1/supply", get(get_circulating_supply))
@@ -204,7 +205,11 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/v1/history/encrypted", get(get_encrypted_history))
         .route("/v1/history/plain", get(get_plain_history));
 
-    let dag_routes = Router::new().route("/v1/dag/tips", post(get_tips));
+    let dag_routes = Router::new()
+        .route("/v1/dag/tips", post(get_tips))
+        .route("/v1/config", get(crate::api_fn::config::get_config))
+        // Endpoint for fetching single block
+        .route("/v1/blocks/{id}", get(get_block_by_id));
 
     // ═══════════════════════════════════════════════════════════════════════
     // TÂCHE 5: Rate-limiting strict pour les endpoints NFT sensibles
@@ -235,6 +240,13 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         // Endpoint: /v1/nft/burn (Burn NFT signed by owner)
         // Rate-limited plus strictement via layer ci-dessous
         .route("/v1/nft/burn", post(burn_nft))
+        // Endpoint: /v1/nft/transfer/prepare (Coordinator re-encryption)
+        .route("/v1/nft/transfer/prepare", post(prepare_nft_transfer))
+        // Endpoint: /v1/wallet/{address}/utxos (Fetch plain UTXOs)
+        .route(
+            "/v1/wallet/{address}/utxos",
+            get(crate::api_fn::wallet::get_utxos_by_address),
+        )
         // Appliquer le rate-limiter strict aux routes NFT sensibles
         .layer(GovernorLayer::new(nft_sensitive_governor));
 

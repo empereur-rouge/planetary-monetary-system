@@ -15,6 +15,9 @@ pub struct RuntimeConfig {
     /// Taux de commission sur les transactions (en basis points, 100 = 1%)
     pub fee_rate_bps: u32,
 
+    /// Frais fixes par transaction (ex: "0.001")
+    pub base_fee: String,
+
     /// Part des fees allant à la plateforme (en basis points, 2000 = 20%)
     pub platform_fee_bps: u32,
 
@@ -40,10 +43,11 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            fee_rate_bps: 100,      // 1%
-            platform_fee_bps: 2000, // 20% des fees
-            node_fee_bps: 3000,     // 30% des fees pour les nœuds
-            min_pow_bits: 8,        // Difficulté minimale
+            fee_rate_bps: 240,             // 1%
+            base_fee: "0.001".to_string(), // Frais fixes par défaut
+            platform_fee_bps: 2000,        // 20% des fees
+            node_fee_bps: 3000,            // 30% des fees pour les nœuds
+            min_pow_bits: 8,               // Difficulté minimale
             max_mint_per_block: 1_000_000,
             mint_enabled: true,
             updated_at_block: String::new(),
@@ -67,6 +71,9 @@ impl RuntimeConfig {
         match update {
             ConfigUpdate::SetFeeRate { bps } => {
                 new_config.fee_rate_bps = *bps;
+            }
+            ConfigUpdate::SetBaseFee { fee } => {
+                new_config.base_fee = fee.clone();
             }
             ConfigUpdate::SetPlatformFee { bps } => {
                 new_config.platform_fee_bps = *bps;
@@ -102,6 +109,9 @@ pub enum ConfigUpdate {
     /// Modifier le taux de commission (basis points, max 10000 = 100%)
     SetFeeRate { bps: u32 },
 
+    /// Modifier les frais fixes
+    SetBaseFee { fee: String },
+
     /// Modifier la part plateforme (basis points, max 10000 = 100%)
     SetPlatformFee { bps: u32 },
 
@@ -126,6 +136,7 @@ impl ConfigUpdate {
     pub fn description(&self) -> String {
         match self {
             Self::SetFeeRate { bps } => format!("SetFeeRate({}bps)", bps),
+            Self::SetBaseFee { fee } => format!("SetBaseFee({})", fee),
             Self::SetPlatformFee { bps } => format!("SetPlatformFee({}bps)", bps),
             Self::SetMinPow { bits } => format!("SetMinPow({}bits)", bits),
             Self::SetMaxMint { amount } => format!("SetMaxMint({})", amount),

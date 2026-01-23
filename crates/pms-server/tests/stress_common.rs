@@ -289,8 +289,13 @@ pub async fn send_tx_with_split_fee(
                 address: platform_addr.into(),
                 amount: platform_part.to_string(),
             }, // idx 2 - platform fee
+            // STRICT VALIDATION: Explicitly pay miner fee to admin/coordinator
+            TxOutput {                // Caller `spam_transactions` passes `admin_address_ref` as `admin_addr`.
+                address: platform_addr.into(),
+                amount: miner_part.to_string(),
+            }, // idx 3 - miner fee (explicit)
         ],
-        fee: miner_part.to_string(), // Fee field must be the Implicit Part (Miner)
+        fee: "0".into(), // Implicit fees forbidden. Set to 0.
         unlocks: vec![],
     };
 

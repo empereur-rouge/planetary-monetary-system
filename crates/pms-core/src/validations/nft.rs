@@ -243,5 +243,41 @@ pub fn validate_nft_action<S: NftStorage>(
 
             Ok(())
         }
+
+        // ═══════════════════════════════════════════════════════════════
+        // BATCH BURN: Destruction multiple
+        // ═══════════════════════════════════════════════════════════════
+        NftAction::BatchBurn { token_ids, burner } => {
+            // Le signer doit être le burner pour tout le lot
+            if !burner.eq_ignore_ascii_case(signer_pk_hex) {
+                // On peut prendre le premier token pour l'erreur ou un placeholder
+                let tid = token_ids.first().cloned().unwrap_or_default();
+                return Err(anyhow!(NftValidationError::Unauthorized {
+                    token_id: tid,
+                    expected: burner.clone(),
+                    got: signer_pk_hex.to_string(),
+                }));
+            }
+
+            for token_id in token_ids {
+                // 1. Le token doit exister
+                let owner = nft_store.get_owner(token_id)?.ok_or_else(|| {
+                    anyhow!(NftValidationError::TokenNotFound {
+                        token_id: token_id.clone(),
+                    })
+                })?;
+
+                // 2. `burner` doit être le owner
+                if !owner.eq_ignore_ascii_case(burner) {
+                    return Err(anyhow!(NftValidationError::Unauthorized {
+                        token_id: token_id.clone(),
+                        expected: owner,
+                        got: burner.clone(),
+                    }));
+                }
+            }
+
+            Ok(())
+        }
     }
 }

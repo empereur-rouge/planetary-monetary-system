@@ -75,12 +75,11 @@ pub async fn validate_transaction_async(
     }
 
     // 2. Récupération des inputs (lecture parallèle par shard)
-    let fee = amount_parse_non_neg_dec(&tx.fee)?;
     let mut out_sum = Decimal::ZERO;
     for o in &tx.outputs {
         out_sum += amount_parse_pos_dec(&o.amount)?;
     }
-    let need = out_sum + fee;
+    // let need = out_sum + fee; // implicit fees forbidden
 
     let mut in_sum = Decimal::ZERO;
 
@@ -100,15 +99,15 @@ pub async fn validate_transaction_async(
         }
     }
 
-    if in_sum < need {
+    if in_sum != out_sum {
         tracing::warn!(
-            "Insufficient funds: in_sum={} need={} (out={} + fee={})",
+            "Strict validation failed: inputs ({}) != outputs ({}) (implicit fees not allowed)",
             in_sum,
-            need,
-            out_sum,
-            fee
+            out_sum
         );
-        return Err(ValidationError::InsufficientFunds);
+        return Err(ValidationError::InsufficientFunds); // Or a new error variant "BalancedTransactionRequired"?
+        // Using InsufficientFunds for compatibility or add new variant if possible.
+        // Actually, let's keep it simple.
     }
 
     Ok(())

@@ -34,16 +34,30 @@ export interface Utxo extends TxOutput {
 // Transaction Types
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** Input de transaction (wrapper autour de OutputRef) */
+export interface TxInput {
+    /** Référence à l'UTXO dépensé */
+    out: OutputRef;
+}
+
+/** Unlock (signature pour un input) */
+export interface Unlock {
+    /** Clé publique hex */
+    pubkey_hex: string;
+    /** Signature base64 */
+    signature_b64: string;
+}
+
 /** Transaction UTXO */
 export interface TxUtxo {
     /** Inputs (UTXOs à dépenser) */
-    inputs: OutputRef[];
+    inputs: TxInput[];
     /** Outputs (nouveaux UTXOs) */
     outputs: TxOutput[];
     /** Frais de transaction */
     fee: string;
-    /** Données optionnelles (memo) */
-    data?: string;
+    /** Unlocks (signatures pour chaque input) */
+    unlocks: Unlock[];
 }
 
 /** Enveloppe de payload */
@@ -57,7 +71,34 @@ export type PlainPayload =
     | { TxUtxo: TxUtxo }
     | { Milestone: MilestonePayload }
     | { Nft: NftAction }
-    | { ConfigUpdate: ConfigUpdate };
+    | { ConfigUpdate: ConfigUpdate }
+    | { Reward: RewardPayload }
+    | { EncryptedReward: EncryptedRewardPayload };
+
+/** Payload de récompense (Mining/Fees) */
+export interface RewardPayload {
+    fee_outputs: TaggedOutput[];
+    reward_outputs: TxOutput[];
+    burned: string;
+    tx_block_id: string;
+}
+
+/** Output avec tag (pour fees) */
+export interface TaggedOutput extends TxOutput {
+    tag: string; // e.g. "NodeFee", "BurnRefund"
+}
+
+/** Payload de récompense chiffrée */
+export interface EncryptedRewardPayload {
+    encrypted_outputs: EncryptedRewardOutput[];
+    burned: string;
+    tx_block_id: string;
+}
+
+/** Output de récompensation chiffré individuellement */
+export interface EncryptedRewardOutput {
+    encrypted: EncryptedPayload;
+}
 
 /** Payload chiffré - compatible avec pms-types-payload/encrypted_payload.rs */
 export interface EncryptedPayload {
@@ -126,6 +167,7 @@ export type NftAction =
     | { Mint: { token_id: string; owner: string; metadata: NftMetadata } }
     | { Transfer: { token_id: string; from: string; to: string } }
     | { Burn: { token_id: string; burner: string } }
+    | { BatchBurn: { token_ids: string[]; burner: string } }
     | { Use: { token_id: string; user: string; action_type: string } };
 
 /** Mise à jour de configuration */
@@ -228,11 +270,41 @@ export interface BurnNftResponse {
     status: string;
     /** ID du bloc créé dans le DAG */
     block_id: string;
-    /** Token ID du NFT brûlé */
+    /** Token ID du NFT brûlé (ou "batch") */
     token_id: string;
+    /** Liste des token IDs brûlés (pour batch burn) */
+    token_ids?: string[];
     /** Remboursement (si cube authentique avec signature Authority valide) */
     refund: RefundPreview | null;
 }
+
+/** Requête pour préparer un transfert avec re-chiffrement */
+export interface PrepareTransferRequest {
+    token_id: string;
+    to_address: string;
+    from_address: string;
+    new_owner_x25519_pubkey: string;
+}
+
+/** Réponse de préparation de transfert */
+export interface PrepareTransferResponse {
+    action: NftAction;
+}
+
+/** Réponse de getNft - informations complètes d'un NFT */
+export interface NftResponse {
+    /** Token ID du NFT */
+    token_id: string;
+    /** Propriétaire actuel (null si le token n'existe pas) */
+    owner: string | null;
+    /** ID du bloc contenant les métadonnées chiffrées (pour récupération + déchiffrement client) */
+    mint_block_id: string | null;
+    /** Existe-t-il sur le DAG ? */
+    exists: boolean;
+    /** @deprecated Les métadonnées sont maintenant chiffrées dans le bloc source */
+    metadata?: NftMetadata;
+}
+
 
 /** Balance d'une adresse */
 export interface BalanceInfo {
@@ -303,4 +375,44 @@ export interface CoordinatorInfoResponse {
     secp256k1_pubkey: string;
     /** Clé publique X25519 (hex) - pour le chiffrement */
     x25519_pubkey: string;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// History Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Élément d'historique de wallet */
+export interface HistoryItem {
+    block_id: string;
+    ts_ms: number;
+    payload_type: string; // "Mint", "TxUtxo", "Reward", "EncryptedReward"
+    payload: any;         // Typé dynamiquement selon payload_type
+}
+
+/** Réponse de l'historique du wallet */
+export interface WalletHistoryResp {
+    address: string;
+    items: HistoryItem[];
+    count: number;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Config Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface RuntimeConfig {
+    fee_rate_bps: number;
+    base_fee: string;
+    platform_fee_bps: number;
+    node_fee_bps: number;
+    min_pow_bits: number;
+    max_mint_per_block: number;
+    mint_enabled: boolean;
+    updated_at_block: string;
+    updated_at_timestamp: number;
+}
+
+/** Config publique retournée par /v1/config */
+export interface NodePublicConfig extends RuntimeConfig {
+    fee_recipient: string;
 }

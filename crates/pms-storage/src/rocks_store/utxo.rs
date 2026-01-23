@@ -19,6 +19,14 @@ pub struct UtxoDelta {
     pub create: Vec<(String, u32, String, String)>, // (txid, index, address, amount)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UtxoValue {
+    #[serde(rename = "addr")]
+    pub address: String,
+    #[serde(rename = "amt")]
+    pub amount: String,
+}
+
 impl RocksStore {
     #[inline]
     fn k_utxo_key(out_txid: &str, out_index: u32) -> Vec<u8> {
@@ -97,6 +105,16 @@ impl RocksStore {
         // 4) Commit atomique
         self.db.write(batch)?;
         Ok(true)
+    }
+    pub fn get_utxo(&self, txid: &str, index: u32) -> Result<Option<UtxoValue>> {
+        let cf_utxo = self.cf_utxo();
+        let key = Self::k_utxo_key(txid, index);
+        if let Some(val) = self.db.get_cf(cf_utxo, key)? {
+            let u: UtxoValue = serde_json::from_slice(&val)?;
+            Ok(Some(u))
+        } else {
+            Ok(None)
+        }
     }
 }
 

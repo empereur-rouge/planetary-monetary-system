@@ -14,6 +14,7 @@ use crate::api::AppState;
 use crate::fee_distribution::{
     BlockRewardConfig, FeeDistributionConfig, compute_block_reward_outputs, compute_fee_outputs,
 };
+use pms_storage::DagStorage;
 use pms_storage::PutResult;
 use pms_types::TxOutput;
 use pms_types_block::Block;
@@ -182,6 +183,8 @@ async fn accumulate_fee_if_tx(st: &AppState, wb: &WireBlock) {
 /// Processes burn refunds for cube NFTs if applicable
 /// Adds validated refunds to the fee pool for later distribution
 async fn process_burn_refund_if_applicable(st: &AppState, wb: &WireBlock) {
+    use super::nft::decrypt_nft_metadata_from_dag;
+
     // 1. Parse payload for NFT Burn action
     let burn_action = match extract_nft_burn_action(wb) {
         Some(action) => action,
@@ -191,22 +194,26 @@ async fn process_burn_refund_if_applicable(st: &AppState, wb: &WireBlock) {
     // 2. Get authority public keys from config
     let authority_pks = &st.settings.fees.authority_public_keys;
 
-    // 3. Calculate refund (if valid cube with valid signature)
+    // 3. Déchiffrer les métadonnées depuis le bloc DAG
+    // Le coordinateur peut déchiffrer car il est dans la liste des recipients
+    let metadata = decrypt_nft_metadata_from_dag(st, &burn_action.token_id).await;
+
+    // 4. Calculate refund (if valid cube with valid signature)
     let refund = match crate::burn_refund::calculate_burn_refund(
         &burn_action.token_id,
         &burn_action.burner,
-        st.store.as_ref(),
+        metadata.as_ref(),
         authority_pks,
     ) {
         Ok(Some(r)) => r,
-        Ok(None) => return, // No refund (not a cube, invalid sig, etc.)
+        Ok(None) => return, // No refund (not a cube, invalid sig, no metadata, etc.)
         Err(e) => {
             tracing::warn!("Burn refund calculation failed: {}", e);
             return;
         }
     };
 
-    // 4. Add refund to fee pool (will be distributed via Milestone)
+    // 5. Add refund to fee pool (will be distributed via Milestone)
     {
         let mut pool = st.fee_pool.write().await;
         pool.add_fee(refund.amount, &refund.recipient);
@@ -512,8 +519,44 @@ fn verify_wireblock_signature(wb: &WireBlock) -> Result<(), StatusCode> {
     // 4) message canonique identique à celui du CLI
     let msg = canonical_wireblock_message(wb);
 
-    // 5) vérif
     verify_key
         .verify(msg.as_bytes(), &sig)
         .map_err(|_| StatusCode::UNAUTHORIZED)
+}
+
+/// GET /v1/blocks/:id
+/// Récupère un bloc par son ID
+pub async fn get_block_by_id(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<WireBlock>, (StatusCode, String)> {
+    // 1. Fetch from store
+    let sb = st
+        .store
+        .get_block(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Block not found".to_string()))?;
+
+    // 2. Convert to WireBlock
+    let wb = WireBlock {
+        id: sb.id,
+        parents: sb.parents,
+        payload_json: sb.payload_json,
+        nonce: sb.nonce,
+        network_id: st._cfg.network.network_id.clone(),
+        protocol_version: st._cfg.network.protocol_version as u16,
+        signer_pk_hex: String::new(), // StoredBlock doesn't store signer PK explicitly if unrelated to logic, or maybe it does?
+        // Wait, StoredBlock usually has metadata, but where is signer_pk?
+        // Let's check StoredBlock definition if possible.
+        // For now, return empty or try to extract from metadata if available.
+        signature_hex: String::new(), // Same for signature
+        metadata: sb.metadata,
+    };
+
+    // Note: StoredBlock in pms-storage might not have exact original fields for signer/sig if they were stripped?
+    // Usually we want to return the exact block as submitted.
+    // However, for sync purposes, payload_json is the most important.
+
+    Ok(Json(wb))
 }

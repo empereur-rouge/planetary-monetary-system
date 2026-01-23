@@ -1,7 +1,7 @@
 // crates/pms-wallet/tests/rocks_history_pagination.rs
 
 use anyhow::Result;
-use std::sync::Arc;
+
 use tokio::time::{Duration, sleep};
 
 use pms_storage::{DagStorage, models::StoredBlock};

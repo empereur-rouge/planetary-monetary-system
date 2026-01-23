@@ -1,7 +1,8 @@
 use anyhow::{Result, anyhow};
 use pms_storage::DagStorage;
 use pms_storage::rocks_store::store::RocksStore;
-use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
+use pms_types_payload::{EncryptedPayload, EncryptedRewardOutput, PayloadEnvelope, PlainPayload};
+use pms_types_transaction::TxOutput;
 use pms_wire::WireBlock;
 
 #[derive(Debug, Clone)]
@@ -15,6 +16,41 @@ pub struct HistoryEntry {
     pub id: String,
     pub ts_ms: i64,
     pub plain: PlainPayload,
+}
+
+// Helper pour tenter de déchiffrer un EncryptedReward
+// Si on trouve des outputs pour nous, on reconstruit un PlainPayload::Reward
+fn try_decrypt_encrypted_reward(
+    encrypted_outputs: &[EncryptedRewardOutput],
+    burned: &str,
+    tx_block_id: &str,
+    x25519_sk_hex: &str,
+    addr: &str,
+) -> Option<PlainPayload> {
+    let mut my_outputs = Vec::new();
+
+    for e_out in encrypted_outputs {
+        if let Ok(pt) = e_out.encrypted.decrypt_with(x25519_sk_hex) {
+            // On suppose que c'est un TxOutput sérialisé
+            if let Ok(out) = serde_json::from_slice::<TxOutput>(&pt) {
+                if out.address == addr {
+                    my_outputs.push(out);
+                }
+            }
+        }
+    }
+
+    if my_outputs.is_empty() {
+        None
+    } else {
+        // On présente ça comme un Reward "clair" pour l'affichage
+        Some(PlainPayload::Reward {
+            fee_outputs: vec![],
+            reward_outputs: my_outputs,
+            burned: burned.to_string(),
+            tx_block_id: tx_block_id.to_string(),
+        })
+    }
 }
 
 /// Récupère les `limit` derniers blocs depuis le store, et tente de les
@@ -60,6 +96,14 @@ pub fn involves_address(plain: &PlainPayload, addr: &str) -> bool {
             // MVP: filtre par outputs uniquement (les inputs nécessitent un index UTXO)
             tx.outputs.iter().any(|o| o.address == addr)
         }
+        PlainPayload::Reward {
+            fee_outputs,
+            reward_outputs,
+            ..
+        } => {
+            fee_outputs.iter().any(|o| o.address == addr)
+                || reward_outputs.iter().any(|o| o.address == addr)
+        }
         _ => false,
     }
 }
@@ -73,6 +117,18 @@ pub fn involves_any_address(plain: &PlainPayload, candidates: &[String]) -> bool
             .outputs
             .iter()
             .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c))),
+        PlainPayload::Reward {
+            fee_outputs,
+            reward_outputs,
+            ..
+        } => {
+            fee_outputs
+                .iter()
+                .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c)))
+                || reward_outputs
+                    .iter()
+                    .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c)))
+        }
         _ => false,
     }
 }
@@ -107,6 +163,28 @@ pub async fn scan_decrypt_recent_for_address(
                         plain,
                     });
                 }
+            }
+        } else if let PayloadEnvelope::Plain(plain) = env {
+            match plain {
+                PlainPayload::EncryptedReward {
+                    encrypted_outputs,
+                    burned,
+                    tx_block_id,
+                } => {
+                    if let Some(decrypted_reward) = try_decrypt_encrypted_reward(
+                        &encrypted_outputs,
+                        &burned,
+                        &tx_block_id,
+                        x25519_sk_hex,
+                        addr,
+                    ) {
+                        out.push(Decrypted {
+                            block_id: wb.id,
+                            plain: decrypted_reward,
+                        });
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -147,20 +225,46 @@ pub async fn history_page_for_address(
     let mut out = Vec::new();
     for b in blocks {
         let ts = *id_ts.get(&b.id).unwrap_or(&0);
-        if let Some(PayloadEnvelope::Encrypted(enc)) = b
+        let Some(env) = b
             .payload_json
             .as_ref()
             .and_then(|s| serde_json::from_str::<PayloadEnvelope>(s).ok())
-        {
-            if let Ok(plain) = enc.decrypt_as_payload(recipient_sk_hex) {
-                if involves_address(&plain, addr) {
+        else {
+            continue;
+        };
+
+        match env {
+            PayloadEnvelope::Encrypted(enc) => {
+                if let Ok(plain) = enc.decrypt_as_payload(recipient_sk_hex) {
+                    if involves_address(&plain, addr) {
+                        out.push(HistoryEntry {
+                            id: b.id.clone(),
+                            ts_ms: ts,
+                            plain,
+                        });
+                    }
+                }
+            }
+            PayloadEnvelope::Plain(PlainPayload::EncryptedReward {
+                encrypted_outputs,
+                burned,
+                tx_block_id,
+            }) => {
+                if let Some(decrypted_reward) = try_decrypt_encrypted_reward(
+                    &encrypted_outputs,
+                    &burned,
+                    &tx_block_id,
+                    recipient_sk_hex,
+                    addr,
+                ) {
                     out.push(HistoryEntry {
                         id: b.id.clone(),
                         ts_ms: ts,
-                        plain,
+                        plain: decrypted_reward,
                     });
                 }
             }
+            _ => {}
         }
     }
 

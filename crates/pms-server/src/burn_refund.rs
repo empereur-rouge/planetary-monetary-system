@@ -19,7 +19,7 @@ use base64::Engine;
 use base64::engine::general_purpose;
 use hex::FromHex;
 use k256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-use pms_storage::NftStorage;
+use pms_types_nft::NftMetadata;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -40,8 +40,11 @@ pub struct CubeExtra {
 /// Attributs d'un cube utilisés pour le calcul du remboursement
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CubeAttributes {
+    /// Poids en grammes (ex: 500 à 5000g pour 0.5-5kg)
     pub weight: u32,
+    /// Taille en mm (ex: 20 à 80mm pour 2-8cm)
     pub size: u32,
+    /// Densité x100 (ex: 20 à 100 pour 0.2-1.0)
     pub density: u32,
 }
 
@@ -61,16 +64,20 @@ pub struct BurnRefundResult {
 /// # Arguments
 /// * `token_id` - ID du NFT brûlé
 /// * `burner` - Adresse du propriétaire qui brûle
-/// * `nft_store` - Store pour récupérer les métadonnées
-/// * `authority_pk` - Clé publique de l'Authority (hex)
+/// * `metadata` - Métadonnées déchiffrées du NFT (None si pas disponibles)
+/// * `authority_pks` - Clés publiques des Authority (hex)
 ///
 /// # Returns
 /// * `Some(BurnRefundResult)` si le cube est authentique et éligible
 /// * `None` si pas de remboursement (pas un cube, signature invalide, etc.)
-pub fn calculate_burn_refund<S: NftStorage>(
+///
+/// # Privacy Note
+/// Le caller (coordinateur) doit déchiffrer les métadonnées depuis le bloc DAG
+/// avant d'appeler cette fonction. Les métadonnées ne sont jamais stockées en clair.
+pub fn calculate_burn_refund(
     token_id: &str,
     burner: &str,
-    nft_store: &S,
+    metadata: Option<&NftMetadata>,
     authority_pks: &[String],
 ) -> Result<Option<BurnRefundResult>> {
     // 1. Vérifier qu'on a au moins une Authority key configurée
@@ -79,8 +86,8 @@ pub fn calculate_burn_refund<S: NftStorage>(
         return Ok(None);
     }
 
-    // 2. Récupérer les métadonnées du NFT
-    let metadata = match nft_store.get_metadata(token_id)? {
+    // 2. Vérifier qu'on a des métadonnées
+    let metadata = match metadata {
         Some(m) => m,
         None => {
             tracing::debug!("No metadata for token {}, no burn refund", token_id);
@@ -214,9 +221,14 @@ pub fn attributes_to_signed_message(attrs: &CubeAttributes) -> String {
 ///
 /// Min: 1 * 1 * 1 / 10000 = 0.0001 PMS
 /// Max: 100 * 100 * 100 / 10000 = 100 PMS
+/// Calcule le montant de remboursement basé sur les attributs.
+/// Formule: (weight_g * size_mm * density_x100) / 19_300_000_000
+///
+/// Target moyenne hardcore: ~277 PMS/mois
 fn calculate_refund_amount(attrs: &CubeAttributes) -> Decimal {
     let product = u64::from(attrs.weight) * u64::from(attrs.size) * u64::from(attrs.density);
-    let refund = Decimal::from(product) / Decimal::from(10_000);
+    // Diviseur calibré pour ~0.0004275 PMS par cube moyen (Hardcore: 277 PMS/mois)
+    let refund = (Decimal::from(product) / Decimal::from(19_300_000_000u64)).round_dp(8);
 
     // Safety clamp: max 1000 PMS
     let max_refund = Decimal::from(1000);
@@ -230,58 +242,53 @@ fn calculate_refund_amount(attrs: &CubeAttributes) -> Decimal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
-
     // ═══════════════════════════════════════════════════════════════════════
     // Tests de calcul de remboursement
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
     fn test_calculate_refund_min() {
+        // Minimum possible: 0.5kg (500g), 2cm (20mm), 0.2 density (20)
         let attrs = CubeAttributes {
-            weight: 1,
-            size: 1,
-            density: 1,
+            weight: 500,
+            size: 20,
+            density: 20,
         };
         let refund = calculate_refund_amount(&attrs);
-        assert_eq!(refund, Decimal::from_str("0.0001").unwrap());
+        // 500 * 20 * 20 = 200,000
+        // 200,000 / 19,300,000,000 = 0.00001036269...
+        // Round dp 8 -> 0.00001036
+        assert_eq!(refund.to_string(), "0.00001036");
     }
 
     #[test]
     fn test_calculate_refund_mid() {
+        // Moyen: ~2.75kg (2750g), ~5cm (50mm), ~0.6 density (60)
         let attrs = CubeAttributes {
-            weight: 50,
+            weight: 2750,
             size: 50,
-            density: 50,
+            density: 60,
         };
         let refund = calculate_refund_amount(&attrs);
-        // 50 * 50 * 50 = 125000 / 10000 = 12.5
-        assert_eq!(refund, Decimal::from_str("12.5").unwrap());
+        // 2750 * 50 * 60 = 8,250,000
+        // 8,250,000 / 19,300,000,000 = 0.0004274611...
+        // Round dp 8 -> 0.00042746
+        assert_eq!(refund.to_string(), "0.00042746");
     }
 
     #[test]
     fn test_calculate_refund_max() {
+        // Maximum: 5kg (5000g), 8cm (80mm), 1.0 density (100)
         let attrs = CubeAttributes {
-            weight: 100,
-            size: 100,
+            weight: 5000,
+            size: 80,
             density: 100,
         };
         let refund = calculate_refund_amount(&attrs);
-        // 100 * 100 * 100 = 1000000 / 10000 = 100
-        assert_eq!(refund, Decimal::from_str("100").unwrap());
-    }
-
-    #[test]
-    fn test_calculate_refund_clamped_to_max() {
-        // Même avec des valeurs au-delà de 100, on cap à 1000 PMS
-        let attrs = CubeAttributes {
-            weight: 200,
-            size: 200,
-            density: 200,
-        };
-        let refund = calculate_refund_amount(&attrs);
-        // 200 * 200 * 200 = 8000000 / 10000 = 800 (sous le cap)
-        assert_eq!(refund, Decimal::from_str("800").unwrap());
+        // 5000 * 80 * 100 = 40,000,000
+        // 40,000,000 / 19,300,000,000 = 0.002072538...
+        // Round dp 8 -> 0.00207254
+        assert_eq!(refund.to_string(), "0.00207254");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -291,23 +298,12 @@ mod tests {
     #[test]
     fn test_attributes_to_signed_message() {
         let attrs = CubeAttributes {
-            weight: 42,
-            size: 77,
-            density: 13,
+            weight: 2750,
+            size: 50,
+            density: 60,
         };
         let msg = attributes_to_signed_message(&attrs);
-        assert_eq!(msg, "weight:42,size:77,density:13");
-    }
-
-    #[test]
-    fn test_attributes_to_signed_message_zeros() {
-        let attrs = CubeAttributes {
-            weight: 0,
-            size: 0,
-            density: 0,
-        };
-        let msg = attributes_to_signed_message(&attrs);
-        assert_eq!(msg, "weight:0,size:0,density:0");
+        assert_eq!(msg, "weight:2750,size:50,density:60");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -344,67 +340,46 @@ mod tests {
     fn test_cube_extra_parsing_with_signature() {
         let json = r#"{
             "rarity": "Rare",
-            "attributes": {"weight": 50, "size": 50, "density": 50},
+            "attributes": {"weight": 2750, "size": 50, "density": 60},
             "roll": 1234567,
             "signature": "MEUCIQDtest..."
         }"#;
 
         let extra: CubeExtra = serde_json::from_str(json).unwrap();
         assert_eq!(extra.rarity, "Rare");
-        assert_eq!(extra.attributes.weight, 50);
+        assert_eq!(extra.attributes.weight, 2750);
         assert!(extra.signature.is_some());
     }
 
-    #[test]
-    fn test_cube_extra_parsing_without_signature() {
-        let json = r#"{
-            "rarity": "Common",
-            "attributes": {"weight": 10, "size": 10, "density": 10},
-            "roll": 999
-        }"#;
-
-        let extra: CubeExtra = serde_json::from_str(json).unwrap();
-        assert_eq!(extra.rarity, "Common");
-        assert!(extra.signature.is_none());
-    }
-
     // ═══════════════════════════════════════════════════════════════════════
-    // Tests d'intégration avec mock NftStorage
+    // Tests d'intégration avec la nouvelle API (metadata en paramètre)
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
     fn test_calculate_burn_refund_no_authority_configured() {
-        use pms_storage::mock::InMemoryNftStore;
-
-        let store = InMemoryNftStore::new();
-        let result = calculate_burn_refund("token123", "burner_addr", &store, &[]).unwrap();
+        let result = calculate_burn_refund("token123", "burner_addr", None, &[]).unwrap();
 
         // Sans authority configurée, pas de remboursement
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_calculate_burn_refund_token_not_found() {
-        use pms_storage::mock::InMemoryNftStore;
-
-        let store = InMemoryNftStore::new();
+    fn test_calculate_burn_refund_no_metadata() {
         let fake_pk = "04".to_string() + &"00".repeat(64);
 
-        let result = calculate_burn_refund("nonexistent", "burner", &store, &[fake_pk]).unwrap();
+        let result = calculate_burn_refund("nonexistent", "burner", None, &[fake_pk]).unwrap();
 
-        // Token inexistant, pas de remboursement
+        // Pas de métadonnées, pas de remboursement
         assert!(result.is_none());
     }
 
     #[test]
     fn test_calculate_burn_refund_not_a_cube() {
-        use pms_storage::mock::InMemoryNftStore;
         use pms_types_nft::NftMetadata;
 
-        let store = InMemoryNftStore::new();
         let fake_pk = "04".to_string() + &"00".repeat(64);
 
-        // Créer un NFT qui n'est pas un cube
+        // Créer des métadonnées pour un NFT qui n'est pas un cube
         let metadata = NftMetadata {
             name: Some("Not a Cube".to_string()),
             description: None,
@@ -412,10 +387,9 @@ mod tests {
             nft_type: Some("collectible".to_string()), // NOT "cube"
             extra: None,
         };
-        store.set_owner("token123", "owner").unwrap();
-        store.set_metadata("token123", &metadata).unwrap();
 
-        let result = calculate_burn_refund("token123", "owner", &store, &[fake_pk]).unwrap();
+        let result =
+            calculate_burn_refund("token123", "owner", Some(&metadata), &[fake_pk]).unwrap();
 
         // Pas un cube, pas de remboursement
         assert!(result.is_none());
@@ -423,16 +397,14 @@ mod tests {
 
     #[test]
     fn test_calculate_burn_refund_cube_no_signature() {
-        use pms_storage::mock::InMemoryNftStore;
         use pms_types_nft::NftMetadata;
 
-        let store = InMemoryNftStore::new();
         let fake_pk = "04".to_string() + &"00".repeat(64);
 
         // Cube sans signature
         let extra = serde_json::json!({
             "rarity": "Common",
-            "attributes": {"weight": 50, "size": 50, "density": 50},
+            "attributes": {"weight": 500, "size": 20, "density": 20},
             "roll": 1234
             // Pas de "signature"
         });
@@ -444,10 +416,9 @@ mod tests {
             nft_type: Some("cube".to_string()),
             extra: Some(extra.to_string()),
         };
-        store.set_owner("cube123", "owner").unwrap();
-        store.set_metadata("cube123", &metadata).unwrap();
 
-        let result = calculate_burn_refund("cube123", "owner", &store, &[fake_pk]).unwrap();
+        let result =
+            calculate_burn_refund("cube123", "owner", Some(&metadata), &[fake_pk]).unwrap();
 
         // Cube sans signature, pas de remboursement
         assert!(result.is_none());

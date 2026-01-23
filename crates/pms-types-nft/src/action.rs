@@ -25,6 +25,9 @@ pub enum NftAction {
     },
 
     /// Transfert d'un NFT à un nouveau propriétaire.
+    ///
+    /// Si `new_owner_x25519_pubkey` est fourni, le coordinateur re-chiffrera
+    /// les métadonnées pour le nouveau propriétaire.
     Transfer {
         /// ID du token à transférer
         token_id: String,
@@ -32,6 +35,17 @@ pub enum NftAction {
         from: String,
         /// Adresse du nouveau propriétaire
         to: String,
+        /// Clé publique X25519 du nouveau propriétaire pour re-chiffrement
+        /// des métadonnées. Si None, les métadonnées restent chiffrées
+        /// pour l'ancien propriétaire (non recommandé).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        new_owner_x25519_pubkey: Option<String>,
+
+        /// Métadonnées re-chiffrées pour le nouveau propriétaire (JSON string).
+        /// Requis si `new_owner_x25519_pubkey` est présent.
+        /// Type String pour éviter dépendance circulaire avec pms-types-payload.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encrypted_metadata: Option<String>,
     },
 
     /// Utilisation d'un NFT (action sans destruction).
@@ -58,6 +72,16 @@ pub enum NftAction {
         /// Adresse du propriétaire qui brûle (doit signer)
         burner: String,
     },
+
+    /// Destruction définitive de plusieurs NFTs.
+    ///
+    /// Les tokens sont retirés de la circulation et ne peuvent plus être utilisés.
+    BatchBurn {
+        /// Liste des IDs des tokens à détruire
+        token_ids: Vec<String>,
+        /// Adresse du propriétaire qui brûle (doit signer)
+        burner: String,
+    },
 }
 
 impl NftAction {
@@ -68,6 +92,13 @@ impl NftAction {
             NftAction::Transfer { token_id, .. } => token_id,
             NftAction::Use { token_id, .. } => token_id,
             NftAction::Burn { token_id, .. } => token_id,
+            NftAction::BatchBurn { token_ids, .. } => {
+                if let Some(first) = token_ids.first() {
+                    first
+                } else {
+                    ""
+                }
+            }
         }
     }
 
@@ -78,6 +109,7 @@ impl NftAction {
             NftAction::Transfer { .. } => "transfer",
             NftAction::Use { .. } => "use",
             NftAction::Burn { .. } => "burn",
+            NftAction::BatchBurn { .. } => "batch_burn",
         }
     }
 }

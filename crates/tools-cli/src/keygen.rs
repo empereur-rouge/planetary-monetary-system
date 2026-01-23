@@ -202,12 +202,16 @@ pub fn generate_and_save(key_path: &str, json_path: &str, config_path: Option<&s
     );
 
     // 4. Sauvegarder le JSON (pour l'admin)
+    //    On récupère le mnémonique si disponible dans le wallet
+    let mnemonic = wallet.mnemonic_words.clone().map(|w| w.join(" "));
+
     let info = json!({
         "private_key": priv_hex,
         "public_key": pub_hex,
         "address": address,
+        "mnemonic": mnemonic, // <-- Ajout du mnémonique
         "type": "coordinator",
-        "readme": "KEEP PRIVATE_KEY SECRET! PubKey is for config.toml."
+        "readme": "KEEP PRIVATE_KEY & MNEMONIC SECRET! PubKey is for config.toml."
     });
 
     fs::write(json_path, serde_json::to_string_pretty(&info)?)?;

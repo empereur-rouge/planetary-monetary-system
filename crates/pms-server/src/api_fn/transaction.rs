@@ -8,7 +8,8 @@ use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use http::StatusCode;
-use pms_storage::{DagStorage, PutResult};
+use pms_config::RuntimeConfig;
+use pms_storage::{ConfigStorage, DagStorage, PutResult};
 use pms_token::FeePolicy;
 use pms_types::{Block, Transaction, TxOutput};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
@@ -67,14 +68,79 @@ pub async fn wallet_send_tx(
     // On n'injecte PLUS rien (cela casserait la signature client).
     // On VÉRIFIE que le client a bien inclus l'output de frais vers un admin.
 
-    // a) Charger la policy
+    // a) Charger la policy (Runtime Config - Dynamic)
+    let runtime_config = state
+        .store
+        .get_runtime_config()
+        .unwrap_or_else(|_| RuntimeConfig::default());
+
+    let ratio_dec = Decimal::from(runtime_config.fee_rate_bps) / Decimal::from(10000);
+
     let fee_policy = FeePolicy::new(
-        &settings.fees.base_fee,
-        &settings.fees.ratio,
-        18, // Precision (TODO: put in config provided token decimals?)
+        &runtime_config.base_fee,
+        &ratio_dec.to_string(), // Convert config bps to ratio string (ex: "0.01")
+        18,
     );
 
-    // b) Identifier H20 Sender pour exclure le Change
+    // b) STRICT: Verify Inputs == Outputs (No implicit fees)
+    //    We must fetch inputs to sum them up.
+    let mut total_inputs = Decimal::ZERO;
+    for input in &tx.inputs {
+        match state
+            .store
+            .get_utxo(&input.out.txid, input.out.index as u32)
+        {
+            Ok(Some(u)) => {
+                if let Ok(amt) = Decimal::from_str_exact(&u.amount) {
+                    total_inputs += amt;
+                } else {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "invalid decimal in stored utxo" })),
+                    );
+                }
+            }
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        json!({ "error": format!("input utxo not found (double spend?): {}:{}", input.out.txid, input.out.index) }),
+                    ),
+                );
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("db error fetching utxo: {}", e) })),
+                );
+            }
+        }
+    }
+
+    let mut total_outputs = Decimal::ZERO;
+    for out in &tx.outputs {
+        if let Ok(amt) = Decimal::from_str_exact(&out.amount) {
+            total_outputs += amt;
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid output amount decimal" })),
+            );
+        }
+    }
+
+    if total_inputs != total_outputs {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "implicit fees invalid: total inputs must equal total outputs (including fee output)",
+                "inputs": total_inputs.to_string(),
+                "outputs": total_outputs.to_string(),
+            })),
+        );
+    }
+
+    // c) Identifier H20 Sender pour exclure le Change
     //    Unlock[0] contient la pubkey du sender.
     let sender_h20 = if let Some(first_unlock) = tx.unlocks.first() {
         if let Ok(pub_bytes) = hex::decode(&first_unlock.pubkey_hex) {

@@ -27,7 +27,7 @@ async fn spawn_node(port_p2p: u16, port_api: u16) -> (Arc<Server>, TempDir, Stri
 
     // Init Store
     // Fix: Remove .into() to let &str generic work or implicit coercion
-    let store = Arc::new(RocksStore::new(&db_path, 1000, "test").await.unwrap());
+    let store = Arc::new(RocksStore::new(&db_path, 1000, "test", None).await.unwrap());
     store.ensure_schema().await.unwrap();
 
     // Genesis

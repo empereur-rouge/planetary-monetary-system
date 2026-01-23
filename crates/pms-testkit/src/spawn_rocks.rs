@@ -83,7 +83,7 @@ pub async fn spawn_node_generic_rocks_with_seed(
     }
 
     // 1) Store Rocks
-    let store = Arc::new(RocksStore::new(db_path, tip_limit, prefix).await?);
+    let store = Arc::new(RocksStore::new(db_path, tip_limit, prefix, None).await?);
 
     // 1.bis) Schéma + GENESIS si DB vide (pipeline prod-like)
     store.ensure_schema().await?;

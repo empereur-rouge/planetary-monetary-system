@@ -78,6 +78,7 @@ async fn unsigned_block_is_rejected() -> anyhow::Result<()> {
             db_path.to_string_lossy().as_ref(),
             256, // tip_limit test
             "pms:test",
+            None,
         )
         .await?,
     );
@@ -143,7 +144,7 @@ async fn signed_plain_block_is_accepted() -> Result<()> {
     let db_path = dir.path().join("rocks-signed-plain");
 
     let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test").await?);
+        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None).await?);
 
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
@@ -190,7 +191,7 @@ async fn signed_encrypted_mint_is_accepted() -> Result<()> {
     let db_path = dir.path().join("rocks-signed-mint");
 
     let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test").await?);
+        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None).await?);
 
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);

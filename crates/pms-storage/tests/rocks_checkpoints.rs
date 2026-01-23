@@ -33,7 +33,7 @@ async fn rocks_checkpoints_are_created_and_rotated() -> Result<()> {
     //    - path: db_path
     //    - tip_limit: 256 (valeur arbitraire pour le test)
     //    - prefix: "it:test"
-    let store = RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "it:test")
+    let store = RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "it:test", None)
         .await
         .expect("RocksStore::new doit réussir en test");
 

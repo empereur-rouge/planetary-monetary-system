@@ -32,8 +32,15 @@ async fn mint_policy_enforced_on_admin_vs_non_admin() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let db_path = dir.path().join("rocks-mint-policy");
 
-    let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test:mint").await?);
+    let store = Arc::new(
+        RocksStore::new(
+            db_path.to_string_lossy().as_ref(),
+            256,
+            "pms:test:mint",
+            None,
+        )
+        .await?,
+    );
 
     // 2) Load config and create genesis
     let settings = load_config()?;
@@ -162,7 +169,13 @@ async fn dev_mode_mint_signed_by_admin_is_accepted() -> anyhow::Result<()> {
     let db_path = dir.path().join("rocks-mint-dev-ok");
 
     let store = Arc::new(
-        RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test:mint-dev").await?,
+        RocksStore::new(
+            db_path.to_string_lossy().as_ref(),
+            256,
+            "pms:test:mint-dev",
+            None,
+        )
+        .await?,
     );
 
     // 2) Bootstrap DAG
@@ -218,6 +231,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             path: "/var/lib/pms/rocks".to_string(),
             prefix: "pms:main".to_string(),
             tip_limit: 100,
+            checkpoint_interval_secs: None,
         },
         network: Network {
             mode: NetworkMode::Mainnet,

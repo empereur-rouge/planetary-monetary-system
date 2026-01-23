@@ -21,7 +21,7 @@ async fn mk_store(tip_limit: usize, prefix: &str) -> Result<TestStore> {
     std::fs::create_dir_all(&path)?;
     let path_str = path.to_string_lossy().to_string();
 
-    let store = Arc::new(RocksStore::new(&path_str, tip_limit, prefix).await?);
+    let store = Arc::new(RocksStore::new(&path_str, tip_limit, prefix, None).await?);
     Ok(TestStore {
         _dir: dir,
         path: path_str,

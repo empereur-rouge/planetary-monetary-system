@@ -69,6 +69,8 @@ fn test_action_types() {
         token_id: "t3".into(),
         from: "from-addr".into(),
         to: "to-addr".into(),
+        new_owner_x25519_pubkey: None,
+        encrypted_metadata: None,
     };
     assert_eq!(transfer.action_type_str(), "transfer");
 

@@ -185,7 +185,7 @@ where
         // 1.y) Validation NFT (PlainPayload::Nft)
         //
         // - Valide l'action NFT (ownership, existence, autorisation)
-        // - Applique au store si valide (Mint → set_owner, Transfer → set_owner, Burn → delete)
+        // - Applique au store si valide (Mint → apply_mint, Transfer/Burn → apply_action)
         if let Some(PayloadEnvelope::Plain(PlainPayload::Nft(action))) = &payload {
             // Récupère la clé publique du signataire
             let signer_pk = &wb.signer_pk_hex;
@@ -210,8 +210,41 @@ where
             }
 
             // Applique l'action (modifie ownership)
-            if let Err(e) = self.store.apply_action(action) {
-                tracing::error!("❌ NFT apply_action failed: {}", e);
+            // Privacy: Pour Mint, on utilise apply_mint avec block_id
+            // Privacy: Pour Transfer avec re-encryption, on utilise apply_transfer
+            use pms_types_nft::NftAction;
+            let apply_result = match action {
+                NftAction::Mint {
+                    token_id, creator, ..
+                } => {
+                    // Privacy-first: stocke (token_id, owner, block_id) - pas de metadata
+                    self.store.apply_mint(token_id, creator, &wb.id)
+                }
+                NftAction::Transfer {
+                    token_id,
+                    to,
+                    new_owner_x25519_pubkey,
+                    ..
+                } => {
+                    // Si new_owner_x25519_pubkey est fourni, on met à jour le block_id
+                    // pour pointer vers ce bloc Transfer (qui contiendra les métadonnées
+                    // re-chiffrées pour le nouveau owner via le serveur coordinator)
+                    if new_owner_x25519_pubkey.is_some() {
+                        // Re-encryption: le bloc Transfer devient la nouvelle référence
+                        self.store.apply_transfer(token_id, to, &wb.id)
+                    } else {
+                        // Transfer simple sans re-encryption (ancien owner garde accès)
+                        self.store.set_owner(token_id, to)
+                    }
+                }
+                _ => {
+                    // Burn, Use, BatchBurn
+                    self.store.apply_action(action)
+                }
+            };
+
+            if let Err(e) = apply_result {
+                tracing::error!("❌ NFT apply failed: {}", e);
                 return Ok(PutResult::Rejected(format!("NFT apply failed: {}", e)));
             }
 

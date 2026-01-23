@@ -22,11 +22,21 @@ pub struct RocksStore {
     pub tip_limit: usize,
     /// namespace logique (équivalent prefix Redis)
     pub prefix: String,
+    /// Intervalle de checkpoint
+    pub checkpoint_interval: Duration,
 }
 
 impl RocksStore {
-    pub async fn new(path: &str, tip_limit: usize, prefix: impl Into<String>) -> Result<Self> {
+    pub async fn new(
+        path: &str,
+        tip_limit: usize,
+        prefix: impl Into<String>,
+        checkpoint_interval_secs: Option<u64>,
+    ) -> Result<Self> {
         let prefix = prefix.into();
+        // Défaut 24h si None
+        let checkpoint_interval =
+            Duration::from_secs(checkpoint_interval_secs.unwrap_or(24 * 3600));
 
         let path = PathBuf::from(path);
         eprintln!("[rocks] init at {}", path.display());
@@ -70,11 +80,11 @@ impl RocksStore {
             "tx_applied",
             "nft_ownership",     // NFT ownership tracking: token_id -> owner_address
             "nfts_by_owner",     // Reverse index: owner_address -> list of token_ids (JSON)
-            "nft_metadata",      // NFT metadata storage: token_id -> NftMetadata (JSON)
-            "runtime_config",    // Current runtime config (single key "current")
-            "config_history",    // History of config changes (block_id -> entry)
+            "nft_block_ids", // NFT block references: token_id -> block_id (encrypted metadata in DAG)
+            "runtime_config", // Current runtime config (single key "current")
+            "config_history", // History of config changes (block_id -> entry)
             "node_block_counts", // Block count per node: node_pk -> count
-            "node_fee_pool",     // Fee pool: single key "pool" -> amount (u64)
+            "node_fee_pool", // Fee pool: single key "pool" -> amount (u64)
             "node_reward_addresses", // Reward addresses: node_pk -> address
         ]
         .into_iter()
@@ -154,6 +164,7 @@ impl RocksStore {
             db: Arc::new(db),
             tip_limit,
             prefix,
+            checkpoint_interval,
         })
     }
 
@@ -294,14 +305,24 @@ impl RocksStore {
         flush_every: Duration,
         stats_every: Duration,
     ) -> JoinHandle<()> {
-        // Interval pour les checkpoints (1 fois / 24h)
-        let checkpoint_every = Duration::from_secs(24 * 3600);
-
+        // Interval pour les checkpoints (celui configuré)
+        let checkpoint_every = self.checkpoint_interval;
         // Dossier de backup :
         // - en prod tu mettras typiquement /var/backups/pms
         // - en dev: ./backups/pms
-        let backup_root =
-            std::env::var("PMS_BACKUP_ROOT").unwrap_or_else(|_| "./backups/pms".to_string());
+        let backup_root = std::env::var("PMS_BACKUP_ROOT").unwrap_or_else(|_| {
+            let p = std::path::Path::new("./crates");
+            if p.exists() && p.is_dir() {
+                // On est à la racine du workspace
+                "./backups/pms".to_string()
+            } else if std::path::Path::new("../../crates").exists() {
+                // On est probablement dans crates/pms-server
+                "../../backups/pms".to_string()
+            } else {
+                // Fallback
+                "./backups/pms".to_string()
+            }
+        });
 
         tokio::spawn(async move {
             // Timers périodiques
@@ -382,6 +403,7 @@ impl RocksStore {
             db: std::sync::Arc::new(db),
             tip_limit,
             prefix: "".to_string(),
+            checkpoint_interval: Duration::from_secs(24 * 3600),
         })
     }
 
@@ -425,7 +447,7 @@ impl RocksStore {
             "tx_applied",
             "nft_ownership",
             "nfts_by_owner",
-            "nft_metadata",
+            "nft_block_ids",
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -450,6 +472,7 @@ impl RocksStore {
             db: Arc::new(db),
             tip_limit,
             prefix,
+            checkpoint_interval: Duration::from_secs(24 * 3600),
         })
     }
 }

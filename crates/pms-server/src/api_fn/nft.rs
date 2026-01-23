@@ -8,22 +8,105 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use pms_types_nft::NftMetadata;
+use pms_types_nft::NftMetadata; // Used for MintNftRequest
 use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
-use pms_interface::NetDagAdapter;
-use pms_types_payload::{EncryptedPayload, PayloadEnvelope};
+use pms_storage::{DagStorage, NftStorage};
+use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use pms_wallet::SignerBackend;
 use pms_wire::WireBlock;
 
-/// Réponse pour GET /v1/nft/{token_id}
+// ═══════════════════════════════════════════════════════════════════════════
+// Helper: Coordinator-side Decryption of NFT Metadata
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Déchiffre les métadonnées d'un NFT depuis le bloc DAG.
+///
+/// Le coordinateur peut déchiffrer car il est dans la liste des recipients
+/// lors du chiffrement (voir `mint_nft`).
+///
+/// # Arguments
+/// * `state` - AppState contenant le store et le node_wallet
+/// * `token_id` - ID du token dont on veut les métadonnées
+///
+/// # Returns
+/// * `Some(NftMetadata)` si déchiffrement réussi
+/// * `None` si le token n'existe pas, pas de block_id, ou déchiffrement échoué
+pub async fn decrypt_nft_metadata_from_dag(
+    state: &AppState,
+    token_id: &str,
+) -> Option<NftMetadata> {
+    // 1. Récupérer le block_id depuis le store NFT
+    let block_id = state.store.get_block_id(token_id).ok()??;
+
+    // 2. Récupérer le bloc depuis le DAG
+    let stored_block = state.store.get_block(&block_id).await.ok()??;
+
+    // 3. Parser le payload du bloc
+    let payload_json = stored_block.payload_json?;
+    let envelope: PayloadEnvelope = serde_json::from_str(&payload_json).ok()?;
+
+    // 4. Extraire le payload chiffré
+    //    - Soit direct (Mint) : PayloadEnvelope::Encrypted
+    //    - Soit imbriqué (Transfer) : PlainPayload::Nft(Transfer { encrypted_metadata: Some(str) })
+    let encrypted = match envelope {
+        PayloadEnvelope::Encrypted(enc) => enc,
+        PayloadEnvelope::Plain(PlainPayload::Nft(pms_types_nft::NftAction::Transfer {
+            encrypted_metadata: Some(enc_str),
+            ..
+        })) => {
+            // Le payload est une String JSON à désérialiser
+            match serde_json::from_str::<EncryptedPayload>(&enc_str) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to parse encrypted_metadata in Transfer block {}: {}",
+                        block_id,
+                        e
+                    );
+                    return None;
+                }
+            }
+        }
+        _ => {
+            tracing::debug!("Block {} has no compatible encrypted payload", block_id);
+            return None;
+        }
+    };
+
+    // 5. Déchiffrer avec la clé X25519 du coordinateur
+    let x25519_sk = state.node_wallet.x25519_sk_hex()?;
+    let plaintext = match encrypted.decrypt_with(&x25519_sk) {
+        Ok(pt) => pt,
+        Err(e) => {
+            tracing::debug!("Failed to decrypt block {}: {}", block_id, e);
+            return None;
+        }
+    };
+
+    // 6. Désérialiser les métadonnées
+    //    Le plaintext est le JSON des métadonnées (encodé lors du mint)
+    let metadata: NftMetadata = serde_json::from_slice(&plaintext).ok()?;
+
+    tracing::debug!(
+        "✅ Decrypted metadata for token {} from block {}",
+        token_id,
+        &block_id[..16.min(block_id.len())]
+    );
+
+    Some(metadata)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NftResponse {
     /// Token ID demandé
     pub token_id: String,
     /// Propriétaire actuel (None si le token n'existe pas)
     pub owner: Option<String>,
+    /// ID du bloc contenant les métadonnées chiffrées (pour récupération + déchiffrement client)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mint_block_id: Option<String>,
     /// Le token existe-t-il ?
     pub exists: bool,
 }
@@ -59,9 +142,13 @@ pub async fn get_nft(
     match store.get_owner(&token_id) {
         Ok(Some(owner)) => {
             // Token existe avec un owner
+            // On récupère le block_id qui contient les métadonnées chiffrées
+            let mint_block_id = store.get_block_id(&token_id).unwrap_or(None);
+
             let response = NftResponse {
                 token_id,
                 owner: Some(owner),
+                mint_block_id,
                 exists: true,
             };
             (StatusCode::OK, Json(response))
@@ -71,6 +158,7 @@ pub async fn get_nft(
             let response = NftResponse {
                 token_id,
                 owner: None,
+                mint_block_id: None,
                 exists: false,
             };
             (StatusCode::NOT_FOUND, Json(response))
@@ -81,6 +169,7 @@ pub async fn get_nft(
             let response = NftResponse {
                 token_id,
                 owner: None,
+                mint_block_id: None,
                 exists: false,
             };
             (StatusCode::INTERNAL_SERVER_ERROR, Json(response))
@@ -324,30 +413,24 @@ pub async fn mint_nft(
 
             {
                 use pms_storage::NftStorage;
-                use pms_types_nft::NftAction;
 
-                // Construire l'action Mint avec les mêmes données qu'on a utilisées
-                // pour le bloc (token_id, owner, metadata)
-                let mint_action = NftAction::Mint {
-                    token_id: req.token_id.clone(),
-                    creator: req.owner_address.clone(),
-                    metadata: req.metadata.clone(),
-                };
-
-                // Appliquer l'action au store NFT
-                // Cela appelle set_owner + set_metadata (voir nft_store.rs lignes 82-91)
-                if let Err(e) = state.store.apply_action(&mint_action) {
+                // Privacy-first: on ne stocke PAS les métadonnées en clair.
+                // On stocke seulement (token_id, owner, block_id).
+                // Les métadonnées sont chiffrées dans le bloc du DAG.
+                if let Err(e) = state.store.apply_mint(
+                    &req.token_id,
+                    &req.owner_address,
+                    &block_id, // Référence au bloc contenant les métadonnées chiffrées
+                ) {
                     // Le bloc est déjà persisté, on log l'erreur mais on ne fail pas
                     // car le bloc est dans le DAG (source de vérité)
-                    tracing::error!(
-                        "❌ NFT store apply_action failed after block inserted: {}",
-                        e
-                    );
+                    tracing::error!("❌ NFT store apply_mint failed after block inserted: {}", e);
                 } else {
                     tracing::info!(
-                        "✅ NFT {} minted to {} (store updated)",
+                        "✅ NFT {} minted to {} (store updated, metadata in block {})",
                         req.token_id,
-                        req.owner_address
+                        req.owner_address,
+                        &block_id[..16]
                     );
                 }
             }
@@ -386,8 +469,11 @@ pub struct BurnNftResponse {
     pub status: String,
     /// ID du bloc créé dans le DAG
     pub block_id: String,
-    /// Token ID du NFT brûlé
+    /// Token ID du NFT brûlé (si single burn) ou "batch" (si batch burn)
     pub token_id: String,
+    /// Liste des token IDs brûlés (pour batch burn)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_ids: Option<Vec<String>>,
     /// Remboursement (si cube authentique avec signature Authority valide)
     /// Calculé via la formule: (weight * size * density) / 10000
     pub refund: Option<RefundPreview>,
@@ -405,22 +491,18 @@ pub struct RefundPreview {
 /// POST /v1/nft/burn
 ///
 /// Endpoint helper pour burn un NFT. Le client doit fournir un `WireBlock`
-/// pré-signé contenant un payload `NftAction::Burn`.
+/// pré-signé contenant un payload `NftAction::Burn` ou `NftAction::BatchBurn`.
 ///
 /// ## Flow
 /// 1. Parse le WireBlock depuis le body JSON
-/// 2. Vérifie que le payload contient bien un `NftAction::Burn`
+/// 2. Vérifie que le payload contient bien un `NftAction::Burn` ou `BatchBurn`
 /// 3. Soumet le bloc au DAG via `persist_block`
-/// 4. Si le cube est authentique (signature Authority), calcule le refund preview
+/// 4. Si le cube est authentique (signature Authority), calcule le refund preview global
 ///
 /// ## Pourquoi le client doit-il signer ?
-/// La validation NFT (voir `pms-core/src/validations/nft.rs` lignes 218-244)
+/// La validation NFT (voir `pms-core/src/validations/nft.rs`)
 /// exige que le `signer` du bloc soit égal au `burner`. Le serveur ne peut
 /// donc pas signer à la place du client.
-///
-/// ## Voir aussi
-/// - Chapitre 4.2 du Rust Book : Références et Emprunt
-///   (pour comprendre pourquoi on passe `&wb` et `&state.store`)
 pub async fn burn_nft(
     State(state): State<AppState>,
     Json(wb): Json<WireBlock>,
@@ -430,6 +512,8 @@ pub async fn burn_nft(
     // ─────────────────────────────────────────────────────────────────────
     // On récupère le payload JSON du bloc et on le désérialise
     // pour s'assurer qu'il contient bien une action NftAction::Burn.
+    use pms_storage::NftStorage;
+    use rust_decimal::Decimal;
 
     let payload_json = match &wb.payload_json {
         Some(p) => p,
@@ -486,14 +570,19 @@ pub async fn burn_nft(
         }
     };
 
-    // Vérifier que c'est bien un Burn
-    let (token_id, burner) = match &nft_action {
-        pms_types_nft::NftAction::Burn { token_id, burner } => (token_id.clone(), burner.clone()),
+    // Vérifier que c'est bien un Burn ou BatchBurn
+    let (token_ids_to_process, burner) = match &nft_action {
+        pms_types_nft::NftAction::Burn { token_id, burner } => {
+            (vec![token_id.clone()], burner.clone())
+        }
+        pms_types_nft::NftAction::BatchBurn { token_ids, burner } => {
+            (token_ids.clone(), burner.clone())
+        }
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
-                    "error": "Expected NftAction::Burn, got different action type"
+                    "error": "Expected NftAction::Burn or BatchBurn, got different action type"
                 })),
             )
                 .into_response();
@@ -501,44 +590,40 @@ pub async fn burn_nft(
     };
 
     // ─────────────────────────────────────────────────────────────────────
-    // 1.5. ANTI DOUBLE-REFUND : Vérifier que le NFT existe encore
+    // 1.5. ANTI DOUBLE-REFUND : Vérifier que TOUS les NFTs existent encore
     // ─────────────────────────────────────────────────────────────────────
-    // Si le NFT n'existe plus dans le store, c'est qu'il a déjà été brûlé.
-    // On rejette immédiatement pour éviter un double-refund.
-    //
-    // Voir chapitre 6 du Rust Book : Enums and Pattern Matching
-    // https://doc.rust-lang.org/book/ch06-00-enums.html
+    // Si un seul NFT n'existe plus, on rejette tout le bloc.
     {
-        use pms_storage::NftStorage;
-
-        match state.store.get_owner(&token_id) {
-            Ok(Some(_)) => {
-                // Le NFT existe, on peut continuer le processus de burn
-            }
-            Ok(None) => {
-                // Le NFT n'existe plus → déjà brûlé !
-                tracing::warn!(
-                    "🚫 Double-burn attempt detected for token {}",
-                    &token_id[..16.min(token_id.len())]
-                );
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": "NFT already burned or does not exist",
-                        "token_id": token_id
-                    })),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                tracing::error!("Failed to check NFT existence: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": format!("Failed to check NFT existence: {}", e)
-                    })),
-                )
-                    .into_response();
+        for tid in &token_ids_to_process {
+            match state.store.get_owner(tid) {
+                Ok(Some(_)) => {
+                    // exists
+                }
+                Ok(None) => {
+                    // n'existe plus
+                    tracing::warn!(
+                        "🚫 Batch burn failure: Token {} already burned or missing",
+                        &tid[..16.min(tid.len())]
+                    );
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": format!("NFT already burned or does not exist: {}", tid),
+                            "token_id": tid
+                        })),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    tracing::error!("Failed to check NFT existence for {}: {}", tid, e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!("Failed to check NFT existence: {}", e)
+                        })),
+                    )
+                        .into_response();
+                }
             }
         }
     }
@@ -546,69 +631,108 @@ pub async fn burn_nft(
     // ─────────────────────────────────────────────────────────────────────
     // 2. PRE-CALCUL DU REFUND (AVANT persist_block !)
     // ─────────────────────────────────────────────────────────────────────
-    // IMPORTANT: On doit calculer le refund AVANT de persister le bloc car
-    // persist_block supprime les métadonnées du NFT (action Burn).
-    // Si on calcule après, les métadonnées n'existent plus → "No metadata for token".
+    // On doit calculer le refund pour chaque token et sommer les montants.
+    // Le coordinateur déchiffre les métadonnées depuis le bloc DAG.
 
-    let refund_result = crate::burn_refund::calculate_burn_refund(
-        &token_id,
-        &burner,
-        state.store.as_ref(),
-        &state.settings.fees.authority_public_keys,
-    );
+    let mut total_refund: Decimal = Decimal::ZERO;
+    let mut refund_recipient: Option<String> = None;
+
+    for tid in &token_ids_to_process {
+        // Déchiffrer les métadonnées depuis le bloc DAG
+        // Le coordinateur peut déchiffrer car il est dans la liste des recipients
+        let metadata = decrypt_nft_metadata_from_dag(&state, tid).await;
+
+        let result = crate::burn_refund::calculate_burn_refund(
+            tid,
+            &burner,
+            metadata.as_ref(),
+            &state.settings.fees.authority_public_keys,
+        );
+
+        match result {
+            Ok(Some(r)) => {
+                total_refund += r.amount;
+                // Le recipient doit être le burner (vérifié par calculate_burn_refund)
+                if refund_recipient.is_none() {
+                    refund_recipient = Some(r.recipient);
+                }
+                tracing::info!(
+                    "🔥 Cube refund calculated: {} -> {} PMS",
+                    &tid[..16.min(tid.len())],
+                    r.amount
+                );
+            }
+            Ok(None) => {
+                // Pas de refund pour ce token (pas un cube ou pas authentique)
+                tracing::debug!("No refund for token {}", tid);
+            }
+            Err(e) => {
+                tracing::warn!("Refund calculation error for {}: {}", tid, e);
+                // On continue mais sans refund pour ce token
+            }
+        }
+    }
 
     // ─────────────────────────────────────────────────────────────────────
     // 3. SOUMISSION : Persister le bloc dans le DAG
     // ─────────────────────────────────────────────────────────────────────
-    // On délègue la validation (signature, ownership) au DAG via persist_block.
-    // Si le bloc est invalide (mauvaise signature, burner != owner, etc.),
-    // persist_block retournera une erreur.
+    // On délègue la validation globale au DAG.
 
     let block_id = wb.id.clone();
 
     match state.srv.adapter_arc().persist_block(&wb).await {
         Ok(pms_storage::PutResult::Inserted) => {
-            // Broadcast le bloc aux autres nœuds
+            // Broadcast
             let _ = state.srv.enqueue_broadcast(block_id.clone()).await;
             crate::metrics::BLOCKS_PERSISTED.inc();
 
             // ─────────────────────────────────────────────────────────────
-            // 4. REFUND PROCESSING : Ajouter au fee_pool si valide
+            // 4. UPDATE STORE : Marquer comme brûlés
             // ─────────────────────────────────────────────────────────────
-            // On utilise le résultat pré-calculé (avant suppression des métadonnées).
-            // On l'ajoute au fee_pool SEULEMENT si le persist a réussi.
+            if let Err(e) = state.store.apply_action(&nft_action) {
+                tracing::error!("❌ Failed to apply BURN action to NFT store: {}", e);
+            } else {
+                tracing::info!(
+                    "✅ {} NFTs marked as burned by {}",
+                    token_ids_to_process.len(),
+                    burner
+                );
+            }
 
-            let refund_preview = match refund_result {
-                Ok(Some(result)) => {
-                    // Ajouter le refund au pool (sera distribué via Milestone)
-                    // Utilise add_burn_refund (pas add_fee) car c'est pour un wallet utilisateur
-                    {
-                        let mut pool = state.fee_pool.write().await;
-                        pool.add_burn_refund(&result.recipient, result.amount);
-                        tracing::info!(
-                            "🔥 Cube burn refund added to pool: {} -> {} PMS (token: {})",
-                            &result.recipient[..20.min(result.recipient.len())],
-                            result.amount,
-                            &token_id[..16.min(token_id.len())]
-                        );
-                    }
+            // ─────────────────────────────────────────────────────────────
+            // 5. REFUND ALLOCATION
+            // ─────────────────────────────────────────────────────────────
+            let refund_preview = if !total_refund.is_zero() && refund_recipient.is_some() {
+                let recipient = refund_recipient.unwrap();
+                {
+                    let mut pool = state.fee_pool.write().await;
+                    pool.add_burn_refund(&recipient, total_refund);
+                    tracing::info!(
+                        "🔥 Batch burn refund added to pool: {} -> {} PMS ({} cubes)",
+                        &recipient[..20.min(recipient.len())],
+                        total_refund,
+                        token_ids_to_process.len()
+                    );
+                }
+                Some(RefundPreview {
+                    amount: total_refund.to_string(),
+                    recipient,
+                })
+            } else {
+                None
+            };
 
-                    Some(RefundPreview {
-                        amount: result.amount.to_string(),
-                        recipient: result.recipient,
-                    })
-                }
-                Ok(None) => None, // Pas un cube ou signature invalide
-                Err(e) => {
-                    tracing::warn!("Refund calculation error for {}: {}", token_id, e);
-                    None
-                }
+            let response_token_id = if token_ids_to_process.len() == 1 {
+                token_ids_to_process[0].clone()
+            } else {
+                "batch".to_string()
             };
 
             let response = BurnNftResponse {
                 status: "burned".to_string(),
                 block_id,
-                token_id,
+                token_id: response_token_id,
+                token_ids: Some(token_ids_to_process),
                 refund: refund_preview,
             };
 
@@ -622,17 +746,14 @@ pub async fn burn_nft(
             })),
         )
             .into_response(),
-        Ok(pms_storage::PutResult::Rejected(reason)) => {
-            // La validation a échoué (signature invalide, pas le owner, etc.)
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!("Block rejected: {}", reason),
-                    "block_id": block_id
-                })),
-            )
-                .into_response()
-        }
+        Ok(pms_storage::PutResult::Rejected(reason)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("Block rejected: {}", reason),
+                "block_id": block_id
+            })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -641,4 +762,99 @@ pub async fn burn_nft(
         )
             .into_response(),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PREPARE TRANSFER (Coordinator re-encryption)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PrepareTransferRequest {
+    pub token_id: String,
+    pub to_address: String,
+    pub from_address: String,
+    pub new_owner_x25519_pubkey: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PrepareTransferResponse {
+    /// Action préparée avec métadonnées re-chiffrées, prête à être signée
+    pub action: pms_types_nft::NftAction,
+}
+
+/// POST /v1/nft/transfer/prepare
+///
+/// Prépare une action de transfert avec re-chiffrement des métadonnées.
+/// Le coordinateur :
+/// 1. Déchiffre les métadonnées actuelles (car il est destinataire)
+/// 2. Re-chiffre pour le nouveau propriétaire + coordinateur
+/// 3. Retourne l'action Transfer complète pour signature par le client
+pub async fn prepare_nft_transfer(
+    State(state): State<AppState>,
+    Json(req): Json<PrepareTransferRequest>,
+) -> impl IntoResponse {
+    // 1. Déchiffrer les métadonnées
+    let metadata = match decrypt_nft_metadata_from_dag(&state, &req.token_id).await {
+        Some(m) => m,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                "Metadata not found or decryption failed",
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Chiffrer pour le nouveau propriétaire + coordinateur
+    let coord_x25519 = state.node_wallet.x25519_pub_hex();
+    let recipients = vec![
+        req.new_owner_x25519_pubkey.clone(),
+        coord_x25519.to_string(),
+    ];
+
+    let plaintext = match serde_json::to_vec(&metadata) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Json error: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let encrypted_payload =
+        match EncryptedPayload::encrypt_for(&plaintext, &recipients, plaintext.len() as u32) {
+            Ok(ep) => ep,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Encrypt error: {e}"),
+                )
+                    .into_response();
+            }
+        };
+
+    // Sérialiser le payload chiffré en string JSON pour l'inclure dans l'action
+    let encrypted_metadata_json = match serde_json::to_string(&encrypted_payload) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Payload serialize error: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    // 3. Construire l'action Transfer
+    let action = pms_types_nft::NftAction::Transfer {
+        token_id: req.token_id,
+        from: req.from_address,
+        to: req.to_address,
+        new_owner_x25519_pubkey: Some(req.new_owner_x25519_pubkey),
+        encrypted_metadata: Some(encrypted_metadata_json),
+    };
+
+    (StatusCode::OK, Json(PrepareTransferResponse { action })).into_response()
 }

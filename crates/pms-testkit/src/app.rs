@@ -24,6 +24,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
             db_path.to_string_lossy().as_ref(),
             settings.rocks.tip_limit as usize,
             &settings.rocks.prefix,
+            None,
         )
         .await?,
     );
@@ -117,6 +118,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
             db_path.to_string_lossy().as_ref(),
             settings.rocks.tip_limit as usize,
             &settings.rocks.prefix,
+            None,
         )
         .await?,
     );
@@ -215,6 +217,7 @@ pub async fn make_test_ctx_with_admin(
             db_path.to_string_lossy().as_ref(),
             settings.rocks.tip_limit as usize,
             &settings.rocks.prefix,
+            None,
         )
         .await?,
     );

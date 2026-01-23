@@ -5,22 +5,19 @@
 // Called when Coordinator emits Milestone with distribute_node_rewards=true
 // Creates EncryptedReward block with proportional outputs based on block counts
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
-use std::str::FromStr;
-
 use crate::api::AppState;
-use crate::fee_distribution::{BlockRewardConfig, FeeDistributionConfig, compute_fee_outputs};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use pms_storage::PutResult;
 use pms_types::TxOutput;
 use pms_types_block::Block;
-use pms_types_payload::{EncryptedPayload, EncryptedRewardOutput, PayloadEnvelope, PlainPayload};
+use pms_types_payload::{PayloadEnvelope, PlainPayload};
 use pms_utils::check_pow::check_pow_leading_zero_bits;
 use pms_utils::compute_block_id;
+use pms_wallet::SignerBackend;
 use pms_wallet::signing_wire::canonical_wireblock_message;
-use pms_wallet::{SignerBackend, decode_address};
 use pms_wire::WireBlock;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 /// Request to trigger fee distribution via Milestone
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

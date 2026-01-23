@@ -30,8 +30,15 @@ async fn nft_mint_and_verify_ownership() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("rocks-nft-e2e");
 
-    let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:nft-test").await?);
+    let store = Arc::new(
+        RocksStore::new(
+            db_path.to_string_lossy().as_ref(),
+            256,
+            "pms:nft-test",
+            None,
+        )
+        .await?,
+    );
 
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
@@ -104,7 +111,13 @@ async fn nft_transfer_changes_ownership() -> Result<()> {
     let db_path = dir.path().join("rocks-nft-transfer");
 
     let store = Arc::new(
-        RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:nft-transfer").await?,
+        RocksStore::new(
+            db_path.to_string_lossy().as_ref(),
+            256,
+            "pms:nft-transfer",
+            None,
+        )
+        .await?,
     );
 
     let settings = load_config()?;
@@ -158,6 +171,8 @@ async fn nft_transfer_changes_ownership() -> Result<()> {
         token_id: token_id.clone(),
         from: owner_a_pk.clone(),
         to: owner_b_pk.clone(),
+        new_owner_x25519_pubkey: None,
+        encrypted_metadata: None,
     };
 
     let payload_transfer = Some(PayloadEnvelope::Plain(PlainPayload::Nft(transfer_action)));
@@ -197,8 +212,15 @@ async fn nft_burn_removes_token() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("rocks-nft-burn");
 
-    let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:nft-burn").await?);
+    let store = Arc::new(
+        RocksStore::new(
+            db_path.to_string_lossy().as_ref(),
+            256,
+            "pms:nft-burn",
+            None,
+        )
+        .await?,
+    );
 
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
@@ -264,8 +286,15 @@ async fn nft_unauthorized_transfer_rejected() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("rocks-nft-unauth");
 
-    let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:nft-unauth").await?);
+    let store = Arc::new(
+        RocksStore::new(
+            db_path.to_string_lossy().as_ref(),
+            256,
+            "pms:nft-unauth",
+            None,
+        )
+        .await?,
+    );
 
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
@@ -303,6 +332,8 @@ async fn nft_unauthorized_transfer_rejected() -> Result<()> {
         token_id: token_id.clone(),
         from: owner_pk.clone(), // Prétend être le owner
         to: attacker_pk.clone(),
+        new_owner_x25519_pubkey: None,
+        encrypted_metadata: None,
     };
     let payload_transfer = Some(PayloadEnvelope::Plain(PlainPayload::Nft(transfer)));
     let block_transfer = dag.forge_block(payload_transfer.clone(), 0, compute_block_id)?;
@@ -342,7 +373,13 @@ async fn nft_get_by_owner_after_mint() -> Result<()> {
     let db_path = dir.path().join("rocks-nft-byowner");
 
     let store = Arc::new(
-        RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:nft-byowner").await?,
+        RocksStore::new(
+            db_path.to_string_lossy().as_ref(),
+            256,
+            "pms:nft-byowner",
+            None,
+        )
+        .await?,
     );
 
     let settings = load_config()?;
@@ -401,6 +438,7 @@ async fn nft_get_by_owner_updates_on_transfer() -> Result<()> {
             db_path.to_string_lossy().as_ref(),
             256,
             "pms:nft-transfer-list",
+            None,
         )
         .await?,
     );
@@ -445,6 +483,8 @@ async fn nft_get_by_owner_updates_on_transfer() -> Result<()> {
         token_id: token_id.clone(),
         from: owner_a_pk.clone(),
         to: owner_b_pk.clone(),
+        new_owner_x25519_pubkey: None,
+        encrypted_metadata: None,
     };
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(transfer)));
     let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
@@ -480,7 +520,13 @@ async fn nft_get_by_owner_clears_on_burn() -> Result<()> {
     let db_path = dir.path().join("rocks-nft-burn-list");
 
     let store = Arc::new(
-        RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:nft-burn-list").await?,
+        RocksStore::new(
+            db_path.to_string_lossy().as_ref(),
+            256,
+            "pms:nft-burn-list",
+            None,
+        )
+        .await?,
     );
 
     let settings = load_config()?;

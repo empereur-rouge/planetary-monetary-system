@@ -4,7 +4,27 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use pms_config::load_config;
 use pms_wallet::decode_address;
-use pms_wallet::utxo_store::gather_wallet_utxos_dec;
+use pms_wallet::utxo_store::{gather_address_utxos_dec, gather_wallet_utxos_dec};
+use axum::extract::Path;
+
+#[derive(serde::Serialize)]
+pub struct Outpoint {
+    pub txid: String,
+    pub index: u32,
+}
+
+#[derive(serde::Serialize)]
+pub struct UtxoItem {
+    pub address: String,
+    pub amount: String,
+    pub outpoint: Outpoint,
+}
+
+#[derive(serde::Serialize)]
+pub struct UtxoResp {
+    pub utxos: Vec<UtxoItem>,
+}
+
 
 #[derive(serde::Deserialize)]
 pub struct BalanceReq {
@@ -89,4 +109,29 @@ pub async fn balance_by_address(
     Ok(Json(SimpleBalanceResp {
         balance: balance.to_string(),
     }))
+}
+
+pub async fn get_utxos_by_address(
+    State(app): State<AppState>,
+    Path(address): Path<String>,
+) -> Result<Json<UtxoResp>, (StatusCode, String)> {
+    let settings = load_config().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Use address-based gathering (plaintext only, no keys needed)
+    let utxos_dec = gather_address_utxos_dec(&app.store, &settings.address.hrp, &address, 2000)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let list = utxos_dec
+        .into_iter()
+        .map(|u| UtxoItem {
+            address: address.clone(),
+            amount: u.amount.to_string(),
+            outpoint: Outpoint {
+                txid: u.txid,
+                index: u.index,
+            },
+        })
+        .collect();
+
+    Ok(Json(UtxoResp { utxos: list }))
 }

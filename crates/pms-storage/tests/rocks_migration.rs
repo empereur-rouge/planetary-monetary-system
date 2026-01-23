@@ -20,7 +20,7 @@ async fn migrations_apply_and_version_is_current() -> Result<()> {
 
     let path = temp_db_path();
     let prefix = format!("pms:test:{}", nanoid::nanoid!());
-    let store = RocksStore::new(path.to_str().unwrap(), 64, prefix.clone()).await?;
+    let store = RocksStore::new(path.to_str().unwrap(), 64, prefix.clone(), None).await?;
 
     // si tu as une fonction équivalente à ensure_schema()
     store.ensure_schema().await?;

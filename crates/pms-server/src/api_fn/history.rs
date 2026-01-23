@@ -188,6 +188,36 @@ pub async fn get_wallet_history(
                     "TxUtxo".to_string(),
                     serde_json::to_value(tx).unwrap_or_default(),
                 ),
+                pms_types_payload::PlainPayload::Reward {
+                    fee_outputs,
+                    reward_outputs,
+                    burned,
+                    tx_block_id,
+                } => (
+                    "Reward".to_string(),
+                    serde_json::json!({
+                        "fee_outputs": fee_outputs,
+                        "reward_outputs": reward_outputs,
+                        "burned": burned,
+                        "tx_block_id": tx_block_id
+                    }),
+                ),
+                pms_types_payload::PlainPayload::EncryptedReward {
+                    encrypted_outputs,
+                    burned,
+                    tx_block_id,
+                } => (
+                    "EncryptedReward".to_string(),
+                    serde_json::json!({
+                        "encrypted_outputs": encrypted_outputs,
+                        "burned": burned,
+                        "tx_block_id": tx_block_id
+                    }),
+                ),
+                pms_types_payload::PlainPayload::Nft(action) => (
+                    "Nft".to_string(),
+                    serde_json::to_value(action).unwrap_or_default(),
+                ),
                 _ => ("Unknown".to_string(), serde_json::json!({})),
             };
             HistoryItem {

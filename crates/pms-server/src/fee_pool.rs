@@ -82,7 +82,7 @@ impl FeePool {
             .filter(|(_, count)| **count > 0)
             .map(|(pk, count)| {
                 let share = Decimal::from(*count) / Decimal::from(total_blocks);
-                let amount = self.total_fees * share;
+                let amount = (self.total_fees * share).round_dp(8);
                 (pk.clone(), share, amount)
             })
             .collect()
@@ -135,5 +135,26 @@ mod tests {
 
         assert_eq!(node1.2, Decimal::from(30)); // 75% of 40
         assert_eq!(node2.2, Decimal::from(10)); // 25% of 40
+    }
+
+    #[test]
+    fn test_fee_pool_precision() {
+        let mut pool = FeePool::new();
+
+        // Total fees = 100 PMS (exact)
+        pool.add_fee(Decimal::from(100), "node1");
+
+        // 3 blocks total: Node1 (2 blocks), Node2 (1 block)
+        // Node1 share = 2/3 * 100 = 66.666666666... -> 66.66666667
+        // Node2 share = 1/3 * 100 = 33.333333333... -> 33.33333333
+        pool.node_contributions.insert("node1".to_string(), 2);
+        pool.node_contributions.insert("node2".to_string(), 1);
+
+        let shares = pool.calculate_shares();
+        let node1 = shares.iter().find(|(pk, _, _)| pk == "node1").unwrap();
+        let node2 = shares.iter().find(|(pk, _, _)| pk == "node2").unwrap();
+
+        assert_eq!(node1.2.to_string(), "66.66666667");
+        assert_eq!(node2.2.to_string(), "33.33333333");
     }
 }

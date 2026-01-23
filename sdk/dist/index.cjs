@@ -20,21 +20,13 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
-  DEFAULT_CONFIG: () => DEFAULT_CONFIG,
   PmsClient: () => PmsClient,
   PmsWallet: () => PmsWallet,
-  checkPowBits: () => checkPowBits,
-  computeBlockId: () => computeBlockId,
   decryptPayload: () => decryptPayload,
-  deriveX25519PublicKey: () => deriveX25519PublicKey,
-  encryptPayload: () => encryptPayload,
   formatAmount: () => formatAmount,
-  formatCubeAttributesMessage: () => formatCubeAttributesMessage,
   fromHex: () => fromHex,
-  generateX25519Keypair: () => generateX25519Keypair,
   isValidMnemonic: () => isValidMnemonic,
   parseAmount: () => parseAmount,
-  signCubeAttributes: () => signCubeAttributes,
   toHex: () => toHex
 });
 module.exports = __toCommonJS(index_exports);
@@ -68,24 +60,6 @@ function computeBlockId(parents, payloadJson, nonce) {
   const content = `${parentsStr}|${payloadStr}|${nonce}`;
   const hash = sha256Hash(encodeUtf8(content));
   return toHex(hash);
-}
-function checkPowBits(blockId, requiredBits) {
-  if (requiredBits === 0) return true;
-  const bytes = fromHex(blockId);
-  let zeroBits = 0;
-  for (const byte of bytes) {
-    if (byte === 0) {
-      zeroBits += 8;
-    } else {
-      let mask = 128;
-      while (mask > 0 && (byte & mask) === 0) {
-        zeroBits++;
-        mask >>= 1;
-      }
-      break;
-    }
-  }
-  return zeroBits >= requiredBits;
 }
 function parseAmount(amount) {
   const [whole, frac = ""] = amount.split(".");
@@ -282,6 +256,63 @@ var DEFAULT_CONFIG = {
   enableRacing: true
 };
 
+// src/crypto.ts
+var import_ed255192 = require("@noble/curves/ed25519");
+var import_aes = require("@noble/ciphers/aes.js");
+var import_hkdf2 = require("@noble/hashes/hkdf");
+var import_sha23 = require("@noble/hashes/sha2");
+var import_utils3 = require("@noble/hashes/utils");
+var import_base = require("@scure/base");
+var SCHEME = "x25519+aes256gcm";
+var HKDF_SALT = new TextEncoder().encode("pms-dek-wrap");
+var HKDF_INFO_KEK = new TextEncoder().encode("kek-v1");
+var HKDF_INFO_KID = new TextEncoder().encode("kid-v1");
+function fromBase64(str) {
+  return import_base.base64.decode(str);
+}
+function sha256Hex(data) {
+  return (0, import_utils3.bytesToHex)((0, import_sha23.sha256)(data));
+}
+function decryptPayload(encrypted, recipientPrivateKeyHex) {
+  if (encrypted.scheme !== SCHEME) {
+    throw new Error(`Sch\xE9ma non support\xE9: ${encrypted.scheme}`);
+  }
+  const recipientSk = (0, import_utils3.hexToBytes)(recipientPrivateKeyHex);
+  let dek = null;
+  for (const wrap of encrypted.recipients) {
+    const ephemeralPk = (0, import_utils3.hexToBytes)(wrap.ephem_pub);
+    const sharedSecret = import_ed255192.x25519.getSharedSecret(recipientSk, ephemeralPk);
+    const kek = (0, import_hkdf2.hkdf)(import_sha23.sha256, sharedSecret, HKDF_SALT, HKDF_INFO_KEK, 32);
+    const kidBytes = (0, import_hkdf2.hkdf)(import_sha23.sha256, sharedSecret, HKDF_SALT, HKDF_INFO_KID, 16);
+    const expectedKid = (0, import_utils3.bytesToHex)(kidBytes);
+    if (expectedKid !== wrap.kid) {
+      continue;
+    }
+    try {
+      const kwNonce = fromBase64(wrap.kw_nonce_b64);
+      const wrappedKey = fromBase64(wrap.wrapped_key_b64);
+      const kwCipher = (0, import_aes.gcm)(kek, kwNonce, new TextEncoder().encode(wrap.kid));
+      dek = kwCipher.decrypt(wrappedKey);
+      break;
+    } catch {
+      continue;
+    }
+  }
+  if (!dek) {
+    throw new Error("Aucun destinataire correspondant trouv\xE9 ou d\xE9ballage \xE9chou\xE9");
+  }
+  const nonce = fromBase64(encrypted.nonce_b64);
+  const ciphertext = fromBase64(encrypted.ciphertext_b64);
+  const aadBytes = new TextEncoder().encode(JSON.stringify(encrypted.aad));
+  const cipher = (0, import_aes.gcm)(dek, nonce, aadBytes);
+  const plaintext = cipher.decrypt(ciphertext);
+  const gotCommitment = sha256Hex(plaintext);
+  if (gotCommitment !== encrypted.commitment) {
+    throw new Error("Commitment mismatch - donn\xE9es corrompues");
+  }
+  return new TextDecoder().decode(plaintext);
+}
+
 // src/client.ts
 var PmsClient = class {
   config;
@@ -289,6 +320,9 @@ var PmsClient = class {
   lastNodeRefresh = 0;
   NODE_REFRESH_INTERVAL = 6e4;
   // 1 min
+  configCache = null;
+  CONFIG_TTL = 3e5;
+  // 5 min
   /**
    * Crée un nouveau client PMS.
    * @param config - Configuration du client
@@ -306,6 +340,10 @@ var PmsClient = class {
     this.addKnownNode(this.config.nodeUrl);
     this.config.seedNodes.forEach((url) => this.addKnownNode(url));
   }
+  /**
+   * @internal
+   * Ajoute un nœud à la liste des nœuds connus.
+   */
   addKnownNode(url) {
     const normalized = url.replace(/\/$/, "");
     if (normalized.startsWith("http")) {
@@ -335,7 +373,13 @@ var PmsClient = class {
    * Récupère un bloc par son ID.
    */
   async getBlock(blockId) {
-    return this.fetch(`/v1/blocks/${blockId}`);
+    const wb = await this.fetch(`/v1/blocks/${blockId}`);
+    return {
+      id: wb.id,
+      parents: wb.parents,
+      nonce: wb.nonce,
+      payload: wb.payload_json ? JSON.parse(wb.payload_json) : void 0
+    };
   }
   /**
    * Récupère les informations de supply.
@@ -397,12 +441,99 @@ var PmsClient = class {
     const res = await this.fetch(`/v1/wallet/${address}/nfts`);
     return res.token_ids ?? [];
   }
+  /**
+   * Récupère les informations complètes d'un NFT par son token_id.
+   * 
+   * @param tokenId - Identifiant unique du NFT (64 caractères hex)
+   * @returns NftResponse avec owner, exists et metadata
+   * 
+   * @example
+   * ```typescript
+   * const nft = await client.getNft("abc123def456...");
+   * if (nft.exists) {
+   *     console.log(`Owner: ${nft.owner}`);
+   *     console.log(`Name: ${nft.metadata?.name}`);
+   * }
+   * ```
+   */
+  async getNft(tokenId) {
+    return this.fetch(`/v1/nft/${tokenId}`);
+  }
+  /**
+   * Récupère l'historique des transactions d'un wallet.
+   * Supporte le déchiffrement des récompenses (EncryptedReward) côté client.
+   * 
+   * @param address - Adresse du wallet (bech32)
+   * @param options - Options (limit, decryptionWallet)
+   * @returns Historique complet
+   */
+  async getHistory(address, options) {
+    const limit = options?.limit ?? 100;
+    const res = await this.fetch("/wallet/history", {
+      method: "POST",
+      body: JSON.stringify({ bech32_addr: address, limit })
+    });
+    if (options?.decryptionWallet) {
+      const wallet = options.decryptionWallet;
+      for (const item of res.items) {
+        if (item.payload_type === "EncryptedReward") {
+          const encPayload = item.payload;
+          const decryptedOutputs = [];
+          for (const eOut of encPayload.encrypted_outputs) {
+            try {
+              const plaintext = decryptPayload(
+                eOut.encrypted,
+                wallet.x25519PrivateKeyHex
+              );
+              const output = JSON.parse(plaintext);
+              if (output.address === address) {
+                decryptedOutputs.push(output);
+              }
+            } catch (e) {
+            }
+          }
+          if (decryptedOutputs.length > 0) {
+            item.payload_type = "Reward";
+            const plain = {
+              fee_outputs: [],
+              reward_outputs: decryptedOutputs,
+              burned: encPayload.burned,
+              tx_block_id: encPayload.tx_block_id
+            };
+            item.payload = plain;
+          }
+        }
+      }
+    }
+    return res;
+  }
   // ═══════════════════════════════════════════════════════════════════════
   // Méthodes d'écriture (POST)
   // ═══════════════════════════════════════════════════════════════════════
   /**
+   * Récupère la configuration publique du nœud (frais, PoW, recipient, etc.)
+   */
+  async getNetworkConfig() {
+    if (this.configCache && Date.now() < this.configCache.expires) {
+      return this.configCache.data;
+    }
+    const cfg = await this.fetch("/v1/config");
+    this.configCache = { data: cfg, expires: Date.now() + this.CONFIG_TTL };
+    return cfg;
+  }
+  /**
+   * Récupère la configuration runtime du nœud (frais, PoW, etc.)
+   * @deprecated Use getNetworkConfig instead
+   */
+  async getRuntimeConfig() {
+    return this.getNetworkConfig();
+  }
+  /**
+   * @internal
    * Soumet un bloc au réseau.
    * Utilise le racing pattern si activé pour envoyer à plusieurs noeuds.
+   * 
+   * ⚠️ API interne - préférez utiliser `send()`, `mintNft()`, ou `burnNft()`.
    */
   async submitBlock(wireBlock) {
     if (this.config.enableRacing) {
@@ -434,6 +565,8 @@ var PmsClient = class {
           body,
           signal: controller.signal
         });
+        if (!res.block_id) res.block_id = wireBlock.id;
+        if (!res.status) res.status = "inserted";
         return res;
       } catch (err) {
         throw err;
@@ -471,39 +604,67 @@ var PmsClient = class {
    * Construit automatiquement la transaction, la signe et la soumet.
    */
   async send(params) {
-    const { to, amount, wallet, memo } = params;
+    const { to, amount, wallet, memo: _memo } = params;
     const utxos = await this.getUtxos(wallet.address);
     if (utxos.length === 0) {
       throw new Error("No UTXOs available");
     }
+    const netConfig = await this.getNetworkConfig();
+    const baseFeeSats = parseAmount(netConfig.base_fee);
+    const feeRateBps = BigInt(netConfig.fee_rate_bps);
     const amountSats = parseAmount(amount);
-    const feeRate = 100n;
-    const fee = amountSats * feeRate / 10000n;
+    const variableFee = amountSats * feeRateBps / 10000n;
+    const fee = baseFeeSats + variableFee;
     const totalNeeded = amountSats + fee;
     let selectedSats = 0n;
-    const inputs = [];
+    const selectedUtxos = [];
     for (const utxo of utxos) {
-      inputs.push(utxo.outpoint);
+      selectedUtxos.push(utxo);
       selectedSats += parseAmount(utxo.amount);
       if (selectedSats >= totalNeeded) break;
     }
     if (selectedSats < totalNeeded) {
       throw new Error(
-        `Insufficient balance: have ${formatAmount(selectedSats)}, need ${formatAmount(totalNeeded)}`
+        `Insufficient balance: have ${formatAmount(selectedSats)}, need ${formatAmount(totalNeeded)} (incl. fee ${formatAmount(fee)})`
       );
     }
     const outputs = [
       { address: to, amount: formatAmount(amountSats) }
     ];
+    if (fee > 0n) {
+      outputs.push({
+        address: netConfig.fee_recipient,
+        amount: formatAmount(fee)
+      });
+    }
     const change = selectedSats - amountSats - fee;
     if (change > 0n) {
       outputs.push({ address: wallet.address, amount: formatAmount(change) });
     }
+    const inputs = selectedUtxos.map((utxo) => ({
+      out: {
+        txid: utxo.outpoint.txid,
+        index: utxo.outpoint.index
+      }
+    }));
+    const txCanonical = {
+      inputs,
+      outputs,
+      fee: formatAmount(fee)
+    };
+    const txMessage = JSON.stringify(txCanonical);
+    const txSignatureHex = wallet.sign(encodeUtf8(txMessage));
+    const txSigBytes = fromHex(txSignatureHex);
+    const txSigB64 = btoa(String.fromCharCode(...txSigBytes));
+    const unlocks = inputs.map(() => ({
+      pubkey_hex: wallet.publicKeyHex,
+      signature_b64: txSigB64
+    }));
     const tx = {
       inputs,
       outputs,
       fee: formatAmount(fee),
-      data: memo
+      unlocks
     };
     const tips = await this.getTips();
     const parents = tips.slice(0, 2);
@@ -511,8 +672,19 @@ var PmsClient = class {
     const payloadJson = JSON.stringify(payload);
     let nonce = 0;
     let blockId = computeBlockId(parents, payloadJson, nonce);
-    const messageToSign = encodeUtf8(blockId);
-    const signature = await wallet.sign(messageToSign);
+    const canonicalView = {
+      id: blockId,
+      parents,
+      payload_json: payloadJson,
+      nonce,
+      network_id: this.config.networkId,
+      protocol_version: this.config.protocolVersion,
+      signer_pk_hex: wallet.publicKeyHex
+    };
+    const messageToSign = JSON.stringify(canonicalView);
+    const signatureHex = wallet.sign(encodeUtf8(messageToSign));
+    const signatureBytes = fromHex(signatureHex);
+    const signatureB64 = btoa(String.fromCharCode(...signatureBytes));
     const wireBlock = {
       id: blockId,
       parents,
@@ -521,13 +693,78 @@ var PmsClient = class {
       network_id: this.config.networkId,
       protocol_version: this.config.protocolVersion,
       signer_pk_hex: wallet.publicKeyHex,
-      signature_hex: signature
+      signature_hex: signatureB64
     };
     return this.submitBlock(wireBlock);
   }
   // ═══════════════════════════════════════════════════════════════════════
   // Méthodes NFT Cube (Burn et Mint spécialisé)
   // ═══════════════════════════════════════════════════════════════════════
+  /**
+   * Transférer un NFT à un autre propriétaire.
+   * Prend en charge le re-chiffrement des métadonnées via le coordinateur.
+   * 
+   * @param params - Paramètres du transfert
+   * @param params.tokenId - Identifiant du NFT
+   * @param params.to - Adresse du nouveau propriétaire
+   * @param params.wallet - Wallet du propriétaire actuel (signataire)
+   * @param params.newOwnerX25519 - Clé publique X25519 du nouveau owner (pour re-encryption)
+   */
+  async transferNft(params) {
+    const { tokenId, to, wallet, newOwnerX25519 } = params;
+    let action;
+    if (newOwnerX25519) {
+      const prepReq = {
+        token_id: tokenId,
+        to_address: to,
+        from_address: wallet.address,
+        new_owner_x25519_pubkey: newOwnerX25519
+      };
+      const prepRes = await this.fetch("/v1/nft/transfer/prepare", {
+        method: "POST",
+        body: JSON.stringify(prepReq)
+      });
+      action = prepRes.action;
+    } else {
+      action = {
+        Transfer: {
+          token_id: tokenId,
+          from: wallet.address,
+          to
+        }
+      };
+    }
+    const tips = await this.getTips();
+    const parents = tips.slice(0, 2);
+    const payload = { Plain: { Nft: action } };
+    const payloadJson = JSON.stringify(payload);
+    const nonce = 0;
+    const blockId = computeBlockId(parents, payloadJson, nonce);
+    const canonicalView = {
+      id: blockId,
+      parents,
+      payload_json: payloadJson,
+      nonce,
+      network_id: this.config.networkId,
+      protocol_version: this.config.protocolVersion,
+      signer_pk_hex: wallet.publicKeyHex
+    };
+    const messageToSign = JSON.stringify(canonicalView);
+    const signatureHex = wallet.sign(encodeUtf8(messageToSign));
+    const signatureBytes = fromHex(signatureHex);
+    const signatureB64 = btoa(String.fromCharCode(...signatureBytes));
+    const wireBlock = {
+      id: blockId,
+      parents,
+      payload_json: payloadJson,
+      nonce,
+      network_id: this.config.networkId,
+      protocol_version: this.config.protocolVersion,
+      signer_pk_hex: wallet.publicKeyHex,
+      signature_hex: signatureB64
+    };
+    return this.submitBlock(wireBlock);
+  }
   /**
    * Brûle (détruit) un NFT existant.
    * 
@@ -595,6 +832,62 @@ var PmsClient = class {
       signer_pk_hex: wallet.publicKeyHex,
       signature_hex: signatureB64
       // base64 malgré le nom "hex"
+    };
+    return this.fetch("/v1/nft/burn", {
+      method: "POST",
+      body: JSON.stringify(burnRequest)
+    });
+  }
+  /**
+   * Brûle (détruit) plusieurs NFTs en une seule transaction.
+   * 
+   * @param params - Paramètres du batch burn
+   * @param params.tokenIds - Liste des Identifiants des NFTs à brûler
+   * @param params.wallet - Wallet PMS du propriétaire
+   * @returns BurnNftResponse avec refund preview cumulé si applicable
+   */
+  async burnNfts(params) {
+    const { tokenIds, wallet } = params;
+    if (tokenIds.length === 0) {
+      throw new Error("No token IDs provided for batch burn");
+    }
+    const tips = await this.getTips();
+    const parents = tips.slice(0, 2);
+    const payload = {
+      Plain: {
+        Nft: {
+          BatchBurn: {
+            token_ids: tokenIds,
+            burner: wallet.address
+          }
+        }
+      }
+    };
+    const payloadJson = JSON.stringify(payload);
+    const nonce = 0;
+    const blockId = computeBlockId(parents, payloadJson, nonce);
+    const canonicalView = {
+      id: blockId,
+      parents,
+      payload_json: payloadJson,
+      nonce,
+      network_id: this.config.networkId,
+      protocol_version: this.config.protocolVersion,
+      signer_pk_hex: wallet.publicKeyHex
+    };
+    const messageToSign = JSON.stringify(canonicalView);
+    const signatureHex = wallet.sign(encodeUtf8(messageToSign));
+    const signatureBytes = fromHex(signatureHex);
+    const signatureB64 = btoa(String.fromCharCode(...signatureBytes));
+    const burnRequest = {
+      id: blockId,
+      parents,
+      payload_json: payloadJson,
+      nonce,
+      network_id: this.config.networkId,
+      protocol_version: this.config.protocolVersion,
+      signer_pk_hex: wallet.publicKeyHex,
+      signature_hex: signatureB64
     };
     return this.fetch("/v1/nft/burn", {
       method: "POST",
@@ -689,154 +982,31 @@ var PmsClient = class {
         signal
       });
       if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`HTTP ${res.status} (${url}): ${text}`);
+        const text2 = await res.text();
+        throw new Error(`HTTP ${res.status} (${url}): ${text2}`);
       }
-      return res.json();
+      const text = await res.text();
+      if (!text) {
+        return {};
+      }
+      try {
+        return JSON.parse(text);
+      } catch (e) {
+        throw new Error(`Invalid JSON response: ${text.substring(0, 50)}...`);
+      }
     } finally {
       clearTimeout(timeout);
     }
   }
 };
-
-// src/crypto.ts
-var import_ed255192 = require("@noble/curves/ed25519");
-var import_aes = require("@noble/ciphers/aes.js");
-var import_hkdf2 = require("@noble/hashes/hkdf");
-var import_sha23 = require("@noble/hashes/sha2");
-var import_utils4 = require("@noble/hashes/utils");
-var import_base = require("@scure/base");
-var SCHEME = "x25519+aes256gcm";
-var KEY_VERSION = 1;
-var HKDF_SALT = new TextEncoder().encode("pms-dek-wrap");
-var HKDF_INFO_KEK = new TextEncoder().encode("kek-v1");
-var HKDF_INFO_KID = new TextEncoder().encode("kid-v1");
-function toBase64(data) {
-  return import_base.base64.encode(data);
-}
-function fromBase64(str) {
-  return import_base.base64.decode(str);
-}
-function sha256Hex(data) {
-  return (0, import_utils4.bytesToHex)((0, import_sha23.sha256)(data));
-}
-function encryptPayload(plaintext, recipientPublicKeysHex) {
-  const plaintextBytes = typeof plaintext === "string" ? new TextEncoder().encode(plaintext) : plaintext;
-  const dek = (0, import_utils4.randomBytes)(32);
-  const nonce = (0, import_utils4.randomBytes)(12);
-  const aad = { len_hint: plaintextBytes.length };
-  const aadBytes = new TextEncoder().encode(JSON.stringify(aad));
-  const cipher = (0, import_aes.gcm)(dek, nonce, aadBytes);
-  const ciphertext = cipher.encrypt(plaintextBytes);
-  const commitment = sha256Hex(plaintextBytes);
-  const ephemeralPrivateKey = (0, import_utils4.randomBytes)(32);
-  const ephemeralPublicKey = import_ed255192.x25519.getPublicKey(ephemeralPrivateKey);
-  const ephemeralPublicKeyHex = (0, import_utils4.bytesToHex)(ephemeralPublicKey);
-  const recipients = [];
-  for (const recipientPkHex of recipientPublicKeysHex) {
-    const recipientPk = (0, import_utils4.hexToBytes)(recipientPkHex);
-    const sharedSecret = import_ed255192.x25519.getSharedSecret(ephemeralPrivateKey, recipientPk);
-    const kek = (0, import_hkdf2.hkdf)(import_sha23.sha256, sharedSecret, HKDF_SALT, HKDF_INFO_KEK, 32);
-    const kidBytes = (0, import_hkdf2.hkdf)(import_sha23.sha256, sharedSecret, HKDF_SALT, HKDF_INFO_KID, 16);
-    const kid = (0, import_utils4.bytesToHex)(kidBytes);
-    const kwNonce = (0, import_utils4.randomBytes)(12);
-    const kwCipher = (0, import_aes.gcm)(kek, kwNonce, new TextEncoder().encode(kid));
-    const wrappedKey = kwCipher.encrypt(dek);
-    recipients.push({
-      kid,
-      ephem_pub: ephemeralPublicKeyHex,
-      wrapped_key_b64: toBase64(wrappedKey),
-      kw_nonce_b64: toBase64(kwNonce)
-    });
-  }
-  return {
-    scheme: SCHEME,
-    key_version: KEY_VERSION,
-    aad,
-    commitment,
-    ciphertext_b64: toBase64(ciphertext),
-    recipients,
-    nonce_b64: toBase64(nonce)
-  };
-}
-function decryptPayload(encrypted, recipientPrivateKeyHex) {
-  if (encrypted.scheme !== SCHEME) {
-    throw new Error(`Sch\xE9ma non support\xE9: ${encrypted.scheme}`);
-  }
-  const recipientSk = (0, import_utils4.hexToBytes)(recipientPrivateKeyHex);
-  let dek = null;
-  for (const wrap of encrypted.recipients) {
-    const ephemeralPk = (0, import_utils4.hexToBytes)(wrap.ephem_pub);
-    const sharedSecret = import_ed255192.x25519.getSharedSecret(recipientSk, ephemeralPk);
-    const kek = (0, import_hkdf2.hkdf)(import_sha23.sha256, sharedSecret, HKDF_SALT, HKDF_INFO_KEK, 32);
-    const kidBytes = (0, import_hkdf2.hkdf)(import_sha23.sha256, sharedSecret, HKDF_SALT, HKDF_INFO_KID, 16);
-    const expectedKid = (0, import_utils4.bytesToHex)(kidBytes);
-    if (expectedKid !== wrap.kid) {
-      continue;
-    }
-    try {
-      const kwNonce = fromBase64(wrap.kw_nonce_b64);
-      const wrappedKey = fromBase64(wrap.wrapped_key_b64);
-      const kwCipher = (0, import_aes.gcm)(kek, kwNonce, new TextEncoder().encode(wrap.kid));
-      dek = kwCipher.decrypt(wrappedKey);
-      break;
-    } catch {
-      continue;
-    }
-  }
-  if (!dek) {
-    throw new Error("Aucun destinataire correspondant trouv\xE9 ou d\xE9ballage \xE9chou\xE9");
-  }
-  const nonce = fromBase64(encrypted.nonce_b64);
-  const ciphertext = fromBase64(encrypted.ciphertext_b64);
-  const aadBytes = new TextEncoder().encode(JSON.stringify(encrypted.aad));
-  const cipher = (0, import_aes.gcm)(dek, nonce, aadBytes);
-  const plaintext = cipher.decrypt(ciphertext);
-  const gotCommitment = sha256Hex(plaintext);
-  if (gotCommitment !== encrypted.commitment) {
-    throw new Error("Commitment mismatch - donn\xE9es corrompues");
-  }
-  return new TextDecoder().decode(plaintext);
-}
-function generateX25519Keypair() {
-  const privateKey = (0, import_utils4.randomBytes)(32);
-  const publicKey = import_ed255192.x25519.getPublicKey(privateKey);
-  return {
-    privateKey: (0, import_utils4.bytesToHex)(privateKey),
-    publicKey: (0, import_utils4.bytesToHex)(publicKey)
-  };
-}
-function deriveX25519PublicKey(privateKeyHex) {
-  const privateKey = (0, import_utils4.hexToBytes)(privateKeyHex);
-  const publicKey = import_ed255192.x25519.getPublicKey(privateKey);
-  return (0, import_utils4.bytesToHex)(publicKey);
-}
-function formatCubeAttributesMessage(weight, size, density) {
-  return `weight:${weight},size:${size},density:${density}`;
-}
-function signCubeAttributes(weight, size, density, authorityWallet) {
-  const message = formatCubeAttributesMessage(weight, size, density);
-  const messageBytes = new TextEncoder().encode(message);
-  const signatureHex = authorityWallet.sign(messageBytes);
-  const signatureBytes = (0, import_utils4.hexToBytes)(signatureHex);
-  return toBase64(signatureBytes);
-}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  DEFAULT_CONFIG,
   PmsClient,
   PmsWallet,
-  checkPowBits,
-  computeBlockId,
   decryptPayload,
-  deriveX25519PublicKey,
-  encryptPayload,
   formatAmount,
-  formatCubeAttributesMessage,
   fromHex,
-  generateX25519Keypair,
   isValidMnemonic,
   parseAmount,
-  signCubeAttributes,
   toHex
 });

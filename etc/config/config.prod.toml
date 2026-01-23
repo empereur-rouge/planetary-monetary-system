@@ -2,6 +2,7 @@
 path = "/home/pms/data/rocks"
 prefix = "pms:main"           # MAINNET: pms:main | TESTNET: pms:test
 tip_limit = 256               # Limite des tips DAG en mémoire
+checkpoint_interval_secs = 21600 # 6 heures (défaut)
 
 [network]
 mode = "mainnet"              # "dev" | "testnet" | "mainnet"

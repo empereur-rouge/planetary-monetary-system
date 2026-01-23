@@ -1,18 +1,21 @@
-//! Stockage des NFTs (ownership tracking).
+//! Stockage des NFTs (ownership tracking + block_id reference).
 //!
 //! Ce module définit le trait `NftStorage` et son implémentation
 //! pour tracker les propriétaires des NFTs dans la blockchain PMS.
 //!
-//! ## Modèle de données
-//! - Clé : `token_id` (String)
-//! - Valeur : `owner_address` (String)
+//! ## Modèle de données (Privacy-First)
+//! - `token_id` → `owner_address` (ownership)
+//! - `token_id` → `block_id` (référence au bloc contenant les métadonnées chiffrées)
+//!
+//! Les métadonnées ne sont JAMAIS stockées en clair. Elles restent chiffrées
+//! dans le bloc du DAG et seuls owner + coordinateur peuvent les déchiffrer.
 //!
 //! ## Voir aussi
 //! - Chapitre 10 du Rust Book : Generic Types, Traits, and Lifetimes
 //!   https://doc.rust-lang.org/book/ch10-00-generics.html
 
 use anyhow::Result;
-use pms_types_nft::{NftAction, NftMetadata};
+use pms_types_nft::NftAction;
 
 /// Trait pour le stockage des NFTs.
 ///
@@ -50,20 +53,21 @@ pub trait NftStorage: Send + Sync {
     /// En production, envisager une pagination.
     fn get_by_owner(&self, owner: &str) -> Result<Vec<String>>;
 
-    /// Récupère les métadonnées d'un NFT par son token_id.
+    /// Récupère l'ID du bloc contenant les métadonnées chiffrées.
     ///
-    /// Retourne `None` si le token n'existe pas ou n'a pas de métadonnées.
-    fn get_metadata(&self, token_id: &str) -> Result<Option<NftMetadata>>;
+    /// Retourne `None` si le token n'existe pas.
+    /// Les métadonnées elles-mêmes sont dans le bloc du DAG (chiffrées).
+    fn get_block_id(&self, token_id: &str) -> Result<Option<String>>;
 
-    /// Définit les métadonnées d'un NFT.
+    /// Définit l'ID du bloc contenant les métadonnées chiffrées.
     ///
-    /// Utilisé lors du Mint pour stocker les attributs.
-    fn set_metadata(&self, token_id: &str, metadata: &NftMetadata) -> Result<()>;
+    /// Utilisé lors du Mint pour référencer le bloc source.
+    fn set_block_id(&self, token_id: &str, block_id: &str) -> Result<()>;
 
-    /// Supprime les métadonnées d'un NFT.
+    /// Supprime la référence au bloc d'un NFT.
     ///
     /// Appelé lors du Burn pour nettoyer le storage.
-    fn delete_metadata(&self, token_id: &str) -> Result<()>;
+    fn delete_block_id(&self, token_id: &str) -> Result<()>;
 
     /// Vérifie si un NFT existe.
     fn exists(&self, token_id: &str) -> Result<bool> {
@@ -73,34 +77,59 @@ pub trait NftStorage: Send + Sync {
     /// Applique une action NFT au store.
     ///
     /// Cette méthode est appelée après validation pour mettre à jour l'état.
+    /// NOTE: Pour Mint, utilisez `apply_mint` qui accepte le block_id.
+    /// NOTE: Pour Transfer avec re-encryption, utilisez `apply_transfer`.
     ///
     /// # Règles
-    /// - **Mint** : Crée le NFT avec le creator comme owner, stocke les métadonnées
-    /// - **Transfer** : Change le owner
+    /// - **Transfer** : Change le owner (pour re-encryption, utilisez apply_transfer)
     /// - **Use** : Pas de changement d'ownership (optionnel: log usage)
-    /// - **Burn** : Supprime le NFT et ses métadonnées
+    /// - **Burn** : Supprime le NFT et sa référence bloc
     fn apply_action(&self, action: &NftAction) -> Result<()> {
         match action {
-            NftAction::Mint {
-                token_id,
-                creator,
-                metadata,
-            } => {
-                self.set_owner(token_id, creator)?;
-                self.set_metadata(token_id, metadata)?;
-                Ok(())
+            NftAction::Mint { .. } => {
+                // Pour Mint, utiliser apply_mint qui accepte le block_id
+                anyhow::bail!("Use apply_mint() for Mint actions - block_id is required")
             }
-            NftAction::Transfer { token_id, to, .. } => self.set_owner(token_id, to),
+            NftAction::Transfer { token_id, to, .. } => {
+                // Transfer simple: change owner, garde block_id
+                // Pour re-encryption, utilisez apply_transfer avec le nouveau block_id
+                self.set_owner(token_id, to)
+            }
             NftAction::Use { .. } => {
                 // L'action "Use" ne modifie pas l'ownership
-                // On pourrait logger l'usage ici si nécessaire
                 Ok(())
             }
             NftAction::Burn { token_id, .. } => {
-                self.delete_metadata(token_id)?;
+                self.delete_block_id(token_id)?;
                 self.delete(token_id)
             }
+            NftAction::BatchBurn { token_ids, .. } => {
+                for token_id in token_ids {
+                    self.delete_block_id(token_id)?;
+                    self.delete(token_id)?;
+                }
+                Ok(())
+            }
         }
+    }
+
+    /// Applique un Mint avec le block_id source.
+    ///
+    /// Les métadonnées sont dans le bloc, pas dans le store.
+    fn apply_mint(&self, token_id: &str, creator: &str, block_id: &str) -> Result<()> {
+        self.set_owner(token_id, creator)?;
+        self.set_block_id(token_id, block_id)?;
+        Ok(())
+    }
+
+    /// Applique un Transfer avec mise à jour du block_id (re-encryption).
+    ///
+    /// Utilisé quand le coordinateur re-chiffre les métadonnées pour le nouveau owner.
+    /// Le block_id pointe maintenant vers le bloc Transfer au lieu du bloc Mint.
+    fn apply_transfer(&self, token_id: &str, new_owner: &str, new_block_id: &str) -> Result<()> {
+        self.set_owner(token_id, new_owner)?;
+        self.set_block_id(token_id, new_block_id)?;
+        Ok(())
     }
 }
 
@@ -109,7 +138,6 @@ pub trait NftStorage: Send + Sync {
 /// Disponible pour les tests d'intégration de tous les crates.
 pub mod mock {
     use super::*;
-    use pms_types_nft::NftMetadata;
     use std::collections::HashMap;
     use std::sync::RwLock;
 
@@ -117,15 +145,15 @@ pub mod mock {
     pub struct InMemoryNftStore {
         /// Ownership: token_id -> owner_address
         owners: RwLock<HashMap<String, String>>,
-        /// Metadata: token_id -> NftMetadata
-        metadata: RwLock<HashMap<String, NftMetadata>>,
+        /// Block reference: token_id -> block_id (contient les métadonnées chiffrées)
+        block_ids: RwLock<HashMap<String, String>>,
     }
 
     impl InMemoryNftStore {
         pub fn new() -> Self {
             Self {
                 owners: RwLock::new(HashMap::new()),
-                metadata: RwLock::new(HashMap::new()),
+                block_ids: RwLock::new(HashMap::new()),
             }
         }
     }
@@ -167,19 +195,19 @@ pub mod mock {
             Ok(tokens)
         }
 
-        fn get_metadata(&self, token_id: &str) -> Result<Option<NftMetadata>> {
-            let data = self.metadata.read().unwrap();
+        fn get_block_id(&self, token_id: &str) -> Result<Option<String>> {
+            let data = self.block_ids.read().unwrap();
             Ok(data.get(token_id).cloned())
         }
 
-        fn set_metadata(&self, token_id: &str, metadata: &NftMetadata) -> Result<()> {
-            let mut data = self.metadata.write().unwrap();
-            data.insert(token_id.to_string(), metadata.clone());
+        fn set_block_id(&self, token_id: &str, block_id: &str) -> Result<()> {
+            let mut data = self.block_ids.write().unwrap();
+            data.insert(token_id.to_string(), block_id.to_string());
             Ok(())
         }
 
-        fn delete_metadata(&self, token_id: &str) -> Result<()> {
-            let mut data = self.metadata.write().unwrap();
+        fn delete_block_id(&self, token_id: &str) -> Result<()> {
+            let mut data = self.block_ids.write().unwrap();
             data.remove(token_id);
             Ok(())
         }

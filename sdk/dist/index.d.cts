@@ -137,16 +137,28 @@ interface Utxo extends TxOutput {
     /** Référence à cet UTXO */
     outpoint: OutputRef;
 }
+/** Input de transaction (wrapper autour de OutputRef) */
+interface TxInput {
+    /** Référence à l'UTXO dépensé */
+    out: OutputRef;
+}
+/** Unlock (signature pour un input) */
+interface Unlock {
+    /** Clé publique hex */
+    pubkey_hex: string;
+    /** Signature base64 */
+    signature_b64: string;
+}
 /** Transaction UTXO */
 interface TxUtxo {
     /** Inputs (UTXOs à dépenser) */
-    inputs: OutputRef[];
+    inputs: TxInput[];
     /** Outputs (nouveaux UTXOs) */
     outputs: TxOutput[];
     /** Frais de transaction */
     fee: string;
-    /** Données optionnelles (memo) */
-    data?: string;
+    /** Unlocks (signatures pour chaque input) */
+    unlocks: Unlock[];
 }
 /** Enveloppe de payload */
 type PayloadEnvelope = {
@@ -165,7 +177,32 @@ type PlainPayload = {
     Nft: NftAction;
 } | {
     ConfigUpdate: ConfigUpdate;
+} | {
+    Reward: RewardPayload;
+} | {
+    EncryptedReward: EncryptedRewardPayload;
 };
+/** Payload de récompense (Mining/Fees) */
+interface RewardPayload {
+    fee_outputs: TaggedOutput[];
+    reward_outputs: TxOutput[];
+    burned: string;
+    tx_block_id: string;
+}
+/** Output avec tag (pour fees) */
+interface TaggedOutput extends TxOutput {
+    tag: string;
+}
+/** Payload de récompense chiffrée */
+interface EncryptedRewardPayload {
+    encrypted_outputs: EncryptedRewardOutput[];
+    burned: string;
+    tx_block_id: string;
+}
+/** Output de récompensation chiffré individuellement */
+interface EncryptedRewardOutput {
+    encrypted: EncryptedPayload;
+}
 /** Payload chiffré - compatible avec pms-types-payload/encrypted_payload.rs */
 interface EncryptedPayload {
     /** Schéma de chiffrement (toujours "x25519+aes256gcm") */
@@ -241,6 +278,11 @@ type NftAction = {
 } | {
     Burn: {
         token_id: string;
+        burner: string;
+    };
+} | {
+    BatchBurn: {
+        token_ids: string[];
         burner: string;
     };
 } | {
@@ -349,10 +391,25 @@ interface BurnNftResponse {
     status: string;
     /** ID du bloc créé dans le DAG */
     block_id: string;
-    /** Token ID du NFT brûlé */
+    /** Token ID du NFT brûlé (ou "batch") */
     token_id: string;
+    /** Liste des token IDs brûlés (pour batch burn) */
+    token_ids?: string[];
     /** Remboursement (si cube authentique avec signature Authority valide) */
     refund: RefundPreview | null;
+}
+/** Réponse de getNft - informations complètes d'un NFT */
+interface NftResponse {
+    /** Token ID du NFT */
+    token_id: string;
+    /** Propriétaire actuel (null si le token n'existe pas) */
+    owner: string | null;
+    /** ID du bloc contenant les métadonnées chiffrées (pour récupération + déchiffrement client) */
+    mint_block_id: string | null;
+    /** Existe-t-il sur le DAG ? */
+    exists: boolean;
+    /** @deprecated Les métadonnées sont maintenant chiffrées dans le bloc source */
+    metadata?: NftMetadata;
 }
 /** Balance d'une adresse */
 interface BalanceInfo {
@@ -362,21 +419,6 @@ interface BalanceInfo {
     balance: string;
     /** Liste des UTXOs */
     utxos: Utxo[];
-}
-/** Info sur un noeud du réseau */
-interface NodeInfo {
-    /** Clé publique du noeud */
-    node_pk: string;
-    /** URL de l'API */
-    api_url: string;
-    /** Nombre de blocs produits */
-    block_count: number;
-    /** Timestamp dernière activité */
-    last_seen: number;
-}
-/** Réponse de liste des noeuds */
-interface NodeListResponse {
-    nodes: NodeInfo[];
 }
 /** Configuration du client PMS */
 interface PmsClientConfig {
@@ -393,10 +435,6 @@ interface PmsClientConfig {
     /** Activer le mode racing (envoie à tous les noeuds connus) (défaut: true) */
     enableRacing?: boolean;
 }
-/** Configuration par défaut */
-declare const DEFAULT_CONFIG: Required<Omit<PmsClientConfig, "nodeUrl" | "seedNodes">> & {
-    seedNodes: string[];
-};
 /** Réponse de l'endpoint d'information du coordinateur */
 interface CoordinatorInfoResponse {
     /** Ce nœud est-il le Coordinateur ? */
@@ -405,6 +443,34 @@ interface CoordinatorInfoResponse {
     secp256k1_pubkey: string;
     /** Clé publique X25519 (hex) - pour le chiffrement */
     x25519_pubkey: string;
+}
+/** Élément d'historique de wallet */
+interface HistoryItem {
+    block_id: string;
+    ts_ms: number;
+    payload_type: string;
+    payload: any;
+}
+/** Réponse de l'historique du wallet */
+interface WalletHistoryResp {
+    address: string;
+    items: HistoryItem[];
+    count: number;
+}
+interface RuntimeConfig {
+    fee_rate_bps: number;
+    base_fee: string;
+    platform_fee_bps: number;
+    node_fee_bps: number;
+    min_pow_bits: number;
+    max_mint_per_block: number;
+    mint_enabled: boolean;
+    updated_at_block: string;
+    updated_at_timestamp: number;
+}
+/** Config publique retournée par /v1/config */
+interface NodePublicConfig extends RuntimeConfig {
+    fee_recipient: string;
 }
 
 /**
@@ -435,6 +501,8 @@ declare class PmsClient {
     private knownNodes;
     private lastNodeRefresh;
     private readonly NODE_REFRESH_INTERVAL;
+    private configCache;
+    private readonly CONFIG_TTL;
     /**
      * Crée un nouveau client PMS.
      * @param config - Configuration du client
@@ -443,6 +511,10 @@ declare class PmsClient {
      * @param config.seedNodes - Liste des nœuds de seed
      */
     constructor(config: PmsClientConfig);
+    /**
+     * @internal
+     * Ajoute un nœud à la liste des nœuds connus.
+     */
     private addKnownNode;
     /**
      * Récupère les tips actuels du DAG.
@@ -492,8 +564,48 @@ declare class PmsClient {
      */
     getNfts(address: string): Promise<string[]>;
     /**
+     * Récupère les informations complètes d'un NFT par son token_id.
+     *
+     * @param tokenId - Identifiant unique du NFT (64 caractères hex)
+     * @returns NftResponse avec owner, exists et metadata
+     *
+     * @example
+     * ```typescript
+     * const nft = await client.getNft("abc123def456...");
+     * if (nft.exists) {
+     *     console.log(`Owner: ${nft.owner}`);
+     *     console.log(`Name: ${nft.metadata?.name}`);
+     * }
+     * ```
+     */
+    getNft(tokenId: string): Promise<NftResponse>;
+    /**
+     * Récupère l'historique des transactions d'un wallet.
+     * Supporte le déchiffrement des récompenses (EncryptedReward) côté client.
+     *
+     * @param address - Adresse du wallet (bech32)
+     * @param options - Options (limit, decryptionWallet)
+     * @returns Historique complet
+     */
+    getHistory(address: string, options?: {
+        limit?: number;
+        decryptionWallet?: PmsWallet;
+    }): Promise<WalletHistoryResp>;
+    /**
+     * Récupère la configuration publique du nœud (frais, PoW, recipient, etc.)
+     */
+    getNetworkConfig(): Promise<NodePublicConfig>;
+    /**
+     * Récupère la configuration runtime du nœud (frais, PoW, etc.)
+     * @deprecated Use getNetworkConfig instead
+     */
+    getRuntimeConfig(): Promise<RuntimeConfig>;
+    /**
+     * @internal
      * Soumet un bloc au réseau.
      * Utilise le racing pattern si activé pour envoyer à plusieurs noeuds.
+     *
+     * ⚠️ API interne - préférez utiliser `send()`, `mintNft()`, ou `burnNft()`.
      */
     submitBlock(wireBlock: WireBlock): Promise<SubmitResponse>;
     /**
@@ -516,6 +628,22 @@ declare class PmsClient {
         amount: string;
         wallet: PmsWallet;
         memo?: string;
+    }): Promise<SubmitResponse>;
+    /**
+     * Transférer un NFT à un autre propriétaire.
+     * Prend en charge le re-chiffrement des métadonnées via le coordinateur.
+     *
+     * @param params - Paramètres du transfert
+     * @param params.tokenId - Identifiant du NFT
+     * @param params.to - Adresse du nouveau propriétaire
+     * @param params.wallet - Wallet du propriétaire actuel (signataire)
+     * @param params.newOwnerX25519 - Clé publique X25519 du nouveau owner (pour re-encryption)
+     */
+    transferNft(params: {
+        tokenId: string;
+        to: string;
+        wallet: PmsWallet;
+        newOwnerX25519?: string;
     }): Promise<SubmitResponse>;
     /**
      * Brûle (détruit) un NFT existant.
@@ -546,6 +674,18 @@ declare class PmsClient {
      */
     burnNft(params: {
         tokenId: string;
+        wallet: PmsWallet;
+    }): Promise<BurnNftResponse>;
+    /**
+     * Brûle (détruit) plusieurs NFTs en une seule transaction.
+     *
+     * @param params - Paramètres du batch burn
+     * @param params.tokenIds - Liste des Identifiants des NFTs à brûler
+     * @param params.wallet - Wallet PMS du propriétaire
+     * @returns BurnNftResponse avec refund preview cumulé si applicable
+     */
+    burnNfts(params: {
+        tokenIds: string[];
         wallet: PmsWallet;
     }): Promise<BurnNftResponse>;
     /**
@@ -586,15 +726,6 @@ declare function toHex(bytes: Uint8Array): string;
  */
 declare function fromHex(hex: string): Uint8Array;
 /**
- * Génère un ID de bloc à partir du contenu.
- * Format: SHA256(parents + payload + nonce)
- */
-declare function computeBlockId(parents: string[], payloadJson: string | undefined, nonce: number): string;
-/**
- * Vérifie si un ID a le nombre requis de leading zero bits (PoW).
- */
-declare function checkPowBits(blockId: string, requiredBits: number): boolean;
-/**
  * Parse un montant décimal en satoshis (8 décimales).
  */
 declare function parseAmount(amount: string): bigint;
@@ -617,25 +748,6 @@ declare function formatAmount(sats: bigint): string;
  */
 
 /**
- * Chiffre des données pour un ou plusieurs destinataires.
- *
- * Chaque destinataire doit fournir sa clé publique X25519 (32 bytes hex).
- * Seul le détenteur de la clé privée correspondante pourra déchiffrer.
- *
- * @param plaintext - Données à chiffrer (string ou bytes)
- * @param recipientPublicKeysHex - Liste des clés publiques X25519 des destinataires
- * @returns EncryptedPayload compatible avec le backend Rust
- *
- * @example
- * ```typescript
- * const encrypted = encryptPayload(
- *     JSON.stringify({ secret: "data" }),
- *     [recipientX25519PublicKeyHex]
- * );
- * ```
- */
-declare function encryptPayload(plaintext: string | Uint8Array, recipientPublicKeysHex: string[]): EncryptedPayload;
-/**
  * Déchiffre un payload chiffré avec la clé privée X25519 du destinataire.
  *
  * @param encrypted - Payload chiffré (output de encryptPayload)
@@ -650,55 +762,5 @@ declare function encryptPayload(plaintext: string | Uint8Array, recipientPublicK
  * ```
  */
 declare function decryptPayload(encrypted: EncryptedPayload, recipientPrivateKeyHex: string): string;
-/**
- * Génère une paire de clés X25519.
- *
- * @returns { privateKey: string, publicKey: string } en hex
- */
-declare function generateX25519Keypair(): {
-    privateKey: string;
-    publicKey: string;
-};
-/**
- * Dérive une clé publique X25519 depuis une clé privée.
- *
- * @param privateKeyHex - Clé privée X25519 (64 chars hex)
- * @returns Clé publique X25519 (64 chars hex)
- */
-declare function deriveX25519PublicKey(privateKeyHex: string): string;
-/**
- * Formats cube attributes into the canonical message format for signing.
- *
- * This MUST match the Rust backend format in burn_refund.rs:
- * `"weight:X,size:Y,density:Z"`
- *
- * @param weight - Cube weight (1-100)
- * @param size - Cube size (1-100)
- * @param density - Cube density (1-100)
- * @returns Canonical string to sign
- */
-declare function formatCubeAttributesMessage(weight: number, size: number, density: number): string;
-/**
- * Signs cube attributes with an Authority wallet.
- *
- * The signature proves that the cube was officially generated by the Authority
- * and enables burn-to-mint refunds on the DAG.
- *
- * @param weight - Cube weight
- * @param size - Cube size
- * @param density - Cube density
- * @param authorityWallet - Wallet with Authority private key
- * @returns Base64-encoded DER signature
- *
- * @example
- * ```typescript
- * const authority = PmsWallet.fromPrivateKey(AUTHORITY_PRIVATE_KEY);
- * const signature = signCubeAttributes(50, 50, 50, authority);
- * // Include this signature in cube metadata.extra
- * ```
- */
-declare function signCubeAttributes(weight: number, size: number, density: number, authorityWallet: {
-    sign: (message: Uint8Array) => string;
-}): string;
 
-export { type BalanceInfo, type Block, type BurnNftResponse, type ConfigUpdate, type CoordinatorInfoResponse, type CubeAttributes, DEFAULT_CONFIG, type EncryptedPayload, type KeyWrap, type MilestonePayload, type MintCubeResponse, type MintPayload, type NftAction, type NftMetadata, type NodeInfo, type NodeListResponse, type OutputRef, type PayloadEnvelope, type PlainPayload, PmsClient, type PmsClientConfig, PmsWallet, type RefundPreview, type SubmitResponse, type SupplyInfo, type TxOutput, type TxUtxo, type Utxo, type WireBlock, checkPowBits, computeBlockId, decryptPayload, deriveX25519PublicKey, encryptPayload, formatAmount, formatCubeAttributesMessage, fromHex, generateX25519Keypair, isValidMnemonic, parseAmount, signCubeAttributes, toHex };
+export { type BalanceInfo, type Block, type BurnNftResponse, type CoordinatorInfoResponse, type CubeAttributes, type HistoryItem, type MintCubeResponse, type NftMetadata, type NftResponse, PmsClient, type PmsClientConfig, PmsWallet, type RuntimeConfig, type SubmitResponse, type SupplyInfo, type Utxo, type WalletHistoryResp, decryptPayload, formatAmount, fromHex, isValidMnemonic, parseAmount, toHex };

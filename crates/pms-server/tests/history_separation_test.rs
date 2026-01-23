@@ -20,7 +20,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("rocks-separation");
     let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test").await?);
+        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None).await?);
 
     // 2) Configuration
     let settings = load_config()?;

@@ -1,4 +1,5 @@
 pub mod blocks;
+pub mod config;
 pub mod coordinator;
 pub mod dag;
 pub mod history;

@@ -26,19 +26,30 @@ import type {
     SubmitResponse,
     MintCubeResponse,
     BurnNftResponse,
+    NftResponse,
     CubeAttributes,
     Utxo,
-    OutputRef,
     TxOutput,
     TxUtxo,
+    TxInput,
+    Unlock,
     PayloadEnvelope,
     NodeListResponse,
     NftMetadata,
     CoordinatorInfoResponse,
+    WalletHistoryResp,
+    RewardPayload,
+    EncryptedRewardPayload,
+    RuntimeConfig,
+    NodePublicConfig,
+    PrepareTransferRequest,
+    PrepareTransferResponse,
+    NftAction,
 } from "./types";
 import { DEFAULT_CONFIG, type BalanceInfo } from "./types";
 import { PmsWallet } from "./wallet";
 import { computeBlockId, encodeUtf8, parseAmount, formatAmount, fromHex } from "./utils";
+import { decryptPayload } from "./crypto";
 
 
 /**
@@ -49,6 +60,9 @@ export class PmsClient {
     private knownNodes: Set<string> = new Set();
     private lastNodeRefresh = 0;
     private readonly NODE_REFRESH_INTERVAL = 60_000; // 1 min
+
+    private configCache: { data: NodePublicConfig, expires: number } | null = null;
+    private readonly CONFIG_TTL = 300_000; // 5 min
 
     /**
      * Crée un nouveau client PMS.
@@ -70,6 +84,10 @@ export class PmsClient {
         this.config.seedNodes.forEach(url => this.addKnownNode(url));
     }
 
+    /**
+     * @internal
+     * Ajoute un nœud à la liste des nœuds connus.
+     */
     private addKnownNode(url: string) {
         // Normalize URL: remove trailing slash
         const normalized = url.replace(/\/$/, "");
@@ -104,7 +122,13 @@ export class PmsClient {
      * Récupère un bloc par son ID.
      */
     async getBlock(blockId: string): Promise<Block> {
-        return this.fetch(`/v1/blocks/${blockId}`);
+        const wb = await this.fetch<WireBlock>(`/v1/blocks/${blockId}`);
+        return {
+            id: wb.id,
+            parents: wb.parents,
+            nonce: wb.nonce,
+            payload: wb.payload_json ? JSON.parse(wb.payload_json) : undefined
+        };
     }
 
     /**
@@ -172,13 +196,119 @@ export class PmsClient {
         return res.token_ids ?? [];
     }
 
+    /**
+     * Récupère les informations complètes d'un NFT par son token_id.
+     * 
+     * @param tokenId - Identifiant unique du NFT (64 caractères hex)
+     * @returns NftResponse avec owner, exists et metadata
+     * 
+     * @example
+     * ```typescript
+     * const nft = await client.getNft("abc123def456...");
+     * if (nft.exists) {
+     *     console.log(`Owner: ${nft.owner}`);
+     *     console.log(`Name: ${nft.metadata?.name}`);
+     * }
+     * ```
+     */
+    async getNft(tokenId: string): Promise<NftResponse> {
+        return this.fetch<NftResponse>(`/v1/nft/${tokenId}`);
+    }
+
+    /**
+     * Récupère l'historique des transactions d'un wallet.
+     * Supporte le déchiffrement des récompenses (EncryptedReward) côté client.
+     * 
+     * @param address - Adresse du wallet (bech32)
+     * @param options - Options (limit, decryptionWallet)
+     * @returns Historique complet
+     */
+    async getHistory(
+        address: string,
+        options?: { limit?: number; decryptionWallet?: PmsWallet }
+    ): Promise<WalletHistoryResp> {
+        const limit = options?.limit ?? 100;
+        const res = await this.fetch<WalletHistoryResp>("/wallet/history", {
+            method: "POST",
+            body: JSON.stringify({ bech32_addr: address, limit })
+        });
+
+        // Client-side decryption if wallet provided
+        if (options?.decryptionWallet) {
+            const wallet = options.decryptionWallet;
+
+            for (const item of res.items) {
+                if (item.payload_type === "EncryptedReward") {
+                    const encPayload = item.payload as EncryptedRewardPayload;
+                    const decryptedOutputs: TxOutput[] = [];
+
+                    // Try to decrypt each output
+                    for (const eOut of encPayload.encrypted_outputs) {
+                        try {
+                            const plaintext = decryptPayload(
+                                eOut.encrypted,
+                                wallet.x25519PrivateKeyHex
+                            );
+                            const output = JSON.parse(plaintext) as TxOutput;
+
+                            // Check if it belongs to us
+                            if (output.address === address) {
+                                decryptedOutputs.push(output);
+                            }
+                        } catch (e) {
+                            // Decryption failed or not for us -> ignore
+                        }
+                    }
+
+                    if (decryptedOutputs.length > 0) {
+                        // Transform item to standard Reward
+                        item.payload_type = "Reward";
+                        // Construct plain RewardPayload
+                        const plain: RewardPayload = {
+                            fee_outputs: [],
+                            reward_outputs: decryptedOutputs,
+                            burned: encPayload.burned,
+                            tx_block_id: encPayload.tx_block_id
+                        };
+                        item.payload = plain;
+                    }
+                }
+            }
+        }
+
+        return res;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Méthodes d'écriture (POST)
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
+     * Récupère la configuration publique du nœud (frais, PoW, recipient, etc.)
+     */
+    async getNetworkConfig(): Promise<NodePublicConfig> {
+        if (this.configCache && Date.now() < this.configCache.expires) {
+            return this.configCache.data;
+        }
+        const cfg = await this.fetch<NodePublicConfig>("/v1/config");
+        this.configCache = { data: cfg, expires: Date.now() + this.CONFIG_TTL };
+        return cfg;
+    }
+
+    /**
+     * Récupère la configuration runtime du nœud (frais, PoW, etc.)
+     * @deprecated Use getNetworkConfig instead
+     */
+    async getRuntimeConfig(): Promise<RuntimeConfig> {
+        return this.getNetworkConfig();
+    }
+
+    /**
+     * @internal
      * Soumet un bloc au réseau.
      * Utilise le racing pattern si activé pour envoyer à plusieurs noeuds.
+     * 
+     * ⚠️ API interne - préférez utiliser `send()`, `mintNft()`, ou `burnNft()`.
      */
     async submitBlock(wireBlock: WireBlock): Promise<SubmitResponse> {
         if (this.config.enableRacing) {
@@ -221,6 +351,11 @@ export class PmsClient {
                     body,
                     signal: controller.signal
                 });
+
+                // Ensure default values if backend returns empty JSON
+                if (!res.block_id) res.block_id = wireBlock.id;
+                if (!res.status) res.status = "inserted";
+
                 return res;
             } catch (err) {
                 throw err;
@@ -274,7 +409,7 @@ export class PmsClient {
         wallet: PmsWallet;
         memo?: string;
     }): Promise<SubmitResponse> {
-        const { to, amount, wallet, memo } = params;
+        const { to, amount, wallet, memo: _memo } = params;
 
         // 1. Récupérer les UTXOs du wallet
         const utxos = await this.getUtxos(wallet.address);
@@ -283,23 +418,30 @@ export class PmsClient {
         }
 
         // 2. Sélectionner les inputs
+        // Fetch dynamic config
+        const netConfig = await this.getNetworkConfig();
+        const baseFeeSats = parseAmount(netConfig.base_fee);
+        const feeRateBps = BigInt(netConfig.fee_rate_bps);
+
         const amountSats = parseAmount(amount);
-        const feeRate = 100n; // 1% minimum
-        const fee = (amountSats * feeRate) / 10000n;
+
+        // Fee = Base + (Amount * Rate / 10000)
+        const variableFee = (amountSats * feeRateBps) / 10000n;
+        const fee = baseFeeSats + variableFee;
         const totalNeeded = amountSats + fee;
 
         let selectedSats = 0n;
-        const inputs: OutputRef[] = [];
+        const selectedUtxos: Utxo[] = [];
 
         for (const utxo of utxos) {
-            inputs.push(utxo.outpoint);
+            selectedUtxos.push(utxo);
             selectedSats += parseAmount(utxo.amount);
             if (selectedSats >= totalNeeded) break;
         }
 
         if (selectedSats < totalNeeded) {
             throw new Error(
-                `Insufficient balance: have ${formatAmount(selectedSats)}, need ${formatAmount(totalNeeded)}`
+                `Insufficient balance: have ${formatAmount(selectedSats)}, need ${formatAmount(totalNeeded)} (incl. fee ${formatAmount(fee)})`
             );
         }
 
@@ -308,18 +450,52 @@ export class PmsClient {
             { address: to, amount: formatAmount(amountSats) },
         ];
 
+        // Explicit Fee Output (if fee > 0)
+        if (fee > 0n) {
+            outputs.push({
+                address: netConfig.fee_recipient,
+                amount: formatAmount(fee),
+            });
+        }
+
         // Change
         const change = selectedSats - amountSats - fee;
         if (change > 0n) {
             outputs.push({ address: wallet.address, amount: formatAmount(change) });
         }
 
-        // 4. Construire la transaction
+        // 4. Construire les inputs avec wrapper TxInput
+        const inputs: TxInput[] = selectedUtxos.map(utxo => ({
+            out: {
+                txid: utxo.outpoint.txid,
+                index: utxo.outpoint.index,
+            }
+        }));
+
+        // 5. Créer le message de signature de transaction (pour unlocks)
+        // Le message est un hash du contenu canonique de la transaction
+        const txCanonical = {
+            inputs: inputs,
+            outputs: outputs,
+            fee: formatAmount(fee),
+        };
+        const txMessage = JSON.stringify(txCanonical);
+        const txSignatureHex = wallet.sign(encodeUtf8(txMessage));
+        const txSigBytes = fromHex(txSignatureHex);
+        const txSigB64 = btoa(String.fromCharCode(...txSigBytes));
+
+        // 6. Construire les unlocks (une signature par input, toutes identiques car même wallet)
+        const unlocks: Unlock[] = inputs.map(() => ({
+            pubkey_hex: wallet.publicKeyHex,
+            signature_b64: txSigB64,
+        }));
+
+        // 7. Construire la transaction
         const tx: TxUtxo = {
             inputs,
             outputs,
             fee: formatAmount(fee),
-            data: memo,
+            unlocks,
         };
 
         // 5. Créer le bloc
@@ -336,8 +512,22 @@ export class PmsClient {
         // En production, boucler jusqu'à avoir les bits requis
 
         // 7. Signer le bloc
-        const messageToSign = encodeUtf8(blockId);
-        const signature = await wallet.sign(messageToSign);
+        // 7. Signer le bloc (Signature canonique)
+        const canonicalView = {
+            id: blockId,
+            parents: parents,
+            payload_json: payloadJson,
+            nonce: nonce,
+            network_id: this.config.networkId,
+            protocol_version: this.config.protocolVersion,
+            signer_pk_hex: wallet.publicKeyHex,
+        };
+        const messageToSign = JSON.stringify(canonicalView);
+        const signatureHex = wallet.sign(encodeUtf8(messageToSign));
+
+        // Convert to Base64 for the wire format
+        const signatureBytes = fromHex(signatureHex);
+        const signatureB64 = btoa(String.fromCharCode(...signatureBytes));
 
         // 8. Construire le WireBlock
         const wireBlock: WireBlock = {
@@ -348,7 +538,7 @@ export class PmsClient {
             network_id: this.config.networkId,
             protocol_version: this.config.protocolVersion,
             signer_pk_hex: wallet.publicKeyHex,
-            signature_hex: signature,
+            signature_hex: signatureB64,
         };
 
         // 9. Soumettre
@@ -362,6 +552,87 @@ export class PmsClient {
     // ═══════════════════════════════════════════════════════════════════════
     // Méthodes NFT Cube (Burn et Mint spécialisé)
     // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Transférer un NFT à un autre propriétaire.
+     * Prend en charge le re-chiffrement des métadonnées via le coordinateur.
+     * 
+     * @param params - Paramètres du transfert
+     * @param params.tokenId - Identifiant du NFT
+     * @param params.to - Adresse du nouveau propriétaire
+     * @param params.wallet - Wallet du propriétaire actuel (signataire)
+     * @param params.newOwnerX25519 - Clé publique X25519 du nouveau owner (pour re-encryption)
+     */
+    async transferNft(params: {
+        tokenId: string;
+        to: string;
+        wallet: PmsWallet;
+        newOwnerX25519?: string;
+    }): Promise<SubmitResponse> {
+        const { tokenId, to, wallet, newOwnerX25519 } = params;
+
+        let action: NftAction;
+
+        if (newOwnerX25519) {
+            // Coordinator-side re-encryption
+            const prepReq: PrepareTransferRequest = {
+                token_id: tokenId,
+                to_address: to,
+                from_address: wallet.address,
+                new_owner_x25519_pubkey: newOwnerX25519
+            };
+            const prepRes = await this.fetch<PrepareTransferResponse>("/v1/nft/transfer/prepare", {
+                method: "POST",
+                body: JSON.stringify(prepReq)
+            });
+            action = prepRes.action;
+        } else {
+            // Simple transfer
+            action = {
+                Transfer: {
+                    token_id: tokenId,
+                    from: wallet.address,
+                    to: to
+                }
+            };
+        }
+
+        // Common submission logic
+        const tips = await this.getTips();
+        const parents = tips.slice(0, 2);
+
+        const payload: PayloadEnvelope = { Plain: { Nft: action } };
+        const payloadJson = JSON.stringify(payload);
+        const nonce = 0;
+        const blockId = computeBlockId(parents, payloadJson, nonce);
+
+        const canonicalView = {
+            id: blockId,
+            parents: parents,
+            payload_json: payloadJson,
+            nonce: nonce,
+            network_id: this.config.networkId,
+            protocol_version: this.config.protocolVersion,
+            signer_pk_hex: wallet.publicKeyHex,
+        };
+        const messageToSign = JSON.stringify(canonicalView);
+        const signatureHex = wallet.sign(encodeUtf8(messageToSign));
+        const signatureBytes = fromHex(signatureHex);
+        const signatureB64 = btoa(String.fromCharCode(...signatureBytes));
+
+        const wireBlock: WireBlock = {
+            id: blockId,
+            parents,
+            payload_json: payloadJson,
+            nonce,
+            network_id: this.config.networkId,
+            protocol_version: this.config.protocolVersion,
+            signer_pk_hex: wallet.publicKeyHex,
+            signature_hex: signatureB64,
+        };
+
+        return this.submitBlock(wireBlock);
+    }
 
     /**
      * Brûle (détruit) un NFT existant.
@@ -453,6 +724,81 @@ export class PmsClient {
         };
 
         // 8. Soumettre à /v1/nft/burn (endpoint spécialisé avec refund preview)
+        return this.fetch<BurnNftResponse>("/v1/nft/burn", {
+            method: "POST",
+            body: JSON.stringify(burnRequest),
+        });
+    }
+
+    /**
+     * Brûle (détruit) plusieurs NFTs en une seule transaction.
+     * 
+     * @param params - Paramètres du batch burn
+     * @param params.tokenIds - Liste des Identifiants des NFTs à brûler
+     * @param params.wallet - Wallet PMS du propriétaire
+     * @returns BurnNftResponse avec refund preview cumulé si applicable
+     */
+    async burnNfts(params: {
+        tokenIds: string[];
+        wallet: PmsWallet;
+    }): Promise<BurnNftResponse> {
+        const { tokenIds, wallet } = params;
+
+        if (tokenIds.length === 0) {
+            throw new Error("No token IDs provided for batch burn");
+        }
+
+        // 1. Récupérer les tips du DAG
+        const tips = await this.getTips();
+        const parents = tips.slice(0, 2);
+
+        // 2. Construire le payload BatchBurn
+        const payload: PayloadEnvelope = {
+            Plain: {
+                Nft: {
+                    BatchBurn: {
+                        token_ids: tokenIds,
+                        burner: wallet.address,
+                    }
+                }
+            }
+        };
+        const payloadJson = JSON.stringify(payload);
+
+        // 3. Calculer le block ID
+        const nonce = 0;
+        const blockId = computeBlockId(parents, payloadJson, nonce);
+
+        // 4. Construire le message canonique
+        const canonicalView = {
+            id: blockId,
+            parents: parents,
+            payload_json: payloadJson,
+            nonce: nonce,
+            network_id: this.config.networkId,
+            protocol_version: this.config.protocolVersion,
+            signer_pk_hex: wallet.publicKeyHex,
+        };
+        const messageToSign = JSON.stringify(canonicalView);
+
+        // 5. Signer
+        const signatureHex = wallet.sign(encodeUtf8(messageToSign));
+        const signatureBytes = fromHex(signatureHex);
+        const signatureB64 = btoa(String.fromCharCode(...signatureBytes));
+
+        // 6. Request Body
+        const burnRequest = {
+            id: blockId,
+            parents,
+            payload_json: payloadJson,
+            nonce,
+            network_id: this.config.networkId,
+            protocol_version: this.config.protocolVersion,
+            signer_pk_hex: wallet.publicKeyHex,
+            signature_hex: signatureB64,
+        };
+
+        // 7. Soumettre
         return this.fetch<BurnNftResponse>("/v1/nft/burn", {
             method: "POST",
             body: JSON.stringify(burnRequest),
@@ -587,7 +933,15 @@ export class PmsClient {
                 throw new Error(`HTTP ${res.status} (${url}): ${text}`);
             }
 
-            return res.json() as Promise<T>;
+            const text = await res.text();
+            if (!text) {
+                return {} as T;
+            }
+            try {
+                return JSON.parse(text) as T;
+            } catch (e) {
+                throw new Error(`Invalid JSON response: ${text.substring(0, 50)}...`);
+            }
         } finally {
             clearTimeout(timeout);
         }

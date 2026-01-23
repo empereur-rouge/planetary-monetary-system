@@ -45,6 +45,7 @@ async fn mint_then_tx_are_persisted_consistently_in_rocks_and_dag() -> Result<()
             &db_path_str,
             settings.rocks.tip_limit as usize,
             &settings.rocks.prefix,
+            None,
         )
         .await?,
     );
@@ -194,6 +195,7 @@ async fn invalid_tx_does_not_mutate_rocks_nor_dag() -> anyhow::Result<()> {
             &db_path_str,
             settings.rocks.tip_limit as usize,
             &settings.rocks.prefix,
+            None,
         )
         .await?,
     );

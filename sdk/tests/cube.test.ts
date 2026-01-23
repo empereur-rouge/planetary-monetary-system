@@ -115,35 +115,57 @@ describe("rollWeightedAttribute", () => {
 describe("PmsClient NFT Cube Methods", () => {
     let client: PmsClient;
     let wallet: PmsWallet;
-    let userWallet: PmsWallet;
 
     beforeEach(() => {
-        // Créer un wallet coordinateur et un wallet utilisateur
+        // Créer un wallet utilisateur
         wallet = PmsWallet.generate();
-        userWallet = PmsWallet.generate();
 
-        // Créer un client avec mock du fetch ET le coordinatorWallet configuré
+        // Créer un client simple (sans coordinatorWallet - plus nécessaire)
         client = new PmsClient({
             nodeUrl: "http://localhost:3000",
             enableRacing: false,
-            coordinatorWallet: wallet,
         });
 
-        // Mock fetch pour getTips et submitBlock
+        // Mock fetch pour les différents endpoints
         global.fetch = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+            // Mock /v1/dag/tips
             if (url.includes("/v1/dag/tips")) {
                 return Promise.resolve({
                     ok: true,
                     json: () => Promise.resolve(["tip1", "tip2"]),
                 });
             }
-            if (url.includes("/submit/block")) {
+            // Mock /v1/nft/burn (nouvelle API)
+            if (url.includes("/v1/nft/burn")) {
                 const body = JSON.parse(init?.body as string);
                 return Promise.resolve({
                     ok: true,
                     json: () => Promise.resolve({
                         status: "inserted",
                         block_id: body.id,
+                        refund: { amount: "1.23456789", recipient: body.signer_pk_hex },
+                    }),
+                });
+            }
+            // Mock /v1/nft/mint
+            if (url.includes("/v1/nft/mint")) {
+                return Promise.resolve({
+                    ok: true,
+                    json: () => Promise.resolve({
+                        status: "inserted",
+                        block_id: "mint-block-123",
+                    }),
+                });
+            }
+            // Mock cube generator endpoint
+            if (url.includes("/api/cube/generate")) {
+                return Promise.resolve({
+                    ok: true,
+                    json: () => Promise.resolve({
+                        rarity: "Common",
+                        attributes: { weight: 50.5, size: 30.2, density: 2.5 },
+                        roll: 50000,
+                        signature: "mock-authority-signature-base64",
                     }),
                 });
             }
@@ -161,8 +183,9 @@ describe("PmsClient NFT Cube Methods", () => {
 
             // Vérifier que le payload contient bien Burn
             const lastCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
-                (call) => call[0].includes("/submit/block")
+                (call) => call[0].includes("/v1/nft/burn")
             );
+            expect(lastCall).toBeDefined();
             const body = JSON.parse(lastCall![1].body);
             const payload = JSON.parse(body.payload_json);
 
@@ -180,103 +203,73 @@ describe("PmsClient NFT Cube Methods", () => {
             expect(result.status).toBe("inserted");
 
             const lastCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
-                (call) => call[0].includes("/submit/block")
+                (call) => call[0].includes("/v1/nft/burn")
             );
             const body = JSON.parse(lastCall![1].body);
 
             expect(body.signer_pk_hex).toBe(wallet.publicKeyHex);
             expect(body.signature_hex).toBeDefined();
             expect(body.signature_hex.length).toBeGreaterThan(0);
+        });
+
+        it("retourne un refund preview si disponible", async () => {
+            const result = await client.burnNft({
+                tokenId: "cube-with-refund",
+                wallet,
+            });
+
+            expect(result.status).toBe("inserted");
+            expect(result.refund).toBeDefined();
+            expect(result.refund?.amount).toBe("1.23456789");
         });
     });
 
     describe("mintCube", () => {
-        it("génère un payload chiffré (Encrypted)", async () => {
+        const generatorUrl = "http://localhost:4000";
+
+        it("appelle le générateur de cubes et mint un NFT", async () => {
             const result = await client.mintCube({
-                ownerAddress: userWallet.address,
-                ownerX25519PubKeyHex: userWallet.x25519PublicKeyHex,
+                wallet,
+                generatorUrl,
             });
 
             expect(result.status).toBe("inserted");
-
-            const lastCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
-                (call) => call[0].includes("/submit/block")
-            );
-            const body = JSON.parse(lastCall![1].body);
-            const payload = JSON.parse(body.payload_json);
-
-            // Le payload doit être Encrypted, pas Plain
-            expect(payload.Encrypted).toBeDefined();
-            expect(payload.Plain).toBeUndefined();
+            expect(result.token_id).toBeDefined();
+            expect(result.rarity).toBe("Common");
+            expect(result.roll).toBe(50000);
+            expect(result.attributes).toBeDefined();
+            expect(result.attributes.weight).toBe(50.5);
         });
 
-        it("inclut les champs requis dans le payload chiffré", async () => {
+        it("appelle le bon endpoint générateur", async () => {
             await client.mintCube({
-                ownerAddress: userWallet.address,
-                ownerX25519PubKeyHex: userWallet.x25519PublicKeyHex,
+                wallet,
+                generatorUrl,
             });
 
-            const lastCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
-                (call) => call[0].includes("/submit/block")
+            const generatorCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+                (call) => call[0].includes("/api/cube/generate")
             );
-            const body = JSON.parse(lastCall![1].body);
-            const payload = JSON.parse(body.payload_json);
-
-            // Vérifier la structure du payload chiffré
-            expect(payload.Encrypted.scheme).toBe("x25519+aes256gcm");
-            expect(payload.Encrypted.ciphertext_b64).toBeDefined();
-            expect(payload.Encrypted.nonce_b64).toBeDefined();
-            expect(payload.Encrypted.recipients).toBeDefined();
-            expect(payload.Encrypted.recipients.length).toBeGreaterThan(0);
+            expect(generatorCall).toBeDefined();
+            expect(generatorCall![0]).toBe(`${generatorUrl}/api/cube/generate`);
         });
 
-        it("signe le bloc avec le wallet du coordinateur", async () => {
+        it("appelle mintNft avec les métadonnées correctes", async () => {
             await client.mintCube({
-                ownerAddress: userWallet.address,
-                ownerX25519PubKeyHex: userWallet.x25519PublicKeyHex,
+                wallet,
+                generatorUrl,
             });
 
-            const lastCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
-                (call) => call[0].includes("/submit/block")
+            const mintCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+                (call) => call[0].includes("/v1/nft/mint")
             );
-            const body = JSON.parse(lastCall![1].body);
+            expect(mintCall).toBeDefined();
+            const body = JSON.parse(mintCall![1].body);
 
-            // Signé par le coordinateur (wallet), pas par l'utilisateur
-            expect(body.signer_pk_hex).toBe(wallet.publicKeyHex);
-            expect(body.signature_hex).toBeDefined();
-            expect(body.signature_hex.length).toBeGreaterThan(0);
-        });
-
-        it("lève une erreur si coordinatorWallet n'est pas configuré", async () => {
-            // Client sans coordinatorWallet
-            const clientWithoutWallet = new PmsClient({
-                nodeUrl: "http://localhost:3000",
-                enableRacing: false,
-            });
-
-            await expect(
-                clientWithoutWallet.mintCube({
-                    ownerAddress: userWallet.address,
-                    ownerX25519PubKeyHex: userWallet.x25519PublicKeyHex,
-                })
-            ).rejects.toThrow("coordinatorWallet must be configured");
-        });
-
-        it("utilise l'adresse du destinataire fournie", async () => {
-            const result = await client.mintCube({
-                ownerAddress: userWallet.address,
-                ownerX25519PubKeyHex: userWallet.x25519PublicKeyHex,
-            });
-
-            expect(result.status).toBe("inserted");
-
-            const lastCall = (global.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
-                (call) => call[0].includes("/submit/block")
-            );
-            const body = JSON.parse(lastCall![1].body);
-
-            // Le bloc est soumis avec le payload chiffré
-            expect(body.payload_json).toContain("Encrypted");
+            expect(body.owner_address).toBe(wallet.address);
+            expect(body.metadata.nft_type).toBe("cube");
+            expect(body.metadata.extra).toContain("Common");
+            expect(body.metadata.extra).toContain("mock-authority-signature-base64");
         });
     });
 });

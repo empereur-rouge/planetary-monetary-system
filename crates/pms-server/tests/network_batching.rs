@@ -94,7 +94,8 @@ fn make_test_wallet() -> Arc<Wallet> {
 #[tokio::test]
 async fn test_network_batching_enqueue() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let store = Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test").await?);
+    let store =
+        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None).await?);
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter::new(store));
     let wallet = make_test_wallet();
 
@@ -120,7 +121,8 @@ async fn test_network_batching_enqueue() -> Result<()> {
 #[tokio::test]
 async fn test_network_batching_high_load() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let store = Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test").await?);
+    let store =
+        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None).await?);
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter::new(store));
     let wallet = make_test_wallet();
 
@@ -143,7 +145,8 @@ async fn test_network_batching_high_load() -> Result<()> {
 #[tokio::test]
 async fn test_network_batching_empty_tick() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let store = Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test").await?);
+    let store =
+        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None).await?);
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter::new(store));
     let wallet = make_test_wallet();
 
@@ -165,7 +168,8 @@ async fn test_network_batching_empty_tick() -> Result<()> {
 #[tokio::test]
 async fn test_network_batching_concurrent() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let store = Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test").await?);
+    let store =
+        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None).await?);
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter::new(store));
     let wallet = make_test_wallet();
 

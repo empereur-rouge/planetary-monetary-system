@@ -22,36 +22,60 @@
  *   wallet,
  * });
  * ```
+ * 
+ * Pour les fonctionnalités avancées (construction manuelle de blocs, chiffrement),
+ * voir `@pms/sdk/advanced`.
  */
 
+// ============================================================================
 // Wallet
+// ============================================================================
 export { PmsWallet, isValidMnemonic } from "./wallet";
 
+// ============================================================================
 // Client
+// ============================================================================
 export { PmsClient } from "./client";
 
-// Types
-export * from "./types";
+// ============================================================================
+// Types (high-level only)
+// ============================================================================
+export type {
+    // Client config & responses
+    PmsClientConfig,
+    SubmitResponse,
+    BalanceInfo,
+    SupplyInfo,
+    CoordinatorInfoResponse,
 
-// Utils
+    // NFT high-level
+    NftMetadata,
+    NftResponse,
+    MintCubeResponse,
+    BurnNftResponse,
+    CubeAttributes,
+
+    // Block & Transaction (read-only)
+    Block,
+    Utxo,
+
+    // History
+    WalletHistoryResp,
+    HistoryItem,
+    RuntimeConfig,
+} from "./types";
+
+// ============================================================================
+// Utils (simple, user-friendly)
+// ============================================================================
 export {
-    computeBlockId,
-    checkPowBits,
     parseAmount,
     formatAmount,
     toHex,
     fromHex,
 } from "./utils";
 
-// Crypto (encryption)
-export {
-    encryptPayload,
-    decryptPayload,
-
-    generateX25519Keypair,
-    deriveX25519PublicKey,
-
-    // Authority signing (for burn-to-mint)
-    formatCubeAttributesMessage,
-    signCubeAttributes,
-} from "./crypto";
+// ============================================================================
+// Crypto
+// ============================================================================
+export { decryptPayload } from "./crypto";

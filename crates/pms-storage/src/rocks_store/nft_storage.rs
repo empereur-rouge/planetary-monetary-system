@@ -3,6 +3,11 @@
 //! ## Schéma des Column Families (CF):
 //! - `nft_ownership`: `token_id` -> `owner_address`
 //! - `nfts_by_owner`: `owner_address` -> JSON array de `token_id`s
+//! - `nft_block_ids`: `token_id` -> `block_id` (référence au bloc avec métadonnées chiffrées)
+//!
+//! ## Privacy
+//! Les métadonnées ne sont JAMAIS stockées en clair. Seul le `block_id` est stocké
+//! pour référencer le bloc du DAG contenant les métadonnées chiffrées.
 //!
 //! ## Voir aussi
 //! - Chapitre 15 du Rust Book : Smart Pointers
@@ -88,33 +93,32 @@ impl NftStorage for RocksStore {
         }
     }
 
-    /// Récupère les métadonnées d'un NFT par son token_id.
+    /// Récupère l'ID du bloc contenant les métadonnées chiffrées.
     ///
-    /// Retourne `None` si le token n'existe pas ou n'a pas de métadonnées.
-    fn get_metadata(&self, token_id: &str) -> Result<Option<pms_types_nft::NftMetadata>> {
-        let cf_metadata = self.cf("nft_metadata");
-        if let Some(v) = self.db.get_cf(cf_metadata, token_id.as_bytes())? {
-            let metadata: pms_types_nft::NftMetadata = serde_json::from_slice(&v)?;
-            Ok(Some(metadata))
+    /// Retourne `None` si le token n'existe pas.
+    fn get_block_id(&self, token_id: &str) -> Result<Option<String>> {
+        let cf_block_ids = self.cf("nft_block_ids");
+        if let Some(v) = self.db.get_cf(cf_block_ids, token_id.as_bytes())? {
+            Ok(Some(String::from_utf8(v.to_vec())?))
         } else {
             Ok(None)
         }
     }
 
-    /// Définit les métadonnées d'un NFT.
+    /// Définit l'ID du bloc contenant les métadonnées chiffrées.
     ///
-    /// Stocke les métadonnées en JSON dans la CF `nft_metadata`.
-    fn set_metadata(&self, token_id: &str, metadata: &pms_types_nft::NftMetadata) -> Result<()> {
-        let cf_metadata = self.cf("nft_metadata");
-        let json = serde_json::to_vec(metadata)?;
-        self.db.put_cf(cf_metadata, token_id.as_bytes(), &json)?;
+    /// Appelé lors du Mint pour référencer le bloc source.
+    fn set_block_id(&self, token_id: &str, block_id: &str) -> Result<()> {
+        let cf_block_ids = self.cf("nft_block_ids");
+        self.db
+            .put_cf(cf_block_ids, token_id.as_bytes(), block_id.as_bytes())?;
         Ok(())
     }
 
-    /// Supprime les métadonnées d'un NFT (lors du Burn).
-    fn delete_metadata(&self, token_id: &str) -> Result<()> {
-        let cf_metadata = self.cf("nft_metadata");
-        self.db.delete_cf(cf_metadata, token_id.as_bytes())?;
+    /// Supprime la référence au bloc d'un NFT (lors du Burn).
+    fn delete_block_id(&self, token_id: &str) -> Result<()> {
+        let cf_block_ids = self.cf("nft_block_ids");
+        self.db.delete_cf(cf_block_ids, token_id.as_bytes())?;
         Ok(())
     }
 }

@@ -5,6 +5,7 @@
 path = "/home/pms/data/rocks"
 prefix = "pms:test"
 tip_limit = 256
+checkpoint_interval_secs = 3600 # 1 heure pour tests
 
 [network]
 mode = "testnet"        # TESTNET MODE - Coordinator check enabled

@@ -12,6 +12,15 @@ yarn add @pms/sdk
 pnpm add @pms/sdk
 ```
 
+## Structure de l'API
+
+Le SDK est organisé en deux niveaux :
+
+| Import | Usage | Contenu |
+|--------|-------|--------|
+| `@pms/sdk` | 99% des cas | `PmsWallet`, `PmsClient`, utils simples |
+| `@pms/sdk/src/advanced` | Power users | `computeBlockId`, crypto, types bas niveau |
+
 ## Démarrage Rapide
 
 ```typescript
@@ -183,6 +192,28 @@ const info: BalanceInfo = await client.getBalanceInfo(address);
 // }
 ```
 
+```typescript
+// Récupérer l'historique (Transactions, Mints, Rewards)
+const history = await client.getHistory(address, { limit: 50 });
+// Réponse:
+// {
+//   address: "04abc123...",
+//   count: 50,
+//   items: [
+//     { block_id: "...", ts_ms: 1700000000000, payload_type: "Reward", payload: { ... } },
+//     { block_id: "...", ts_ms: 1700000050000, payload_type: "TxUtxo", payload: { ... } }
+//   ]
+// }
+
+// Récupérer l'historique avec déchiffrement automatique des rewards
+// (Nécessite le wallet pour déchiffrer les EncryptedRewards)
+const historyWithDecrypt = await client.getHistory(address, {
+    limit: 50,
+    decryptionWallet: myWallet 
+});
+// Les items "EncryptedReward" déchiffrés apparaîtront comme des "Reward" standards
+```
+
 #### Méthodes d'Écriture (Transactions)
 
 ```typescript
@@ -235,12 +266,13 @@ const result = await client.mintNft({
 
 #### Mint Cube (NFT avec Rareté)
 
-Les Cubes sont des NFTs spéciaux avec rareté et attributs générés aléatoirement (Game Logic client-side).
+Les Cubes sont des NFTs spéciaux avec rareté et attributs générés par un backend Authority.
 
 ```typescript
 // Mint un cube pour un utilisateur
 const result = await client.mintCube({
   wallet: myWallet,
+  generatorUrl: "https://cube-generator.example.com", // Backend Authority
 });
 // Réponse (MintCubeResponse):
 // {
@@ -250,9 +282,9 @@ const result = await client.mintCube({
 //   rarity: "Legendary",
 //   roll: 75,
 //   attributes: {
-//     weight: 12,
-//     size: 8,
-//     density: 23
+//     weight: 50.5,
+//     size: 30.2,
+//     density: 2.5
 //   }
 // }
 ```
@@ -279,56 +311,72 @@ const result = await client.burnNft({
 // Réponse:
 // {
 //   status: "inserted",
-//   block_id: "1a2b3c4d5e6f..."
+//   block_id: "1a2b3c4d5e6f...",
+//   refund: {                       // Uniquement pour les Cubes authentiques
+//     amount: "1.23456789",
+//     recipient: "04abc123..."
+//   }
+// }
+```
+
+> [!TIP]
+> Les Cubes avec une signature Authority valide génèrent un **remboursement automatique** calculé selon leurs attributs.
+
+#### Batch Burn (Destruction Multiple)
+
+Pour détruire plusieurs NFTs en une seule transaction (économie de frais) :
+
+```typescript
+const result = await client.burnNfts({
+  tokenIds: ["token-1", "token-2", "token-3"],
+  wallet: ownerWallet,
+});
+// Réponse:
+// {
+//   status: "burned",
+//   token_id: "batch",
+//   token_ids: ["token-1", "token-2", "token-3"],
+//   refund: { ... } // Remboursement cumulé
 // }
 ```
 
 ---
 
-### Chiffrement (Crypto)
+### API Avancée
 
-Le SDK fournit des utilitaires de chiffrement compatibles avec le backend PMS.
-
-```typescript
-import { 
-  encryptPayload, 
-  decryptPayload, 
-  generateX25519Keypair,
-  deriveX25519PublicKey,
-} from "@pms/sdk";
-
-// Générer une paire de clés X25519
-const { publicKey, privateKey } = generateX25519Keypair();
-
-// Chiffrer des données pour un destinataire
-const encrypted = encryptPayload(
-  "données secrètes",
-  [recipientPublicKeyHex]
-);
-
-// Déchiffrer avec sa clé privée
-const decrypted = decryptPayload(encrypted, myPrivateKeyHex);
-```
-
----
-
-### Utilitaires
+Pour les cas d'usage avancés (construction manuelle de blocs, chiffrement custom), importez depuis le module `advanced` :
 
 ```typescript
 import { 
   computeBlockId, 
-  checkPowBits, 
+  checkPowBits,
+  encryptPayload, 
+  decryptPayload, 
+  generateX25519Keypair,
+  deriveX25519PublicKey,
+} from "@pms/sdk/src/advanced";
+
+import type {
+  WireBlock,
+  PayloadEnvelope,
+  TxUtxo,
+} from "@pms/sdk/src/advanced";
+```
+
+> [!WARNING]
+> L'API avancée peut changer sans préavis. Préférez l'API publique pour la stabilité.
+
+---
+
+### Utilitaires (API Publique)
+
+```typescript
+import { 
   parseAmount, 
   formatAmount,
   toHex,
   fromHex,
 } from "@pms/sdk";
-
-// Calculer l'ID d'un bloc
-const blockId = computeBlockId(parents, payloadJson, nonce);
-
-// Vérifier la difficulté PoW
-const isValid = checkPowBits(blockId, requiredBits);
 
 // Convertir les montants
 const sats = parseAmount("10.5");      // -> 1050000000n
@@ -350,30 +398,34 @@ import type {
   // Configuration
   PmsClientConfig,
   
-  // Blocs
-  Block,
-  WireBlock,
-  PayloadEnvelope,
-  PlainPayload,
-  EncryptedPayload,
-  
-  // Transactions
-  TxUtxo,
-  TxOutput,
-  OutputRef,
-  Utxo,
+  // Réponses API
+  SubmitResponse,
+  BalanceInfo,
+  SupplyInfo,
   
   // NFT
-  NftAction,
   NftMetadata,
+  MintCubeResponse,
+  BurnNftResponse,
+  CubeAttributes,
   
-  // API Responses
-  SubmitResponse,
-  SupplyInfo,
-  BalanceInfo,
-  NodeInfo,
-  NodeListResponse,
+  // Blocs & Transactions (lecture)
+  Block,
+  Utxo,
+  
+  // Historique
+  WalletHistoryResp,
+  HistoryItem,
 } from "@pms/sdk";
+
+// Types bas niveau (API avancée)
+import type {
+  WireBlock,
+  PayloadEnvelope,
+  TxUtxo,
+  OutputRef,
+  TxOutput,
+} from "@pms/sdk/src/advanced";
 ```
 
 ---

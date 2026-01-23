@@ -25,7 +25,7 @@ async fn signed_block_goes_through_full_pipeline() -> Result<()> {
     let db_path = dir.path().join("rocks-core-pipeline");
 
     let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test").await?);
+        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None).await?);
 
     // Initialize store schema
     store.ensure_schema().await?;

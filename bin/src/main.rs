@@ -98,6 +98,7 @@ async fn main() -> Result<()> {
             &settings.rocks.path,
             settings.rocks.tip_limit,
             settings.rocks.prefix.clone(),
+            settings.rocks.checkpoint_interval_secs,
         )
         .await?,
     );

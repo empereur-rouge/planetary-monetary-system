@@ -14,7 +14,7 @@ async fn test_metadata_persistence_and_supply() {
     let dir = tempdir().unwrap();
     // Fix: to_str() for path
     let store = Arc::new(
-        RocksStore::new(dir.path().to_str().unwrap(), 1000, "test")
+        RocksStore::new(dir.path().to_str().unwrap(), 1000, "test", None)
             .await
             .unwrap(),
     );

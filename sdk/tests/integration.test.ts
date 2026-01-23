@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { PmsClient } from "../src/client";
 import { PmsWallet } from "../src/wallet";
-import { computeBlockId } from "../src/utils";
-import type { WireBlock, PayloadEnvelope } from "../src/types";
+import { computeBlockId } from "../src/advanced";
+import type { WireBlock, PayloadEnvelope } from "../src/advanced";
 
 // Allow self-signed certs for local Docker tests
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -64,11 +64,27 @@ describe("SDK Integration Tests (Docker Cluster)", () => {
         const tips = await client.getTips();
         const parents = tips.slice(0, 2);
 
-        const payload: PayloadEnvelope = { Plain: { TxUtxo: { inputs: [], outputs: [], fee: "0" } } };
+        const payload: PayloadEnvelope = { Plain: { TxUtxo: { inputs: [], outputs: [], fee: "0", unlocks: [] } } };
         const payloadJson = JSON.stringify(payload);
         const nonce = 0;
         const id = computeBlockId(parents, payloadJson, nonce);
-        const signature = wallet.sign(id); // Plain signature of ID (utf8)
+
+        // Canonical signing
+        const canonicalView = {
+            id,
+            parents,
+            payload_json: payloadJson,
+            nonce,
+            network_id: "pms-test",
+            protocol_version: 1,
+            signer_pk_hex: wallet.publicKeyHex,
+        };
+        const messageToSign = JSON.stringify(canonicalView);
+        const signatureHex = wallet.sign(new TextEncoder().encode(messageToSign));
+
+        // Base64 encoding
+        const signatureBytes = new Uint8Array(signatureHex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
+        const signatureB64 = btoa(String.fromCharCode(...signatureBytes));
 
         const wireBlock: WireBlock = {
             id,
@@ -78,7 +94,7 @@ describe("SDK Integration Tests (Docker Cluster)", () => {
             network_id: "pms-test",
             protocol_version: 1,
             signer_pk_hex: wallet.publicKeyHex,
-            signature_hex: signature,
+            signature_hex: signatureB64,
         };
 
         // This might fail due to validation (invalid signature or structure), 

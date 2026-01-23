@@ -80,6 +80,7 @@ impl PmsEvent {
                 NftAction::Transfer { .. } => "nft_transferred",
                 NftAction::Use { .. } => "nft_used",
                 NftAction::Burn { .. } => "nft_burned",
+                NftAction::BatchBurn { .. } => "nft_batch_burned",
             },
             PmsEvent::ContractFulfilled { .. } => "contract_fulfilled",
             PmsEvent::ContractFailed { .. } => "contract_failed",

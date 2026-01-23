@@ -21,7 +21,7 @@ pub async fn test_rocks_store(name: &str) -> anyhow::Result<TestRocksStore> {
     std::fs::create_dir_all(&path)?;
     let path_str = path.to_string_lossy().to_string();
 
-    let store = Arc::new(RocksStore::new(&path_str, 128, format!("it:{name}")).await?);
+    let store = Arc::new(RocksStore::new(&path_str, 128, format!("it:{name}"), None).await?);
 
     Ok(TestRocksStore { store, _dir: dir })
 }
@@ -38,7 +38,7 @@ pub async fn test_rocks_store_with_limit(
     // prefix libre pour les tests
     let prefix = format!("it:{}", name);
 
-    let store = RocksStore::new(&db_path, tip_limit, &prefix).await?;
+    let store = RocksStore::new(&db_path, tip_limit, &prefix, None).await?;
     // si tu as ensure_schema async:
     store.ensure_schema().await?;
     Ok(Arc::new(store))

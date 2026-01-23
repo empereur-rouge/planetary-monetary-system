@@ -21,6 +21,10 @@ pub struct Rocks {
     pub prefix: String, // ex: "testnet" | "mainnet"
     #[serde(default = "default_tip_limit")]
     pub tip_limit: usize,
+    /// Intervalle entre chaque backup (checkpoint) en secondes.
+    /// Défaut: 21600 (6 heures).
+    #[serde(default)]
+    pub checkpoint_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
