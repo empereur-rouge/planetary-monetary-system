@@ -16,7 +16,7 @@ hrp = "8e"                    # Human-Readable Prefix pour les adresses
 # Nouveau système de treasury wallets
 # Les wallets sont chargés depuis un fichier JSON signé (vérifié contre la clé coordinator)
 # Sélection: pseudo-aléatoire pour les frais, premier wallet pour les récompenses de bloc
-treasury_wallets_file = "/home/pms/config/treasury-wallets.json"
+treasury_wallets_file = "/home/pms/config/pms/treasury-wallets.json"
 
 [client]
 # Configuration du serveur/client

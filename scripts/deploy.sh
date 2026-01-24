@@ -310,6 +310,35 @@ if [ "\$DO_BUILD" = "true" ]; then
     # Note: On build pms-node qui contient tools-cli
     docker compose -f docker-compose.yml build --no-cache
     
+    # --- Action 2b: Init Coordinator (Pre-Start) ---
+    if [ "\$DO_INIT_COORD" = "true" ]; then
+        echo -e "\${YELLOW}👑 Initializing Coordinator & Treasury (Pre-Start)...\${NC}"
+        
+        # Use 'docker compose run --rm' to generate files in mounted volumes without starting the full node service
+        # 1. Gen Coordinator
+        docker compose -f docker-compose.yml run --rm node1 tools-cli gen-coordinator \
+            /home/pms/config/pms/coordinator.key \
+            /home/pms/config/pms/coordinator.json \
+            /home/pms/config/config.prod.toml
+
+        # 2. Gen Treasury (Path modified to /home/pms/config/pms/ to persist in ./etc/pms volume)
+        echo -e "\${YELLOW}🏦 Generating Treasury Wallet...\${NC}"
+        docker compose -f docker-compose.yml run --rm node1 tools-cli treasury-generate 1 \
+            /home/pms/config/pms/treasury-keys \
+            /home/pms/config/pms/treasury-wallets.json
+
+        # 3. Sign Treasury
+        docker compose -f docker-compose.yml run --rm node1 tools-cli treasury-sign \
+            /home/pms/config/pms/coordinator.key \
+            /home/pms/config/pms/treasury-wallets.json
+            
+        echo -e "\${GREEN}✅ Init Complete. Files generated in ./etc/pms/\${NC}"
+        
+        echo "MAGIC_JSON_START"
+        cat etc/pms/coordinator.json
+        echo "MAGIC_JSON_END"
+    fi
+    
     # Start (Force recreate to ensure config is picked up)
     docker compose -f docker-compose.yml up -d --force-recreate
 
@@ -347,39 +376,7 @@ else
 fi
 
 
-# --- Action 3: Init Coordinator ---
-if [ "\$DO_INIT_COORD" = "true" ]; then
-    echo -e "\${YELLOW}👑 Initializing Coordinator...\${NC}"
-    
-    # On utilise tools-cli DANS le conteneur pour générer et mettre à jour la config
-    # On redirige stderr vers null pour ne garder que le JSON clean sur stdout si possible
-    # Mais tools-cli est verbeux. On va essayer de capturer le fichier généré.
-    
-    # Executer la génération
-    docker exec pms-node-prod tools-cli gen-coordinator \
-        /home/pms/config/pms/coordinator.key \
-        /home/pms/config/pms/coordinator.json \
-        /home/pms/config/config.prod.toml > /dev/null 2>&1
-        
-    # --- Treasury Wallet Generation ---
-    echo -e "\${YELLOW}🏦 Generating Treasury Wallet...\${NC}"
-    # Generate 1 treasury wallet
-    docker exec pms-node-prod tools-cli treasury-generate 1 \
-        /home/pms/config/pms/treasury-keys \
-        /home/pms/config/treasury-wallets.json
-        
-    # Sign it with coordinator key
-    docker exec pms-node-prod tools-cli treasury-sign \
-        /home/pms/config/pms/coordinator.key \
-        /home/pms/config/treasury-wallets.json
-        
-    # Redémarrer pour prendre en compte la nouvelle config (clés coordinator update + treasury)
-    docker compose -f docker-compose.prod.yml restart node1
-    
-    echo "MAGIC_JSON_START"
-    cat etc/pms/coordinator.json
-    echo "MAGIC_JSON_END"
-fi
+
 
 EOFREMOTE_MAIN
 
