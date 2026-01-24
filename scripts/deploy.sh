@@ -316,19 +316,20 @@ if [ "\$DO_BUILD" = "true" ]; then
         
         # Use 'docker compose run --rm' to generate files in mounted volumes without starting the full node service
         # 1. Gen Coordinator
-        docker compose -f docker-compose.yml run --rm node1 tools-cli gen-coordinator \
+        # ⚠️  ENTRYPOINT OVERRIDE: Must run tools-cli, NOT the node itself
+        docker compose -f docker-compose.yml run --rm --entrypoint /usr/local/bin/tools-cli node1 gen-coordinator \
             /home/pms/config/pms/coordinator.key \
             /home/pms/config/pms/coordinator.json \
             /home/pms/config/config.prod.toml
 
         # 2. Gen Treasury (Path modified to /home/pms/config/pms/ to persist in ./etc/pms volume)
         echo -e "\${YELLOW}🏦 Generating Treasury Wallet...\${NC}"
-        docker compose -f docker-compose.yml run --rm node1 tools-cli treasury-generate 1 \
+        docker compose -f docker-compose.yml run --rm --entrypoint /usr/local/bin/tools-cli node1 treasury-generate 1 \
             /home/pms/config/pms/treasury-keys \
             /home/pms/config/pms/treasury-wallets.json
 
         # 3. Sign Treasury
-        docker compose -f docker-compose.yml run --rm node1 tools-cli treasury-sign \
+        docker compose -f docker-compose.yml run --rm --entrypoint /usr/local/bin/tools-cli node1 treasury-sign \
             /home/pms/config/pms/coordinator.key \
             /home/pms/config/pms/treasury-wallets.json
             
