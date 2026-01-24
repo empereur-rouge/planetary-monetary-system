@@ -23,13 +23,13 @@ services:
       - ./secrets/tls:/home/pms/tls:ro
       # Persistent storage
       - pms_data:/home/pms/data
-    # Validated Production Healthcheck (Process Check)
+    # Validated Production Healthcheck (Using curl with HTTPS -k for self-signed)
     healthcheck:
-      test: [ "CMD", "/usr/local/bin/pms-node", "--version" ]
+      test: [ "CMD-SHELL", "curl -k -f https://127.0.0.1:8080/livez || exit 1" ]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 5s
+      start_period: 10s
     # Internal port only - Caddy handles external traffic
     expose:
       - "8080"
