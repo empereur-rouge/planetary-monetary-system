@@ -289,7 +289,9 @@ impl Server {
                     )
                     .await
                 {
-                    eprintln!("[API] error: {e}");
+                    eprintln!("[API] FATAL error: {e}");
+                    // CRITICAL: Exit process on API failure to conform to "fail fast" requirement
+                    std::process::exit(1);
                 }
             });
         }

@@ -326,7 +326,19 @@ if [ "\$DO_INIT_COORD" = "true" ]; then
         /home/pms/config/pms/coordinator.json \
         /home/pms/config/config.prod.toml > /dev/null 2>&1
         
-    # Redémarrer pour prendre en compte la nouvelle config (clés coordinator update)
+    # --- Treasury Wallet Generation ---
+    echo -e "\${YELLOW}🏦 Generating Treasury Wallet...\${NC}"
+    # Generate 1 treasury wallet
+    docker exec pms-node-prod tools-cli treasury-generate 1 \
+        /home/pms/config/pms/treasury-keys \
+        /home/pms/config/treasury-wallets.json
+        
+    # Sign it with coordinator key
+    docker exec pms-node-prod tools-cli treasury-sign \
+        /home/pms/config/pms/coordinator.key \
+        /home/pms/config/treasury-wallets.json
+        
+    # Redémarrer pour prendre en compte la nouvelle config (clés coordinator update + treasury)
     docker compose -f docker-compose.prod.yml restart node1
     
     echo "MAGIC_JSON_START"
