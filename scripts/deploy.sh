@@ -456,25 +456,41 @@ EOFREMOTE_EXPORT
     TREASURY_JSON=$(echo "$REMOTE_DATA" | sed -n '/---START_TREASURY---/,/---END_TREASURY---/p' | sed '1d;$d')
 
     # Generate final JSON locally
-    # Using python3 for safe JSON formatting if available, otherwise fallback to simple string construction
+    # Safe method: Pass content via environment variables to avoid python string injection issues
+    export COORD_JSON_ENV="$COORD_JSON"
+    export COORD_KEY_ENV="$COORD_KEY"
+    export TREASURY_JSON_ENV="$TREASURY_JSON"
+    
     if command -v python3 &>/dev/null; then
       python3 -c "
-import json, sys
+import json, os, sys
 
-data = {
-    'deployment_info': {
-        'domain': '$DOMAIN_NAME',
-        'admin_token': '$ADMIN_TOKEN',
-        'vps_ip': '$VPS_IP',
-        'user': '$VPS_USER'
-    },
-    'coordinator': {
-        'wallet': json.loads('''$COORD_JSON'''),
-        'private_key_hex': '$COORD_KEY'.strip()
-    },
-    'treasury_wallets': json.loads('''$TREASURY_JSON''')
-}
-print(json.dumps(data, indent=2))
+try:
+    coord_json_str = os.environ.get('COORD_JSON_ENV', '{}')
+    coord_key_str = os.environ.get('COORD_KEY_ENV', '')
+    treasury_json_str = os.environ.get('TREASURY_JSON_ENV', '[]')
+
+    # Handle potentially empty or whitespace-only strings
+    if not coord_json_str.strip(): coord_json_str = '{}'
+    if not treasury_json_str.strip(): treasury_json_str = '[]'
+
+    data = {
+        'deployment_info': {
+            'domain': '$DOMAIN_NAME',
+            'admin_token': '$ADMIN_TOKEN',
+            'vps_ip': '$VPS_IP',
+            'user': '$VPS_USER'
+        },
+        'coordinator': {
+            'wallet': json.loads(coord_json_str),
+            'private_key_hex': coord_key_str.strip()
+        },
+        'treasury_wallets': json.loads(treasury_json_str)
+    }
+    print(json.dumps(data, indent=2))
+except Exception as e:
+    print(f'Error creating JSON: {e}', file=sys.stderr)
+    sys.exit(1)
 " > "$BACKUP_FILE"
     else
       # Fallback for basic environments

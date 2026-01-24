@@ -67,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Docker Build**: Optimized build context by excluding `scripts/`, `docs/`, `backups/`, and other dev files in `.dockerignore`.
   - **TLS Config**: Fixed Caddy ACME registration failure by replacing invalid `admin@localhost` with `admin@pms-network.com` in generated Caddyfile.
   - **Healthcheck**: Restored `curl` healthcheck (validated working via debug script) as process-check proved unreliable.
-  - **Secure Export**: Added `deploy.sh` feature to download sensitive data to a local JSON backup **on demand** (prompted). Includes a **native macOS "Save As" dialog**.
+  - **Secure Export**: Added `deploy.sh` feature to download sensitive data to a local JSON backup **on demand** (prompted). Includes a **native macOS "Save As" dialog**. Fixed JSON injection issues using environment variables.
 
 ---
 
