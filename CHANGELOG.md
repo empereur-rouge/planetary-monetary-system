@@ -61,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Added explicit permission fix (`chmod 777 etc/pms`, `chmod 777 etc/config`) to ensure container can write generated keys.
     - Updated `tools-cli` with `--force` flag to bypass interactive confirmation during automated deployment.
     - **Persistence Fix**: Mounted `etc/config` as directory instead of file to solve Docker atomic write/inode issues on host.
+    - **Verification Logic**: Refined `grep` to ignore placeholders in `authority_public_keys` and only check `coordinator_public_key`.
   - **Fail Fast**: Node process now exits (crashes) if API fails to start (e.g. missing treasury config), preventing "zombie" states where only P2P runs
   - **Checklist**: Added visual file status table to `deploy.sh`. Runs AFTER setup and STOPS deployment if critical files are missing. Correctly handles files to be generated.
 

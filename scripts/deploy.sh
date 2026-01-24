@@ -349,7 +349,8 @@ if [ "\$DO_BUILD" = "true" ]; then
         
         # Verification: Check if config was actually updated
         echo -e "\${YELLOW}🔍 Verifying Config Update...\${NC}"
-        if grep -q "03XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" etc/config/config.prod.toml; then
+        # We check specifically for the assignment line to avoid matching the other placeholder in authority_public_keys
+        if grep -q 'coordinator_public_key = "03XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"' etc/config/config.prod.toml; then
              echo -e "\${RED}❌ ERROR: Config file was NOT updated with new coordinator key! (Still has placeholder)\${NC}"
              exit 1
         else
