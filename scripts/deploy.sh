@@ -440,11 +440,16 @@ if ask_yes_no "   ❓ Download Secure Backup (keys, wallets) locally?" "Y"; then
     scp -q $VPS_USER@$VPS_IP:/opt/pms/etc/pms/coordinator.json "$TMP_DIR/coordinator.json" 2>/dev/null || echo "{}" > "$TMP_DIR/coordinator.json"
     scp -q $VPS_USER@$VPS_IP:/opt/pms/etc/pms/coordinator.key "$TMP_DIR/coordinator.key" 2>/dev/null || touch "$TMP_DIR/coordinator.key"
     scp -q $VPS_USER@$VPS_IP:/opt/pms/etc/pms/treasury-wallets.json "$TMP_DIR/treasury-wallets.json" 2>/dev/null || echo "[]" > "$TMP_DIR/treasury-wallets.json"
+    
+    # Fix: Get the full treasury keys (mnemonics) directory
+    # -r for recursive copy of the directory
+    mkdir -p "$TMP_DIR/treasury-keys"
+    scp -q -r $VPS_USER@$VPS_IP:/opt/pms/etc/pms/treasury-keys/* "$TMP_DIR/treasury-keys/" 2>/dev/null || true
 
     # Generate final JSON locally
     if command -v python3 &>/dev/null; then
       python3 -c "
-import json, os, sys
+import json, os, sys, glob
 
 try:
     # Read files safely
@@ -469,6 +474,21 @@ try:
     except:
         treasury_wallets = []
 
+    # Read all treasury key files
+    treasury_keys = []
+    key_files = glob.glob('$TMP_DIR/treasury-keys/*.json')
+    for kf in key_files:
+        try:
+            with open(kf, 'r') as f:
+                key_data = json.load(f)
+                treasury_keys.append(key_data)
+        except:
+            pass
+            
+    # If we found detailed keys, prefer them or merge them
+    # But usually treasury_wallets is just the public list. 
+    # Let's provide both for completeness.
+
     data = {
         'deployment_info': {
             'domain': '$DOMAIN_NAME',
@@ -480,7 +500,8 @@ try:
             'wallet': coord_wallet,
             'private_key_hex': coord_key_raw
         },
-        'treasury_wallets': treasury_wallets
+        'treasury_list_public': treasury_wallets,
+        'treasury_opt_keys_full': treasury_keys
     }
     print(json.dumps(data, indent=2))
 except Exception as e:
