@@ -52,11 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Docker Deployment**
   - Reverted healthcheck to HTTPS (`-k`) as server enforces TLS in production
   - Corrected service name (`node` -> `node1`) to match Caddy reverse proxy configuration
-  - Updated `scripts/deploy.sh` to force sync local `docker-compose.yml` to VPS (ensures fixes apply without git push)
   - Updated `scripts/deploy.sh` to generate Caddyfile with correct backend host (`node1`) and configured proper HTTPS transport (skip verify) for internal traffic
+  - **Manual Sync**: Automatic `docker-compose.yml` sync removed from `deploy.sh`. Use `git push` before deploying (warning added).
   - **Automated Treasury**: `deploy.sh` now auto-generates and signs `treasury-wallets.json` during Coordinator init
   - **Fail Fast**: Node process now exits (crashes) if API fails to start (e.g. missing treasury config), preventing "zombie" states where only P2P runs
-  - **Checklist**: Added visual file status table to `deploy.sh` to warn about missing critical files before build
+  - **Checklist**: Added visual file status table to `deploy.sh`. Runs AFTER setup and STOPS deployment if critical files are missing. Correctly handles files to be generated.
 
 ---
 
