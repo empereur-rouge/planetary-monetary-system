@@ -56,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Updated `scripts/deploy.sh` to generate Caddyfile with correct backend host (`node1`) and configured proper HTTPS transport (skip verify) for internal traffic
   - **Automated Treasury**: `deploy.sh` now auto-generates and signs `treasury-wallets.json` during Coordinator init
   - **Fail Fast**: Node process now exits (crashes) if API fails to start (e.g. missing treasury config), preventing "zombie" states where only P2P runs
+  - **Checklist**: Added visual file status table to `deploy.sh` to warn about missing critical files before build
 
 ---
 

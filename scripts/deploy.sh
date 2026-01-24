@@ -257,6 +257,53 @@ EOF
 
 # --- Action 2: Build & Start ---
 if [ "$DO_BUILD" = "true" ]; then
+
+    # --- Pre-Deployment Checklist ---
+    echo ""
+    echo -e "${YELLOW}📂 Checking critical files...${NC}"
+    echo "==================================================="
+    printf "%-40s %s\n" "File" "Status"
+    echo "---------------------------------------------------"
+    
+    MISSING_CRITICAL=false
+    
+    check_file() {
+        local file=$1
+        local is_critical=$2 # "true" or "false"
+        if [ -f "$file" ]; then
+            printf "%-40s ${GREEN}[✅ OK]${NC}\n" "$file"
+        else
+            printf "%-40s ${RED}[❌ MISSING]${NC}\n" "$file"
+            if [ "$is_critical" = "true" ]; then
+                MISSING_CRITICAL=true
+            fi
+        fi
+    }
+    
+    check_file "docker-compose.yml" "true"
+    check_file "Dockerfile" "true"
+    check_file "etc/config/config.prod.toml" "true"
+    check_file "etc/pms/node.key" "true"
+    check_file "secrets/tls/cert.pem" "true"
+    
+    # Treasury is critical only if we are NOT about to init/gen it
+    if [ "$DO_INIT_COORD" = "true" ]; then
+        check_file "etc/pms/treasury-wallets.json" "false" # Will be generated
+    else
+        check_file "etc/pms/treasury-wallets.json" "true" # Must exist already
+    fi
+    
+    echo "==================================================="
+    
+    if [ "$MISSING_CRITICAL" = "true" ]; then
+        echo -e "${RED}⚠️  CRITICAL FILES MISSING! The node might fail to start.${NC}"
+        echo "   (If you are initializing for the first time, ensure setups ran correctly)"
+        sleep 2
+    else
+        echo -e "${GREEN}✅ All critical files present.${NC}"
+    fi
+    echo ""
+
     echo -e "${YELLOW}🐳 Rebuilding and Starting Containers...${NC}"
     
     # Nettoyage si demandé
