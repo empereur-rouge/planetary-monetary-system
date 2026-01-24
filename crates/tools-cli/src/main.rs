@@ -26,17 +26,32 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() > 1 && args[1] == "gen-coordinator" {
-        if args.len() < 4 || args.len() > 5 {
-            eprintln!("Usage: tools-cli gen-coordinator <key_file> <json_file> [config_file]");
+        // Simple manual parsing to support optional flag anywhere
+        let mut clean_args: Vec<String> = Vec::new();
+        let mut force = false;
+
+        for arg in &args {
+            if arg == "--force" {
+                force = true;
+            } else {
+                clean_args.push(arg.clone());
+            }
+        }
+
+        if clean_args.len() < 4 || clean_args.len() > 5 {
+            eprintln!(
+                "Usage: tools-cli gen-coordinator <key_file> <json_file> [config_file] [--force]"
+            );
             eprintln!(
                 "  config_file: optionnel, met à jour coordinator_public_key automatiquement"
             );
+            eprintln!("  --force: écrase les fichiers existants sans confirmation");
             std::process::exit(1);
         }
-        let key_path = &args[2];
-        let json_path = &args[3];
-        let config_path = args.get(4).map(|s| s.as_str());
-        keygen::generate_and_save(key_path, json_path, config_path)?;
+        let key_path = &clean_args[2];
+        let json_path = &clean_args[3];
+        let config_path = clean_args.get(4).map(|s| s.as_str());
+        keygen::generate_and_save(key_path, json_path, config_path, force)?;
         return Ok(());
     }
 

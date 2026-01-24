@@ -109,7 +109,13 @@ use std::path::Path;
 /// - `key_path` : Clé privée en hex (64 caractères) - format attendu par pms-node
 /// - `json_path` : Fichier JSON complet avec les informations du wallet
 /// - `config_path` : Optionnel - met à jour automatiquement coordinator_public_key dans le config
-pub fn generate_and_save(key_path: &str, json_path: &str, config_path: Option<&str>) -> Result<()> {
+/// - `force` : Si true, écrase les fichiers existants sans demander confirmation
+pub fn generate_and_save(
+    key_path: &str,
+    json_path: &str,
+    config_path: Option<&str>,
+    force: bool,
+) -> Result<()> {
     use dialoguer::Confirm;
 
     println!("🔑 Generation des clés coordinateur...");
@@ -168,15 +174,19 @@ pub fn generate_and_save(key_path: &str, json_path: &str, config_path: Option<&s
         }
         println!();
 
-        let confirm = Confirm::new()
-            .with_prompt("Voulez-vous continuer et écraser ces fichiers ?")
-            .default(false)
-            .interact()
-            .unwrap_or(false);
+        if !force {
+            let confirm = Confirm::new()
+                .with_prompt("Voulez-vous continuer et écraser ces fichiers ?")
+                .default(false)
+                .interact()
+                .unwrap_or(false);
 
-        if !confirm {
-            println!("❌ Génération annulée.");
-            return Ok(());
+            if !confirm {
+                println!("❌ Génération annulée.");
+                return Ok(());
+            }
+        } else {
+            println!("⏩ Option --force détectée : écrasement forcé.");
         }
         println!();
     }

@@ -326,7 +326,7 @@ if [ "\$DO_BUILD" = "true" ]; then
             "/usr/local/bin/tools-cli gen-coordinator \
             /home/pms/config/pms/coordinator.key \
             /home/pms/config/pms/coordinator.json \
-            /home/pms/config/config.prod.toml"
+            /home/pms/config/config.prod.toml --force"
 
         # 2. Gen Treasury (Path modified to /home/pms/config/pms/ to persist in ./etc/pms volume)
         echo -e "\${YELLOW}🏦 Generating Treasury Wallet...\${NC}"
