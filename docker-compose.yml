@@ -2,7 +2,7 @@
 # Production Docker Compose - Single Node + Caddy (Let's Encrypt)
 # =============================================================================
 services:
-  node:
+  node1:
     build:
       context: .
       dockerfile: Dockerfile
@@ -23,13 +23,16 @@ services:
       - ./secrets/tls:/home/pms/tls:ro
       # Persistent storage
       - pms_data:/home/pms/data
+    # Validated Production Healthcheck (Using curl with HTTPS -k for self-signed)
     healthcheck:
-      test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1" ]
+      test: [ "CMD-SHELL", "curl -k -f https://127.0.0.1:8080/livez || exit 1" ]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
-    # Pas de ports exposés directement - Caddy fait le proxy
+    # Internal port only - Caddy handles external traffic
+    expose:
+      - "8080"
     restart: unless-stopped
 
   caddy:
@@ -40,11 +43,11 @@ services:
       - "80:80" # HTTP (Let's Encrypt challenge)
       - "443:443" # HTTPS
     volumes:
-      - ./caddyfile:/etc/caddy/Caddyfile:ro
+      - ./Caddyfile.prod:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      node:
+      node1:
         condition: service_healthy
 
 volumes:

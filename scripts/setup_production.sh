@@ -138,11 +138,12 @@ services:
       - ./etc/pms/node-identity.key:/home/pms/config/node-identity.key:ro
       - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
       - pms_data:/home/pms/data
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+    # Healthcheck defined in Dockerfile is sufficient
+    # healthcheck:
+    #   test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
+    #   interval: 30s
+    #   timeout: 5s
+    #   retries: 3
     # Internal only - Caddy handles external traffic
     expose:
       - "8080"

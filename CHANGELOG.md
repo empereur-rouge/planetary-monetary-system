@@ -48,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - `fee_distribution_e2e_test.rs` - E2E verification of treasury fee distribution
 
+### Fixed
+- **Docker Deployment**
+  - Reverted healthcheck to HTTPS (`-k`) as server enforces TLS in production
+  - Corrected service name (`node` -> `node1`) to match Caddy reverse proxy configuration
+  - Updated `scripts/deploy.sh` to force sync local `docker-compose.yml` to VPS (ensures fixes apply without git push)
+  - Updated `scripts/deploy.sh` to generate Caddyfile with correct backend host (`node1`) and configured proper HTTPS transport (skip verify) for internal traffic
+
 ---
 
 ## [0.3.0] - 2026-01-08

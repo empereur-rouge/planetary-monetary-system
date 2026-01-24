@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl-dev \
     openssl \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create dedicated user
