@@ -400,18 +400,107 @@ fi
 EOFREMOTE_MAIN
 
 # -----------------------------------------------------------------------------
-# Post-Processing Local (Affichage Secret)
+# 6. Secure Export (User Request)
 # -----------------------------------------------------------------------------
+echo ""
+if ask_yes_no "   ❓ Download Secure Backup (keys, wallets) locally?" "Y"; then
+    echo -e "${YELLOW}💾 Generating Secure Verification Export...${NC}"
 
-echo ""
-echo "================================================================================"
-echo -e "🎉 ${GREEN}DEPLOYMENT FINISHED${NC}"
-echo "================================================================================"
-echo ""
-echo -e "🌍 API Endpoint:     ${GREEN}https://$DOMAIN_NAME${NC}"
-echo -e "🔑 Admin Token:      ${GREEN}$ADMIN_TOKEN${NC}"
+    BACKUP_DIR="backups"
+    DEFAULT_FILENAME="pms-deployment-$(date +%Y%m%d-%H%M%S).json"
+    BACKUP_FILE=""
 
-echo ""
+    # macOS Native "Save As" Dialog
+    if command -v osascript &>/dev/null; then
+        echo "   Requesting save location via dialog..."
+        # AppleScript: choose file name
+        # We use 'try' block to handle user cancel
+        BACKUP_FILE=$(osascript -e "set fileName to choose file name with prompt \"Enregistrer la sauvegarde PMS :\" default name \"$DEFAULT_FILENAME\" default location (path to desktop folder)" -e "POSIX path of fileName" 2>/dev/null)
+    fi
+
+    # Fallback if user cancelled dialog or not on macOS
+    if [ -z "$BACKUP_FILE" ]; then
+        mkdir -p "$BACKUP_DIR"
+        BACKUP_FILE="$BACKUP_DIR/$DEFAULT_FILENAME"
+        if command -v osascript &>/dev/null; then
+             # User hit cancel on the dialog, usually implies they don't want to save
+             # But we default to backup dir just in case
+            echo "   ⚠️  Dialog cancelled. Defaulting to: $BACKUP_FILE"
+        fi
+    fi
+
+    # Retrieve remote sensitive files content safely
+    # We print them specifically to capture them
+    echo "   Fetching remote secrets..."
+
+    REMOTE_DATA=$(ssh -T $VPS_USER@$VPS_IP << EOFREMOTE_EXPORT
+      set -e
+      cd /opt/pms
+      echo "---START_COORD_JSON---"
+      cat etc/pms/coordinator.json 2>/dev/null || echo "{}"
+      echo "---END_COORD_JSON---"
+
+      echo "---START_COORD_KEY---"
+      cat etc/pms/coordinator.key 2>/dev/null || echo ""
+      echo "---END_COORD_KEY---"
+
+      echo "---START_TREASURY---"
+      cat etc/pms/treasury-wallets.json 2>/dev/null || echo "[]"
+      echo "---END_TREASURY---"
+EOFREMOTE_EXPORT
+    )
+
+    # Extract content using bash string manipulation
+    COORD_JSON=$(echo "$REMOTE_DATA" | sed -n '/---START_COORD_JSON---/,/---END_COORD_JSON---/p' | sed '1d;$d')
+    COORD_KEY=$(echo "$REMOTE_DATA" | sed -n '/---START_COORD_KEY---/,/---END_COORD_KEY---/p' | sed '1d;$d')
+    TREASURY_JSON=$(echo "$REMOTE_DATA" | sed -n '/---START_TREASURY---/,/---END_TREASURY---/p' | sed '1d;$d')
+
+    # Generate final JSON locally
+    # Using python3 for safe JSON formatting if available, otherwise fallback to simple string construction
+    if command -v python3 &>/dev/null; then
+      python3 -c "
+import json, sys
+
+data = {
+    'deployment_info': {
+        'domain': '$DOMAIN_NAME',
+        'admin_token': '$ADMIN_TOKEN',
+        'vps_ip': '$VPS_IP',
+        'user': '$VPS_USER'
+    },
+    'coordinator': {
+        'wallet': json.loads('''$COORD_JSON'''),
+        'private_key_hex': '$COORD_KEY'.strip()
+    },
+    'treasury_wallets': json.loads('''$TREASURY_JSON''')
+}
+print(json.dumps(data, indent=2))
+" > "$BACKUP_FILE"
+    else
+      # Fallback for basic environments
+      cat > "$BACKUP_FILE" << EOF
+{
+  "deployment_info": {
+     "domain": "$DOMAIN_NAME",
+     "admin_token": "$ADMIN_TOKEN",
+     "vps_ip": "$VPS_IP"
+  },
+  "coordinator": {
+     "wallet": $COORD_JSON,
+     "private_key_hex": "$COORD_KEY"
+  },
+  "treasury_wallets": $TREASURY_JSON
+}
+EOF
+    fi
+
+    echo -e "   ${GREEN}✅ Secure Backup Saved: $BACKUP_FILE${NC}"
+    echo -e "   ${RED}⚠️  KEEP THIS FILE SECRET! IT CONTAINS PRIVATE KEYS!${NC}"
+fi
+
+# -----------------------------------------------------------------------------
+# 7. Connectivity Check
+# -----------------------------------------------------------------------------
 echo -e "${YELLOW}🔍 Verifying external connectivity...${NC}"
 echo "   Request: GET https://$DOMAIN_NAME/livez"
 
