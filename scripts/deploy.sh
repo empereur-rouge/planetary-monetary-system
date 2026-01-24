@@ -122,19 +122,62 @@ scp docker-compose.yml Dockerfile "$VPS_USER@$VPS_IP:/opt/pms/"
 echo -e "${GREEN}✅ Local docker-compose.yml & Dockerfile uploaded.${NC}"
 
 # -----------------------------------------------------------------------------
-# Execution sur le VPS
+# 3. Execution: Phase 1 (Git Update)
 # -----------------------------------------------------------------------------
 echo ""
-echo -e "${YELLOW}🔌 Connecting to VPS...${NC}"
+echo -e "${YELLOW}🔌 Connecting to VPS (Phase 1: Git Update)...${NC}"
 
-# On construit un script HEREDOC dynamique pour envoyer les variables
-ssh -T $VPS_USER@$VPS_IP << EOFREMOTE
+ssh -T $VPS_USER@$VPS_IP << EOFREMOTE_GIT
+set -e
+DO_GIT_PULL="$DO_GIT_PULL"
+
+# Esthétique distante
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo "📁 Preparation..."
+mkdir -p /opt/pms
+cd /opt/pms
+
+# --- Action 1: Git Pull ---
+if [ "\$DO_GIT_PULL" = "true" ]; then
+    echo -e "\${YELLOW}📥 Updating repository...\${NC}"
+    if [ -d ".git" ]; then
+        # On reset les changements locaux pour permettre le pull
+        # (Les fichiers de config seront ré-écrasés par le SCP juste après)
+        git reset --hard HEAD
+        git pull
+    else
+        git clone https://github.com/empereur-rouge/planetary-monetary-system.git .
+    fi
+else
+    echo "   Skipping Git Pull."
+fi
+EOFREMOTE_GIT
+
+# -----------------------------------------------------------------------------
+# 4. Execution: Phase 2 (Sync Local Config)
+# -----------------------------------------------------------------------------
+# IMPORTANT: On envoie le docker-compose.yml local APRES le git pull
+# pour s'assurer que nos correctifs locaux (node1, healthcheck) écrasent
+# la version du repo (si différente ou si reset).
+echo ""
+echo -e "${YELLOW}📤 Syncing local configuration files...${NC}"
+scp docker-compose.yml Dockerfile "$VPS_USER@$VPS_IP:/opt/pms/"
+echo -e "${GREEN}✅ Local docker-compose.yml & Dockerfile uploaded.${NC}"
+
+# -----------------------------------------------------------------------------
+# 5. Execution: Phase 3 (Config & Deploy)
+# -----------------------------------------------------------------------------
+echo ""
+echo -e "${YELLOW}🔌 Connecting to VPS (Phase 2: Deploy)...${NC}"
+
+ssh -T $VPS_USER@$VPS_IP << EOFREMOTE_MAIN
 set -e
 
-# Définition des variables sur le distant
+# Définition des variables sur le distant (Phase 2)
 ADMIN_TOKEN="$ADMIN_TOKEN"
 DOMAIN_NAME="$DOMAIN_NAME"
-DO_GIT_PULL="$DO_GIT_PULL"
 DO_BUILD="$DO_BUILD"
 DO_CLEAN_RESET="$DO_CLEAN_RESET"
 DO_INIT_COORD="$DO_INIT_COORD"
@@ -145,25 +188,7 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo "📁 Checking directories..."
-mkdir -p /opt/pms
 cd /opt/pms
-
-# --- Action 1: Git Pull ---
-if [ "\$DO_GIT_PULL" = "true" ]; then
-    echo -e "\${YELLOW}📥 Updating repository...\${NC}"
-    if [ -d ".git" ]; then
-        # Force checkout config BEFORE pulling to avoid merge conflicts
-        # But only if user accepts losing local changes to config
-        # Here we assume yes for smooth deploy
-        git checkout etc/config/config.prod.toml
-        git pull
-    else
-        git clone https://github.com/empereur-rouge/planetary-monetary-system.git .
-    fi
-else
-    echo "   Skipping Git Pull."
-fi
 
 # --- Setup Config & Secrets ---
 echo -e "\${YELLOW}⚙️  Configuring environment...\${NC}"
@@ -194,8 +219,7 @@ if [ ! -f etc/config/config.prod.toml ]; then
     sed -i 's|ca_pem =|# ca_pem =|g' etc/config/config.prod.toml
 fi
 
-# IMPORTANT: On utilise le docker-compose.yml du repo (déjà configuré pour la prod)
-# Plus besoin de générer docker-compose.prod.yml dynamiquement
+# IMPORTANT: On utilise le docker-compose.yml du repo (OU celui uploadé par SCP)
 
 # --- Caddyfile Check ---
 # On s'assure que le Caddyfile existe (et que ce n'est pas un dossier résiduel de Docker)
@@ -238,10 +262,14 @@ if [ "$DO_BUILD" = "true" ]; then
     # Nettoyage si demandé
     if [ "$DO_CLEAN_RESET" = "true" ]; then
         echo -e "${RED}🧹 Cleaning ALL data (down -v)...${NC}"
-        docker compose -f docker-compose.yml down -v 2>/dev/null || true
+        docker compose -f docker-compose.yml down -v --remove-orphans 2>/dev/null || true
     else
-        docker compose -f docker-compose.yml down 2>/dev/null || true
+        docker compose -f docker-compose.yml down --remove-orphans 2>/dev/null || true
     fi
+    
+    # Sécurité supplémentaire : On supprime explicitement le conteneur s'il traîne encore
+    # (Cas de changement de nom de service ex: node -> node1 avec même container_name)
+    docker rm -f pms-node 2>/dev/null || true
     
     # Build
     # Note: On build pms-node qui contient tools-cli
@@ -306,7 +334,7 @@ if [ "\$DO_INIT_COORD" = "true" ]; then
     echo "MAGIC_JSON_END"
 fi
 
-EOFREMOTE
+EOFREMOTE_MAIN
 
 # -----------------------------------------------------------------------------
 # Post-Processing Local (Affichage Secret)
