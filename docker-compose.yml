@@ -18,7 +18,7 @@ services:
       PMS__LIMITS__BURST: 2000
     volumes:
       # Configuration
-      - ./etc/config/config.prod.toml:/home/pms/config/config.prod.toml:rw
+      - ./etc/config:/home/pms/config:rw
       - ./etc/pms:/home/pms/config/pms:rw
       - ./secrets/tls:/home/pms/tls:ro
       # Persistent storage

@@ -317,7 +317,7 @@ if [ "\$DO_BUILD" = "true" ]; then
         # FIX PERMISSIONS: Ensure container user (pms) can write to mounted config and dir
         echo "   Fixing permissions for Docker write access..."
         chmod 777 etc/pms
-        chmod 666 etc/config/config.prod.toml
+        chmod 777 etc/config
 
         # Use 'docker compose run --rm' to generate files in mounted volumes without starting the full node service
         # 1. Gen Coordinator
