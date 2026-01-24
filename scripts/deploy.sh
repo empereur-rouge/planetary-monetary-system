@@ -314,6 +314,11 @@ if [ "\$DO_BUILD" = "true" ]; then
     if [ "\$DO_INIT_COORD" = "true" ]; then
         echo -e "\${YELLOW}👑 Initializing Coordinator & Treasury (Pre-Start)...\${NC}"
         
+        # FIX PERMISSIONS: Ensure container user (pms) can write to mounted config and dir
+        echo "   Fixing permissions for Docker write access..."
+        chmod 777 etc/pms
+        chmod 666 etc/config/config.prod.toml
+
         # Use 'docker compose run --rm' to generate files in mounted volumes without starting the full node service
         # 1. Gen Coordinator
         # ⚠️  ENTRYPOINT OVERRIDE: Use bash wrapper to ensure tools-cli runs
@@ -341,6 +346,15 @@ if [ "\$DO_BUILD" = "true" ]; then
         echo "MAGIC_JSON_START"
         cat etc/pms/coordinator.json
         echo "MAGIC_JSON_END"
+        
+        # Verification: Check if config was actually updated
+        echo -e "\${YELLOW}🔍 Verifying Config Update...\${NC}"
+        if grep -q "03XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" etc/config/config.prod.toml; then
+             echo -e "\${RED}❌ ERROR: Config file was NOT updated with new coordinator key! (Still has placeholder)\${NC}"
+             exit 1
+        else
+             echo -e "\${GREEN}✅ Config updated successfully.\${NC}"
+        fi
     fi
     
     # Start (Force recreate to ensure config is picked up)

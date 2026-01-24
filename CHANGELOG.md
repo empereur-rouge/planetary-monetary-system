@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Relocated generation to **Pre-Start** phase (between Build and Up) using `docker compose run --rm`.
     - Solves "egg/chicken" crash where node needed treasury file to start, but file generation needed running node.
     - Moved file path to `./etc/pms/treasury-wallets.json` ensures persistence.
+    - Added explicit permission fix (`chmod 777 etc/pms`, `chmod 666 config.prod.toml`) to ensure container can write generated keys.
   - **Fail Fast**: Node process now exits (crashes) if API fails to start (e.g. missing treasury config), preventing "zombie" states where only P2P runs
   - **Checklist**: Added visual file status table to `deploy.sh`. Runs AFTER setup and STOPS deployment if critical files are missing. Correctly handles files to be generated.
 
