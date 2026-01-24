@@ -429,50 +429,45 @@ if ask_yes_no "   ❓ Download Secure Backup (keys, wallets) locally?" "Y"; then
         fi
     fi
 
-    # Retrieve remote sensitive files content safely
-    # We print them specifically to capture them
-    echo "   Fetching remote secrets..."
-
-    REMOTE_DATA=$(ssh -T $VPS_USER@$VPS_IP << EOFREMOTE_EXPORT
-      set -e
-      cd /opt/pms
-      echo "---START_COORD_JSON---"
-      cat etc/pms/coordinator.json 2>/dev/null || echo "{}"
-      echo "---END_COORD_JSON---"
-
-      echo "---START_COORD_KEY---"
-      cat etc/pms/coordinator.key 2>/dev/null || echo ""
-      echo "---END_COORD_KEY---"
-
-      echo "---START_TREASURY---"
-      cat etc/pms/treasury-wallets.json 2>/dev/null || echo "[]"
-      echo "---END_TREASURY---"
-EOFREMOTE_EXPORT
-    )
-
-    # Extract content using bash string manipulation
-    COORD_JSON=$(echo "$REMOTE_DATA" | sed -n '/---START_COORD_JSON---/,/---END_COORD_JSON---/p' | sed '1d;$d')
-    COORD_KEY=$(echo "$REMOTE_DATA" | sed -n '/---START_COORD_KEY---/,/---END_COORD_KEY---/p' | sed '1d;$d')
-    TREASURY_JSON=$(echo "$REMOTE_DATA" | sed -n '/---START_TREASURY---/,/---END_TREASURY---/p' | sed '1d;$d')
+    # Retrieve remote sensitive files content safely using SCP
+    # This avoids stdout pollution issues with SSH/sed
+    echo "   Fetching remote secrets via SCP..."
+    
+    TMP_DIR=$(mktemp -d)
+    
+    # We use -q to be quiet, -r for recursive (though we copy files)
+    # We copy individually to handle missing files gracefully in the next step
+    scp -q $VPS_USER@$VPS_IP:/opt/pms/etc/pms/coordinator.json "$TMP_DIR/coordinator.json" 2>/dev/null || echo "{}" > "$TMP_DIR/coordinator.json"
+    scp -q $VPS_USER@$VPS_IP:/opt/pms/etc/pms/coordinator.key "$TMP_DIR/coordinator.key" 2>/dev/null || touch "$TMP_DIR/coordinator.key"
+    scp -q $VPS_USER@$VPS_IP:/opt/pms/etc/pms/treasury-wallets.json "$TMP_DIR/treasury-wallets.json" 2>/dev/null || echo "[]" > "$TMP_DIR/treasury-wallets.json"
 
     # Generate final JSON locally
-    # Safe method: Pass content via environment variables to avoid python string injection issues
-    export COORD_JSON_ENV="$COORD_JSON"
-    export COORD_KEY_ENV="$COORD_KEY"
-    export TREASURY_JSON_ENV="$TREASURY_JSON"
-    
     if command -v python3 &>/dev/null; then
       python3 -c "
 import json, os, sys
 
 try:
-    coord_json_str = os.environ.get('COORD_JSON_ENV', '{}')
-    coord_key_str = os.environ.get('COORD_KEY_ENV', '')
-    treasury_json_str = os.environ.get('TREASURY_JSON_ENV', '[]')
+    # Read files safely
+    def read_file(path, default):
+        if not os.path.exists(path): return default
+        with open(path, 'r') as f:
+            content = f.read().strip()
+            return content if content else default
 
-    # Handle potentially empty or whitespace-only strings
-    if not coord_json_str.strip(): coord_json_str = '{}'
-    if not treasury_json_str.strip(): treasury_json_str = '[]'
+    coord_json_raw = read_file('$TMP_DIR/coordinator.json', '{}')
+    coord_key_raw = read_file('$TMP_DIR/coordinator.key', '')
+    treasury_json_raw = read_file('$TMP_DIR/treasury-wallets.json', '[]')
+
+    # Parse JSON strings to objects
+    try:
+        coord_wallet = json.loads(coord_json_raw)
+    except:
+        coord_wallet = {}
+
+    try:
+        treasury_wallets = json.loads(treasury_json_raw)
+    except:
+        treasury_wallets = []
 
     data = {
         'deployment_info': {
@@ -482,10 +477,10 @@ try:
             'user': '$VPS_USER'
         },
         'coordinator': {
-            'wallet': json.loads(coord_json_str),
-            'private_key_hex': coord_key_str.strip()
+            'wallet': coord_wallet,
+            'private_key_hex': coord_key_raw
         },
-        'treasury_wallets': json.loads(treasury_json_str)
+        'treasury_wallets': treasury_wallets
     }
     print(json.dumps(data, indent=2))
 except Exception as e:
@@ -493,22 +488,19 @@ except Exception as e:
     sys.exit(1)
 " > "$BACKUP_FILE"
     else
-      # Fallback for basic environments
+      # Fallback for simple cat if python not available
       cat > "$BACKUP_FILE" << EOF
 {
-  "deployment_info": {
-     "domain": "$DOMAIN_NAME",
-     "admin_token": "$ADMIN_TOKEN",
-     "vps_ip": "$VPS_IP"
-  },
-  "coordinator": {
-     "wallet": $COORD_JSON,
-     "private_key_hex": "$COORD_KEY"
-  },
-  "treasury_wallets": $TREASURY_JSON
+  "COORD_NOTE": "Python missing, raw dump",
+  "coordinator_wallet": $(cat "$TMP_DIR/coordinator.json"),
+  "coordinator_key": "$(cat "$TMP_DIR/coordinator.key")",
+  "treasury": $(cat "$TMP_DIR/treasury-wallets.json")
 }
 EOF
     fi
+
+    # Cleanup temp
+    rm -rf "$TMP_DIR"
 
     echo -e "   ${GREEN}✅ Secure Backup Saved: $BACKUP_FILE${NC}"
     echo -e "   ${RED}⚠️  KEEP THIS FILE SECRET! IT CONTAINS PRIVATE KEYS!${NC}"
