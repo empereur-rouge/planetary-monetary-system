@@ -225,7 +225,7 @@ fi
 cat > Caddyfile.prod << EOF
 {
     # Options globales
-    email admin@localhost
+    email admin@pms-network.com
 }
 
 $DOMAIN_NAME, www.$DOMAIN_NAME, api.$DOMAIN_NAME {

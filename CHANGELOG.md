@@ -64,6 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **Verification Logic**: Refined `grep` to ignore placeholders in `authority_public_keys` and only check `coordinator_public_key`.
   - **Fail Fast**: Node process now exits (crashes) if API fails to start (e.g. missing treasury config), preventing "zombie" states where only P2P runs
   - **Checklist**: Added visual file status table to `deploy.sh`. Runs AFTER setup and STOPS deployment if critical files are missing. Correctly handles files to be generated.
+  - **Docker Build**: Optimized build context by excluding `scripts/`, `docs/`, `backups/`, and other dev files in `.dockerignore`.
+  - **TLS Config**: Fixed Caddy ACME registration failure by replacing invalid `admin@localhost` with `admin@pms-network.com` in generated Caddyfile.
 
 ---
 

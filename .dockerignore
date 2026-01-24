@@ -5,3 +5,29 @@ target/
 data/
 *.log
 .DS_Store
+
+# Scripts and Docs (User Request)
+scripts/
+documentation/
+
+# Environment & Secrets
+.env
+.env.example
+secrets/
+wallet-seed-*.json
+
+# Data & Backups
+backups/
+benchmark_results/
+docker_bin/
+docker_data/
+exports/
+
+# Test Outputs
+test_output*.txt
+
+# Misc
+docker-compose*.yml
+runbook_ops.md
+README.md
+CHANGELOG.md
