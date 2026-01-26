@@ -33,3 +33,9 @@ impl Stats {
         )
     }
 }
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self::new()
+    }
+}

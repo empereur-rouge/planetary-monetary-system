@@ -81,15 +81,21 @@ impl Settings {
             let secrets = &self.secrets;
 
             let node_key = Path::new(&secrets.node_identity_key_path);
-            let admin_file = Path::new(&secrets.admin_wallet_file);
 
-            // NOTE: Condition combinée pour satisfaire clippy::collapsible_if
-            if !(node_key.exists() && admin_file.exists()) && self.network.mode.is_prod() {
+            // Check node key
+            if !node_key.exists() && self.network.mode.is_prod() {
                 bail!(
-                    "Secrets manquants en prod : node_identity_key_path='{}', admin_wallet_file='{}'",
-                    secrets.node_identity_key_path,
-                    secrets.admin_wallet_file
+                    "Secrets manquants en prod : node_identity_key_path='{}'",
+                    secrets.node_identity_key_path
                 );
+            }
+
+            // Check admin wallet ONLY if specified
+            if let Some(path) = &secrets.admin_wallet_file {
+                let admin_file = Path::new(path);
+                if !admin_file.exists() && self.network.mode.is_prod() {
+                    bail!("Secrets manquants en prod : admin_wallet_file='{}'", path);
+                }
             }
         }
 
@@ -166,7 +172,7 @@ pub fn load_config_with(arg: Option<&std::path::Path>) -> Result<Settings, LoadE
         .set_default("rocks.prefix", "pms:dev")?
         .set_default("network.mode", "dev")?
         .set_default("address.hrp", "8e")?
-        .set_default("admin.wallet_addresses", Vec::<String>::new())?
+        // lb: admin.wallet_addresses is obsolete
         .set_default("client.oracle_url", "https://127.0.0.1:8080")?
         .set_default("client.allow_insecure_tls", true)?
         .set_default("tip_limit", 200)?

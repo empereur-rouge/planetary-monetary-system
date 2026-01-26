@@ -23,3 +23,4 @@ dotenvy = "0.15"
 rustls-pemfile = "2.2.0"
 rustls = { workspace = true }                                               # même si tu n'importes rien de rustls
 clap = { version = "4.5.51", features = ["derive"] }
+webbrowser = "1.0"

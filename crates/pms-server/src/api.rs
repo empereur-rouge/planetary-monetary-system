@@ -1,7 +1,7 @@
 // pms-server/src/api
 use crate::Server;
 use crate::admin::{admin_compact, admin_ping};
-use crate::api_fn::blocks::{submit_block, get_block_by_id};
+use crate::api_fn::blocks::{get_block_by_id, submit_block};
 use crate::api_fn::coordinator::get_coordinator_info;
 use crate::api_fn::dag::get_tips;
 use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
@@ -43,6 +43,7 @@ use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_http::{
     cors::{Any, CorsLayer},
     limit::RequestBodyLimitLayer,
+    services::ServeDir,
     timeout::TimeoutLayer,
     trace::TraceLayer,
 };
@@ -194,8 +195,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/wallet/history", post(get_wallet_history))
         .route("/v1/balance", post(balance_by_address));
 
-    let blocks = Router::new()
-        .route("/blocks/stream", get(stream_blocks));
+    let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
 
     let supply = Router::new()
         .route("/v1/supply", get(get_circulating_supply))
@@ -261,6 +261,9 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
 
     let debug = Router::new().route("/debug/slow", get(debug_slow));
 
+    // Endpoint: /dashboard (Static Files)
+    let dashboard = Router::new().nest_service("/dashboard", ServeDir::new("pms-dashboard/dist"));
+
     // Combine all
     Router::new()
         .merge(livez)
@@ -279,6 +282,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .merge(coordinator_routes)
         .merge(node_routes)
         .merge(debug)
+        .merge(dashboard)
         .with_state(state)
         // GLOBAL LAYERS (Reverse Order: Bottom executed first)
         // 5. Rate Limit
@@ -440,6 +444,11 @@ pub async fn serve_api(
         fee_pool: crate::fee_pool::create_fee_pool(),
     };
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // AUTOMATED FEE DISTRIBUTION TASK
+    // ═══════════════════════════════════════════════════════════════════════
+    spawn_fee_distributor_task(state.clone());
+
     // 🔹 Construit le Router complet
     let app = build_api_router(state, &settings);
 
@@ -502,4 +511,45 @@ pub async fn serve_api(
 pub async fn debug_slow(State(_state): State<AppState>) -> impl IntoResponse {
     sleep(Duration::from_secs(5)).await;
     "slow-ok"
+}
+
+/// Spawns the fee distribution task if enabled in configuration.
+/// Public for testing integration.
+pub fn spawn_fee_distributor_task(state: AppState) {
+    let settings = &state.settings;
+    if settings.fees.distribution_interval_sec > 0 {
+        let state_distrib = state.clone();
+        let interval_sec = settings.fees.distribution_interval_sec;
+
+        // Only run if Coordinator or Dev
+        tokio::spawn(async move {
+            tracing::info!(
+                "⏰ Fee Distribution Service started (interval: {}s)",
+                interval_sec
+            );
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+            // consume first tick (immediate)
+            interval.tick().await;
+
+            loop {
+                interval.tick().await; // Wait for next tick
+
+                match crate::fee_distribution::perform_fee_distribution(&state_distrib, None).await
+                {
+                    Ok(res) => {
+                        if res.success && res.total_distributed != "0" {
+                            tracing::info!(
+                                "✅ Automated distribution success: {} PMS",
+                                res.total_distributed
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Automated distribution failed: {}", e);
+                    }
+                }
+            }
+        });
+    }
 }

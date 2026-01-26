@@ -420,8 +420,8 @@ export class PmsClient {
         // 2. Sélectionner les inputs
         // Fetch dynamic config
         const netConfig = await this.getNetworkConfig();
-        const baseFeeSats = parseAmount(netConfig.base_fee);
-        const feeRateBps = BigInt(netConfig.fee_rate_bps);
+        const baseFeeSats = parseAmount(netConfig.base_fee || "0");
+        const feeRateBps = BigInt(netConfig.fee_rate_bps || 0);
 
         const amountSats = parseAmount(amount);
 
@@ -435,7 +435,7 @@ export class PmsClient {
 
         for (const utxo of utxos) {
             selectedUtxos.push(utxo);
-            selectedSats += parseAmount(utxo.amount);
+            selectedSats += parseAmount(utxo.amount || "0");
             if (selectedSats >= totalNeeded) break;
         }
 

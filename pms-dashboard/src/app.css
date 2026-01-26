@@ -1,0 +1,95 @@
+:root {
+  --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  --line-height: 1.5;
+  --font-weight: 400;
+
+  --color-bg-body: #0a0a0b;
+  --color-bg-card: rgba(24, 24, 27, 0.7);
+  --color-fg-primary: #f4f4f5;
+  --color-fg-secondary: #a1a1aa;
+  --color-accent: #6d28d9;
+  --color-accent-gradient: linear-gradient(135deg, #7c3aed 0%, #d8b4fe 100%);
+  --color-success: #10b981;
+  --color-error: #ef4444;
+  --color-border: rgba(255, 255, 255, 0.1);
+
+  --glass-blur: blur(12px);
+  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  font-family: var(--font-family);
+  background-color: var(--color-bg-body);
+  color: var(--color-fg-primary);
+  background-image: 
+    radial-gradient(circle at 10% 20%, rgba(109, 40, 217, 0.15) 0%, transparent 20%),
+    radial-gradient(circle at 90% 80%, rgba(16, 185, 129, 0.1) 0%, transparent 20%);
+}
+
+#app {
+  width: 100%;
+}
+
+h1, h2, h3, h4 {
+  margin: 0;
+  font-weight: 600;
+  color: #fff;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 8px;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: #27272a;
+  color: #fff;
+  transition: all 0.25s;
+}
+
+button:hover {
+  background-color: #3f3f46;
+}
+
+button.primary {
+  background: var(--color-accent-gradient);
+  color: white;
+  box-shadow: 0 0 15px rgba(124, 58, 237, 0.3);
+}
+
+button.primary:hover {
+  box-shadow: 0 0 25px rgba(124, 58, 237, 0.5);
+  transform: translateY(-1px);
+}
+
+input {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--color-border);
+  color: white;
+  padding: 0.6em 1em;
+  border-radius: 8px;
+  font-size: 1em;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+input:focus {
+  border-color: var(--color-accent);
+}
+
+.glass-panel {
+  background: var(--color-bg-card);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  padding: 1.5rem;
+  box-shadow: var(--glass-shadow);
+}

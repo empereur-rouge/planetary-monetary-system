@@ -117,7 +117,7 @@ pub struct Auth {
 #[derive(Deserialize, Clone, Debug)]
 pub struct SecretSettings {
     pub node_identity_key_path: String,
-    pub admin_wallet_file: String,
+    pub admin_wallet_file: Option<String>,
 }
 
 #[derive(Clone)]
@@ -209,6 +209,13 @@ pub struct FeesSettings {
     pub authority_public_keys: Vec<String>,
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Automated Distribution
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Interval in seconds for automated fee distribution. Default: 600 (10 minutes).
+    #[serde(default = "default_distribution_interval_sec")]
+    pub distribution_interval_sec: u64,
+
+    // ═══════════════════════════════════════════════════════════════════════
     // TÂCHE 6: Audit des clés Authority - rotation recommandée
     // ═══════════════════════════════════════════════════════════════════════
     /// Date de dernière rotation des clés Authority (format ISO 8601: "2025-01-15")
@@ -226,6 +233,9 @@ fn default_base_fee() -> String {
 }
 fn default_platform_fee_ratio() -> String {
     "0.45".to_string()
+}
+fn default_distribution_interval_sec() -> u64 {
+    600
 }
 
 // Fee distribution defaults

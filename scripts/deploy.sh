@@ -197,11 +197,22 @@ fi
 # (Le token sera injecté directement dans le docker-compose)
 
 # On assure que la config prod existe
+# On assure que la config prod existe
 if [ ! -f etc/config/config.prod.toml ]; then
+    echo "   Generating etc/config/config.prod.toml from template..."
     cp etc/config/config.prod.template.toml etc/config/config.prod.toml
     sed -i 's|/data/pms/rocks|/home/pms/data/rocks|g' etc/config/config.prod.toml
     sed -i 's|/etc/pms/tls|/home/pms/tls|g' etc/config/config.prod.toml
     sed -i 's|ca_pem =|# ca_pem =|g' etc/config/config.prod.toml
+
+    # Si on n'initialise PAS un coordinateur (simple noeud), on désactive les références admin/treasury
+    if [ "$DO_INIT_COORD" != "true" ]; then
+         echo "   Adapting config for non-coordinator node..."
+         # On commente admin_wallet_file car non requis
+         sed -i 's|admin_wallet_file =|# admin_wallet_file =|g' etc/config/config.prod.toml
+         # On ne touche pas aux treasury-wallets.json car ils sont publics (les adresses)
+         # mais le fichier doit exister (géré via SCP ou dummy)
+    fi
 fi
 
 # IMPORTANT: On utilise le docker-compose.yml du repo (OU celui uploadé par SCP)

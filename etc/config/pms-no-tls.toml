@@ -1,0 +1,62 @@
+# Configuration Sans TLS pour Test Local
+[rocks]
+path = "./data/rocks-local"
+prefix = "pms:dev"
+tip_limit = 256
+
+[network]
+mode = "dev"
+network_id = "pms-dev"
+protocol_version = 1
+
+[address]
+hrp = "8e"
+
+[admin]
+
+[client]
+bind_addr = "0.0.0.0:7001"
+api_addr = "127.0.0.1:8090"
+allow_insecure_tls = true
+
+[p2p]
+known_peers = ""
+
+[limits]
+max_body_bytes = 1048576
+request_timeout_ms = 30000
+rate_limit_rps = 100
+burst = 200
+
+[fees]
+epsilon = "0.001"
+mode = "uniform"
+treasury_fee_percent = 15
+creator_fee_percent = 45
+parents_fee_percent = 40
+distribution_interval_sec = 600
+block_reward = "0.1"
+annual_inflation_percent = 3.0
+
+[auth]
+require_signed_submit = true
+admin_api_token = "changeme"
+allowed_ips = ["127.0.0.1"]
+
+[secrets]
+node_identity_key_path = "etc/pms/node-identity.key"
+
+[validation]
+min_pow_leading_zero_bits = 0
+max_payload_bytes = 65536
+min_parents_after_boot = 0
+max_parents = 8
+require_unique_parents = true
+forbid_self_parent = true
+max_inputs = 64
+max_outputs = 64
+max_tx_bytes = 65536
+max_fee_per_tx = 1000
+enforce_parent_existence = false
+enforce_fee_recipient = true
+coordinator_public_key = "030000000000000000000000000000000000000000000000000000000000000000"

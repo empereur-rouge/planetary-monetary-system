@@ -83,6 +83,22 @@ Pour un déploiement sur serveur :
 
 ---
 
+## ⚙️ Configuration
+
+### Nœud Utilisateur (Non-Coordinateur)
+Pour lancer un nœud simple sans privilèges d'administration (pas de minting, pas de treasury) :
+
+1. Utilisez le fichier `etc/config/pms-config-user.toml`.
+2. Lancez le nœud :
+   ```bash
+   ./target/release/pms-node --config etc/config/pms-config-user.toml
+   ```
+
+### Nœud Coordinateur / Production
+Voir la section "Déploiement VPS".
+
+---
+
 ## 🧪 Tests E2E (Cluster Local)
 
 Pour exécuter les tests de stress et de synchronisation P2P (1000 transactions, 3 nœuds) :

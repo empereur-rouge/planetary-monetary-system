@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Extended `NftMetadata` with `extra` field for generic attributes
   - Renamed "Game Authority" to "Authority" in config and code
 
+- **Security & Configuration**
+  - **Git Cleanup**: Removed sensitive `config.prod.toml` from version control.
+  - **Simplified Setup**: Made `admin_wallet_file` optional for non-coordinator nodes.
+  - **User Config**: Added `etc/config/pms-config-user.toml` template for simple nodes.
+  - **Deployment**: Enhanced `deploy.sh` to generate secure production config automatically.
+
 - **NFT Management & Queries**
   - **Retrieve by Owner**: New API `/v1/wallet/:address/nfts`
   - Added `get_by_owner` to `pms-storage` with dual-write to `nfts` and `nfts_by_owner` column families
@@ -47,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 - `fee_distribution_e2e_test.rs` - E2E verification of treasury fee distribution
+
+### Added
+- **Automated Fee Distribution**:
+  - Added automated fee distribution background task (interval configurable via `distribution_interval_sec`).
+  - Refactored fee distribution logic into `fee_distribution.rs` module.
+  - Coordinator automatically creates Mint blocks to distribute accumulated fees and burn refunds.
+  - Added `automated_distribution_test.rs` ensuring distribution happens and pool resets.
 
 ### Fixed
 - **Docker Deployment**

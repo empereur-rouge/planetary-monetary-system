@@ -17,6 +17,19 @@ use rust_decimal::prelude::FromPrimitive;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::api::AppState;
+use anyhow::Result;
+use pms_storage::PutResult;
+use pms_types::TxOutput;
+use pms_types_block::Block;
+use pms_types_payload::{PayloadEnvelope, PlainPayload};
+use pms_utils::check_pow::check_pow_leading_zero_bits;
+use pms_utils::compute_block_id;
+use pms_wallet::SignerBackend;
+use pms_wallet::signing_wire::canonical_wireblock_message;
+use pms_wire::WireBlock;
+use serde::{Deserialize, Serialize};
+
 /// Représente un output de fee à inclure dans le bloc
 #[derive(Debug, Clone)]
 pub struct FeeOutput {
@@ -262,6 +275,246 @@ pub fn compute_block_reward_outputs(
     }
 
     (outputs, burn_amount)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Automated Fee Distribution Logic
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistributeFeesResult {
+    pub success: bool,
+    pub reward_block_id: Option<String>,
+    pub total_distributed: String,
+    pub num_recipients: usize,
+}
+
+/// Exécute la distribution des fees et refunds accumulés dans le pool.
+/// Crée un bloc de type Mint contenant les UTXOs pour les destinataires.
+pub async fn perform_fee_distribution(
+    state: &AppState,
+    parent_id: Option<String>,
+) -> Result<DistributeFeesResult> {
+    let settings = &state.settings;
+    let node_wallet = &state.node_wallet;
+
+    // Only Coordinator can distribute
+    let is_coordinator = if let Some(coord_pk) = &settings.validation.coordinator_public_key {
+        node_wallet.encoded_public_key() == *coord_pk
+    } else {
+        true // Dev mode
+    };
+
+    if !is_coordinator {
+        // Not authorized, but we return success=false instead of logging error essentially
+        return Ok(DistributeFeesResult {
+            success: false,
+            reward_block_id: None,
+            total_distributed: "0".to_string(),
+            num_recipients: 0,
+        });
+    }
+
+    // 0. RESOLVE PARENT
+    let parent_id = match parent_id {
+        Some(id) if !id.is_empty() => id,
+        _ => {
+            // Fetch current tip from DAG
+            match state.srv.adapter_arc().top_tips(1).await {
+                Ok(tips) if !tips.is_empty() => tips[0].clone(),
+                _ => {
+                    // No tips available? Should be rare unless genesis
+                    return Ok(DistributeFeesResult {
+                        success: false,
+                        reward_block_id: None,
+                        total_distributed: "0".to_string(),
+                        num_recipients: 0,
+                    });
+                }
+            }
+        }
+    };
+
+    // 1. READ FEE POOL
+    let (total_node_fees, shares, burn_refunds, total_burn_refunds) = {
+        let pool = state.fee_pool.read().await;
+        if !pool.has_fees() {
+            return Ok(DistributeFeesResult {
+                success: true, // "Success" because nothing to do
+                reward_block_id: None,
+                total_distributed: "0".to_string(),
+                num_recipients: 0,
+            });
+        }
+        (
+            pool.total_fees,
+            pool.calculate_shares(),
+            pool.get_burn_refunds(),
+            pool.total_burn_refunds(),
+        )
+    };
+
+    // 2. BUILD OUTPUTS
+    let coordinator_x25519 = state.node_wallet.x25519_pub_hex().to_string();
+    let mut all_outputs: Vec<TxOutput> = Vec::new();
+    let mut total_distributed = Decimal::ZERO;
+
+    // 2a. BURN REFUNDS
+    for (wallet_address, amount) in &burn_refunds {
+        if *amount <= Decimal::ZERO {
+            continue;
+        }
+        all_outputs.push(TxOutput {
+            address: wallet_address.clone(),
+            amount: amount.to_string(),
+        });
+        total_distributed += *amount;
+        tracing::info!(
+            "💰 Burn refund output: {} -> {} PMS",
+            &wallet_address[..20.min(wallet_address.len())],
+            amount
+        );
+    }
+
+    // 2b. NODE FEES
+    {
+        let registry = state.node_registry.read().await;
+        let nodes = registry.get_active_nodes();
+
+        for (node_pk, _share_pct, share_amount) in &shares {
+            if *share_amount <= Decimal::ZERO {
+                continue;
+            }
+            if let Some(node) = nodes.iter().find(|n| &n.node_pk == node_pk) {
+                // TODO: Use real reward address
+                tracing::debug!(
+                    "Found node {} with api_url {}, but no reward address yet",
+                    &node_pk[..16.min(node_pk.len())],
+                    node.api_url
+                );
+            }
+        }
+    }
+
+    if all_outputs.is_empty() {
+        return Ok(DistributeFeesResult {
+            success: true,
+            reward_block_id: None,
+            total_distributed: "0".to_string(),
+            num_recipients: 0,
+        });
+    }
+
+    let num_recipients = all_outputs.len();
+
+    // 3. CREATE MINT BLOCK
+    let mint_payload = PlainPayload::Mint {
+        outputs: all_outputs.clone(),
+    };
+
+    let mut reward_block = Block {
+        id: String::new(),
+        parents: vec![parent_id.clone()],
+        payload: Some(PayloadEnvelope::Plain(mint_payload)),
+        nonce: 0,
+        metadata: Some(pms_types_block::BlockMetadata {
+            signer_x25519_hex: Some(coordinator_x25519.clone()),
+            description: Some(format!(
+                "Fees/Refunds: {} PMS to {} wallets",
+                total_distributed, num_recipients
+            )),
+            ..Default::default()
+        }),
+        signer_pk: None,
+        signature: None,
+    };
+    reward_block.id = compute_block_id(
+        &reward_block.parents,
+        &reward_block.payload,
+        reward_block.nonce,
+    );
+
+    // PoW
+    let min_bits = state.srv.adapter_arc().min_pow_leading_zero_bits();
+    if min_bits > 0 {
+        while !check_pow_leading_zero_bits(&reward_block.id, min_bits) {
+            reward_block.nonce += 1;
+            reward_block.id = compute_block_id(
+                &reward_block.parents,
+                &reward_block.payload,
+                reward_block.nonce,
+            );
+        }
+    }
+
+    // Build WireBlock
+    let reward_payload_json = serde_json::to_string(&reward_block.payload)?;
+    let mut reward_wb = WireBlock {
+        id: reward_block.id.clone(),
+        parents: reward_block.parents.clone(),
+        payload_json: Some(reward_payload_json),
+        nonce: reward_block.nonce,
+        network_id: state._cfg.network.network_id.clone(),
+        protocol_version: state._cfg.network.protocol_version as u16,
+        signer_pk_hex: node_wallet.encoded_public_key(),
+        signature_hex: String::new(),
+        metadata: reward_block.metadata.clone(),
+    };
+
+    // Sign
+    let reward_msg = canonical_wireblock_message(&reward_wb);
+    reward_wb.signature_hex = node_wallet.sign(&reward_msg)?;
+
+    // 4. PERSIST
+    match state.srv.adapter_arc().persist_block(&reward_wb).await {
+        Ok(PutResult::Inserted) => {
+            let _ = state.srv.enqueue_broadcast(reward_wb.id.clone()).await;
+
+            // 5. UPDATE UTXOS DIRECTLY
+            let mut idx = 0u32;
+            for output in &all_outputs {
+                state
+                    .srv
+                    .adapter_arc()
+                    .add_utxo(
+                        reward_wb.id.clone(),
+                        idx,
+                        output.address.clone(),
+                        output.amount.clone(),
+                    )
+                    .await;
+                idx += 1;
+            }
+
+            // 6. RESET POOL
+            {
+                let mut pool = state.fee_pool.write().await;
+                pool.reset();
+            }
+
+            tracing::info!(
+                "📦 Automated fees distributed: {} PMS to {} wallets (block: {})",
+                total_distributed,
+                num_recipients,
+                &reward_wb.id[..16]
+            );
+
+            Ok(DistributeFeesResult {
+                success: true,
+                reward_block_id: Some(reward_wb.id),
+                total_distributed: total_distributed.to_string(),
+                num_recipients,
+            })
+        }
+        Ok(PutResult::AlreadyExists) => {
+            // Should not happen with nonce increment, but possible
+            anyhow::bail!("Reward block already exists")
+        }
+        Ok(PutResult::Rejected(r)) => {
+            anyhow::bail!("Reward block rejected: {}", r)
+        }
+        Err(e) => anyhow::bail!("Storage error: {}", e),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

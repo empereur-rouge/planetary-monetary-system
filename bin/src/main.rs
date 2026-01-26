@@ -227,6 +227,20 @@ async fn main() -> Result<()> {
         });
     }
 
+    // 8) Auto-Launch Dashboard
+    {
+        let scheme = if cfg.tls.is_some() { "https" } else { "http" };
+        let url = format!("{}://{}/dashboard/", scheme, cfg.api_addr);
+        eprintln!("🖥️  Launching Dashboard at {}", url);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if webbrowser::open(&url).is_err() {
+                eprintln!("⚠️  Failed to open browser automatically.");
+            }
+        });
+    }
+
     srv.run(Arc::new(cfg), store).await?;
 
     Ok(())
