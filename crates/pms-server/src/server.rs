@@ -38,10 +38,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-// Note: SEEN_TTL sera utilisé pour le cache d'inventaire quand le mode multi-writer sera activé
-#[allow(dead_code)]
-const SEEN_TTL: Duration = Duration::from_secs(60);
-
 /// Serveur P2P générique, paramétré par un `DagAdapter`.
 ///
 /// - `adapter` : façade vers la logique DAG/persistance (have_block/persist_block)
@@ -1196,26 +1192,6 @@ impl Server {
                 }
             }
         }
-    }
-
-    /// Vérifie si on a déjà vu cet *Inv* récemment.
-    /// Renvoie true si déjà vu (donc à ignorer), false sinon (et le marque vu).
-    /// Note: Utilisé pour le mode multi-writer (pas encore activé).
-    #[allow(dead_code)]
-    async fn seen_inv_recently_and_mark(&self, id: &str) -> bool {
-        let now = Instant::now();
-        let mut cache = self.seen_invs.lock().await;
-
-        if let Some(ts) = cache.get(id) {
-            if now.duration_since(*ts) < SEEN_TTL {
-                return true;
-            }
-        }
-        cache.put(id.to_string(), now);
-        while cache.len() > SEEN_CAPACITY {
-            cache.pop_lru();
-        }
-        false
     }
 
     async fn mark_inv_seen(&self, id: &str) {

@@ -95,6 +95,10 @@ impl NetDagAdapter for MockAdapter {
         Decimal::ZERO
     }
 
+    async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+        Vec::new()
+    }
+
     async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String) {
         // No-op for mock, unless we want to verify UTXOs
     }

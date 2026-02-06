@@ -3,11 +3,8 @@ use crate::concurrent_dag::ConcurrentDag;
 use crate::utxo::ShardedUtxoSet;
 use crate::{DagRef, ValidatePolicy};
 use pms_config::load_config;
-use pms_errors::ValidationError;
 use pms_event::EventBus;
 use pms_storage::{DagStorage, NftStorage};
-use pms_utils::check_pow_leading_zero_bits;
-use pms_wire::WireBlock;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -89,26 +86,6 @@ impl<S: DagStorage + NftStorage + Send + Sync + 'static> CoreAdapter<S> {
             persist_tx,
             event_bus,
         })
-    }
-
-    /// Valide la preuve de travail d'un WireBlock.
-    /// Note: Actuellement inutilisé car PoW désactivé par défaut.
-    #[allow(dead_code)]
-    pub(crate) fn validate_wire_block_pow(&self, wb: &WireBlock) -> Result<(), ValidationError> {
-        let bits = self.policy.min_pow_leading_zero_bits;
-
-        if bits == 0 {
-            return Ok(()); // PoW désactivé
-        }
-
-        if !check_pow_leading_zero_bits(&wb.id, bits) {
-            return Err(ValidationError::InvalidDifficulty {
-                id: wb.id.clone(),
-                required_bits: bits,
-            });
-        }
-
-        Ok(())
     }
 
     pub fn dag_ref(&self) -> DagRef {

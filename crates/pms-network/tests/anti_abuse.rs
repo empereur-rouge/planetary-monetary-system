@@ -102,6 +102,11 @@ impl NetDagAdapter for DummyAdapter {
         rust_decimal::Decimal::ZERO
     }
 
+    /// Retourne les UTXOs d'une adresse (vide pour le DummyAdapter)
+    async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+        Vec::new()
+    }
+
     /// Ajoute un UTXO (no-op pour le DummyAdapter)
     async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String) {
         // Dummy: on ne stocke pas les UTXOs dans ce mock

@@ -1,18 +1,6 @@
 use crate::Dag;
-use crate::validations::traits::{ReadState, WriteState};
+use crate::validations::traits::WriteState;
 use pms_types::Block;
-
-impl ReadState for Dag {
-    fn have_block(&self, id: &str) -> bool {
-        self.blocks.contains_key(id)
-    }
-    fn parent_exists(&self, id: &str) -> bool {
-        self.blocks.contains_key(id)
-    }
-    fn spent_in_ram(&self, out: (&str, u32)) -> bool {
-        self.spent_outpoints.contains(&(out.0.to_string(), out.1))
-    }
-}
 
 impl WriteState for Dag {
     fn add_block_mem(&mut self, b: &Block) {

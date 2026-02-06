@@ -60,6 +60,9 @@ impl pms_interface::NetDagAdapter for MockAdapter {
     async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
         rust_decimal::Decimal::ZERO
     }
+    async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+        Vec::new()
+    }
     async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String) {
         // Mock: no-op
     }

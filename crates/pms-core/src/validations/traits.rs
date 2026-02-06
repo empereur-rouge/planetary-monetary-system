@@ -1,14 +1,5 @@
 use pms_types::Block;
 
-/// Lecture seule (utilisée par la validation)
-#[allow(dead_code)]
-pub trait ReadState {
-    fn have_block(&self, id: &str) -> bool;
-    fn parent_exists(&self, id: &str) -> bool;
-    fn spent_in_ram(&self, outpoint: (&str, u32)) -> bool;
-    // … (balance/UTXO lecture plus tard)
-}
-
 /// Écriture (appliquée seulement après validation)
 pub trait WriteState {
     fn add_block_mem(&mut self, b: &Block); // index RAM

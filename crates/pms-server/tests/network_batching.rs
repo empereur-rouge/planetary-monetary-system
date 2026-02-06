@@ -9,7 +9,7 @@ use anyhow::Result;
 use pms_interface::NetDagAdapter;
 use pms_server::Server;
 use pms_storage::rocks_store::store::RocksStore;
-use pms_storage::{DagStorage, PutResult, StoredBlock, UtxoDelta};
+use pms_storage::{DagStorage, PutResult, StoredBlock};
 use pms_wallet::Wallet;
 use pms_wire::WireBlock;
 use std::sync::Arc;
@@ -78,6 +78,10 @@ impl NetDagAdapter for MockAdapter {
 
     async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
         rust_decimal::Decimal::ZERO
+    }
+
+    async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+        Vec::new()
     }
 
     async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String) {
