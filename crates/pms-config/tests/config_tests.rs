@@ -1,0 +1,177 @@
+//! Tests pour pms-config
+//!
+//! Couverture:
+//! - NetworkMode (is_prod, is_non_prod)
+//! - Désérialisation TOML
+//! - Valeurs par défaut
+
+use pms_config::NetworkMode;
+
+#[test]
+fn test_network_mode_is_prod() {
+    assert!(NetworkMode::Mainnet.is_prod());
+    assert!(!NetworkMode::Testnet.is_prod());
+    assert!(!NetworkMode::Dev.is_prod());
+}
+
+#[test]
+fn test_network_mode_is_non_prod() {
+    assert!(!NetworkMode::Mainnet.is_non_prod());
+    assert!(NetworkMode::Testnet.is_non_prod());
+    assert!(NetworkMode::Dev.is_non_prod());
+}
+
+#[test]
+fn test_network_mode_deserialize() {
+    use serde_json;
+
+    // Test lowercase deserialization
+    let dev: NetworkMode = serde_json::from_str(r#""dev""#).unwrap();
+    assert_eq!(dev, NetworkMode::Dev);
+
+    let testnet: NetworkMode = serde_json::from_str(r#""testnet""#).unwrap();
+    assert_eq!(testnet, NetworkMode::Testnet);
+
+    let mainnet: NetworkMode = serde_json::from_str(r#""mainnet""#).unwrap();
+    assert_eq!(mainnet, NetworkMode::Mainnet);
+}
+
+#[test]
+fn test_fee_pick_mode_deserialize() {
+    use pms_config::FeePickMode;
+    use serde_json;
+
+    let uniform: FeePickMode = serde_json::from_str(r#""uniform""#).unwrap();
+    assert!(matches!(uniform, FeePickMode::Uniform));
+
+    let round_robin: FeePickMode = serde_json::from_str(r#""roundrobin""#).unwrap();
+    assert!(matches!(round_robin, FeePickMode::RoundRobin));
+}
+
+#[test]
+fn test_rocks_default_tip_limit() {
+    use pms_config::Rocks;
+    use serde_json;
+
+    // Rocks sans tip_limit doit avoir la valeur par défaut 200
+    let rocks: Rocks = serde_json::from_str(r#"{"path": "/tmp/test"}"#).unwrap();
+    assert_eq!(rocks.tip_limit, 200);
+    assert_eq!(rocks.prefix, ""); // default empty
+
+    // Rocks avec tip_limit explicite
+    let rocks_custom: Rocks =
+        serde_json::from_str(r#"{"path": "/tmp/test", "tip_limit": 500}"#).unwrap();
+    assert_eq!(rocks_custom.tip_limit, 500);
+}
+
+#[test]
+fn test_validation_settings_defaults() {
+    use pms_config::ValidationSettings;
+    use serde_json;
+
+    // Test avec valeurs minimales (les defaults seront appliqués pour les champs optionnels)
+    let json = r#"{
+        "min_pow_leading_zero_bits": 4,
+        "max_payload_bytes": 65536,
+        "min_parents_after_boot": 2,
+        "max_parents": 8,
+        "require_unique_parents": true,
+        "forbid_self_parent": true,
+        "max_inputs": 64,
+        "max_outputs": 64,
+        "max_tx_bytes": 65536,
+        "max_fee_per_tx": 1000,
+        "enforce_parent_existence": true,
+        "enforce_fee_recipient": false
+    }"#;
+
+    let settings: ValidationSettings = serde_json::from_str(json).unwrap();
+    assert_eq!(settings.min_pow_leading_zero_bits, 4);
+    assert!(settings.enforce_single_writer); // default true
+    assert!(settings.coordinator_public_key.is_none());
+}
+
+#[test]
+fn test_fees_settings_defaults() {
+    use pms_config::FeesSettings;
+    use serde_json;
+
+    // Test avec valeurs minimales
+    let json = r#"{
+        "epsilon": "0.001",
+        "mode": "uniform"
+    }"#;
+
+    let fees: FeesSettings = serde_json::from_str(json).unwrap();
+
+    // Vérifier les valeurs par défaut
+    assert_eq!(fees.ratio, "0.035");
+    assert_eq!(fees.base_fee, "0.001");
+    assert_eq!(fees.platform_fee_ratio, "0.45");
+    assert_eq!(fees.treasury_fee_percent, 15);
+    assert_eq!(fees.creator_fee_percent, 45);
+    assert_eq!(fees.parents_fee_percent, 40);
+    assert_eq!(fees.block_reward, "0.1");
+    assert_eq!(fees.distribution_interval_sec, 600);
+}
+
+#[test]
+fn test_tls_config_deserialize() {
+    use pms_config::TlsConfig;
+    use serde_json;
+
+    let json = r#"{
+        "cert_pem": "/path/to/cert.pem",
+        "key_pem": "/path/to/key.pem",
+        "ca_pem": "/path/to/ca.pem"
+    }"#;
+
+    let tls: TlsConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(tls.cert_pem, "/path/to/cert.pem");
+    assert_eq!(tls.key_pem, "/path/to/key.pem");
+    assert_eq!(tls.ca_pem, Some("/path/to/ca.pem".to_string()));
+    assert!(tls.whitelist_fp256.is_empty());
+}
+
+#[test]
+fn test_p2p_config_defaults() {
+    use pms_config::P2pConfig;
+    use serde_json;
+
+    // Test désérialisation avec JSON vide (tous defaults)
+    let p2p: P2pConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(p2p.known_peers, "");
+    assert!(p2p.bind_addr.is_none());
+    assert!(p2p.allowed_peer_ips.is_empty());
+    assert!(!p2p.strict_whitelist);
+}
+
+#[test]
+fn test_auth_config_defaults() {
+    use pms_config::Auth;
+    use serde_json;
+
+    let auth: Auth = serde_json::from_str("{}").unwrap();
+    assert!(!auth.require_signed_submit);
+    assert!(auth.admin_api_token.is_none());
+    assert!(auth.allowed_ips.is_empty());
+}
+
+#[test]
+fn test_limits_deserialize() {
+    use pms_config::Limits;
+    use serde_json;
+
+    let json = r#"{
+        "max_body_bytes": 262144,
+        "request_timeout_ms": 4000,
+        "rate_limit_rps": 20,
+        "burst": 40
+    }"#;
+
+    let limits: Limits = serde_json::from_str(json).unwrap();
+    assert_eq!(limits.max_body_bytes, 262144);
+    assert_eq!(limits.request_timeout_ms, 4000);
+    assert_eq!(limits.rate_limit_rps, 20);
+    assert_eq!(limits.burst, 40);
+}

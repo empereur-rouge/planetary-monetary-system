@@ -135,7 +135,10 @@ impl Dag {
                 break;
             }
             if pool.len() == 1 {
-                selected.push(pool.pop().unwrap().0);
+                // SAFETY: On a vérifié que pool.len() == 1, donc pop() retourne Some
+                if let Some((id, _)) = pool.pop() {
+                    selected.push(id);
+                }
                 break;
             }
             let weights: Vec<u64> = pool.iter().map(|(_, w)| *w).collect();

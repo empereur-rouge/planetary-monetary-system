@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+
 use pms_config::{ServerConfig, load_config};
 use pms_core::CoreAdapter;
 use pms_core::concurrent_dag::ConcurrentDag;
@@ -52,21 +53,19 @@ async fn main() -> Result<()> {
     // 2) Vérification TLS
     if let Some(tls) = &settings.tls {
         if settings.network.mode.is_prod() {
-            // En prod : on vérifie vraiment les fichiers
-            use rustls_pemfile::{certs, ec_private_keys, pkcs8_private_keys};
-            use std::{fs::File, io::BufReader};
+            // En prod : on vérifie vraiment les fichiers (using rustls native PEM support)
+            use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+            use std::fs;
 
-            let mut cr = BufReader::new(File::open(&tls.cert_pem)?);
-            let certs_count = certs(&mut cr).count();
+            let cert_pem = fs::read(&tls.cert_pem)?;
+            let certs_count = CertificateDer::pem_slice_iter(&cert_pem).count();
             eprintln!("[TLS DEBUG] certs = {}", certs_count);
 
-            let mut kr = BufReader::new(File::open(&tls.key_pem)?);
-            let pk8_count = pkcs8_private_keys(&mut kr).count();
-            eprintln!("[TLS DEBUG] pkcs8 keys = {}", pk8_count);
-
-            let mut kr2 = BufReader::new(File::open(&tls.key_pem)?);
-            let ec_count = ec_private_keys(&mut kr2).count();
-            eprintln!("[TLS DEBUG] ec keys = {}", ec_count);
+            let key_pem = fs::read(&tls.key_pem)?;
+            match PrivateKeyDer::from_pem_slice(&key_pem) {
+                Ok(_) => eprintln!("[TLS DEBUG] private key = OK"),
+                Err(e) => eprintln!("[TLS DEBUG] private key error = {}", e),
+            }
         } else {
             eprintln!("[TLS DEBUG] skipping TLS file checks (dev mode)");
         }
@@ -144,7 +143,13 @@ async fn main() -> Result<()> {
         &settings.network.network_id,
         settings.network.protocol_version,
         node_wallet.clone(),
+        &settings.p2p,
     );
+
+    // Capture admin_token before move
+    let admin_api_token = settings.auth.admin_api_token.clone();
+    // Clone settings for internal API use (before partial move)
+    let settings_for_internal = settings.clone();
 
     // Config runtime
     let cfg = ServerConfig {
@@ -169,15 +174,8 @@ async fn main() -> Result<()> {
 
     if !peers.is_empty() {
         let srv_conn = srv.clone();
-        let tls_cfg = if let Some(tls) = &settings.tls {
-            Some(Arc::new(pms_server::tls::load_client_config(
-                &tls.cert_pem,
-                &tls.key_pem,
-                tls.ca_pem.as_deref(),
-            )?))
-        } else {
-            None
-        };
+        // Capture TlsConfig directly (not ClientConfig)
+        let tls_config_base = settings.tls.clone();
 
         eprintln!("🔗 Launching connector for {} known peers...", peers.len());
         tokio::spawn(async move {
@@ -186,16 +184,13 @@ async fn main() -> Result<()> {
 
             for p in peers {
                 let srv = srv_conn.clone();
-                let tls = tls_cfg.clone();
+                let tls = tls_config_base.clone();
                 let addr = p.replace("p2ps://", "").replace("p2p://", "");
 
                 tokio::spawn(async move {
                     loop {
-                        let res = if let Some(t) = &tls {
-                            srv.connect_tls(&addr, t.clone()).await
-                        } else {
-                            srv.connect(&addr).await
-                        };
+                        // Use unified connect_to_peer which handles parsing & DNS
+                        let res = srv.clone().connect_to_peer(addr.clone(), tls.clone()).await;
 
                         match res {
                             Ok(_) => {
@@ -237,6 +232,32 @@ async fn main() -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             if webbrowser::open(&url).is_err() {
                 eprintln!("⚠️  Failed to open browser automatically.");
+            }
+        });
+    }
+
+    // 9) Launcher Internal API (Engine Mode)
+    if let Some(internal_addr) = &settings.client.as_ref().unwrap().internal_api_addr {
+        let addr = internal_addr.clone();
+        let state = pms_server::api::AppState {
+            srv: srv.clone(),
+            _cfg: Arc::new(cfg.clone()),
+            _ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            stats: Arc::new(pms_server::stats::Stats::default()), // Use independent stats for internal API
+            store: store.clone(),
+            admin_token: admin_api_token.clone(),
+            node_wallet: node_wallet.clone(),
+            settings: Arc::new(settings_for_internal.clone()),
+            allowed_networks: vec![], // Internal API is trusted
+            treasury_wallets: pms_config::TreasuryWallets::empty(),
+            node_registry: pms_server::node_registry::create_registry(),
+            fee_pool: pms_server::fee_pool::create_fee_pool(),
+        };
+
+        eprintln!("🔧 Launching Internal API at {}", addr);
+        tokio::spawn(async move {
+            if let Err(e) = pms_server::internal_api::serve_internal_api(&addr, state).await {
+                eprintln!("❌ Internal API failed: {}", e);
             }
         });
     }

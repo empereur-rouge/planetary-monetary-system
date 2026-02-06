@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-/// Durée avant qu'un nœud soit considéré comme inactif (5 minutes)
-const NODE_TTL_SECONDS: u64 = 300;
+/// Durée avant qu'un nœud soit considéré comme inactif (24 heures pour éviter les timeouts en dev)
+const NODE_TTL_SECONDS: u64 = 86400;
 
 /// Information sur un nœud enregistré
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +24,8 @@ pub struct NodeInfo {
     pub node_pk: String,
     /// URL de l'API du nœud (ex: "https://node1.example.com:8080")
     pub api_url: String,
+    /// Adresse du wallet pour recevoir les rewards
+    pub wallet_address: Option<String>,
     /// Nombre de blocs créés par ce nœud (pour la distribution des rewards)
     #[serde(default)]
     pub block_count: u64,
@@ -47,14 +49,19 @@ impl NodeRegistry {
     }
 
     /// Enregistre ou met à jour un nœud
-    pub fn register(&mut self, node_pk: String, api_url: String) {
+    pub fn register(&mut self, node_pk: String, api_url: String, wallet_address: Option<String>) {
         let entry = self.nodes.entry(node_pk.clone()).or_insert(NodeInfo {
             node_pk: node_pk.clone(),
             api_url: api_url.clone(),
+            wallet_address: wallet_address.clone(),
             block_count: 0,
             last_seen: Some(Instant::now()),
         });
         entry.api_url = api_url;
+        // Met à jour l'adresse si fournie, sinon garde l'ancienne
+        if wallet_address.is_some() {
+            entry.wallet_address = wallet_address;
+        }
         entry.last_seen = Some(Instant::now());
     }
 
@@ -136,6 +143,7 @@ pub fn create_registry() -> SharedNodeRegistry {
 pub struct RegisterNodeRequest {
     pub node_pk: String,
     pub api_url: String,
+    pub wallet_address: Option<String>,
 }
 
 /// Réponse pour GET /v1/nodes

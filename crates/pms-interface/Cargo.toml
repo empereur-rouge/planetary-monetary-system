@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 async-trait = "0.1.89"
 anyhow = "1.0.99"
+pms-types = { path = "../pms-types" }
 pms-wire = { path = "../pms-wire" }
 pms-storage = { path = "../pms-storage" }
 rust_decimal = "1.39.0"

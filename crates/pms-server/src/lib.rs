@@ -13,6 +13,7 @@ pub mod fee_pool;
 pub mod node_registry;
 
 mod helper;
+pub mod internal_api;
 pub mod limits;
 mod metrics;
 mod rate;

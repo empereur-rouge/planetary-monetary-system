@@ -4,9 +4,13 @@
 
 ## Vue d'ensemble
 
-L'API PMS expose des endpoints REST pour interagir avec le DAG (Directed Acyclic Graph) et gérer les transactions, NFTs, et portefeuilles.
+L'API PMS expose des endpoints REST pour interagir avec le **DAG centralisé privé**. 
 
-**Base URL**: `http://localhost:3000` (ou votre domaine configuré)
+> [!IMPORTANT]
+> PMS est une infrastructure **custodiale** : le serveur est l'autorité finale de validation.
+> Cette API est destinée à des usages internes (gaming, core banking, wallets custodial).
+
+**Base URL**: `https://localhost:8443` (Gateway Public Port)
 
 ---
 
@@ -44,11 +48,11 @@ Authorization: Bearer votre_token_admin
 
 ---
 
-## ⚡ Rate Limiting
+## ⚡ Rate Limiting (Gateway)
 
 | Type | Limite |
 |------|--------|
-| **Global** | 50 req/s, burst 100 |
+| **Global** | 10000 req/s, burst 20000 (Configurable) |
 | **NFT Mint/Burn** | 5 req/s, burst 10 |
 
 ---
@@ -77,20 +81,20 @@ Toutes les réponses sont en **JSON**.
 
 ### Vérifier que le serveur est actif
 ```bash
-curl http://localhost:3000/livez
+curl -k https://localhost:8443/livez
 # Réponse: ok
 ```
 
 ### Obtenir le solde d'une adresse
 ```bash
-curl -X POST http://localhost:3000/v1/balance \
+curl -k -X POST https://localhost:8443/v1/balance \
   -H "Content-Type: application/json" \
   -d '{"address": "pms1..."}'
 ```
 
 ### Lister les NFTs d'un wallet
 ```bash
-curl http://localhost:3000/v1/wallet/{address}/nfts
+curl -k https://localhost:8443/v1/wallet/{address}/nfts
 ```
 
 ---

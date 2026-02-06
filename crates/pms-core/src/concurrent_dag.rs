@@ -316,7 +316,17 @@ impl ConcurrentDag {
             if let Some(sb) = store.get_block(&id).await? {
                 // Parse payload from JSON if present
                 let payload = if let Some(json) = &sb.payload_json {
-                    serde_json::from_str(json).ok()
+                    match serde_json::from_str(json) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            tracing::error!(
+                                "❌ Failed to parse payload for block {}: {}",
+                                sb.id,
+                                e
+                            );
+                            None
+                        }
+                    }
                 } else {
                     None
                 };

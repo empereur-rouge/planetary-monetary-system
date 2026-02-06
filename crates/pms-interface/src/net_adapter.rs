@@ -16,6 +16,8 @@ pub trait NetDagAdapter: Send + Sync {
     async fn get_block(&self, id: &str) -> Result<Option<WireBlock>>;
     async fn recent_ids(&self, limit: usize) -> Result<Vec<String>>;
     async fn get_blocks_by_ids(&self, ids: &[String]) -> Result<Vec<WireBlock>>;
+    /// [DEPRECATED] PoW is disabled for Private DAG. Returns 0.
+    /// Kept for API compatibility, will be removed in a future version.
     fn min_pow_leading_zero_bits(&self) -> u8;
 
     /// Retourne le supply total en circulation et le nombre d'UTXOs.
@@ -23,6 +25,9 @@ pub trait NetDagAdapter: Send + Sync {
 
     /// Retourne la balance d'une adresse (somme des UTXOs non dépensés).
     async fn balance_by_address(&self, address: &str) -> rust_decimal::Decimal;
+
+    /// Retourne tous les UTXOs d'une adresse depuis le set UTXO en mémoire.
+    async fn utxos_by_address(&self, address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)>;
 
     /// Ajoute un UTXO manuellement (utilisé par le coordinateur pour les EncryptedReward)
     async fn add_utxo(&self, txid: String, index: u32, address: String, amount: String);

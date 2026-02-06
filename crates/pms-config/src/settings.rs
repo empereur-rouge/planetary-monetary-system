@@ -48,13 +48,11 @@ impl Settings {
         // NOTE: On utilise if-let combiné avec && pour satisfaire clippy::collapsible_if
         if self.network.mode.is_prod()
             && let Some(c) = &self.client
-        {
-            if c.allow_insecure_tls {
+            && c.allow_insecure_tls {
                 bail!("Mainnet: client.allow_insecure_tls doit être false");
             }
             // Note: api_addr est une adresse de bind (ex: 0.0.0.0:8080), pas une URL.
             // La sécurité HTTPS est assurée par le bloc [tls] obligatoire en mainnet.
-        }
 
         // 3) TLS
         if let Some(tls) = &self.tls {

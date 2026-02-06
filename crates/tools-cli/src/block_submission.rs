@@ -350,3 +350,141 @@ pub async fn action_send_tokens(
     wait_enter();
     Ok(())
 }
+// ... (existing code)
+
+pub async fn action_send_tokens_headless(
+    dag: &DagRef,
+    store: &Arc<RocksStore>,
+    wallet_private_key: &str,
+    dest_addr: &str,
+    amount_str: &str,
+    fee_str: &str,
+) -> Result<()> {
+    // 1) Load Config & Wallet
+    let settings = load_config()?;
+    let hrp = settings.address.hrp.clone();
+
+    let w = Wallet::from_hex(wallet_private_key).map_err(|e| anyhow::anyhow!(e))?;
+    let w_pub = w.public_key_hex.clone();
+    let w_xpk = w.x25519_pub_hex.clone();
+    let w_xsk = w
+        .x25519_sk_hex()
+        .ok_or_else(|| anyhow::anyhow!("Wallet needs private key"))?;
+
+    // 2) Parse amounts
+    let want =
+        Decimal::from_str_exact(amount_str).map_err(|_| anyhow::anyhow!("Invalid amount"))?;
+    let fee = Decimal::from_str_exact(fee_str).map_err(|_| anyhow::anyhow!("Invalid fee"))?;
+
+    // 3) UTXO Selection
+    let utxos = gather_wallet_utxos_dec(&*store, &w_pub, &w_xpk, &w_xsk, &hrp, 5_000).await?;
+    if utxos.is_empty() {
+        return Err(anyhow::anyhow!("No UTXOs available for this wallet"));
+    }
+
+    let need = want + fee;
+    let (picked, change) = select_utxos_dec(utxos, need)?;
+
+    // 4) Build Transaction
+    let mut outputs = vec![TxOutput {
+        address: dest_addr.to_string(),
+        amount: amount_str.to_string(),
+    }];
+    if change > Decimal::ZERO {
+        let change_addr = make_address(&hrp, &w_pub, &w_xpk);
+        outputs.push(TxOutput {
+            address: change_addr,
+            amount: change.to_string(),
+        });
+    }
+
+    let inputs: Vec<TxInput> = picked
+        .into_iter()
+        .map(|u| TxInput {
+            out: OutputId {
+                txid: u.txid,
+                index: u.index,
+            },
+        })
+        .collect();
+
+    let mut tx = Transaction {
+        inputs,
+        outputs,
+        fee: fee_str.to_string(),
+        unlocks: vec![],
+    };
+
+    // 5) Sign Transaction
+    {
+        let msg = tx.signing_message()?;
+        let sig_b64 = w
+            .sign(&msg)
+            .map_err(|_| anyhow::anyhow!("Failed to sign"))?;
+        tx.unlocks = vec![Unlock {
+            pubkey_hex: w.public_key_hex.clone(),
+            signature_b64: sig_b64,
+        }];
+    }
+
+    // 6) Encrypt Payload
+    let (_h20, dest_xpk_decoded) =
+        decode_address(dest_addr).map_err(|e| anyhow::anyhow!("Invalid dest addr: {e}"))?;
+
+    let plain = PlainPayload::TxUtxo(tx);
+    let enc = EncryptedPayload::encrypt_for_plain(&plain, &[w_xpk.clone(), dest_xpk_decoded])
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    // 7) Submit
+    submit_block_from_cli(
+        dag,
+        store,
+        &w,
+        PayloadEnvelope::Encrypted(enc),
+        "TxUtxo-Headless",
+        &settings.network.network_id,
+        settings.network.protocol_version as u16,
+    )
+    .await?;
+
+    println!("✅ Headless Transaction Submitted Successfully");
+    Ok(())
+}
+
+pub async fn action_make_mint_headless(
+    dag: &DagRef,
+    store: &Arc<RocksStore>,
+    wallet_private_key: &str,
+    amount_str: &str,
+) -> Result<()> {
+    let settings = load_config()?;
+    let hrp = settings.address.hrp.clone();
+
+    let w = Wallet::from_hex(wallet_private_key).map_err(|e| anyhow::anyhow!(e))?;
+
+    // Validate amount
+    if Decimal::from_str_exact(amount_str).is_err() {
+        return Err(anyhow::anyhow!("Invalid amount"));
+    }
+
+    let plain = PlainPayload::Mint {
+        outputs: vec![TxOutput {
+            address: w.get_address(&hrp),
+            amount: amount_str.to_string(),
+        }],
+    };
+
+    submit_block_from_cli(
+        dag,
+        store,
+        &w,
+        PayloadEnvelope::Plain(plain),
+        "Mint-Headless",
+        &settings.network.network_id,
+        settings.network.protocol_version as u16,
+    )
+    .await?;
+
+    println!("✅ Headless Mint Submitted Successfully");
+    Ok(())
+}

@@ -44,6 +44,7 @@ pub struct ValidatePolicy {
     pub platform_address: Option<String>,
     pub platform_fee_ratio: Decimal,
     pub coordinator_public_key: Option<String>,
+    pub enforce_single_writer: bool,
 }
 
 impl Default for ValidatePolicy {
@@ -66,6 +67,7 @@ impl Default for ValidatePolicy {
             platform_address: None,
             platform_fee_ratio: Decimal::ZERO,
             coordinator_public_key: None,
+            enforce_single_writer: true,
         }
     }
 }
@@ -90,12 +92,16 @@ impl ValidatePolicy {
             platform_address: None,
             platform_fee_ratio: Decimal::ZERO,
             coordinator_public_key: v.coordinator_public_key.clone(),
+            enforce_single_writer: v.enforce_single_writer,
         }
     }
 
-    /// Optionnel si tu veux une helper globale
-    pub fn from_global_config() -> Self {
-        let settings = load_config().expect("config invalide");
+    /// Version avec gestion d'erreur pour les problèmes de configuration de sécurité.
+    /// Préférer cette version dans le code de production pour une meilleure gestion des erreurs.
+    pub fn try_from_global_config() -> Result<Self, ValidationError> {
+        let settings = load_config().map_err(|e| {
+            ValidationError::ConfigError(format!("failed to load config: {e}"))
+        })?;
         let mut p = Self::from_settings(&settings.validation);
 
         // Logic for Platform Address Security via Signed Config
@@ -114,15 +120,12 @@ impl ValidatePolicy {
                     if verify_config_signature(addr, sig_hex, master_pk_hex) {
                         p.platform_address = Some(addr.clone());
                     } else {
-                        panic!(
-                            "SECURITY ALERT: Invalid Platform Address Signature! The address '{}' is NOT authorized by the Master Key.",
-                            addr
-                        );
+                        return Err(ValidationError::InvalidPlatformSignature {
+                            address: addr.clone(),
+                        });
                     }
                 } else {
-                    panic!(
-                        "SECURITY ALERT: Missing 'platform_address_signature' in config. Mainnet/Testnet requires signed fee address."
-                    );
+                    return Err(ValidationError::MissingPlatformSignature);
                 }
             } else {
                 tracing::warn!("No platform_address configured. Fee splitting will be disabled.");
@@ -138,25 +141,24 @@ impl ValidatePolicy {
         // Otherwise, use hardcoded values based on network mode
         if let Some(ref custom_key) = settings.validation.coordinator_public_key {
             // ═══════════════════════════════════════════════════════════════
-            // TÂCHE 4: SÉCURITÉ - Empêcher l'utilisation des clés Prod en Dev
+            // SÉCURITÉ - Empêcher l'utilisation des clés Prod en Dev
             // ═══════════════════════════════════════════════════════════════
             // En mode Dev, on ne doit JAMAIS utiliser les clés Mainnet/Testnet.
             // Cela évite une confusion accidentelle ou une tentative de fraude
             // où quelqu'un utiliserait le mode Dev (moins de validations) avec
             // des clés de production.
-            //
-            // Voir chapitre 9 du Rust Book : Error Handling
             if settings.network.mode == pms_config::NetworkMode::Dev {
                 let is_mainnet_key = custom_key == pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET;
                 let is_testnet_key = custom_key == pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET;
 
                 if is_mainnet_key || is_testnet_key {
-                    panic!(
-                        "🚨 SECURITY ALERT: Cannot use {} coordinator key in Dev mode! \
-                         This is a critical misconfiguration that could lead to security issues. \
-                         Either switch to the appropriate network mode or use a Dev-only key.",
-                        if is_mainnet_key { "MAINNET" } else { "TESTNET" }
-                    );
+                    return Err(ValidationError::ProdKeyInDevMode {
+                        network: if is_mainnet_key {
+                            "MAINNET".to_string()
+                        } else {
+                            "TESTNET".to_string()
+                        },
+                    });
                 }
             }
 
@@ -182,7 +184,19 @@ impl ValidatePolicy {
 
         p.platform_fee_ratio =
             Decimal::from_str(&settings.fees.platform_fee_ratio).unwrap_or(Decimal::ZERO);
-        p
+        Ok(p)
+    }
+
+    /// Helper globale qui panic en cas d'erreur de configuration de sécurité.
+    /// Pour une meilleure gestion des erreurs, utilisez `try_from_global_config()`.
+    pub fn from_global_config() -> Self {
+        match Self::try_from_global_config() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("🚨 SECURITY CONFIG ERROR: {e}");
+                panic!("Critical security configuration error: {e}");
+            }
+        }
     }
 
     /// Met à jour la policy avec les valeurs de RuntimeConfig (Hot-Swap).

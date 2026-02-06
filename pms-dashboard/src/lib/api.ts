@@ -24,8 +24,7 @@ export async function apiCall(endpoint: string, method = 'GET', body?: any) {
 
         if (res.status === 401 || res.status === 403) {
             console.warn('Unauthorized access');
-            // Could redirect to login or clear token if needed
-            // adminToken.set(''); 
+            adminToken.set('');
             throw new Error('Unauthorized');
         }
 

@@ -125,6 +125,23 @@ impl ShardedUtxoSet {
         }
         total
     }
+
+    /// Retourne tous les UTXOs d'une adresse.
+    ///
+    /// **Note**: Opération potentiellement lente car elle lock tous les shards.
+    pub async fn utxos_by_address(&self, address: &str) -> Vec<(OutputId, TxOutput)> {
+        let mut result = Vec::new();
+
+        for shard in &self.shards {
+            let locked = shard.read().await;
+            for (outpoint, output) in locked.iter() {
+                if output.address == address {
+                    result.push((outpoint.clone(), output.clone()));
+                }
+            }
+        }
+        result
+    }
 }
 
 impl Default for ShardedUtxoSet {

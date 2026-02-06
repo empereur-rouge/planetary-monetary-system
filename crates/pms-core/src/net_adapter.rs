@@ -102,13 +102,33 @@ where
             return Ok(PutResult::Rejected(format!("invalid signature: {e}")));
         }
 
-        // 1.e) PoW minimal (anti-DOS / anti-spam)
-        //
-        // On centralise la logique dans validate_wire_block_pow() qui utilise
-        // self.policy.min_pow_leading_zero_bits.
-        if let Err(e) = self.validate_wire_block_pow(wb) {
-            return Ok(PutResult::Rejected(format!("invalid difficulty: {e}")));
+        // ============================================================
+        // 1.e) SINGLE WRITER ENFORCEMENT (Private DAG Mode)
+        // ============================================================
+        // En mode Single Writer, TOUS les blocs doivent être signés par le Coordinator.
+        // C'est le verrouillage protocole pour le mode centralisé.
+        if policy.enforce_single_writer {
+            if let Some(ref expected_pk) = policy.coordinator_public_key {
+                if wb.signer_pk_hex.trim() != expected_pk.trim() {
+                    tracing::warn!(
+                        "🚫 Single Writer violation: block {} signed by {} but expected {}",
+                        &wb.id[..16.min(wb.id.len())],
+                        &wb.signer_pk_hex,
+                        expected_pk
+                    );
+                    return Ok(PutResult::Rejected(format!(
+                        "single_writer: only Coordinator can create blocks. Got signer: {}, expected: {}",
+                        &wb.signer_pk_hex,
+                        expected_pk
+                    )));
+                }
+            }
         }
+
+        // [DEPRECATED] 1.f) PoW check removed for Private DAG
+        // Server authority replaces Proof-of-Work. The coordinator's signature
+        // is the sole validation mechanism. PoW logic kept for documentation purposes.
+        // See: validate_wire_block_pow() in core_adapter.rs (disabled, always returns Ok)
 
         // ============================================================
         // 2) DÉCODAGE PAYLOAD + CONTRÔLES STRUCTURELS SIMPLES
@@ -308,11 +328,13 @@ where
         // MAIS on permet d'utiliser "genesis" comme parent supplémentaire
         // si le DAG n'a pas assez de tips distincts.
         //
+        // NOTE: En mode Single Writer, cette règle est REMPLACÉE par enforce_single_parent.
+        //
         // Règle:
         //  - parents.len() >= min_parents_after_boot
         //  - SAUF si le bloc contient "genesis" comme parent ET qu'il n'y a pas assez de tips
         //  - Dans ce cas, genesis peut "compléter" le compte de parents
-        {
+        if !policy.enforce_single_writer {
             let dag_was_bootstrapped = { self.dag.len() > 1 };
             if dag_was_bootstrapped && wb.parents.len() < policy.min_parents_after_boot {
                 // Vérifier si genesis est utilisé comme parent supplémentaire
@@ -327,6 +349,29 @@ where
                         policy.min_parents_after_boot
                     )));
                 }
+            }
+        }
+
+        // 2.f) SINGLE WRITER: Chaîne Linéaire (1 parent)
+        //
+        // En mode Single Writer, on impose exactement 1 parent par bloc.
+        // Cela garantit une chaîne linéaire au lieu d'un DAG.
+        if settings.validation.enforce_single_writer {
+            let is_genesis = payload.as_ref().is_some_and(|p| {
+                matches!(p, PayloadEnvelope::Plain(PlainPayload::Genesis))
+            });
+
+            // Genesis: 0 parents, Non-genesis: exactement 1 parent
+            if !is_genesis && wb.parents.len() != 1 {
+                tracing::warn!(
+                    "🚫 Single Writer violation: block {} has {} parents (expected 1)",
+                    &wb.id[..16.min(wb.id.len())],
+                    wb.parents.len()
+                );
+                return Ok(PutResult::Rejected(format!(
+                    "single_writer: block must have exactly 1 parent, got {}",
+                    wb.parents.len()
+                )));
             }
         }
 
@@ -369,12 +414,26 @@ where
         // Solution: vérifier d'abord que les parents existent dans le store.
         // ============================================================
 
-        // 4.a) Vérification des parents dans le store (pas de lock DAG nécessaire)
+        // 4.a) Vérification des parents (RAM DAG + store)
+        // 🔧 FIX: Check RAM DAG first to handle async persistence race condition
         let t_parents_start = std::time::Instant::now();
         if policy.enforce_parent_existence {
-            use crate::validations::parents::parents_exist_in_store;
-            if let Err(e) = parents_exist_in_store(&*self.store, &block).await {
-                return Ok(PutResult::Rejected(format!("dag validation failed: {e}")));
+            for parent_id in &block.parents {
+                // Check RAM DAG first (blocks are inserted here immediately)
+                let in_ram = self.dag.contains_block(parent_id);
+
+                // If not in RAM, check store (for blocks not yet loaded in RAM)
+                if !in_ram {
+                    match self.store.get_block(parent_id).await {
+                        Ok(Some(_)) => continue, // Parent in store ✓
+                        Ok(None) | Err(_) => {
+                            return Ok(PutResult::Rejected(format!(
+                                "dag validation failed: parent {} not found",
+                                parent_id
+                            )));
+                        }
+                    }
+                }
             }
         }
         let t_parents = t_parents_start.elapsed();
@@ -786,12 +845,38 @@ where
     }
 
     async fn top_tips(&self, limit: usize) -> Result<Vec<String>> {
+        // [SINGLE WRITER] Optimisation : Sélection linéaire simple
+        if self.policy.enforce_single_writer {
+            // 🔧 FIX: Check RAM DAG first (contains most recent blocks)
+            // This fixes race condition where blocks are in DAG but not yet in RocksDB
+            let dag_tips = self.dag.find_tips();
+            if !dag_tips.is_empty() {
+                // Return latest tip from RAM (most up-to-date)
+                // In linear chain mode, find_tips() returns 1 tip (the chain head)
+                println!(
+                    "[ADAPTER] top_tips (RAM): found {} tips. Last: {:?}",
+                    dag_tips.len(),
+                    dag_tips.last()
+                );
+                return Ok(vec![dag_tips[dag_tips.len() - 1].clone()]);
+            }
+
+            // Fallback to store if DAG is empty (shouldn't happen after bootstrap)
+            if let Ok(recents) = self.store.recent_ids(1).await {
+                if !recents.is_empty() {
+                    return Ok(recents);
+                }
+            }
+        }
+
         // 1) essaye le store s’il l’expose
         if let Ok(v) = self.store.top_tips(limit).await {
             if !v.is_empty() {
+                eprintln!("[ADAPTER] top_tips (store): {} tips", v.len());
                 return Ok(v);
             }
         }
+
         // 2) fallback RAM: DAG local (lock-free)
         let mut tips = self.dag.find_tips();
         if tips.len() > limit {
@@ -837,6 +922,10 @@ where
 
     async fn balance_by_address(&self, address: &str) -> rust_decimal::Decimal {
         self.utxos.balance_by_address(address).await
+    }
+
+    async fn utxos_by_address(&self, address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+        self.utxos.utxos_by_address(address).await
     }
 
     async fn add_utxo(&self, txid: String, index: u32, address: String, amount: String) {

@@ -65,6 +65,10 @@ impl<S: DagStorage + NftStorage + Send + Sync + 'static> CoreAdapter<S> {
         store: Arc<S>,
         mut policy: ValidatePolicy,
     ) -> Arc<Self> {
+        eprintln!(
+            "[ADAPTER] new_with_policy entry: enforce_parents={}",
+            policy.enforce_parent_existence
+        );
         // Garde ta logique actuelle de min_parents_after_boot, etc.
         let settings = load_config().expect("config");
         if settings.network.mode.is_non_prod() {
@@ -87,6 +91,9 @@ impl<S: DagStorage + NftStorage + Send + Sync + 'static> CoreAdapter<S> {
         })
     }
 
+    /// Valide la preuve de travail d'un WireBlock.
+    /// Note: Actuellement inutilisé car PoW désactivé par défaut.
+    #[allow(dead_code)]
     pub(crate) fn validate_wire_block_pow(&self, wb: &WireBlock) -> Result<(), ValidationError> {
         let bits = self.policy.min_pow_leading_zero_bits;
 

@@ -3,6 +3,7 @@
     import { apiCall } from "./api";
     import { nodeStatus, networkPeers, adminToken } from "./stores";
     import PerformanceChart from "./PerformanceChart.svelte";
+    import { fade, fly } from "svelte/transition";
 
     let interval: any;
 
@@ -12,12 +13,59 @@
     let lastBlockCount = 0;
     let lastTime = Date.now();
 
+    // New Data States
+    let supplyInfo: any = null;
+    let nodeInfo: any = null;
+
     async function fetchData() {
         try {
-            const metricsText = await apiCall("/metrics");
-            parseMetrics(metricsText);
-            const peers = await apiCall("/v1/nodes");
-            networkPeers.set(peers);
+            // Parallel fetch for independent data
+            const [metricsText, registryRes, p2pRes, supplyRes, nodeRes] =
+                await Promise.all([
+                    apiCall("/metrics").catch((err) => {
+                        console.error("Metrics failed", err);
+                        return "";
+                    }),
+                    apiCall("/v1/nodes").catch((err) => {
+                        console.error("Nodes failed", err);
+                        return { nodes: [] };
+                    }),
+                    apiCall("/v1/peers").catch((err) => {
+                        console.error("Peers failed", err);
+                        return [];
+                    }),
+                    apiCall("/v1/supply").catch((err) => {
+                        console.error("Supply failed", err);
+                        return null;
+                    }),
+                    apiCall("/admin/ping").catch((err) => {
+                        console.error("Ping failed", err);
+                        return null;
+                    }),
+                ]);
+
+            if (metricsText) parseMetrics(metricsText);
+
+            if (supplyRes) supplyInfo = supplyRes;
+            if (nodeRes) nodeInfo = nodeRes;
+
+            const registryNodes = (registryRes.nodes || []).map((n: any) => ({
+                ...n,
+                id: n.node_pk,
+                role: "Node",
+            }));
+
+            // p2pRes is array of strings or objects depending on version, let's assume strings for now based on previous code
+            // But if it fails it returns empty array
+            const p2pPeers = (p2pRes || []).map((addr: string, i: number) => ({
+                id: `peer-${i}`,
+                address: addr,
+                role: "P2P",
+            }));
+
+            // Merge: Show both Registry Nodes AND P2P Peers
+            const allPeers = [...registryNodes, ...p2pPeers];
+            networkPeers.set(allPeers);
         } catch (e) {
             console.error("Failed to fetch dashboard data", e);
         }
@@ -39,8 +87,6 @@
 
         // Calculate TPS
         const currentBlocks = parseInt(data["pms_blocks_total"] || "0");
-        // Using Data.now() for approximation.
-        // Ideally backend provides pms_tps gauge, but we calculate locally for now.
         const now = Date.now();
 
         if (lastBlockCount > 0) {
@@ -78,9 +124,17 @@
     }
 </script>
 
-<div class="dashboard">
+<div class="dashboard" in:fade>
     <header class="glass-panel">
-        <div class="logo">PMS Node</div>
+        <div class="brand">
+            <div class="logo">PMS Node (Fixed)</div>
+            {#if nodeInfo}
+                <span class="badge" title="Network ID">{nodeInfo.network}</span>
+                <span class="badge outline" title="Node Role"
+                    >{nodeInfo.role || "Node"}</span
+                >
+            {/if}
+        </div>
         <div class="actions">
             <button class="secondary" on:click={logout}>Logout</button>
         </div>
@@ -88,13 +142,19 @@
 
     <div class="grid">
         <!-- Status Cards -->
-        <div class="glass-panel card">
+        <div
+            class="glass-panel card"
+            in:fly={{ y: 20, duration: 500, delay: 0 }}
+        >
             <h3>DAG Size</h3>
             <div class="value">{$nodeStatus?.pms_blocks_total || "0"}</div>
             <div class="label">Total Blocks</div>
         </div>
 
-        <div class="glass-panel card">
+        <div
+            class="glass-panel card"
+            in:fly={{ y: 20, duration: 500, delay: 100 }}
+        >
             <h3>Blocks Persisted</h3>
             <div class="value">
                 {$nodeStatus?.pms_blocks_persisted_total || "0"}
@@ -102,14 +162,68 @@
             <div class="label">Confirmed</div>
         </div>
 
-        <div class="glass-panel card">
+        <div
+            class="glass-panel card"
+            in:fly={{ y: 20, duration: 500, delay: 200 }}
+        >
             <h3>Peers</h3>
             <div class="value">{$networkPeers.length}</div>
             <div class="label">Connected Nodes</div>
         </div>
 
+        <div
+            class="glass-panel card"
+            in:fly={{ y: 20, duration: 500, delay: 300 }}
+        >
+            <h3>Circulating Supply</h3>
+            <div class="value">
+                {supplyInfo
+                    ? parseFloat(supplyInfo.circulating_supply).toLocaleString(
+                          undefined,
+                          { maximumFractionDigits: 8 },
+                      )
+                    : "-"}
+            </div>
+            <div class="label">PMS</div>
+        </div>
+
+        <div
+            class="glass-panel card"
+            in:fly={{ y: 20, duration: 500, delay: 350 }}
+        >
+            <h3>Node Reward (Identity)</h3>
+            <div class="value">
+                {supplyInfo && supplyInfo.node_balance
+                    ? parseFloat(supplyInfo.node_balance).toLocaleString(
+                          undefined,
+                          { maximumFractionDigits: 4 },
+                      )
+                    : "-"}
+            </div>
+            <div class="label">PMS (Rewards)</div>
+        </div>
+
+        <div
+            class="glass-panel card"
+            in:fly={{ y: 20, duration: 500, delay: 375 }}
+        >
+            <h3>Treasury</h3>
+            <div class="value">
+                {supplyInfo && supplyInfo.treasury_balance
+                    ? parseFloat(supplyInfo.treasury_balance).toLocaleString(
+                          undefined,
+                          { maximumFractionDigits: 4 },
+                      )
+                    : "-"}
+            </div>
+            <div class="label">PMS (Reserves)</div>
+        </div>
+
         <!-- Real-time Chart -->
-        <div class="glass-panel card wide-chart">
+        <div
+            class="glass-panel card wide-chart"
+            in:fly={{ y: 20, duration: 500, delay: 400 }}
+        >
             <h3>Throughput (Transactions Per Second)</h3>
             <div class="chart-wrapper">
                 <PerformanceChart
@@ -121,37 +235,84 @@
             </div>
         </div>
 
-        <!-- Peer List -->
-        <div class="glass-panel wide">
-            <h3>Network Peers</h3>
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Address</th>
-                            <th>Role</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {#each $networkPeers as peer}
+        <div class="split-tables">
+            <!-- Peer List -->
+            <div
+                class="glass-panel"
+                in:fly={{ y: 20, duration: 500, delay: 500 }}
+            >
+                <h3>Network Peers</h3>
+                <div class="table-container">
+                    <table>
+                        <thead>
                             <tr>
-                                <td class="mono"
-                                    >{peer.id.substring(0, 16)}...</td
-                                >
-                                <td class="mono">{peer.address}</td>
-                                <td>{peer.role || "Node"}</td>
+                                <th>ID</th>
+                                <th>Address</th>
+                                <th>Role</th>
                             </tr>
-                        {/each}
-                        {#if $networkPeers.length === 0}
-                            <tr
-                                ><td colspan="3" class="empty"
-                                    >No peers connected</td
-                                ></tr
-                            >
-                        {/if}
-                    </tbody>
-                </table>
+                        </thead>
+                        <tbody>
+                            {#each $networkPeers as peer}
+                                <tr>
+                                    <td class="mono"
+                                        >{peer.id
+                                            ? peer.id.substring(0, 16)
+                                            : "???"}...</td
+                                    >
+                                    <td class="mono">{peer.address}</td>
+                                    <td>{peer.role || "Node"}</td>
+                                </tr>
+                            {/each}
+                            {#if $networkPeers.length === 0}
+                                <tr
+                                    ><td colspan="3" class="empty"
+                                        >No peers connected</td
+                                    ></tr
+                                >
+                            {/if}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Treasury Details -->
+            <div
+                class="glass-panel"
+                in:fly={{ y: 20, duration: 500, delay: 600 }}
+            >
+                <h3>Treasury Wallets</h3>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Address</th>
+                                <th style="text-align: right;">Balance</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {#if supplyInfo && supplyInfo.treasury_details}
+                                {#each supplyInfo.treasury_details as wallet}
+                                    <tr>
+                                        <td class="mono">{wallet.address}</td>
+                                        <td class="mono number">
+                                            {parseFloat(
+                                                wallet.balance,
+                                            ).toLocaleString(undefined, {
+                                                maximumFractionDigits: 4,
+                                            })} PMS
+                                        </td>
+                                    </tr>
+                                {/each}
+                            {:else}
+                                <tr>
+                                    <td colspan="2" class="empty"
+                                        >No treasury data</td
+                                    >
+                                </tr>
+                            {/if}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>
@@ -172,6 +333,12 @@
         padding: 1rem 2rem;
     }
 
+    .brand {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+
     .logo {
         font-weight: 700;
         font-size: 1.5rem;
@@ -180,9 +347,25 @@
         -webkit-text-fill-color: transparent;
     }
 
+    .badge {
+        font-size: 0.75rem;
+        padding: 0.25em 0.75em;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 99px;
+        color: var(--color-fg-secondary);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    .badge.outline {
+        background: transparent;
+        border: 1px solid var(--color-border);
+    }
+
     .grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
         gap: 1.5rem;
     }
 
@@ -190,10 +373,12 @@
         display: flex;
         flex-direction: column;
         align-items: flex-start;
+        justify-content: space-between;
+        min-height: 140px;
     }
 
     .card h3 {
-        font-size: 0.9rem;
+        font-size: 0.85rem;
         color: var(--color-fg-secondary);
         text-transform: uppercase;
         letter-spacing: 0.05em;
@@ -201,9 +386,18 @@
     }
 
     .card .value {
-        font-size: 2.5rem;
+        font-size: 2.2rem;
         font-weight: 700;
         color: var(--color-fg-primary);
+        line-height: 1.1;
+        margin-top: auto;
+    }
+
+    .card .label {
+        font-size: 0.85rem;
+        color: var(--color-fg-secondary);
+        margin-top: 0.5rem;
+        opacity: 0.7;
     }
 
     .wide {
@@ -221,11 +415,6 @@
         min-height: 300px;
     }
 
-    .table-container {
-        overflow-x: auto;
-        margin-top: 1rem;
-    }
-
     table {
         width: 100%;
         border-collapse: collapse;
@@ -236,30 +425,72 @@
         padding: 1rem;
         color: var(--color-fg-secondary);
         border-bottom: 1px solid var(--color-border);
+        font-size: 0.9rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
     }
 
     td {
         padding: 1rem;
         border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        color: var(--color-fg-secondary);
     }
 
     .mono {
         font-family: monospace;
         color: var(--color-accent);
+        font-size: 0.95rem;
     }
 
     .empty {
         text-align: center;
         color: var(--color-fg-secondary);
         padding: 2rem;
+        font-style: italic;
     }
 
     button.secondary {
         background: transparent;
         border: 1px solid var(--color-border);
+        font-size: 0.9rem;
     }
 
     button.secondary:hover {
         background: rgba(255, 255, 255, 0.05);
+        border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .split-tables {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+        gap: 1.5rem;
+    }
+
+    .table-container {
+        overflow-x: auto;
+        margin-top: 1rem;
+        max-height: 400px; /* Limit height but allow scroll */
+        overflow-y: auto;
+    }
+
+    /* Scrollbar styling for table */
+    .table-container::-webkit-scrollbar {
+        height: 8px;
+        width: 8px;
+    }
+
+    .table-container::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.02);
+        border-radius: 4px;
+    }
+
+    .table-container::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 4px;
+    }
+
+    .table-container::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.2);
     }
 </style>

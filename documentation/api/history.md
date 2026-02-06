@@ -43,10 +43,10 @@ Utilisez `next_after_ts` et `next_after_id` pour la page suivante :
 
 ```bash
 # Page 1
-curl "http://localhost:3000/v1/history/encrypted?limit=100"
+curl -k "https://localhost:8443/v1/history/encrypted?limit=100"
 
 # Page 2
-curl "http://localhost:3000/v1/history/encrypted?after_ts=1705999000000&after_id=block_xyz789&limit=100"
+curl -k "https://localhost:8443/v1/history/encrypted?after_ts=1705999000000&after_id=block_xyz789&limit=100"
 ```
 
 ---

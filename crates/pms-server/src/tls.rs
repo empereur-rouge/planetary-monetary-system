@@ -1,31 +1,20 @@
 use rustls::{
     ServerConfig,
-    pki_types::{CertificateDer, PrivateKeyDer},
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
 };
-use rustls_pemfile::{certs, ec_private_keys, pkcs8_private_keys};
-use std::{fs::File, io::BufReader};
+use std::fs;
 
+/// Load TLS server configuration from PEM files.
+/// Uses rustls native PEM support (replaces deprecated rustls-pemfile crate).
 pub fn load_tls(cert_path: &str, key_path: &str) -> anyhow::Result<ServerConfig> {
-    // certs
-    let mut cr = BufReader::new(File::open(cert_path)?);
-    let cert_chain: Vec<CertificateDer<'static>> = certs(&mut cr).collect::<Result<_, _>>()?;
-
-    // keys: PKCS#8 d’abord
-    let mut kr = BufReader::new(File::open(key_path)?);
-    let mut keys: Vec<PrivateKeyDer<'static>> = pkcs8_private_keys(&mut kr)
-        .map(|r| r.map(PrivateKeyDer::from))
+    // Load certificates from PEM file
+    let cert_pem = fs::read(cert_path)?;
+    let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
         .collect::<Result<_, _>>()?;
 
-    // fallback SEC1 (EC PRIVATE KEY)
-    if keys.is_empty() {
-        kr = BufReader::new(File::open(key_path)?);
-        keys = ec_private_keys(&mut kr)
-            .map(|r| r.map(PrivateKeyDer::from))
-            .collect::<Result<_, _>>()?;
-    }
-
-    anyhow::ensure!(!keys.is_empty(), "no private key found (pkcs8/ec)");
-    let key = keys.remove(0);
+    // Load private key (supports PKCS#8, SEC1/EC, and RSA formats automatically)
+    let key_pem = fs::read(key_path)?;
+    let key = PrivateKeyDer::from_pem_slice(&key_pem)?;
 
     let mut cfg = ServerConfig::builder()
         .with_no_client_auth()
@@ -34,6 +23,8 @@ pub fn load_tls(cert_path: &str, key_path: &str) -> anyhow::Result<ServerConfig>
     Ok(cfg)
 }
 
+/// Load TLS client configuration for mutual TLS.
+/// Uses rustls native PEM support (replaces deprecated rustls-pemfile crate).
 pub fn load_client_config(
     cert_path: &str,
     key_path: &str,
@@ -42,34 +33,21 @@ pub fn load_client_config(
     // 1. Load RootCertStore (CA)
     let mut root_store = rustls::RootCertStore::empty();
 
-    // Add WebPKI roots (optional, but good for real TLS)
-    // root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
     // Add Custom CA if present
     if let Some(ca) = ca_path {
-        let mut cr = BufReader::new(File::open(ca)?);
-        for cert in certs(&mut cr) {
+        let ca_pem = fs::read(ca)?;
+        for cert in CertificateDer::pem_slice_iter(&ca_pem) {
             root_store.add(cert?)?;
         }
     }
 
     // 2. Load Client Cert/Key (Mutual TLS)
-    let mut cr = BufReader::new(File::open(cert_path)?);
-    let cert_chain: Vec<CertificateDer<'static>> = certs(&mut cr).collect::<Result<_, _>>()?;
-
-    let mut kr = BufReader::new(File::open(key_path)?);
-    let mut keys: Vec<PrivateKeyDer<'static>> = pkcs8_private_keys(&mut kr)
-        .map(|r| r.map(PrivateKeyDer::from))
+    let cert_pem = fs::read(cert_path)?;
+    let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
         .collect::<Result<_, _>>()?;
 
-    if keys.is_empty() {
-        kr = BufReader::new(File::open(key_path)?);
-        keys = ec_private_keys(&mut kr)
-            .map(|r| r.map(PrivateKeyDer::from))
-            .collect::<Result<_, _>>()?;
-    }
-    anyhow::ensure!(!keys.is_empty(), "no private key found (pkcs8/ec)");
-    let key = keys.remove(0);
+    let key_pem = fs::read(key_path)?;
+    let key = PrivateKeyDer::from_pem_slice(&key_pem)?;
 
     // 3. Build ClientConfig
     let mut cfg = rustls::ClientConfig::builder()

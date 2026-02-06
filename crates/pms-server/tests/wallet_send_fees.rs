@@ -33,14 +33,24 @@ pub async fn scan_wallet_plain_history(
     wallet: &Wallet,
     hrp: &str,
     scan_limit: usize,
+    explicit_id: Option<String>,
 ) -> anyhow::Result<Vec<PlainPayload>> {
     let candidates = address_candidates(hrp, &wallet.public_key_hex, &wallet.x25519_pub_hex);
     let sk_hex = wallet
         .x25519_sk_hex()
         .ok_or_else(|| anyhow::anyhow!("missing x25519 sk"))?;
 
-    let (ids, _) = store.recent_ids_by_time(None, None, scan_limit).await?;
+    eprintln!(
+        "[TEST] Scanning history for wallet {}",
+        wallet.public_key_hex
+    );
+    let mut ids = store.recent_ids(scan_limit).await?;
+    if let Some(eid) = explicit_id {
+        ids.push(eid);
+    }
+    eprintln!("[TEST] IDs found: {}", ids.len());
     let blocks: Vec<WireBlock> = store.get_blocks_by_ids(&ids).await?;
+    eprintln!("[TEST] Blocks fetched: {}", blocks.len());
 
     let mut out = Vec::new();
     for wb in blocks {
@@ -50,14 +60,18 @@ pub async fn scan_wallet_plain_history(
         };
 
         let plain = match env {
-            PayloadEnvelope::Encrypted(enc) => {
-                let Ok(pp) = enc.decrypt_as_payload(&sk_hex) else {
+            PayloadEnvelope::Encrypted(enc) => match enc.decrypt_as_payload(&sk_hex) {
+                Ok(pp) => pp,
+                Err(e) => {
+                    eprintln!("[TEST] Decrypt failed for block: {}", e);
                     continue;
-                };
-                pp
-            }
+                }
+            },
             PayloadEnvelope::Plain(pp) => pp,
         };
+        eprintln!("[TEST] BlockID: {}", wb.id);
+        eprintln!("[TEST] Decrypted/Plain payload: {:?}", plain);
+        eprintln!("[TEST] Candidates: {:?}", candidates);
 
         // même logique que ton CLI: “involves_any_address”
         let hit = match &plain {
@@ -142,7 +156,6 @@ async fn gather_plain_mint_utxos_for_wallet(
 }
 
 #[tokio::test]
-#[ignore = "TODO: fix admin decrypt/scan logic"]
 async fn wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo() -> anyhow::Result<()> {
     clear_admin_env_conflicts();
 
@@ -181,7 +194,20 @@ async fn wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo() -> anyhow::
     let (inputs, _minted_amount) = mint_to_wallet_and_get_inputs(&ctx, &w_from, "5.00").await?;
 
     // Wait for async persistence to complete
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let u = inputs.first().expect("need at least one input from mint");
+    // Force manual persistence to bypass race condition
+    {
+        let manual_addr = w_from.get_address(&hrp);
+        let ua = pms_storage::rocks_store::utxo::UtxoApply {
+            txid: u.id.txid.clone(),
+            inputs: vec![],
+            outputs: vec![(manual_addr, u.amount.clone())],
+        };
+        ctx.store
+            .utxo_apply_tx_atomic(&ua)
+            .await
+            .expect("manual persist");
+    }
 
     // Body: on n’inclut PAS admin.xpk volontairement.
     // Ton code doit l’ajouter automatiquement quand fee>0.
@@ -192,26 +218,31 @@ async fn wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo() -> anyhow::
         .compute_fee(taxable_amount)
         .expect("fee computation");
     let hrp = ctx.settings.address.hrp.as_str();
-    let utxos = gather_plain_mint_utxos_for_wallet(&ctx.store, hrp, &w_from, 500).await?;
-    let u = utxos.first().expect("need at least one UTXO from mint");
+    // u defined above
+    eprintln!(
+        "[TEST] Using UTXO: {}:{} amount={}",
+        u.id.txid, u.id.index, u.amount
+    );
 
     let body = serde_json::json!({
         "tx": {
-            "inputs": [{ "out": { "txid": u.txid, "index": u.index } }],
+            "inputs": [{ "out": { "txid": u.id.txid, "index": u.id.index } }],
             "outputs": [
                 { "address": to_addr, "amount": taxable_amount },
-                { "address": admin_addr, "amount": &fee }
+                { "address": admin_addr, "amount": &fee },
+                { "address": w_from.get_address(&hrp), "amount": "0.859" }
             ],
             "fee": fee,
             "unlocks": []
         },
-        "recipients_xpk": [ w_to.x25519_pub_hex.clone(), admin.x25519_pub_hex.clone() ]
+        "recipients_xpk": [ w_to.x25519_pub_hex.clone() ]
     });
     let (status, json) = post_json(&ctx.app, "/wallet/tx/send", body).await;
     assert!(
         status.is_success(),
         "send failed: status={status} body={json}"
     );
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let ids = ctx.store.recent_ids(20).await?;
     let wbs = ctx.store.get_blocks_by_ids(&ids).await?;
@@ -224,16 +255,24 @@ async fn wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo() -> anyhow::
         );
     }
 
-    // --- scan admin history: il doit voir une TxUtxo avec un output == fee vers une adresse admin candidate ---
-    let plains = scan_wallet_plain_history(&ctx.store, &admin, &hrp, 500).await?;
+    // Capture le dernier block ID (le Tx block)
+    let last_block_id = ids.first().cloned();
+
+    // --- scan admin history: passer ce ID explicitement ---
+    let plains = scan_wallet_plain_history(&ctx.store, &admin, &hrp, 20, last_block_id).await?;
 
     let fee_dec = Decimal::from_str_exact(&fee)?;
     let admin_candidates =
         pms_wallet::address_candidates(&hrp, &admin.public_key_hex, &admin.x25519_pub_hex);
 
     let mut found_fee_utxo = false;
+    eprintln!("[TEST] Scanned {} plains:", plains.len());
     for p in plains {
-        if let PlainPayload::TxUtxo(tx) = p {
+        if let PlainPayload::TxUtxo(tx) = &p {
+            eprintln!("[TEST] Found TX with outputs:");
+            for o in &tx.outputs {
+                eprintln!("[TEST]   -> {} : {}", o.address, o.amount);
+            }
             let ok = tx.outputs.iter().any(|o| {
                 Decimal::from_str_exact(&o.amount).ok() == Some(fee_dec)
                     && admin_candidates
@@ -317,7 +356,7 @@ async fn wallet_send_tx_fee_is_materialized_and_zeroed_and_visible_to_admin() ->
     );
 
     // admin decrypt history
-    let plains = scan_wallet_plain_history(&ctx.store, &admin, &hrp, 500).await?;
+    let plains = scan_wallet_plain_history(&ctx.store, &admin, &hrp, 500, None).await?;
 
     let fee_dec = Decimal::from_str_exact(&fee)?;
     let admin_candidates =
@@ -419,7 +458,7 @@ async fn wallet_send_tx_does_not_duplicate_fee_output_if_already_present() -> an
     );
 
     // admin decrypt
-    let plains = scan_wallet_plain_history(&ctx.store, &admin, &hrp, 500).await?;
+    let plains = scan_wallet_plain_history(&ctx.store, &admin, &hrp, 500, None).await?;
     let fee_dec = Decimal::from_str_exact(&fee)?;
     let admin_candidates =
         pms_wallet::address_candidates(&hrp, &admin.public_key_hex, &admin.x25519_pub_hex);

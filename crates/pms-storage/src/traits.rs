@@ -17,6 +17,9 @@ pub trait DagStorage: Send + Sync {
 
     async fn all_block_ids(&self) -> Result<Vec<String>>;
 
+    /// Returns the total number of blocks in the DAG
+    async fn block_count(&self) -> Result<u64>;
+
     async fn export_json(&self) -> Result<String>;
     async fn export_namespace(&self) -> Result<String>;
     async fn import_json(&self, dump: &str) -> Result<()>;

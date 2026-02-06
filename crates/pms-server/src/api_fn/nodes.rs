@@ -24,7 +24,11 @@ pub async fn register_node(
     // Register the node
     {
         let mut registry = st.node_registry.write().await;
-        registry.register(req.node_pk.clone(), req.api_url.clone());
+        registry.register(
+            req.node_pk.clone(),
+            req.api_url.clone(),
+            req.wallet_address.clone(),
+        );
     }
 
     tracing::info!(
@@ -59,8 +63,44 @@ pub async fn node_heartbeat(
 
     {
         let mut registry = st.node_registry.write().await;
-        registry.register(req.node_pk, req.api_url);
+        registry.register(req.node_pk, req.api_url, req.wallet_address);
     }
 
     StatusCode::OK.into_response()
+}
+
+/// GET /v1/peers
+/// Returns list of connected P2P peers (socket addresses)
+pub async fn list_peers(State(st): State<AppState>) -> impl IntoResponse {
+    let peers = st.srv.get_p2p_peers();
+    Json(peers)
+}
+
+#[derive(serde::Deserialize)]
+pub struct ConnectPeerRequest {
+    pub addr: String,
+}
+
+/// POST /v1/peers/connect
+/// Manually connect to a P2P peer
+pub async fn connect_peer(
+    State(st): State<AppState>,
+    Json(req): Json<ConnectPeerRequest>,
+) -> impl IntoResponse {
+    let tls = st.settings.tls.clone();
+
+    // We don't strictly validate SocketAddr here to allow hostnames (e.g. node1:8080)
+    // The server::connect_to_peer method handles resolution
+    if req.addr.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Address required").into_response();
+    }
+
+    let srv = st.srv.clone();
+    tokio::spawn(async move {
+        if let Err(e) = srv.connect_to_peer(req.addr.clone(), tls).await {
+            tracing::error!("❌ Failed to connect to peer {}: {}", req.addr, e);
+        }
+    });
+
+    (StatusCode::OK, "Connection initiated").into_response()
 }

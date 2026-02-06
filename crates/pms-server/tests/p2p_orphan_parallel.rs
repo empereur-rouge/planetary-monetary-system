@@ -73,7 +73,13 @@ async fn test_parallel_orphan_fetch_logic() {
 
     // We instantiate Server but do NOT run the network layer.
     // We only access: server.process_incoming_blocks()
-    let server = Server::new(adapter.clone(), "testnet", 1, wallet);
+    let server = Server::new(
+        adapter.clone(),
+        "testnet",
+        1,
+        wallet,
+        &pms_config::P2pConfig::default(),
+    );
 
     // Create Block with 2 missing parents
     let p1 = "00000000000000000000000000000000000000000000000000000000000000A1".to_string();

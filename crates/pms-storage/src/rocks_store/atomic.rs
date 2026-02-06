@@ -18,7 +18,6 @@ impl RocksStore {
         if self.db.get_cf(cf_blocks, b.id.as_bytes())?.is_some() {
             return Ok(false);
         }
-
         // timestamp pour index_by_time & tip
         let now_ts = now_ms_i64();
         let time_key = key_time_index(now_ts, &b.id);

@@ -25,6 +25,7 @@ members = [
     "crates/pms-consensus",
     "crates/pms-event",
     "crates/pms-types-nft",
+    "crates/pms-gateway",
 ]
 
 resolver = "2"
@@ -33,6 +34,6 @@ resolver = "2"
 default-members = ["crates/pms-wallet", "crates/pms-core", "crates/pms-types"]
 
 [workspace.dependencies]
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 hyper-rustls = { version = "0.27", features = ["ring", "http2"] }
 tokio-rustls = "0.26"

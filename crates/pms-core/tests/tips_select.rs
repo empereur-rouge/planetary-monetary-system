@@ -39,6 +39,10 @@ impl DagStorage for DummyStore {
     async fn all_block_ids(&self) -> Result<Vec<String>> {
         Ok(vec![])
     }
+    // Added for trait compatibility
+    async fn block_count(&self) -> Result<u64> {
+        Ok(0)
+    }
     async fn export_json(&self) -> Result<String> {
         Ok("[]".into())
     }
@@ -72,7 +76,8 @@ impl DagStorage for DummyStore {
     }
 
     async fn recent_ids(&self, limit: usize) -> Result<Vec<String>> {
-        todo!()
+        // Mock: retourne les tips inversés (supposant que tips[last] = le plus récent)
+        Ok(self.tips.iter().rev().take(limit).cloned().collect())
     }
 
     async fn recent_ids_by_time(
@@ -163,7 +168,7 @@ async fn tips_selection_is_deterministic_and_excludes_finalized() -> Result<()> 
 
     // 1) Sélection k=3, fenêtre large
     let k = 3usize;
-    let sel1 = select_parents_deterministic(&dag, &store, k, 256).await?;
+    let sel1 = select_parents_deterministic(&dag, &store, k, 256, false).await?;
     assert_eq!(sel1.len(), k, "doit retourner exactement k parents");
     assert!(
         !sel1.iter().any(|x| x == "c"),
@@ -171,16 +176,37 @@ async fn tips_selection_is_deterministic_and_excludes_finalized() -> Result<()> 
     );
 
     // 2) Déterminisme (même seed, même entrée → même résultat)
-    let sel2 = select_parents_deterministic(&dag, &store, k, 256).await?;
+    let sel2 = select_parents_deterministic(&dag, &store, k, 256, false).await?;
     assert_eq!(sel1, sel2, "même seed => même ordre de parents");
 
     // 3) Seed différent => ordre très probablement différent
     let dag2 = mk_dag_with_seed(Some("ms2"), &["c"]);
-    let sel3 = select_parents_deterministic(&dag2, &store, k, 256).await?;
+    let sel3 = select_parents_deterministic(&dag2, &store, k, 256, false).await?;
     assert_ne!(
         sel1, sel3,
         "seed différent => ordre (très probablement) différent"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn tips_selection_single_writer_picks_latest() -> Result<()> {
+    // Setup simple: Genesis -> A -> B
+    // Le "Dernier" (recent_ids) devrait être B.
+    // select_parents_deterministic(..., true) doit retourner [B].
+
+    let store = DummyStore {
+        tips: vec!["gen".into(), "A".into(), "B".into()], // recent_ids(1) -> ["B"]
+    };
+
+    let dag = mk_dag_with_seed(None, &[]);
+    // Note: Dag vide en RAM, mais tips.rs en SW utilise surtout le store.recent_ids
+
+    let sel = select_parents_deterministic(&dag, &store, 2, 256, true).await?;
+
+    assert_eq!(sel.len(), 1, "Single Writer doit retourner 1 seul parent");
+    assert_eq!(sel[0], "B", "Doit être le dernier bloc");
 
     Ok(())
 }

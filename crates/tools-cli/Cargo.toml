@@ -29,7 +29,7 @@ pms-config = { path = "../pms-config" }
 pms-wire = { path = "../pms-wire" }
 pms-wallet = { path = "../pms-wallet" }
 pms-types = { path = "../pms-types" }
-atty = "0.2.14"
+# atty removed - replaced with std::io::IsTerminal (stable since Rust 1.70)
 qrcode = "0.14.1"
 rand = "0.9.2"
 futures = "0.3.31"

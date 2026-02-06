@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased]
+- **feat**: Single Writer Protocol Lock (`enforce_single_writer` in `[validation]` config):
+  - Only Coordinator can create blocks (signature verified at protocol level).
+  - Linear chain enforced (exactly 1 parent per block, except genesis).
+  - Finality is immediate (no k-depth, no orphans, no conflicts).
+  - Default: `true` (Private DAG mode). Set to `false` for multi-writer.
+- **test**: Added `single_writer_enforcement.rs` with 7 tests for linear chain enforcement.
+- **refactor**: Deleted 7 obsolete multi-writer/k-depth tests in preparation for Single Writer DAG:
+  - `finality_kdepth.rs`, `finality_mvp.rs` (probabilistic finality)
+  - `node_rewards_e2e.rs` (multi-miner rewards)
+  - `inv_roundtrip.rs`, `local_stress.rs` (P2P multi-node)
+  - `utxo_ledger_atomic.rs`, `stress_persist.rs` (concurrent UTXO/k-depth finality)
+- fix: Added missing `treasury_addresses` field to `FeesSettings` in `automated_distribution_test.rs`.
+- fix: Added missing `encrypted_metadata` and `new_owner_x25519_pubkey` fields to `NftAction::Transfer` in `nft_validation.rs`.
+- arch: VPS 4-process separation (Engine, Gateway, Prometheus, Caddy) with internal API
+- refactor: Remove PoW validation from block persistence (Private DAG: coordinator signature is sole authority)
+- feat: Add P2P strict whitelist (`allowed_peer_ips`, `strict_whitelist` in `[p2p]` config) for private network enforcement
+- docs: Update API documentation to align with Private DAG vision (removed PoW references, clarified server authority)
+- config: Set `min_pow_leading_zero_bits = 0` in production template (Private DAG: server authority replaces PoW)
+- docs: Major rewrite of README.md to align with "Centralized Private DAG" vision. Removed PoW, trustless, public blockchain references.
+- fix: automatic inclusion of admin XPK in encrypted recipients for fee outputs to ensure Treasury visibility
+- fix: Fixed `mint_security` and `mint_security_full` test compilation by aligning `ValidatePolicy` initialization with new fields.
+- refactor: Updated `net_adapter.rs` to strictly use injected policy for Single Writer enforcement, fixing test overrides.
+
+
 All notable changes to the PMS DAG will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -59,7 +84,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added automated fee distribution background task (interval configurable via `distribution_interval_sec`).
   - Refactored fee distribution logic into `fee_distribution.rs` module.
   - Coordinator automatically creates Mint blocks to distribute accumulated fees and burn refunds.
+  - Coordinator automatically creates Mint blocks to distribute accumulated fees and burn refunds.
   - Added `automated_distribution_test.rs` ensuring distribution happens and pool resets.
+
+### Fixed
+- **Fee Distribution**: Fixed `extract_tx_fee` to correctly decrypt `EncryptedPayload` (was causing "Envelope mismatch" and preventing fee accumulation).
+- **Dashboard Balances**: Fixed zero balances by exposing `node_balance` (Identity) and Aligned Treasury source to use file-backed wallets.
+- **SDK Tests**: Fixed "NetworkError" in tests by allowing self-signed certificates via `setup.ts` and fixed `mintCube` mock.
+- **DAG Metrics**:
+  - feat: ajout du champ `treasury_details` à `/v1/supply` pour lister individuellement les portefeuilles [api]
+- ui: remplacement de la carte Trésorerie par une liste détaillée "Treasury Wallets" sur le dashboard [dashboard]
+- fix: initialisation de la métrique `PMS_BLOCKS_TOTAL` au démarrage [server]
+- feat: ajout des champs `coordinator_balance` et `treasury_balance` à `/v1/supply` [api]
+- ui: affichage des soldes Coordinateur et Trésorerie sur le dashboard [dashboard]
+  - Fixed initialization of `PMS_BLOCKS_TOTAL` metric on startup (was starting at 0, now reads count from Store).
+  - Added `block_count()` to `DagStorage` trait and `RocksStore` implementation.
 
 ### Fixed
 - **Docker Deployment**

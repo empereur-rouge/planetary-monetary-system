@@ -88,13 +88,13 @@ async fn main() -> Result<()> {
         if args.len() != 4 {
             eprintln!("Usage: tools-cli treasury-sign <coordinator_key_file> <treasury_json_file>");
             eprintln!("  Signs the treasury wallets list with the coordinator's private key");
-            eprintln!("");
+            eprintln!();
             eprintln!("  The JSON file should have format:");
             eprintln!("  {{");
             eprintln!("    \"wallets\": [\"8e1addr1...\", \"8e1addr2...\"],");
             eprintln!("    \"signature\": \"\"");
             eprintln!("  }}");
-            eprintln!("");
+            eprintln!();
             eprintln!("  The signature field will be updated with the coordinator's signature.");
             std::process::exit(1);
         }
@@ -161,7 +161,7 @@ async fn main() -> Result<()> {
         println!("═══════════════════════════════════════════════════════════════");
         println!("🏦 Treasury Wallet Generator (Real PMS Addresses)");
         println!("═══════════════════════════════════════════════════════════════");
-        println!("");
+        println!();
 
         // Create output directory
         std::fs::create_dir_all(output_dir)?;
@@ -199,11 +199,11 @@ async fn main() -> Result<()> {
             println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             println!("   Address: {}", address);
             println!("   Saved to: {}", wallet_path);
-            println!("");
+            println!();
             println!("   ⚠️  MNEMONIC (SAVE THIS SECURELY):");
             println!("   ────────────────────────────────────");
             println!("   {}", mnemonic);
-            println!("");
+            println!();
 
             mnemonics_output.push_str(&format!(
                 "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
@@ -229,10 +229,10 @@ async fn main() -> Result<()> {
         println!("📝 Treasury JSON created: {}", json_path);
         println!("   Total wallets: {}", addresses.len());
         println!("═══════════════════════════════════════════════════════════════");
-        println!("");
+        println!();
         println!("📋 SUMMARY - SAVE THESE MNEMONICS!");
         println!("{}", mnemonics_output);
-        println!("");
+        println!();
         println!("⚡ NEXT STEPS:");
         println!("1. Save the mnemonics above in a SECURE location");
         println!("2. Sign the treasury list:");
@@ -245,5 +245,166 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Commande pour générer un wallet avec mnemonic (output JSON)
+    if args.len() > 1 && args[1] == "wallet-generate" {
+        let prefix = args.get(2).map(|s| s.as_str()).unwrap_or("pms");
+        let wallet = pms_wallet::Wallet::generate();
+        let address = wallet.get_address(prefix);
+        let mnemonic = wallet.mnemonic_words.clone().unwrap_or_default().join(" ");
+
+        // Get private key as hex
+        let priv_b64 = &wallet.private_key_b64;
+        let priv_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, priv_b64)
+            .unwrap_or_default();
+        let priv_hex = hex::encode(&priv_bytes);
+
+        let output = serde_json::json!({
+            "private_key_hex": priv_hex,
+            "private_key_b64": wallet.private_key_b64,
+            "public_key_hex": wallet.public_key_hex,
+            "x25519_pub_hex": wallet.x25519_pub_hex,
+            "address": address,
+            "mnemonic": mnemonic
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        return Ok(());
+    }
+
+    // Commande utilitaire pour dériver l'adresse wallet depuis une clé privée hex
+    if args.len() > 1 && args[1] == "key-to-wallet" {
+        if args.len() != 3 {
+            eprintln!("Usage: tools-cli key-to-wallet <private_key_hex>");
+            std::process::exit(1);
+        }
+        let priv_hex = &args[2];
+        let wallet = pms_wallet::Wallet::from_hex(priv_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid key: {}", e))?;
+        println!("{}", wallet.get_address("pms"));
+        return Ok(());
+    }
+
+    // Commande utilitaire pour obtenir la PubKey HEX (04...) depuis une clé privée
+    if args.len() > 1 && args[1] == "priv-to-pub" {
+        if args.len() != 3 {
+            eprintln!("Usage: tools-cli priv-to-pub <private_key_hex>");
+            std::process::exit(1);
+        }
+        let priv_hex = &args[2];
+
+        // Note: pms-node uses compressed keys (03/02...) by default via to_sec1_bytes()
+        // So we must output compressed for the Registry to match the Block signer.
+        let priv_bytes =
+            hex::decode(priv_hex).map_err(|e| anyhow::anyhow!("Invalid hex: {}", e))?;
+        let signing_key = k256::ecdsa::SigningKey::from_slice(&priv_bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid key: {}", e))?;
+        let verify_key = signing_key.verifying_key();
+        println!(
+            "{}",
+            hex::encode(verify_key.to_encoded_point(true).as_bytes())
+        );
+        return Ok(());
+    }
+
+    // Commande headless pour envoyer des tokens sans interaction (pour scripts)
+    if args.len() > 1 && args[1] == "tx" {
+        if args.len() < 5 || args.len() > 6 {
+            eprintln!("Usage: tools-cli tx <priv_key_hex> <dest_addr> <amount> [fee]");
+            std::process::exit(1);
+        }
+        let priv_hex = &args[2];
+        let dest_addr = &args[3];
+        let amount_str = &args[4];
+        let fee_str = args.get(5).map(|s| s.as_str()).unwrap_or("0");
+
+        // Bootstrapping minimal pour DAG/Store en mode secondaire
+        let settings = pms_config::load_config()?;
+        let tip_limit = pms_core::MAX_TIPS_CAP;
+        let secondary_dir = format!("{}/cli-tx-view", &settings.rocks.path);
+
+        eprintln!(
+            "🔌 CLI (Headless) -> RocksDB path='{}'",
+            settings.rocks.path
+        );
+
+        let store_res = pms_storage::rocks_store::store::RocksStore::open_secondary(
+            &settings.rocks.path,
+            &secondary_dir,
+            tip_limit,
+            &settings.rocks.prefix,
+        )
+        .await;
+
+        let (store, dag) = match store_res {
+            Ok(s) => {
+                let store = std::sync::Arc::new(s);
+                let dag = pms_core::ConcurrentDag::bootstrap_from_store::<
+                    pms_storage::rocks_store::store::RocksStore,
+                >(&*store)
+                .await?;
+                (store, std::sync::Arc::new(dag))
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to open RocksDB: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        crate::block_submission::action_send_tokens_headless(
+            &dag, &store, priv_hex, dest_addr, amount_str, fee_str,
+        )
+        .await?;
+
+        return Ok(());
+    }
+
+    // Commande headless pour mint (pour scripts)
+    if args.len() > 1 && args[1] == "mint" {
+        if args.len() != 4 {
+            eprintln!("Usage: tools-cli mint <priv_key_hex> <amount>");
+            std::process::exit(1);
+        }
+        let priv_hex = &args[2];
+        let amount_str = &args[3];
+
+        // Bootstrapping minimal pour DAG/Store en mode secondaire
+        let settings = pms_config::load_config()?;
+        let tip_limit = pms_core::MAX_TIPS_CAP;
+        let secondary_dir = format!("{}/cli-mint-view", &settings.rocks.path);
+
+        eprintln!(
+            "🔌 CLI (Headless Mint) -> RocksDB path='{}'",
+            settings.rocks.path
+        );
+
+        let store_res = pms_storage::rocks_store::store::RocksStore::open_secondary(
+            &settings.rocks.path,
+            &secondary_dir,
+            tip_limit,
+            &settings.rocks.prefix,
+        )
+        .await;
+
+        let (store, dag) = match store_res {
+            Ok(s) => {
+                let store = std::sync::Arc::new(s);
+                let dag = pms_core::ConcurrentDag::bootstrap_from_store::<
+                    pms_storage::rocks_store::store::RocksStore,
+                >(&*store)
+                .await?;
+                (store, std::sync::Arc::new(dag))
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to open RocksDB: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        crate::block_submission::action_make_mint_headless(&dag, &store, priv_hex, amount_str)
+            .await?;
+
+        return Ok(());
+    }
+
+    // Interactive REPL fallback
     repl::run().await
 }

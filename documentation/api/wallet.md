@@ -44,7 +44,7 @@ Récupère le solde d'un wallet avec décryptage des UTXOs chiffrés.
 ### Exemple
 
 ```bash
-curl -X POST http://localhost:3000/wallet/balance \
+curl -k -X POST https://localhost:8443/wallet/balance \
   -H "Content-Type: application/json" \
   -d '{
     "bech32_addr": "pms1qw508d6qejxtdg4y5r3zarvary0c5xw7k...",
@@ -80,7 +80,7 @@ Version simplifiée : récupère le solde d'une adresse sans clés privées.
 ### Exemple
 
 ```bash
-curl -X POST http://localhost:3000/v1/balance \
+curl -k -X POST https://localhost:8443/v1/balance \
   -H "Content-Type: application/json" \
   -d '{"address": "pms1qw508d6qejxtdg4y5r3zarvary0c5xw7k..."}'
 ```
@@ -117,7 +117,7 @@ Récupère les UTXOs (Unspent Transaction Outputs) d'une adresse.
 ### Exemple
 
 ```bash
-curl http://localhost:3000/v1/wallet/pms1abc123.../utxos
+curl -k https://localhost:8443/v1/wallet/pms1abc123.../utxos
 ```
 
 ---
@@ -180,7 +180,7 @@ Envoie des tokens depuis un wallet vers une adresse destination.
 ```typescript
 import { PmsClient, Wallet } from '@pms/sdk';
 
-const client = new PmsClient('http://localhost:3000');
+const client = new PmsClient('https://localhost:8443');
 const wallet = await Wallet.create();
 
 const result = await client.send({
@@ -264,7 +264,7 @@ Récupère l'historique des transactions d'un wallet.
 ### Exemple
 
 ```bash
-curl -X POST http://localhost:3000/wallet/history \
+curl -k -X POST https://localhost:8443/wallet/history \
   -H "Content-Type: application/json" \
   -d '{"bech32_addr": "pms1abc...", "limit": 50}'
 ```

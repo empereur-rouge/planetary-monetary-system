@@ -1,0 +1,94 @@
+# Configuration E2E Production Simulation Test
+# =============================================================================
+# Based on config.prod.template.toml but adapted for E2E testing with Docker.
+# Simulates production environment with TLS and Authority validation.
+
+[rocks]
+path = "/home/pms/data/rocks"
+prefix = "pms:test"
+tip_limit = 256
+checkpoint_interval_secs = 3600
+
+[network]
+mode = "testnet"  # Using testnet mode but with production-like settings
+network_id = "pms-e2e-test"
+protocol_version = 1
+
+[address]
+hrp = "8e"
+
+[admin]
+# Treasury wallets loaded from signed JSON file
+treasury_wallets_file = "/home/pms/config/treasury-wallets.json"
+
+[client]
+bind_addr = "0.0.0.0:8443"
+api_addr = "0.0.0.0:8080"
+internal_api_addr = "127.0.0.1:3000"
+allow_insecure_tls = true  # Allow self-signed certs for testing
+
+[p2p]
+known_peers = ""
+allowed_peer_ips = []
+strict_whitelist = false
+
+[tls]
+cert_pem = "/home/pms/tls/cert.pem"
+key_pem = "/home/pms/tls/key.pem"
+ca_pem = "/home/pms/tls/ca-cert.pem"
+whitelist_fp256 = []
+
+[limits]
+max_body_bytes = 1048576
+request_timeout_ms = 30000
+rate_limit_rps = 100000  # High rate limit for E2E testing
+burst = 200000
+
+[fees]
+epsilon = "0.001"
+mode = "uniform"
+# Fee Distribution (Treasury Tax + Fee Sharing)
+treasury_fee_percent = 15 # 15% to admin/treasury wallets
+creator_fee_percent = 45  # 45% to block creator
+parents_fee_percent = 40  # 40% split between parent signers
+# Block Rewards (Inflation)
+block_reward = "0.1"           # PMS per block
+annual_inflation_percent = 3.0
+treasury_reward_percent = 20   # 20% of block reward to treasury
+creator_reward_percent = 70    # 70% of block reward to creator
+burn_percent = 10              # 10% burned (deflationary pressure)
+
+# AUTHORITY PUBLIC KEYS - To be replaced with test-generated key
+# This will be dynamically updated by the test setup
+authority_public_keys = [
+    "028c98360918cb2aa9bf46ac4a7d18afae90fa5cac1312833b37f78ec5f71df1ac"
+]
+authority_keys_last_rotation = "2026-02-03"
+
+[auth]
+require_signed_submit = true
+admin_api_token = "env:PMS_ADMIN_TOKEN"
+allowed_ips = []
+
+[secrets]
+node_identity_key_path = "/home/pms/config/node-identity.key"
+admin_wallet_file = "/home/pms/config/admin-wallet.json"
+
+[validation]
+min_pow_leading_zero_bits = 0
+max_payload_bytes = 65536
+min_parents_after_boot = 1
+max_parents = 8
+require_unique_parents = true
+forbid_self_parent = true
+max_inputs = 64
+max_outputs = 64
+max_tx_bytes = 65536
+max_fee_per_tx = 1000
+enforce_parent_existence = false
+enforce_fee_recipient = false
+
+# Coordinator public key - ENABLED for Single Writer Mode (uncompressed format)
+# Derived from private key: 52f4cb8344e318c120f87bc0efb429bdd6b379c700731af27aaf59efffc0b248
+coordinator_public_key = "04a1829d324538dee1265c879b720e42e15d19a4dbf464f0943a03b5d29aad02ffdd4f185c0f837f419ae2c70851f74a04f47baf666ff7bb328da3b3ad81dbfc33"
+coordinator_x25519_public_key = "67c953bb1b0151a66d0304fb3c0c564ef6212c71e74820703b9d2c8d9b0fd462"

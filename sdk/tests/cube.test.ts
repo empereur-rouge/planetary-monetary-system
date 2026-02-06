@@ -128,45 +128,41 @@ describe("PmsClient NFT Cube Methods", () => {
 
         // Mock fetch pour les différents endpoints
         global.fetch = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+            // Helper to create response with both json() and text()
+            const mockRes = (data: any) => Promise.resolve({
+                ok: true,
+                status: 200,
+                json: () => Promise.resolve(data),
+                text: () => Promise.resolve(JSON.stringify(data)),
+            });
+
             // Mock /v1/dag/tips
             if (url.includes("/v1/dag/tips")) {
-                return Promise.resolve({
-                    ok: true,
-                    json: () => Promise.resolve(["tip1", "tip2"]),
-                });
+                return mockRes(["tip1", "tip2"]);
             }
             // Mock /v1/nft/burn (nouvelle API)
             if (url.includes("/v1/nft/burn")) {
                 const body = JSON.parse(init?.body as string);
-                return Promise.resolve({
-                    ok: true,
-                    json: () => Promise.resolve({
-                        status: "inserted",
-                        block_id: body.id,
-                        refund: { amount: "1.23456789", recipient: body.signer_pk_hex },
-                    }),
+                return mockRes({
+                    status: "inserted",
+                    block_id: body.id,
+                    refund: { amount: "1.23456789", recipient: body.signer_pk_hex },
                 });
             }
             // Mock /v1/nft/mint
             if (url.includes("/v1/nft/mint")) {
-                return Promise.resolve({
-                    ok: true,
-                    json: () => Promise.resolve({
-                        status: "inserted",
-                        block_id: "mint-block-123",
-                    }),
+                return mockRes({
+                    status: "inserted",
+                    block_id: "mint-block-123",
                 });
             }
             // Mock cube generator endpoint
             if (url.includes("/api/cube/generate")) {
-                return Promise.resolve({
-                    ok: true,
-                    json: () => Promise.resolve({
-                        rarity: "Common",
-                        attributes: { weight: 50.5, size: 30.2, density: 2.5 },
-                        roll: 50000,
-                        signature: "mock-authority-signature-base64",
-                    }),
+                return mockRes({
+                    rarity: "Common",
+                    attributes: { weight: 50.5, size: 30.2, density: 2.5 },
+                    roll: 50000,
+                    signature: "mock-authority-signature-base64",
                 });
             }
             return Promise.reject(new Error(`Unmocked URL: ${url}`));

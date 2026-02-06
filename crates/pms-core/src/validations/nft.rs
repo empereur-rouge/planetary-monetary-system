@@ -168,8 +168,12 @@ pub fn validate_nft_action<S: NftStorage>(
                 }));
             }
 
-            // 3. Le signer doit être autorisé (soit le owner, soit une clé associée)
-            if !from.eq_ignore_ascii_case(signer_pk_hex) {
+            // 3. Le signer doit être autorisé (soit le owner, soit le Coordinator en Single Writer Mode)
+            let is_coordinator = coordinator_pk
+                .map(|coord| signer_pk_hex.eq_ignore_ascii_case(coord))
+                .unwrap_or(false);
+
+            if !from.eq_ignore_ascii_case(signer_pk_hex) && !is_coordinator {
                 return Err(anyhow!(NftValidationError::Unauthorized {
                     token_id: token_id.clone(),
                     expected: from.clone(),
@@ -200,8 +204,12 @@ pub fn validate_nft_action<S: NftStorage>(
                 }));
             }
 
-            // 3. Le signer doit être le user
-            if !user.eq_ignore_ascii_case(signer_pk_hex) {
+            // 3. Le signer doit être le user OU le Coordinator (Single Writer Mode)
+            let is_coordinator = coordinator_pk
+                .map(|coord| signer_pk_hex.eq_ignore_ascii_case(coord))
+                .unwrap_or(false);
+
+            if !user.eq_ignore_ascii_case(signer_pk_hex) && !is_coordinator {
                 return Err(anyhow!(NftValidationError::Unauthorized {
                     token_id: token_id.clone(),
                     expected: user.clone(),
@@ -232,8 +240,12 @@ pub fn validate_nft_action<S: NftStorage>(
                 }));
             }
 
-            // 3. Le signer doit être le burner
-            if !burner.eq_ignore_ascii_case(signer_pk_hex) {
+            // 3. Le signer doit être le burner OU le Coordinator (Single Writer Mode)
+            let is_coordinator = coordinator_pk
+                .map(|coord| signer_pk_hex.eq_ignore_ascii_case(coord))
+                .unwrap_or(false);
+
+            if !burner.eq_ignore_ascii_case(signer_pk_hex) && !is_coordinator {
                 return Err(anyhow!(NftValidationError::Unauthorized {
                     token_id: token_id.clone(),
                     expected: burner.clone(),
@@ -248,8 +260,12 @@ pub fn validate_nft_action<S: NftStorage>(
         // BATCH BURN: Destruction multiple
         // ═══════════════════════════════════════════════════════════════
         NftAction::BatchBurn { token_ids, burner } => {
-            // Le signer doit être le burner pour tout le lot
-            if !burner.eq_ignore_ascii_case(signer_pk_hex) {
+            // Le signer doit être le burner OU le Coordinator (Single Writer Mode)
+            let is_coordinator = coordinator_pk
+                .map(|coord| signer_pk_hex.eq_ignore_ascii_case(coord))
+                .unwrap_or(false);
+
+            if !burner.eq_ignore_ascii_case(signer_pk_hex) && !is_coordinator {
                 // On peut prendre le premier token pour l'erreur ou un placeholder
                 let tid = token_ids.first().cloned().unwrap_or_default();
                 return Err(anyhow!(NftValidationError::Unauthorized {

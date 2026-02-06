@@ -55,7 +55,8 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         adapter,
         &settings.network.network_id,
         settings.network.protocol_version,
-        node_wallet.clone(), // 👈 on injecte le wallet ici
+        node_wallet.clone(),
+        &settings.p2p,
     );
 
     // 7) ServerConfig minimal (ports pas utilisés ici)
@@ -146,7 +147,8 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         adapter,
         &settings.network.network_id,
         settings.network.protocol_version,
-        node_wallet.clone(), // ✅ injecté
+        node_wallet.clone(),
+        &settings.p2p,
     );
 
     // 7) ServerConfig minimal
@@ -247,6 +249,7 @@ pub async fn make_test_ctx_with_admin(
         &settings.network.network_id,
         settings.network.protocol_version,
         node_wallet.clone(),
+        &settings.p2p,
     );
 
     // 7) ServerConfig minimal

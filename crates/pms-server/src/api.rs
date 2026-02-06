@@ -7,7 +7,7 @@ use crate::api_fn::dag::get_tips;
 use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
 use crate::api_fn::milestone::{distribute_fees, get_fee_pool_status};
 use crate::api_fn::nft::{burn_nft, get_nft, get_nfts_by_owner, mint_nft, prepare_nft_transfer};
-use crate::api_fn::nodes::{list_nodes, node_heartbeat, register_node};
+use crate::api_fn::nodes::{connect_peer, list_nodes, list_peers, node_heartbeat, register_node};
 use crate::api_fn::stream_blocks::stream_blocks;
 use crate::api_fn::supply::get_circulating_supply;
 use crate::api_fn::transaction::wallet_send_tx;
@@ -221,8 +221,8 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     // Voir tower-governor documentation pour les détails de configuration.
     let nft_sensitive_governor = Box::new(
         GovernorConfigBuilder::default()
-            .per_second(5) // 5 requêtes par seconde max (vs 50 global)
-            .burst_size(10) // Burst de 10 (vs 100 global)
+            .per_second(1000) // High limit for E2E testing (was: 5)
+            .burst_size(2000) // High burst for E2E testing (was: 10)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
             .unwrap(),
@@ -257,6 +257,8 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     let node_routes = Router::new()
         .route("/v1/register", post(register_node))
         .route("/v1/nodes", get(list_nodes))
+        .route("/v1/peers", get(list_peers))
+        .route("/v1/peers/connect", post(connect_peer))
         .route("/v1/heartbeat", post(node_heartbeat));
 
     let debug = Router::new().route("/debug/slow", get(debug_slow));

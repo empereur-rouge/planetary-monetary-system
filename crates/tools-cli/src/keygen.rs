@@ -54,9 +54,9 @@ pub fn run_keygen() {
 
     // 3) Sérialiser en hex pour stockage/affichage
     //    - Clé privée : 32 bytes (256 bits)
-    //    - Clé publique compressée : 33 bytes (commence par 02 ou 03)
+    //    - Clé publique non-compressée : 65 bytes (commence par 04)
     let private_key_hex = hex::encode(signing_key.to_bytes());
-    let public_key_hex = hex::encode(verifying_key.to_sec1_bytes());
+    let public_key_hex = hex::encode(verifying_key.to_encoded_point(false).as_bytes());
 
     // 4) Affichage avec instructions
     println!("🔑 CLÉS GÉNÉRÉES AVEC SUCCÈS");
@@ -253,7 +253,7 @@ pub fn derive_and_update_config(priv_hex: &str, config_path: &str) -> Result<()>
     let signing_key = k256::ecdsa::SigningKey::from_slice(&priv_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid ECDSA private key: {}", e))?;
     let verify_key = signing_key.verifying_key();
-    let pub_hex = hex::encode(verify_key.to_sec1_bytes());
+    let pub_hex = hex::encode(verify_key.to_encoded_point(false).as_bytes());
 
     // On crée une instance temporaire juste pour dériver x25519
     // On doit encoder la clé privée en base64 pour le constructeur Wallet

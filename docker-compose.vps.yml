@@ -1,0 +1,136 @@
+# =============================================================================
+# VPS Multi-Process Architecture - Strict Separation
+# =============================================================================
+# This compose file splits the PMS monolith into 4 logical processes:
+# 1. Engine (Node) - DAG/Validation/Ledger, Internal API only
+# 2. Gateway - Public API with Auth/RateLimit
+# 3. Prometheus - Metrics collection
+# 4. Promtail - Log shipping (optional, requires Loki)
+#
+# Usage: docker compose -f docker-compose.vps.yml up -d
+
+networks:
+  pms-internal:
+    driver: bridge
+
+volumes:
+  pms_data:
+  prometheus_data:
+  caddy_data:
+  caddy_config:
+
+
+services:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Process 1: PMS Engine (Node) - DAG/Validation/Ledger
+  # ═══════════════════════════════════════════════════════════════════════════
+  engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: pms-node:latest
+    container_name: pms-engine
+    user: "pms"
+    environment:
+      RUST_LOG: info,pms_server=info,pms_core=debug
+      PMS_CONFIG: /home/pms/config/config.vps-test.toml
+    volumes:
+      - ./etc/config:/home/pms/config:rw
+      - ./etc/pms:/home/pms/config/pms:rw
+      - ./secrets/tls:/home/pms/tls:ro
+      - pms_data:/home/pms/data
+    networks:
+      - pms-internal
+    expose:
+      - "3000" # Internal API only
+      - "8443" # P2P
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://127.0.0.1:3000/internal/health || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Process 2: API Gateway - Auth/RateLimit/Public Routes
+  # ═══════════════════════════════════════════════════════════════════════════
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    image: pms-gateway:latest
+    container_name: pms-gateway
+    environment:
+      RUST_LOG: info
+      ENGINE_URL: "http://engine:3000"
+      PMS_CONFIG: /home/pms/config/config.vps-test.toml
+    volumes:
+      - ./etc/config:/home/pms/config:ro
+    networks:
+      - pms-internal
+    ports:
+      - "8080:8080" # Public API
+    depends_on:
+      engine:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://127.0.0.1:8080/livez || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Process 3: Prometheus - Metrics Collection
+  # ═══════════════════════════════════════════════════════════════════════════
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: pms-prometheus
+    volumes:
+      - ./etc/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - pms-internal
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+    restart: unless-stopped
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Process 4: Promtail - Log Shipping (Optional)
+  # ═══════════════════════════════════════════════════════════════════════════
+  # promtail:
+  #   image: grafana/promtail:2.9.4
+  #   container_name: pms-promtail
+  #   volumes:
+  #     - ./etc/promtail/config.yml:/etc/promtail/config.yml:ro
+  #     - /var/log:/var/log:ro
+  #     - /var/lib/docker/containers:/var/lib/docker/containers:ro
+  #   networks:
+  #     - pms-internal
+  #   command: -config.file=/etc/promtail/config.yml
+  #   restart: unless-stopped
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Reverse Proxy (Caddy) - HTTPS Termination
+  # ═══════════════════════════════════════════════════════════════════════════
+  caddy:
+    image: caddy:2-alpine
+    container_name: pms-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - pms-internal
+    depends_on:
+      - gateway

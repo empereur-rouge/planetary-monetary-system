@@ -25,7 +25,7 @@ ok
 ### Exemple
 
 ```bash
-curl http://localhost:3000/livez
+curl -k https://localhost:8443/livez
 # ok
 ```
 
@@ -64,7 +64,7 @@ starting
 ### Exemple
 
 ```bash
-curl -w "\n%{http_code}" http://localhost:3000/healthz
+curl -k -w "\n%{http_code}" https://localhost:8443/healthz
 # ready
 # 200
 ```
@@ -106,13 +106,13 @@ spec:
     livenessProbe:
       httpGet:
         path: /livez
-        port: 3000
+        port: 8443
       initialDelaySeconds: 5
       periodSeconds: 10
     readinessProbe:
       httpGet:
         path: /healthz
-        port: 3000
+        port: 8443
       initialDelaySeconds: 10
       periodSeconds: 5
 ```
@@ -123,10 +123,10 @@ spec:
 #!/bin/bash
 # health_check.sh
 
-ENDPOINT="http://localhost:3000"
+ENDPOINT="https://localhost:8443"
 
 # Check liveness
-if curl -sf "$ENDPOINT/livez" > /dev/null; then
+if curl -skf "$ENDPOINT/livez" > /dev/null; then
     echo "✅ Server is alive"
 else
     echo "❌ Server is down"
@@ -134,7 +134,7 @@ else
 fi
 
 # Check readiness
-READY=$(curl -sf "$ENDPOINT/healthz")
+READY=$(curl -skf "$ENDPOINT/healthz")
 if [ "$READY" = "ready" ]; then
     echo "✅ Server is ready"
 else

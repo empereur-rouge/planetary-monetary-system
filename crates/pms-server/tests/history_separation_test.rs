@@ -38,7 +38,13 @@ async fn history_separation_test() -> anyhow::Result<()> {
     let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
     let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
     let wallet = Arc::new(Wallet::generate());
-    let server = Server::new(adapter.clone(), "testnet", 1, wallet.clone());
+    let server = Server::new(
+        adapter.clone(),
+        "testnet",
+        1,
+        wallet.clone(),
+        &pms_config::P2pConfig::default(),
+    );
     let ready = Arc::new(AtomicBool::new(true));
     let stats = Arc::new(Stats::new());
 

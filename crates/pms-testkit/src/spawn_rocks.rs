@@ -44,6 +44,8 @@ pub async fn spawn_node_generic_rocks(
         tip_limit,
         forced_genesis,
         None,
+        None,
+        false,
     )
     .await
 }
@@ -57,6 +59,8 @@ pub async fn spawn_node_generic_rocks_with_seed(
     tip_limit: usize,
     forced_genesis: Option<&Block>,
     node_seed: Option<[u8; 32]>,
+    coordinator_pk_hex: Option<String>,
+    enforce_parents: bool,
 ) -> Result<(
     Arc<RocksStore>,
     Arc<ConcurrentDag>,
@@ -67,6 +71,10 @@ pub async fn spawn_node_generic_rocks_with_seed(
     // 0) Config (TLS off pour tests)
     let mut settings = load_config()?;
     settings.tls = None;
+
+    if let Some(pk) = coordinator_pk_hex {
+        settings.validation.coordinator_public_key = Some(pk);
+    }
 
     let mut net_id = settings.network.network_id.clone();
     let mut proto = settings.network.protocol_version;
@@ -107,13 +115,17 @@ pub async fn spawn_node_generic_rocks_with_seed(
     let dag = Arc::new(ConcurrentDag::bootstrap_from_store::<RocksStore>(&*store).await?);
 
     // 3) Adapter + serveur
-    let mut policy = ValidatePolicy::from_global_config();
-    policy.enforce_parent_existence = false;
+    let mut policy = ValidatePolicy::from_settings(&settings.validation);
+    policy.enforce_parent_existence = enforce_parents;
+    eprintln!(
+        "[TEST] spawn_rocks: enforce_parents={} policy.enforce={}",
+        enforce_parents, policy.enforce_parent_existence
+    );
 
     let adapter_concrete = CoreAdapter::new_with_policy(dag.clone(), store.clone(), policy);
     let adapter: Arc<dyn NetDagAdapter> = adapter_concrete.clone();
 
-    let server = Server::new(adapter.clone(), &net_id, proto, node_wallet);
+    let server = Server::new(adapter.clone(), &net_id, proto, node_wallet, &settings.p2p);
 
     let cfg = Arc::new(ServerConfig {
         bind_addr: bind_addr.to_string(),

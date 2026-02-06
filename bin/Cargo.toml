@@ -20,7 +20,8 @@ tokio = "1.47.1"
 owo-colors = "4"
 tracing-log = "0.2.0"
 dotenvy = "0.15"
-rustls-pemfile = "2.2.0"
-rustls = { workspace = true }                                               # même si tu n'importes rien de rustls
+# rustls-pemfile removed - using rustls native PEM support (pki_types::pem::PemObject)
+rustls = { workspace = true }
 clap = { version = "4.5.51", features = ["derive"] }
 webbrowser = "1.0"
+dashmap = "6.1.0"

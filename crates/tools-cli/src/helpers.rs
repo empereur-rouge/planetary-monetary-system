@@ -1,7 +1,7 @@
 use owo_colors::OwoColorize;
 use pms_config::Settings;
 use std::io;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::Path;
 
 pub fn in_docker() -> bool {
@@ -15,7 +15,8 @@ pub fn default_export_path(filename: &str) -> String {
     }
 }
 pub fn read_stdin_all() -> Option<String> {
-    if atty::isnt(atty::Stream::Stdin) {
+    // Use std::io::IsTerminal (stable since Rust 1.70) instead of deprecated atty crate
+    if !io::stdin().is_terminal() {
         let mut s = String::new();
         io::stdin().read_to_string(&mut s).ok()?;
         Some(s)

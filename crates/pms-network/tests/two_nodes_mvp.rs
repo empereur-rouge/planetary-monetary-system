@@ -45,6 +45,8 @@ async fn two_nodes_share_blocks_debug_rocks() -> Result<()> {
     let seed_a = [1u8; 32];
     let seed_b = [2u8; 32];
 
+    let coordinator_pk_hex = wallet.encoded_public_key();
+
     println!("[TEST] spawn A @ {bind_a}");
     let (a_store, _a_dag, a_adapter, a_srv, _ha) = spawn_node_generic_rocks_with_seed(
         &db_a_str,
@@ -54,6 +56,8 @@ async fn two_nodes_share_blocks_debug_rocks() -> Result<()> {
         tip_limit,
         Some(&shared_genesis),
         Some(seed_a),
+        Some(coordinator_pk_hex.clone()),
+        false,
     )
     .await?;
 
@@ -66,6 +70,8 @@ async fn two_nodes_share_blocks_debug_rocks() -> Result<()> {
         tip_limit,
         Some(&shared_genesis),
         Some(seed_b),
+        Some(coordinator_pk_hex),
+        false,
     )
     .await?;
 

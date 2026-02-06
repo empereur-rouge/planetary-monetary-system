@@ -1,315 +1,158 @@
 # PMS Node (DAG Protocol)
 
-PMS (Planetary Monetary System) est un nœud blockchain implémentant un **DAG (Directed Acyclic Graph)** de blocs avec consensus basé sur la PoW (Proof of Work) et un modèle UTXO.
+**Planetary Monetary System (PMS)** est une infrastructure de valeur numérique basée sur un **DAG centralisé, privé et haute performance**.
+
+> [!IMPORTANT]
+> PMS **n'est pas** une blockchain publique, n'est **pas trustless** et n'est **pas** un projet idéologique.
+
+Le système est **custodial par design** : l'autorité de validation et de gouvernance appartient à l'entreprise qui opère le réseau. Les nœuds sont privés et contrôlés en interne ou par des partenaires explicitement autorisés.
+
+### 🎯 Cas d'Usage
+- Économies fermées (gaming, plateformes internes)
+- Wallets custodial
+- Core banking privé
+- Plateformes financières internes
 
 ### ⚡ Performance
-- **4000+ TPS** (transactions par seconde) en mode mainnet
-- Architecture lock-free inspirée d'IOTA
+- **4000+ TPS** (transactions par seconde)
+- Architecture lock-free
 - Stockage RocksDB optimisé SSD
 
-## 🌟 Fonctionnement Global
+---
 
-Contrairement aux blockchains linéaires (comme Bitcoin), PMS utilise une structure de graphe où chaque bloc peut référencer **plusieurs parents**. Cela permet :
-*   **Concurrence** : Plusieurs blocs peuvent être minés en parallèle sans créer de forks orphelins.
-*   **Haut débit** : Le réseau "plie" le graphe pour accepter un débit de transactions plus élevé.
+## 🛡️ Priorités du Projet
 
-### Architecture
+| # | Priorité | Description |
+|---|----------|-------------|
+| 1 | **Correctness** | Règles explicites, validation serveur stricte, cohérence comptable |
+| 2 | **Sécurité** | Autorité claire, rôles, permissions, journalisation complète |
+| 3 | **Performance** | Faible latence, haut débit, simplicité opérationnelle |
+| 4 | **Architecture** | Séparation stricte des responsabilités (Gateway, Engine, Storage) |
 
-1.  **BlockDAG**
-    *   Chaque bloc pointe vers `k` blocs précédents (parents).
-    *   L'ensemble des blocs sans enfants est appelé les **Tips**.
-    *   Un nouvel arrivant référence tous les "Tips" connus (ou un sous-ensemble) pour converger.
+### ⚠️ Principes Non Négociables
+- Le **serveur est l'autorité finale** de validation (Single Writer).
+- Le DAG n'est **jamais exposé directement au public**.
+- Tout accès passe par le **Gateway**.
 
-2.  **Consensus & Ordre**
-    *   L'ordre total des événements est déterminé topologiquement.
-    *   Un mécanisme de *Blue Set / Red Set* (inspiré de GhostDAG/SPECTRE) est utilisé pour résoudre les conflits et déterminer l'état final.
+---
 
-3.  **Modèle UTXO & Transactions**
-    *   **Atomic UTXO** : Les transactions consomment des *Unspent Transaction Outputs*.
-    *   **Frais** : Les frais de transaction sont implicites (Input - Output) ou explicites via un output vers l'adresse de frais du validateur.
-    *   **Confidentialité** : Support natif pour des payloads chiffrés (ECIES / X25519) permettant d'envoyer des métadonnées privées on-chain.
+## 🌟 Architecture 4-VPS (Production)
 
-4.  **Stockage & Performance**
-    *   Base de données : **RocksDB** (paramétrée pour SSD).
-    *   Validation : Signatures **ECDSA (k256)**, Proof of Work (Check bits).
-    *   API : Serveur HTTP performant basé sur **Axum** (Rust).
+L'architecture est strictement divisée en 4 services mandataires pour garantir la sécurité et la performance :
+
+```mermaid
+graph TD
+    User[Client / SDK] -->|HTTPS 8443| Gateway[VPS 1: Gateway]
+    Gateway -->|Internal HTTP| Engine[VPS 2: PMS Engine]
+    Engine -->|Read/Write| RocksDB[(VPS 3: RocksDB)]
+    Prometheus[VPS 4: Metrics] -->|Scrape 9091| Gateway
+    Prometheus -->|Scrape 9090| Engine
+```
+
+### Services
+1.  **VPS 1: Gateway (Port 8443)**
+    *   **Seul point d'entrée public**.
+    *   Gère le Rate Limiting (DoS protection).
+    *   Terminaison TLS.
+    *   Proxy vers l'Engine interne.
+
+2.  **VPS 2: PMS Engine (Internal Only)**
+    *   **Cœur du système**.
+    *   Coordinateur Single Writer (valide et ordonne les blocs).
+    *   Aucun accès public direct.
+
+3.  **VPS 3: Stockage (RocksDB)**
+    *   Volume persistant haute performance (NVMe recommandé).
+
+4.  **VPS 4: Monitoring (Prometheus)**
+    *   Collecte les métriques techniques et métier.
 
 ---
 
 ## 🚀 Installation & Déploiement (Docker)
 
-Le déploiement recommandé se fait via **Docker** pour garantir l'isolation et la portabilité.
+Le déploiement se fait via **Docker Compose** orchestrant les 4 services.
 
 ### Prérequis
 *   Docker & Docker Compose.
 
-### 1. Démarrage Rapide
+### Démarrage Rapide (Test Environment)
 
-**Étape 0 : Générer l'identité Coordinateur (Optionnel mais recommandé)**
-Si vous voulez devenir le coordinateur du réseau (Master Node), générez vos clés :
-
-```bash
-chmod +x setup_coordinator.sh
-./setup_coordinator.sh
-```
-Cela crée `node1.key` (clé privée) et `coordinator_wallet.json` (backup), et met à jour automatiquement `config.docker-test.toml` avec votre clé publique.
-
-**Étape 1 : Lancer le Cluster**
-Utilisez le script unifié :
+Utilisez le script unifié pour lancer la stack 4-VPS en local :
 
 ```bash
-chmod +x pms.sh
-./pms.sh test
+./scripts/docker_test.sh setup
 ```
 
 Ce script va :
-1.  Générer des certificats TLS auto-signés (pour le développement/test).
-2.  Préparer les dossiers de configuration (`etc/pms`, `docker_data`).
-3.  Builder l'image Docker optimisée (multi-stage).
-4.  Lancer le nœud Node et le CLI.
+1.  Générer les certificats TLS et clés.
+2.  Builder les images `pms-gateway` et `pms-node`.
+3.  Lancer le cluster complet.
 
-### 2. Commandes Utiles
+### Vérification
 
-*   **Logs** : `docker compose logs -f node`
-*   **CLI Interactif** : `docker compose exec -it node tools-cli`
-*   **Arrêt** : `docker compose down`
-
-### 3. Production
-
-Pour un déploiement sur serveur :
-1.  Copiez le projet.
-2.  Remplacez les certificats dans `secrets/tls/` par de vrais certificats (ex: Let's Encrypt).
-3.  Lancez `./setup_docker_node.sh`.
+*   **Statut du Cluster** : `./scripts/docker_test.sh status`
+*   **Santé Gateway** : `curl -k https://127.0.0.1:8443/livez`
 
 ---
 
 ## ⚙️ Configuration
 
-### Nœud Utilisateur (Non-Coordinateur)
-Pour lancer un nœud simple sans privilèges d'administration (pas de minting, pas de treasury) :
+L'architecture repose sur des variables d'environnement et des fichiers de configuration TOML.
 
-1. Utilisez le fichier `etc/config/pms-config-user.toml`.
-2. Lancez le nœud :
-   ```bash
-   ./target/release/pms-node --config etc/config/pms-config-user.toml
-   ```
+### Gateway (Env Vars)
+*   `LISTEN_ADDR`: 0.0.0.0:8443
+*   `UPSTREAM_URL`: URL de l'Engine interne
+*   `TLS_CERT` / `TLS_KEY`: Chemins des certificats
 
-### Nœud Coordinateur / Production
-Voir la section "Déploiement VPS".
+### Engine (config.toml)
+*   Mode Single Writer activé.
+*   Validation centralisée.
+*   Stockage RocksDB.
 
 ---
 
-## 🧪 Tests E2E (Cluster Local)
+## 🧪 Tests E2E
 
-Pour exécuter les tests de stress et de synchronisation P2P (1000 transactions, 3 nœuds) :
+Pour vérifier le bon fonctionnement de la stack complète (via le Gateway) :
 
 ```bash
-# 1. Lancer le cluster de test (3 nodes)
-./scripts/setup_test_cluster.sh
-
-# 2. Exécuter le test de stress
-cargo test --test docker_stress_sync -- --nocapture
-
-# 3. Arrêter et nettoyer
-docker compose down
-rm -rf docker_data  # Optionnel: reset complet
+cargo test -p pms-server --test distributed_tx_e2e -- --ignored --nocapture
 ```
 
+---
 
+## 📖 Documentation API
 
-## 📖 Documentation & Opérations
+Toute interaction se fait via le **Gateway (Port 8443)**.
 
-Pour une gestion complète en production (Backup, Restore, Maintenance), consultez le **[Runbook des Opérations](./runbook_ops.md)**.
+### Endpoints Principaux
 
-### Commandes Rapides
-| Action | Commande |
-| :--- | :--- |
-| **Démarrer** | `docker compose up -d` |
-| **Logs (Live)** | `docker compose logs -f --tail 100 node` |
-| **Santé** | `curl -k https://127.0.0.1:8080/livez` |
-| **Arrêt** | `docker compose stop node` |
+| Méthode | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/v1/tips` | Récupérer les derniers blocs (Tips) |
+| `GET` | `/v1/utxos/{address}` | Récupérer les UTXOs d'une adresse |
+| `POST` | `/submit/block` | Soumettre un nouveau bloc (Transaction) |
+| `GET` | `/v1/blocks/{id}` | Lire le contenu d'un bloc |
 
 ---
 
 ## 🛠 Observabilité
 
-Le nœud est instrumenté pour Prometheus et Grafana.
-
-*   **Endpoint Métriques** : `/metrics`
-*   **Sécurité** : Requiert un header `Authorization: Bearer <PMS_ADMIN_TOKEN>`
-*   **Exemple** :
-    ```bash
-    curl -k -H "Authorization: Bearer $PMS_ADMIN_TOKEN" https://127.0.0.1:8080/metrics
-    ```
-*   **Logs JSON** : Activés par défaut via `RUST_LOG=info`, parsables pour Elasticsearch/Loki.
-*   **Grafana** : Un dashboard prêt à l'emploi est disponible dans `etc/grafana/pms-dashboard.json`. Importez-le dans Grafana pour visualiser :
-    *   Taille du DAG & Tips.
-    *   Débit d'ingestion (Blocks/s).
-    *   Latence de persistance.
-    *   Santé réseau et erreurs.
-
-## 🔒 Sécurité
-
-*   **Signature Forcée** : En production (`config.prod.toml`), le nœud rejette tout bloc non signé (`require_signed_submit = true`).
-*   **Protection API** :
-    *   **Rate Limiting** : 50 req/s par IP (configurable) pour prévenir le DDoS.
-    *   **Admin Token** : `PMS_ADMIN_TOKEN` protège les routes sensibles et l'accès aux métriques.
-*   **TLS** : HTTPS forcé via Caddy (Reverse Proxy) ou configuration native Rustls.
-
----
-
-## 🔥 Configuration Authority (Burn-to-Mint)
-
-Pour activer la fonctionnalité de **remboursement lors du burn de Cubes**, une "Authority" doit être configurée. Elle certifie les attributs des NFTs Cubes via une signature cryptographique.
-
-### 1. Générer une paire de clés Authority
-Utilisez le SDK pour générer une clé privée (pour votre serveur de jeu) et une clé publique (pour le nœud).
-
-```typescript
-import { PmsWallet } from "@pms/sdk";
-
-const authority = PmsWallet.generate();
-console.log("Private Key (Garder SECRET pour le serveur de jeu):", authority.privateKey);
-console.log("Public Key (Pour config.toml):", authority.publicKeyHex);
-```
-
-### 2. Configurer le Nœud
-Ajoutez la clé publique dans le fichier `config.toml` de vos nœuds :
-
-```toml
-[fees]
-# ... autres configs fees ...
-authority_public_key = "04abc..." # Votre Public Key Hex ici
-```
-
-### 3. Signer des Cubes (Côté Serveur de Jeu)
-Lors de la création d'un NFT Cube, le serveur doit signer ses attributs. Cette signature doit être incluse dans le champ `extra` des métadonnées.
-
-```typescript
-import { PmsWallet, signCubeAttributes } from "@pms/sdk";
-
-// 1. Initialiser le wallet Authority avec la clé privée
-const authorityWallet = PmsWallet.fromPrivateKey("VOTRE_PRIVATE_KEY_HEX");
-
-// 2. Définir les attributs du Cube
-const weight = 50;
-const size = 50;
-const density = 50;
-
-// 3. Générer la signature
-const signature = signCubeAttributes(weight, size, density, authorityWallet);
-
-// 4. Inclure dans les métadonnées NFT
-const metadata = {
-    name: "Cube #123",
-    nft_type: "cube",
-    extra: JSON.stringify({
-        rarity: "Legendary",
-        attributes: { weight, size, density },
-        roll: 50,
-        signature: signature // <--- La signature ici
-    })
-    // ...
-};
-
-// 5. Minter le NFT via le SDK
-await client.mintCube({ ... });
-```
-
----
-
-## 🌐 Déploiement VPS (Production)
-
-### Déploiement Automatisé
-
-```bash
-# Rendre le script exécutable
-chmod +x scripts/deploy.sh
-
-# Déployer sur le VPS
-./scripts/deploy.sh <VPS_IP> <USER>
-
-# Exemple
-./scripts/deploy.sh 45.67.89.123 ubuntu
-```
-
-### Déploiement Manuel
-
-1. **Build l'image Docker :**
-   ```bash
-   docker build -t pms-node:latest .
-   ```
-
-2. **Copier sur le VPS :**
-   ```bash
-   scp -r docker-compose.yml etc/ secrets/ user@vps:/opt/pms/
-   ```
-
-3. **Configurer :**
-   ```bash
-   # Sur le VPS
-   cd /opt/pms
-   cp etc/config/config.prod.template.toml etc/config/config.prod.toml
-   # Éditer config.prod.toml avec vos valeurs
-   ```
-
-4. **Lancer :**
-   ```bash
-   docker compose up -d
-   ```
-
-### Checklist Sécurité Production
-
-| Check | Description |
-|-------|-------------|
-| ☐ | Changer `admin.token` (64+ caractères aléatoires) |
-| ☐ | Configurer certificats TLS réels (Let's Encrypt) |
-| ☐ | Configurer `p2p.known_peers` avec les autres nœuds |
-| ☐ | Limiter `auth.allowed_ips` aux IPs admin |
-| ☐ | Configurer firewall (ports 80, 443, 8443) |
+*   **Endpoint Métriques** : `/metrics` (sur Gateway :9091 et Engine :9090)
+*   **Logs** : JSON structuré (`RUST_LOG=info`).
 
 ---
 
 ## 📦 SDK TypeScript
 
-Le SDK officiel permet d'intégrer PMS dans vos applications.
-
-### Installation
+Le SDK officiel est configuré pour parler au Gateway.
 
 ```bash
 npm install @pms/sdk
 ```
 
-### Utilisation
-
 ```typescript
-import { PmsWallet, PmsClient } from "@pms/sdk";
-
-// Créer un wallet (24 mots)
-const wallet = PmsWallet.generate();
-console.log(wallet.mnemonic);
-console.log(wallet.address);
-
-// Connecter au réseau
-const client = new PmsClient({ nodeUrl: "https://node.pms.network" });
-
-// Consulter la balance
-const balance = await client.getBalance(wallet.address);
-
-// Envoyer des tokens
-await client.send({
-  to: "04abc...",
-  amount: "10.0",
-  wallet,
-});
+// Connecter au Gateway
+const client = new PmsClient({ nodeUrl: "https://gateway.pms.network:8443" });
 ```
-
-### Développement local du SDK
-
-```bash
-cd sdk
-npm install
-npm test      # 25 tests
-npm run build
-```
-

@@ -172,6 +172,7 @@ async fn test_automated_fee_distribution() {
             coordinator_public_key: Some(node_pk.clone()),
             coordinator_x25519_public_key: None,
             coordinator_tx_only: false,
+            enforce_single_writer: false, // Tests need multi-writer flexibility
         },
         fees: FeesSettings {
             epsilon: "0.0".into(),
@@ -192,11 +193,14 @@ async fn test_automated_fee_distribution() {
             burn_percent: 0,
             authority_public_keys: vec![],
             authority_keys_last_rotation: None,
+            treasury_addresses: vec![],
             distribution_interval_sec: 1, // 1 second interval for test
         },
         p2p: P2pConfig {
             known_peers: "".into(),
             bind_addr: Some("127.0.0.1:0".to_string()),
+            allowed_peer_ips: vec![],
+            strict_whitelist: false,
         },
     };
 
@@ -217,9 +221,10 @@ async fn test_automated_fee_distribution() {
 
     let srv = Server::new(
         adapter.clone(),
-        "test_network".to_string(), // arg 2
-        1,                          // arg 3
-        node_wallet.clone(),        // arg 4
+        "test_network".to_string(),
+        1,
+        node_wallet.clone(),
+        &settings.p2p,
     );
 
     // 6. Seed Genesis Block (so we have a tip)

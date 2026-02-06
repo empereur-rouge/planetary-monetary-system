@@ -51,7 +51,7 @@ Test de connectivité admin.
 ### Exemple
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/admin/ping
+curl -k -H "Authorization: Bearer $TOKEN" https://localhost:8443/admin/ping
 ```
 
 ---
@@ -75,7 +75,7 @@ Déclenche une compaction de la base de données RocksDB.
 ### Exemple
 
 ```bash
-curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:3000/admin/compact
+curl -k -X POST -H "Authorization: Bearer $TOKEN" https://localhost:8443/admin/compact
 ```
 
 ---
@@ -126,7 +126,7 @@ Déclenche manuellement une distribution des frais accumulés.
 curl -X POST -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"force": true}' \
-  http://localhost:3000/admin/distribute_fees
+  https://localhost:8443/admin/distribute_fees
 ```
 
 ---
@@ -163,14 +163,14 @@ scrape_configs:
   - job_name: 'pms-server'
     bearer_token: 'votre_token_admin'
     static_configs:
-      - targets: ['localhost:3000']
+      - targets: ['localhost:8443']
     metrics_path: '/metrics'
 ```
 
 ### Exemple
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/metrics
+curl -k -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics
 ```
 
 ---

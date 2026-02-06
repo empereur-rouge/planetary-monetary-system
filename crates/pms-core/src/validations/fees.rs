@@ -57,7 +57,10 @@ pub fn validate_fee_recipient_output(
         return Ok(());
     }
 
-    let fee_out = tx.outputs.last().unwrap();
+    // SAFETY: On a vérifié que outputs.len() >= 2, donc last() ne peut pas être None
+    let Some(fee_out) = tx.outputs.last() else {
+        return Ok(()); // Défensif: ne devrait jamais arriver
+    };
     let ok = policy
         .allowed_fee_addresses
         .iter()

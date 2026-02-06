@@ -93,6 +93,7 @@ fn make_policy(coord_key: Option<&str>) -> ValidatePolicy {
         skip_utxo_checks: false,
         platform_address: None,
         platform_fee_ratio: Decimal::ZERO,
+        enforce_single_writer: true,
         coordinator_public_key: coord_key.map(String::from),
     }
 }

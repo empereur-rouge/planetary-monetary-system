@@ -31,7 +31,7 @@ Récupère les tips actuels du DAG (blocs sans enfants).
 ### Exemple
 
 ```bash
-curl -X POST http://localhost:3000/v1/dag/tips \
+curl -k -X POST https://localhost:8443/v1/dag/tips \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
@@ -69,7 +69,6 @@ Récupère la configuration réseau actuelle.
   "network_id": "mainnet",
   "protocol_version": 1,
   "address_hrp": "pms",
-  "pow_difficulty": 16,
   "block_time_target_ms": 1000,
   "max_parents": 2,
   "fees": {
@@ -84,7 +83,6 @@ Récupère la configuration réseau actuelle.
 | `network_id` | Identifiant du réseau |
 | `protocol_version` | Version du protocole |
 | `address_hrp` | Préfixe HRP des adresses Bech32 |
-| `pow_difficulty` | Bits de difficulté PoW |
 | `block_time_target_ms` | Cible de temps entre blocs |
 | `max_parents` | Nombre max de parents par bloc |
 | `fees` | Configuration des frais |
@@ -92,7 +90,7 @@ Récupère la configuration réseau actuelle.
 ### Exemple
 
 ```bash
-curl http://localhost:3000/v1/config
+curl -k https://localhost:8443/v1/config
 ```
 
 ---
@@ -123,7 +121,7 @@ Récupère les informations publiques du Coordinateur.
 ### Exemple
 
 ```bash
-curl http://localhost:3000/v1/coordinator/info
+curl -k https://localhost:8443/v1/coordinator/info
 ```
 
 ---

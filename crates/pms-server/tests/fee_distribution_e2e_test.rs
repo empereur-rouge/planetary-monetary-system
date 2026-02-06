@@ -2,10 +2,10 @@
 // fee_distribution_e2e_test.rs - Complete Fee Distribution Verification
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// This test ACTUALLY verifies that fees are distributed correctly:
-// - 15% to Treasury (admin wallet)
-// - 45% to Block Creator (coordinator)
-// - 40% to Parent block signers
+// This test verifies that fees are distributed correctly:
+// - 65% to Treasury (admin wallet)
+// - 35% to Block Creator (coordinator)
+// - [DISABLED] Parents share (obsolete in Single Writer mode)
 //
 // And block rewards:
 // - 70% to Creator
@@ -33,7 +33,8 @@ use stress_common::{
     make_coordinator_wallet, mine_mint, send_tx_with_split_fee,
 };
 
-const NODE: &str = "https://127.0.0.1:8080";
+// Gateway is the SOLE entry point - Engine is internal only!
+const NODE: &str = "https://127.0.0.1:8443";
 
 /// Get tips from node
 async fn get_tips(client: &Client, base_url: &str) -> Vec<String> {
@@ -191,17 +192,14 @@ async fn complete_fee_distribution_verification() {
     println!("───────────────────────────────────────────────────────────────");
     println!("   Expected fee distribution:");
     println!(
-        "     - Treasury (15%): {} PMS",
-        total_fee * Decimal::from_str("0.15").unwrap()
+        "     - Treasury (65%): {} PMS",
+        total_fee * Decimal::from_str("0.65").unwrap()
     );
     println!(
-        "     - Creator (45%):  {} PMS",
-        total_fee * Decimal::from_str("0.45").unwrap()
+        "     - Creator (35%):  {} PMS",
+        total_fee * Decimal::from_str("0.35").unwrap()
     );
-    println!(
-        "     - Parents (40%):  {} PMS",
-        total_fee * Decimal::from_str("0.40").unwrap()
-    );
+    // Note: [SINGLE WRITER] No Parents share
 
     // Get UTXO for transaction - sender_utxos is serde_json::Value
     let utxos_array = sender_utxos.as_array();
@@ -287,19 +285,19 @@ async fn complete_fee_distribution_verification() {
     println!("📊 RESULTS ANALYSIS");
     println!("═══════════════════════════════════════════════════════════════");
 
-    let expected_treasury = total_fee * Decimal::from_str("0.15").unwrap();
-    let expected_creator = total_fee * Decimal::from_str("0.45").unwrap();
+    let expected_treasury = total_fee * Decimal::from_str("0.65").unwrap();
+    let expected_creator = total_fee * Decimal::from_str("0.35").unwrap();
 
     println!("\n Fee Distribution (expected vs actual):");
     println!("┌─────────────────┬──────────────┬──────────────┐");
     println!("│ Recipient       │ Expected     │ Actual       │");
     println!("├─────────────────┼──────────────┼──────────────┤");
     println!(
-        "│ Treasury (15%)  │ {:>10}   │ {:>10}   │",
+        "│ Treasury (65%)  │ {:>10}   │ {:>10}   │",
         expected_treasury, treasury_gained
     );
     println!(
-        "│ Creator (45%)   │ {:>10}   │ {:>10}   │",
+        "│ Creator (35%)   │ {:>10}   │ {:>10}   │",
         expected_creator, coord_gained
     );
     println!("└─────────────────┴──────────────┴──────────────┘");

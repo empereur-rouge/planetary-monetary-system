@@ -72,6 +72,8 @@ fn test_transfer_success() {
         token_id: "nft-001".into(),
         from: owner.into(),
         to: new_owner.into(),
+        encrypted_metadata: None,
+        new_owner_x25519_pubkey: None,
     };
 
     // Le transfer devrait réussir
@@ -91,6 +93,8 @@ fn test_transfer_not_owner() {
         token_id: "nft-001".into(),
         from: attacker.into(), // L'attaquant prétend être le owner
         to: "someone".into(),
+        encrypted_metadata: None,
+        new_owner_x25519_pubkey: None,
     };
 
     // Devrait échouer (from != owner réel)

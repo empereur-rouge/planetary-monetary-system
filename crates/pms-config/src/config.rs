@@ -75,6 +75,8 @@ pub struct Client {
     pub api_addr: String,  // API interne (derrière proxy en prod)
     #[serde(default)]
     pub allow_insecure_tls: bool, // true en dev/testnet, false en mainnet
+    #[serde(default)]
+    pub internal_api_addr: Option<String>, // Internal API for Gateway (ex: "0.0.0.0:3000")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -86,11 +88,15 @@ pub struct TlsConfig {
     pub whitelist_fp256: Vec<String>, // empreintes SHA-256 autorisées (optionnel)
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct P2pConfig {
     #[serde(default)]
-    pub known_peers: String, // Comma separated list of peers env-friendly
+    pub known_peers: String,
     pub bind_addr: Option<String>,
+    #[serde(default)]
+    pub allowed_peer_ips: Vec<String>,
+    #[serde(default)]
+    pub strict_whitelist: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,6 +156,19 @@ pub struct ValidationSettings {
     pub coordinator_x25519_public_key: Option<String>, // Clé chiffrement du Coordinator
     #[serde(default)]
     pub coordinator_tx_only: bool, // If true, node rejects non-privileged TXs
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Single Writer Mode (Private DAG)
+    // ═══════════════════════════════════════════════════════════════════════
+    /// En mode Single Writer, seul le Coordinator peut créer des blocs.
+    /// - Tous les blocs doivent être signés par `coordinator_public_key`.
+    /// - La chaîne est linéaire (1 parent par bloc, sauf genesis).
+    /// - Désactive la logique multi-writer (orphelins, conflits, k-depth finality).
+    ///
+    /// Défaut: true (activé) - pour le mode Private DAG centralisé.
+    /// Mettre à false uniquement si vous voulez activer le mode multi-writer.
+    #[serde(default = "default_enforce_single_writer")]
+    pub enforce_single_writer: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,6 +184,10 @@ pub struct FeesSettings {
     pub platform_address_signature: Option<String>,
     #[serde(default = "default_platform_fee_ratio")]
     pub platform_fee_ratio: String, // ex: "0.02" pour 2%
+
+    /// Adresses des wallets de la trésorerie pour recevoir les frais (taxe).
+    #[serde(default)]
+    pub treasury_addresses: Vec<String>,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Fee Distribution (Treasury Tax + Fee Sharing)
@@ -264,6 +287,11 @@ fn default_creator_reward_percent() -> u8 {
 }
 fn default_burn_percent() -> u8 {
     10
+}
+
+// Single Writer Mode default (Private DAG)
+fn default_enforce_single_writer() -> bool {
+    true // Par défaut, seul le Coordinator peut écrire des blocs
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -1,0 +1,74 @@
+# =============================================================================
+# Configuration VPS Test (Docker)
+# =============================================================================
+# Mode DEV pour éviter le check des secrets manquants
+
+[rocks]
+path = "/home/pms/data/rocks"
+prefix = "pms:dev"
+tip_limit = 256
+
+[network]
+mode = "dev"
+network_id = "pms-vps-test"
+protocol_version = 1
+
+[address]
+hrp = "8e"
+
+[admin]
+wallet_addresses = []
+signer_pubkeys = []
+
+[client]
+bind_addr = "0.0.0.0:8443"
+api_addr = "0.0.0.0:8080"
+internal_api_addr = "0.0.0.0:3000"
+allow_insecure_tls = true
+
+[p2p]
+known_peers = ""
+allowed_peer_ips = []
+strict_whitelist = false
+
+[limits]
+max_body_bytes = 1048576
+request_timeout_ms = 30000
+rate_limit_rps = 1000
+burst = 2000
+
+[fees]
+epsilon = "0.001"
+mode = "uniform"
+treasury_fee_percent = 15
+creator_fee_percent = 45
+parents_fee_percent = 40
+block_reward = "0.1"
+annual_inflation_percent = 3.0
+treasury_reward_percent = 20
+creator_reward_percent = 70
+burn_percent = 10
+
+[auth]
+require_signed_submit = false
+admin_api_token = "test-token-vps"
+allowed_ips = []
+
+[secrets]
+node_identity_key_path = "/home/pms/config/node.key"
+admin_wallet_file = ""
+
+[validation]
+min_pow_leading_zero_bits = 0
+max_payload_bytes = 65536
+min_parents_after_boot = 2
+max_parents = 8
+require_unique_parents = true
+forbid_self_parent = true
+max_inputs = 64
+max_outputs = 64
+max_tx_bytes = 65536
+max_fee_per_tx = 1000
+enforce_parent_existence = true
+enforce_fee_recipient = false
+coordinator_public_key = ""

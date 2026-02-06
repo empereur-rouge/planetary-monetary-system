@@ -21,10 +21,13 @@ wallet_addresses = []
 [client]
 bind_addr = "0.0.0.0:8443"
 api_addr = "0.0.0.0:8080"
+internal_api_addr = "127.0.0.1:3000"
 allow_insecure_tls = false
 
 [p2p]
 known_peers = ""
+allowed_peer_ips = []
+strict_whitelist = true
 
 [tls]
 cert_pem = "/home/pms/tls/cert.pem"
@@ -61,7 +64,9 @@ node_identity_key_path = "/home/pms/config/pms/node.key"
 admin_wallet_file = "/home/pms/config/pms/admin-wallet.json"
 
 [validation]
-min_pow_leading_zero_bits = 8
+# PoW disabled: In a Private DAG, the server is the final authority.
+# Signature validation replaces PoW for block acceptance.
+min_pow_leading_zero_bits = 0
 max_payload_bytes = 65536
 min_parents_after_boot = 2
 max_parents = 8

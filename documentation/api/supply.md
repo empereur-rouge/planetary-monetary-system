@@ -29,7 +29,7 @@ Récupère l'offre en circulation de tokens PMS.
 ### Exemple
 
 ```bash
-curl http://localhost:3000/v1/supply
+curl -k https://localhost:8443/v1/supply
 ```
 
 ---
@@ -63,7 +63,7 @@ Récupère le status du pool de frais en attente de distribution.
 ### Exemple
 
 ```bash
-curl http://localhost:3000/v1/fee_pool
+curl -k https://localhost:8443/v1/fee_pool
 ```
 
 ---

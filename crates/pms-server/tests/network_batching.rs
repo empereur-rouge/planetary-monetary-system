@@ -100,7 +100,13 @@ async fn test_network_batching_enqueue() -> Result<()> {
     let wallet = make_test_wallet();
 
     // Create server (spawns broadcast worker)
-    let srv = Server::new(adapter, "test-network", 1, wallet);
+    let srv = Server::new(
+        adapter,
+        "test-network",
+        1,
+        wallet,
+        &pms_config::P2pConfig::default(),
+    );
 
     // Enqueue multiple IDs rapidly
     for i in 0..10 {
@@ -126,7 +132,13 @@ async fn test_network_batching_high_load() -> Result<()> {
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter::new(store));
     let wallet = make_test_wallet();
 
-    let srv = Server::new(adapter, "test-network", 1, wallet);
+    let srv = Server::new(
+        adapter,
+        "test-network",
+        1,
+        wallet,
+        &pms_config::P2pConfig::default(),
+    );
 
     // Enqueue 1000 IDs (should trigger size-based flush at 100)
     for i in 0..1000 {
@@ -150,7 +162,13 @@ async fn test_network_batching_empty_tick() -> Result<()> {
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter::new(store));
     let wallet = make_test_wallet();
 
-    let srv = Server::new(adapter, "test-network", 1, wallet);
+    let srv = Server::new(
+        adapter,
+        "test-network",
+        1,
+        wallet,
+        &pms_config::P2pConfig::default(),
+    );
 
     // Don't enqueue anything, just let the worker tick a few times
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -173,7 +191,13 @@ async fn test_network_batching_concurrent() -> Result<()> {
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter::new(store));
     let wallet = make_test_wallet();
 
-    let srv = Server::new(adapter, "test-network", 1, wallet);
+    let srv = Server::new(
+        adapter,
+        "test-network",
+        1,
+        wallet,
+        &pms_config::P2pConfig::default(),
+    );
 
     // Spawn multiple tasks that enqueue concurrently
     let mut handles = vec![];

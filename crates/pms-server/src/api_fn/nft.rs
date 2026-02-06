@@ -9,13 +9,91 @@ use axum::{
     response::IntoResponse,
 };
 use pms_types_nft::NftMetadata; // Used for MintNftRequest
+use pms_types::TxOutput;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
-use pms_storage::{DagStorage, NftStorage};
+use pms_storage::{DagStorage, NftStorage, PutResult};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use pms_wallet::SignerBackend;
 use pms_wire::WireBlock;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Helper: Create Refund UTXO Block
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Creates a transaction block that mints refund tokens to a recipient.
+/// This is used to immediately create UTXOs for burn refunds.
+///
+/// # Arguments
+/// * `state` - AppState containing the node wallet and server
+/// * `recipient` - Address to receive the refund
+/// * `amount` - Refund amount in PMS
+/// * `parent_block_id` - Parent block (usually the burn block)
+///
+/// # Returns
+/// * `Ok(block_id)` - The ID of the created refund block
+/// * `Err(e)` - Error if block creation or submission failed
+async fn create_refund_utxo_block(
+    state: &AppState,
+    recipient: &str,
+    amount: Decimal,
+    parent_block_id: &str,
+) -> anyhow::Result<String> {
+    // 1. Create a Mint payload with a single output (refund to recipient)
+    //    This mints new tokens to compensate for the burned NFT
+    let outputs = vec![TxOutput {
+        address: recipient.to_string(),
+        amount: amount.to_string(),
+    }];
+
+    let payload = PayloadEnvelope::Plain(PlainPayload::Mint { outputs });
+    let payload_json = serde_json::to_string(&payload)?;
+
+    // 2. Get parent blocks (use the burn block as parent)
+    let parents = vec![parent_block_id.to_string()];
+
+    // 3. Compute block ID
+    let nonce = 0;
+    let block_id = pms_utils::compute_block_id(&parents, &Some(payload), nonce);
+
+    // 4. Create WireBlock
+    let mut wire_block = WireBlock {
+        id: block_id.clone(),
+        parents,
+        payload_json: Some(payload_json),
+        nonce,
+        network_id: state._cfg.network.network_id.clone(),
+        protocol_version: state._cfg.network.protocol_version as u16,
+        signer_pk_hex: state.node_wallet.encoded_public_key(),
+        signature_hex: String::new(),
+        metadata: None,
+    };
+
+    // 5. Sign the block with Coordinator wallet
+    let msg_to_sign = pms_wallet::signing_wire::canonical_wireblock_message(&wire_block);
+    let signature_hex = state.node_wallet.sign(&msg_to_sign)?;
+    wire_block.signature_hex = signature_hex;
+
+    // 6. Submit the block
+    match state.srv.adapter_arc().persist_block(&wire_block).await {
+        Ok(PutResult::Inserted) => {
+            let _ = state.srv.enqueue_broadcast(wire_block.id.clone()).await;
+            crate::metrics::BLOCKS_PERSISTED.inc();
+            Ok(block_id)
+        }
+        Ok(PutResult::AlreadyExists) => {
+            Ok(block_id) // Block already exists, that's fine
+        }
+        Ok(PutResult::Rejected(reason)) => {
+            anyhow::bail!("Refund block rejected: {}", reason)
+        }
+        Err(e) => {
+            anyhow::bail!("Failed to persist refund block: {}", e)
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helper: Coordinator-side Decryption of NFT Metadata
@@ -344,10 +422,12 @@ pub async fn mint_nft(
         };
 
     // 3. Construire le bloc
-    let parents = match state.srv.adapter_arc().top_tips(2).await {
-        Ok(tips) => tips,
-        Err(_) => vec![],
-    };
+    let parents: Vec<String> = state
+        .srv
+        .adapter_arc()
+        .top_tips(2)
+        .await
+        .unwrap_or_default();
 
     // Si pas de parents, on ne peut pas minter au dessus de rien (sauf si on est le tout premier bloc, mais edge case)
     if parents.is_empty() {
@@ -700,20 +780,35 @@ pub async fn burn_nft(
             }
 
             // ─────────────────────────────────────────────────────────────
-            // 5. REFUND ALLOCATION
+            // 5. REFUND ALLOCATION - Create immediate UTXO for refund
             // ─────────────────────────────────────────────────────────────
             let refund_preview = if !total_refund.is_zero() && refund_recipient.is_some() {
-                let recipient = refund_recipient.unwrap();
-                {
-                    let mut pool = state.fee_pool.write().await;
-                    pool.add_burn_refund(&recipient, total_refund);
-                    tracing::info!(
-                        "🔥 Batch burn refund added to pool: {} -> {} PMS ({} cubes)",
-                        &recipient[..20.min(recipient.len())],
-                        total_refund,
-                        token_ids_to_process.len()
-                    );
+                let recipient = refund_recipient.clone().unwrap();
+
+                // Create a refund transaction block immediately
+                // This creates a UTXO for the burner with the refund amount
+                match create_refund_utxo_block(
+                    &state,
+                    &recipient,
+                    total_refund,
+                    &block_id,
+                ).await {
+                    Ok(refund_block_id) => {
+                        tracing::info!(
+                            "🔥 Refund UTXO created: {} PMS -> {} (block: {})",
+                            total_refund,
+                            &recipient[..20.min(recipient.len())],
+                            &refund_block_id[..16]
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Failed to create refund UTXO: {}", e);
+                        // Fallback: add to fee pool for later distribution
+                        let mut pool = state.fee_pool.write().await;
+                        pool.add_burn_refund(&recipient, total_refund);
+                    }
                 }
+
                 Some(RefundPreview {
                     amount: total_refund.to_string(),
                     recipient,

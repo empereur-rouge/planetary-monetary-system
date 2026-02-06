@@ -1,12 +1,29 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# docker_test.sh - Setup and Teardown for Docker 3-Node E2E Tests
+# docker_test.sh - VPS Production Architecture (Single Writer Mode)
 # ═══════════════════════════════════════════════════════════════════════════════
 #
+# Architecture (4 VPS Production Setup):
+#   ┌──────────────────┐     ┌──────────────────┐
+#   │  VPS 1: Gateway  │────▶│  VPS 2: Engine   │
+#   │  (Public Entry)  │     │  (Coordinator)   │
+#   │  Port: 8443      │     │  Internal Only   │
+#   └──────────────────┘     └────────┬─────────┘
+#                                     │
+#                                     ▼
+#   ┌──────────────────┐     ┌──────────────────┐
+#   │  VPS 4: Metrics  │     │  VPS 3: RocksDB  │
+#   │  (Prometheus)    │◀────│  (Data Volume)   │
+#   │  Port: 9091      │     │  Persistent      │
+#   └──────────────────┘     └──────────────────┘
+#
+# Gateway is the ONLY public entry point - Engine is internal only!
+#
 # Usage:
-#   ./scripts/docker_test.sh setup   # Create keys, images, start cluster
-#   ./scripts/docker_test.sh down    # Stop cluster
+#   ./scripts/docker_test.sh setup   # Build images, start full stack
+#   ./scripts/docker_test.sh down    # Stop stack
 #   ./scripts/docker_test.sh clean   # Stop and remove everything
+#   ./scripts/docker_test.sh status  # Show stack status
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -17,10 +34,12 @@ cd "$(dirname "$0")/.."
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Coordinator private key (matches stress_common.rs COORDINATOR_PRIVATE_KEY_HEX)
-COORDINATOR_PRIVATE_KEY="52f4cb8344e318c120f87bc0efb429bdd6b379c700731af27aaf59efffc0b248"
+# Generated wallets will be stored here
+COORDINATOR_WALLET_JSON=""
+TREASURY_WALLET_JSON=""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Functions
@@ -28,7 +47,7 @@ COORDINATOR_PRIVATE_KEY="52f4cb8344e318c120f87bc0efb429bdd6b379c700731af27aaf59e
 
 setup_directories() {
     echo -e "${YELLOW}📁 Creating directories...${NC}"
-    mkdir -p secrets/tls etc/pms docker_data/node{1,2,3}
+    mkdir -p secrets/tls etc/pms docker_data/node etc/prometheus
 }
 
 generate_tls() {
@@ -48,13 +67,13 @@ generate_tls() {
             -out secrets/tls/key.pem -nocrypt 2>/dev/null
         rm secrets/tls/key-temp.pem
         
-        # Server cert with SANs
+        # Server cert with SANs for internal Docker networking
         cat > secrets/tls/extfile.cnf << EOF
-subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:node1,DNS:node2,DNS:node3
+subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:pms-engine,DNS:pms-gateway,DNS:engine,DNS:gateway
 EOF
         openssl req -new -key secrets/tls/key.pem \
             -out secrets/tls/server.csr \
-            -subj "/CN=127.0.0.1" 2>/dev/null
+            -subj "/CN=pms-engine" 2>/dev/null
         openssl x509 -req -in secrets/tls/server.csr \
             -CA secrets/tls/ca-cert.pem \
             -CAkey secrets/tls/ca-key.pem \
@@ -72,239 +91,391 @@ EOF
 }
 
 generate_keys() {
-    echo -e "${YELLOW}🔑 Generating node identity keys...${NC}"
-    
-    # Node 1 uses the coordinator key (for mint authorization)
-    echo -n "$COORDINATOR_PRIVATE_KEY" > etc/pms/node1.key
-    
-    # Nodes 2 & 3 get random keys (64 hex chars = 32 bytes)
-    openssl rand -hex 32 > etc/pms/node2.key
-    openssl rand -hex 32 > etc/pms/node3.key
-    
-    chmod 600 etc/pms/node*.key
-    
-    echo -e "${GREEN}✅ Keys generated:${NC}"
-    echo "   Node1 (Coordinator): ${COORDINATOR_PRIVATE_KEY:0:16}..."
-    echo "   Node2: $(head -c 16 etc/pms/node2.key)..."
-    echo "   Node3: $(head -c 16 etc/pms/node3.key)..."
+    echo -e "${YELLOW}🔑 Generating coordinator wallet with mnemonic...${NC}"
+
+    # Generate a real wallet with mnemonic
+    COORDINATOR_WALLET_JSON=$(cargo run -q -p tools-cli -- wallet-generate pms)
+
+    # Extract private key hex for node.key
+    COORDINATOR_PRIVATE_KEY=$(echo "$COORDINATOR_WALLET_JSON" | jq -r '.private_key_hex')
+    echo -n "$COORDINATOR_PRIVATE_KEY" > etc/pms/node.key
+    chmod 600 etc/pms/node.key
+
+    # Save full wallet JSON for reference
+    echo "$COORDINATOR_WALLET_JSON" > etc/pms/coordinator-wallet.json
+    chmod 600 etc/pms/coordinator-wallet.json
+
+    COORD_ADDR=$(echo "$COORDINATOR_WALLET_JSON" | jq -r '.address')
+    echo -e "${GREEN}✅ Coordinator wallet generated:${NC}"
+    echo "   Address: $COORD_ADDR"
 }
 
 generate_admin_wallet() {
-    if [ ! -f etc/pms/admin-wallet.json ] || [ ! -s etc/pms/admin-wallet.json ]; then
-        echo -e "${YELLOW}👛 Generating admin wallet...${NC}"
-        
-        # Generate 32 random bytes for private key
-        ADMIN_PRIV_HEX=$(openssl rand -hex 32)
-        ADMIN_PRIV_B64=$(echo -n "$ADMIN_PRIV_HEX" | xxd -r -p | base64)
-        
-        # The public key derivation requires secp256k1 which shell can't do easily
-        # So we use a fixed well-known admin key for testing
-        # This matches the expected address in stress tests
-        ADMIN_PRIV_HEX="1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-        ADMIN_PRIV_B64=$(echo -n "$ADMIN_PRIV_HEX" | xxd -r -p | base64)
-        
-        # Use openssl to derive secp256k1 public key
-        # Create a temp EC key file
-        echo -n "$ADMIN_PRIV_HEX" | xxd -r -p > /tmp/admin_priv.bin
-        
-        # Create DER format for secp256k1 private key
-        printf '\x30\x77\x02\x01\x01\x04\x20' > /tmp/admin_key.der
-        cat /tmp/admin_priv.bin >> /tmp/admin_key.der
-        printf '\xa0\x0a\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\xa1\x44\x03\x42\x00\x04' >> /tmp/admin_key.der
-        
-        # Alternative: use openssl with proper secp256k1 key format
-        # Since shell crypto is limited, we generate a known test key
-        ADMIN_PUB_HEX="0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-        X25519_PUB_HEX="2fe57da347cd62431528daac5fbb290730fff684afc4cfc2ed90995f58cb3b74"
-        
-        # Create wallet JSON
-        cat > etc/pms/admin-wallet.json << EOF
+    echo -e "${YELLOW}👛 Generating treasury wallet with mnemonic...${NC}"
+
+    # Generate a real wallet with mnemonic for treasury
+    TREASURY_WALLET_JSON=$(cargo run -q -p tools-cli -- wallet-generate pms)
+
+    # Extract values
+    TREASURY_PRIV_B64=$(echo "$TREASURY_WALLET_JSON" | jq -r '.private_key_b64')
+    TREASURY_PUB_HEX=$(echo "$TREASURY_WALLET_JSON" | jq -r '.public_key_hex')
+    TREASURY_X25519=$(echo "$TREASURY_WALLET_JSON" | jq -r '.x25519_pub_hex')
+    TREASURY_ADDR=$(echo "$TREASURY_WALLET_JSON" | jq -r '.address')
+
+    # Save as admin-wallet.json (used by engine)
+    cat > etc/pms/admin-wallet.json << EOF
 {
-    "private_key_b64": "$ADMIN_PRIV_B64",
-    "public_key_hex": "$ADMIN_PUB_HEX",
-    "x25519_pub_hex": "$X25519_PUB_HEX"
+    "private_key_b64": "$TREASURY_PRIV_B64",
+    "public_key_hex": "$TREASURY_PUB_HEX",
+    "x25519_pub_hex": "$TREASURY_X25519"
 }
 EOF
-        
-        # Cleanup temp files
-        rm -f /tmp/admin_priv.bin /tmp/admin_key.der
-        
-        # Compute the admin address (for config reference)
-        echo "   Admin Public Key: ${ADMIN_PUB_HEX:0:32}..."
-        echo -e "${GREEN}✅ Admin wallet created${NC}"
-    else
-        echo -e "${GREEN}✅ Admin wallet exists${NC}"
-    fi
+    chmod 600 etc/pms/admin-wallet.json
+
+    # Save full wallet JSON with mnemonic for reference
+    echo "$TREASURY_WALLET_JSON" > etc/pms/treasury-wallet.json
+    chmod 600 etc/pms/treasury-wallet.json
+
+    echo -e "${GREEN}✅ Treasury wallet generated:${NC}"
+    echo "   Address: $TREASURY_ADDR"
+}
+
+create_prometheus_config() {
+    echo -e "${YELLOW}📊 Creating Prometheus config...${NC}"
+    cat > etc/prometheus/prometheus.yml << 'PROM_EOF'
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'pms-engine'
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    static_configs:
+      - targets: ['pms-engine:8080']
+    metrics_path: /metrics
+
+  - job_name: 'pms-gateway'
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    static_configs:
+      - targets: ['pms-gateway:8443']
+    metrics_path: /metrics
+PROM_EOF
+    echo -e "${GREEN}✅ Prometheus config created${NC}"
 }
 
 create_test_compose() {
-    # Update config with both coordinator keys using the tool
-    # We use config.docker-test.toml as both input and output since it already exists from repo or previous runs
-    # Wait, we need to make sure the file exists first. The previous logic created it inside this function.
-    # We should update it AFTER creating it, OR update the source file if it is a template.
-    # docker_test.sh mounts ./etc/config/config.docker-test.toml
-    # Let's see how it was done before.
-    # It was just creating the docker-compose file. The config file is expected to be at etc/config/config.docker-test.toml
-    
-    # 1. Ensure config file exists or is reset?
-    # It seems we rely on git checked out file? No, we might be editing it.
-    # Let's just run the derivation tool on the existing file.
-    
     echo -e "${YELLOW}🔑 Updating coordinator keys in config...${NC}"
-    # Use the hardcoded key to update the config
-    cargo run -p tools-cli -- derive-coordinator "$COORDINATOR_PRIVATE_KEY" "etc/config/config.docker-test.toml"
+    COORD_PRIV_KEY=$(cat etc/pms/coordinator-wallet.json | jq -r '.private_key_hex')
+    cargo run -p tools-cli -- derive-coordinator "$COORD_PRIV_KEY" "etc/config/config.docker-test.toml"
     
-    echo -e "${YELLOW}🐳 Creating docker-compose.test.yml...${NC}"
+    echo -e "${YELLOW}🐳 Creating docker-compose.test.yml (4-Service VPS Architecture)...${NC}"
     cat > docker-compose.test.yml << 'COMPOSE_EOF'
-# Generated by docker_test.sh - 3-Node Test Cluster
+# ═══════════════════════════════════════════════════════════════════════════════
+# VPS Production Architecture - Single Writer Mode
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# All 4 services are MANDATORY:
+# - pms-engine:   Coordinator Node (INTERNAL ONLY - no public ports!)
+# - pms-gateway:  API Gateway (PUBLIC - sole entry point)
+# - rocksdb:      Persistent storage volume (simulated via Docker volume)
+# - prometheus:   Metrics collection
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
 services:
-  node1:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # VPS 2: PMS Engine (Coordinator) - INTERNAL ONLY
+  # ─────────────────────────────────────────────────────────────────────────────
+  # This is the Single Writer that validates and persists all blocks.
+  # It is NOT exposed to the public - only Gateway can reach it.
+  pms-engine:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
     image: pms-node:test
-    container_name: pms-node1
-    hostname: node1
+    container_name: pms-engine
+    hostname: pms-engine
     user: "pms"
     environment:
-      RUST_LOG: info,pms_server=debug
+      RUST_LOG: info,pms_server=debug,pms_core=debug
       PMS_CONFIG: /home/pms/config/config.docker-test.toml
       PMS_ADMIN_TOKEN: pms_admin_secret
       PMS__LIMITS__RATE_LIMIT_RPS: 10000
       PMS__LIMITS__BURST: 20000
-      PMS__P2P__KNOWN_PEERS: "node2:8443,node3:8443"
     volumes:
       - ./etc/config/config.docker-test.toml:/home/pms/config/config.docker-test.toml:ro
-      - ./etc/pms/node1.key:/home/pms/config/node-identity.key:ro
+      - ./etc/pms/node.key:/home/pms/config/node-identity.key:ro
       - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
       - ./etc/pms/treasury-wallets.json:/home/pms/config/treasury-wallets.json:ro
       - ./secrets/tls:/home/pms/tls:ro
-      - ./docker_data/node1:/home/pms/data
-    ports:
-      - "8080:8080"
+      - rocksdb_data:/home/pms/data  # VPS 3: Persistent RocksDB storage
+    # NO PUBLIC PORTS - Internal network only!
+    # ports:
+    #   - "8080:8080"  # DISABLED - Only Gateway can access Engine
+    expose:
+      - "8080"  # Internal Docker network only
     healthcheck:
       test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
       interval: 2s
       timeout: 3s
       retries: 15
       start_period: 5s
+    networks:
+      - pms-internal
 
-  node2:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # VPS 1: PMS Gateway - PUBLIC ENTRY POINT (sole access to network)
+  # ─────────────────────────────────────────────────────────────────────────────
+  # All external requests MUST go through Gateway.
+  # Gateway proxies to Engine on internal network.
+  pms-gateway:
     build:
       context: .
-      dockerfile: Dockerfile
-      target: runtime
-    image: pms-node:test
-    container_name: pms-node2
-    hostname: node2
-    user: "pms"
+      dockerfile: Dockerfile.gateway
+    image: pms-gateway:test
+    container_name: pms-gateway
+    hostname: pms-gateway
     depends_on:
-      node1:
+      pms-engine:
         condition: service_healthy
     environment:
-      RUST_LOG: info
-      PMS_CONFIG: /home/pms/config/config.docker-test.toml
-      PMS_ADMIN_TOKEN: pms_admin_secret
-      PMS__LIMITS__RATE_LIMIT_RPS: 10000
-      PMS__LIMITS__BURST: 20000
-      PMS__P2P__KNOWN_PEERS: "node1:8443,node3:8443"
+      RUST_LOG: info,pms_gateway=debug
+      UPSTREAM_URL: https://pms-engine:8080
+      LISTEN_ADDR: 0.0.0.0:8443
+      TLS_CERT: /app/tls/cert.pem
+      TLS_KEY: /app/tls/key.pem
+      ADMIN_TOKEN: pms_admin_secret
+      DASHBOARD_PATH: /app/dashboard
     volumes:
-      - ./etc/config/config.docker-test.toml:/home/pms/config/config.docker-test.toml:ro
-      - ./etc/pms/node2.key:/home/pms/config/node-identity.key:ro
-      - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
-      - ./etc/pms/treasury-wallets.json:/home/pms/config/treasury-wallets.json:ro
-      - ./secrets/tls:/home/pms/tls:ro
-      - ./docker_data/node2:/home/pms/data
+      - ./secrets/tls:/app/tls:ro
     ports:
-      - "8081:8080"
+      - "8443:8443"  # PUBLIC - The ONLY exposed port for external access
     healthcheck:
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8443' || exit 1"]
       interval: 2s
       timeout: 3s
       retries: 15
+    networks:
+      - pms-internal
+      - pms-public
 
-  node3:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime
-    image: pms-node:test
-    container_name: pms-node3
-    hostname: node3
-    user: "pms"
-    depends_on:
-      node1:
-        condition: service_healthy
-    environment:
-      RUST_LOG: info
-      PMS_CONFIG: /home/pms/config/config.docker-test.toml
-      PMS_ADMIN_TOKEN: pms_admin_secret
-      PMS__LIMITS__RATE_LIMIT_RPS: 10000
-      PMS__LIMITS__BURST: 20000
-      PMS__P2P__KNOWN_PEERS: "node1:8443,node2:8443"
+  # ─────────────────────────────────────────────────────────────────────────────
+  # VPS 4: Prometheus (Metrics) - Mandatory monitoring
+  # ─────────────────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: pms-prometheus
     volumes:
-      - ./etc/config/config.docker-test.toml:/home/pms/config/config.docker-test.toml:ro
-      - ./etc/pms/node3.key:/home/pms/config/node-identity.key:ro
-      - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
-      - ./etc/pms/treasury-wallets.json:/home/pms/config/treasury-wallets.json:ro
-      - ./secrets/tls:/home/pms/tls:ro
-      - ./docker_data/node3:/home/pms/data
+      - ./etc/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
     ports:
-      - "8082:8080"
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
-      interval: 2s
-      timeout: 3s
-      retries: 15
+      - "9091:9090"  # Prometheus Web UI
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    networks:
+      - pms-internal
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Networks
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  pms-internal:
+    driver: bridge
+    internal: true  # No external access - Engine is isolated
+  pms-public:
+    driver: bridge
+    # Gateway connects to both internal (to reach Engine) and public (to serve clients)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Volumes (VPS 3: RocksDB Persistent Storage)
+# ─────────────────────────────────────────────────────────────────────────────
+volumes:
+  rocksdb_data:
+    driver: local
+  prometheus_data:
+    driver: local
+
 COMPOSE_EOF
-    echo -e "${GREEN}✅ docker-compose.test.yml created${NC}"
+    echo -e "${GREEN}✅ docker-compose.test.yml created (4-Service VPS Architecture)${NC}"
 }
 
 build_and_start() {
-    echo -e "${YELLOW}🏗️  Building Docker image (once)...${NC}"
-    docker compose -f docker-compose.test.yml build node1
+    echo -e "${YELLOW}🏗️  Building Docker images...${NC}"
     
-    echo -e "${YELLOW}🚀 Starting 3-node cluster...${NC}"
+    # Build Engine image
+    docker compose -f docker-compose.test.yml build pms-engine
+    
+    # Build Gateway image (uses existing Dockerfile.gateway with dashboard)
+    echo -e "${YELLOW}🔧 Building Gateway image (with dashboard)...${NC}"
+    docker compose -f docker-compose.test.yml build pms-gateway
+    
+    echo -e "${YELLOW}🚀 Starting 4-Service Stack...${NC}"
     docker compose -f docker-compose.test.yml up -d --remove-orphans
     
-    echo -e "${YELLOW}⏳ Waiting for nodes to be healthy...${NC}"
-    sleep 5
+    echo -e "${YELLOW}⏳ Waiting for services to be healthy...${NC}"
+    sleep 3
     
-    # Check health
-    for port in 8080 8081 8082; do
-        for i in {1..30}; do
-            if curl -k -s "https://127.0.0.1:$port/live" > /dev/null 2>&1; then
-                echo -e "${GREEN}✅ Node on port $port is UP${NC}"
-                break
-            fi
-            if [ $i -eq 30 ]; then
-                echo -e "${RED}❌ Node on port $port failed to start${NC}"
-                docker compose -f docker-compose.test.yml logs
-                exit 1
-            fi
-            sleep 1
-        done
+    # Check Engine health (internal)
+    for i in {1..30}; do
+        if docker exec pms-engine bash -c 'timeout 2 bash -c "</dev/tcp/127.0.0.1/8080"' 2>/dev/null; then
+            echo -e "${GREEN}✅ Engine is UP (internal)${NC}"
+            break
+        fi
+        if [ $i -eq 30 ]; then
+            echo -e "${RED}❌ Engine failed to start${NC}"
+            docker compose -f docker-compose.test.yml logs pms-engine
+            exit 1
+        fi
+        sleep 1
+    done
+    
+    # Check Gateway health (public)
+    for i in {1..30}; do
+        if curl -k -s "https://127.0.0.1:8443/livez" > /dev/null 2>&1; then
+            echo -e "${GREEN}✅ Gateway is UP (public port 8443)${NC}"
+            break
+        fi
+        if [ $i -eq 30 ]; then
+            echo -e "${RED}❌ Gateway failed to start${NC}"
+            docker compose -f docker-compose.test.yml logs pms-gateway
+            exit 1
+        fi
+        sleep 1
+    done
+    
+    # Check Prometheus
+    for i in {1..15}; do
+        if curl -s "http://127.0.0.1:9091/-/ready" > /dev/null 2>&1; then
+            echo -e "${GREEN}✅ Prometheus is UP (port 9091)${NC}"
+            break
+        fi
+        if [ $i -eq 15 ]; then
+            echo -e "${YELLOW}⚠️ Prometheus may still be starting...${NC}"
+        fi
+        sleep 1
     done
 }
 
+generate_credentials_file() {
+    echo -e "${YELLOW}📄 Generating credentials file...${NC}"
+
+    TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+    OUTPUT_FILE="pms-credentials.txt"
+
+    # Get coordinator info from generated wallet
+    COORD_PRIV=$(cat etc/pms/coordinator-wallet.json | jq -r '.private_key_hex')
+    COORD_PUB=$(cat etc/pms/coordinator-wallet.json | jq -r '.public_key_hex')
+    COORD_WALLET=$(cat etc/pms/coordinator-wallet.json | jq -r '.address')
+    COORD_MNEMONIC=$(cat etc/pms/coordinator-wallet.json | jq -r '.mnemonic')
+
+    # Get treasury info from generated wallet
+    TREASURY_PRIV=$(cat etc/pms/treasury-wallet.json | jq -r '.private_key_hex')
+    TREASURY_WALLET=$(cat etc/pms/treasury-wallet.json | jq -r '.address')
+    TREASURY_MNEMONIC=$(cat etc/pms/treasury-wallet.json | jq -r '.mnemonic')
+
+    cat > "$OUTPUT_FILE" << EOF
+═══════════════════════════════════════════════════════════════════════════════
+                    PMS Docker Test - Credentials & Configuration
+═══════════════════════════════════════════════════════════════════════════════
+Generated: $TIMESTAMP
+
+───────────────────────────────────────────────────────────────────────────────
+                              SERVICES ENDPOINTS
+───────────────────────────────────────────────────────────────────────────────
+Gateway (Public):     https://127.0.0.1:8443
+Dashboard:            https://127.0.0.1:8443/dashboard/
+Prometheus:           http://127.0.0.1:9091
+Engine (Internal):    https://pms-engine:8080 (Docker network only)
+
+───────────────────────────────────────────────────────────────────────────────
+                              COORDINATOR (Single Writer)
+───────────────────────────────────────────────────────────────────────────────
+Private Key (hex):    $COORD_PRIV
+Public Key:           $COORD_PUB
+Wallet Address:       $COORD_WALLET
+
+⚠️  MNEMONIC (24 words) - SAVE THIS SECURELY:
+$COORD_MNEMONIC
+
+───────────────────────────────────────────────────────────────────────────────
+                              TREASURY WALLET
+───────────────────────────────────────────────────────────────────────────────
+Private Key (hex):    $TREASURY_PRIV
+Wallet Address:       $TREASURY_WALLET
+
+⚠️  MNEMONIC (24 words) - SAVE THIS SECURELY:
+$TREASURY_MNEMONIC
+
+───────────────────────────────────────────────────────────────────────────────
+                              ADMIN ACCESS
+───────────────────────────────────────────────────────────────────────────────
+Admin Token:          pms_admin_secret
+Header:               Authorization: Bearer pms_admin_secret
+
+───────────────────────────────────────────────────────────────────────────────
+                              API EXAMPLES
+───────────────────────────────────────────────────────────────────────────────
+# Health check
+curl -k https://127.0.0.1:8443/livez
+
+# Get tips
+curl -k https://127.0.0.1:8443/v1/tips
+
+# Get supply
+curl -k https://127.0.0.1:8443/v1/supply
+
+# Get coordinator info
+curl -k https://127.0.0.1:8443/v1/coordinator/info
+
+# Admin: distribute fees
+curl -k -X POST -H "Authorization: Bearer pms_admin_secret" \\
+     https://127.0.0.1:8443/admin/distribute_fees
+
+# Get UTXOs for treasury
+curl -k https://127.0.0.1:8443/v1/utxos/$TREASURY_WALLET
+
+───────────────────────────────────────────────────────────────────────────────
+                              IMPORTANT NOTES
+───────────────────────────────────────────────────────────────────────────────
+- Gateway is the ONLY public entry point - Engine is internal only
+- TLS certificates are self-signed (use -k with curl)
+- This is a TEST environment - do not use these keys in production!
+- SAVE THE MNEMONICS - they are the only way to recover the wallets!
+
+═══════════════════════════════════════════════════════════════════════════════
+EOF
+
+    echo -e "${GREEN}✅ Credentials saved to: $OUTPUT_FILE${NC}"
+}
+
 stop_cluster() {
-    echo -e "${YELLOW}🛑 Stopping cluster...${NC}"
-    docker compose -f docker-compose.test.yml down -v 2>/dev/null || true
-    echo -e "${GREEN}✅ Cluster stopped${NC}"
+    echo -e "${YELLOW}🛑 Stopping stack...${NC}"
+    docker compose -f docker-compose.test.yml down 2>/dev/null || true
+    echo -e "${GREEN}✅ Stack stopped${NC}"
 }
 
 cleanup() {
     echo -e "${YELLOW}🧹 Full cleanup...${NC}"
     stop_cluster
     
-    # Remove generated files
-    rm -f etc/pms/node1.key etc/pms/node2.key etc/pms/node3.key
-    rm -rf docker_data/node1 docker_data/node2 docker_data/node3
-    rm -f docker-compose.test.yml
+    # Remove volumes
+    docker compose -f docker-compose.test.yml down -v 2>/dev/null || true
     
-    # Optionally remove TLS (uncomment if needed)
-    # rm -rf secrets/tls
+    # Remove generated files
+    rm -f etc/pms/node.key
+    rm -f etc/pms/coordinator-wallet.json
+    rm -f etc/pms/treasury-wallet.json
+    rm -f etc/pms/admin-wallet.json
+    rm -f pms-credentials.txt
+    rm -rf docker_data/node
+    rm -f docker-compose.test.yml
     
     echo -e "${GREEN}✅ Cleanup complete${NC}"
 }
@@ -313,13 +484,24 @@ show_usage() {
     echo "Usage: $0 {setup|down|clean|status}"
     echo ""
     echo "Commands:"
-    echo "  setup  - Generate keys, TLS, build images, start 3-node cluster"
-    echo "  down   - Stop the cluster"
-    echo "  clean  - Stop cluster and remove all generated files"
-    echo "  status - Show cluster status"
+    echo "  setup  - Generate keys, TLS, build images, start 4-service stack"
+    echo "  down   - Stop the stack"
+    echo "  clean  - Stop stack and remove all generated files + volumes"
+    echo "  status - Show stack status"
+    echo ""
+    echo "Architecture (4 VPS - All Mandatory):"
+    echo "  ┌────────────────┐    ┌────────────────┐"
+    echo "  │ VPS 1: Gateway │───▶│ VPS 2: Engine  │"
+    echo "  │ (Port 8443)    │    │ (Internal)     │"
+    echo "  └────────────────┘    └───────┬────────┘"
+    echo "                                │"
+    echo "  ┌────────────────┐    ┌───────▼────────┐"
+    echo "  │ VPS 4: Metrics │◀───│ VPS 3: RocksDB │"
+    echo "  │ (Port 9091)    │    │ (Persistent)   │"
+    echo "  └────────────────┘    └────────────────┘"
     echo ""
     echo "After setup, run tests with:"
-    echo "  cargo test docker_stress_sync --ignored -- --nocapture"
+    echo "  cargo test -p pms-server --test distributed_tx_e2e -- --ignored --nocapture"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -332,20 +514,60 @@ case "$1" in
         generate_tls
         generate_keys
         generate_admin_wallet
+        create_prometheus_config
+        
+        # Configure Treasury Address from generated wallet
+        echo -e "${YELLOW}⚙️  Configuring Treasury Address...${NC}"
+        TREASURY_ADDR=$(cat etc/pms/treasury-wallet.json | jq -r '.address')
+        echo "   Treasury Address: $TREASURY_ADDR"
+
+        # Update config with treasury address
+        if grep -q "treasury_addresses =" etc/config/config.docker-test.toml; then
+            # Replace existing treasury_addresses line
+            sed -i '' "s|treasury_addresses = .*|treasury_addresses = [\"$TREASURY_ADDR\"]|" etc/config/config.docker-test.toml
+        else
+            # Add treasury_addresses after [fees] section
+            export TREASURY_ADDR
+            perl -i -pe 's/^\[fees\]$/[fees]\ntreasury_addresses = ["$ENV{TREASURY_ADDR}"]/' etc/config/config.docker-test.toml
+        fi
+
         create_test_compose
         build_and_start
+
+        # Register node via Gateway (the only public entry point)
+        echo -e "${YELLOW}📝 Registering node (via Gateway)...${NC}"
+        N_PK_PRIV=$(cat etc/pms/node.key)
+        N_PUB=$(cargo run -q -p tools-cli -- priv-to-pub "$N_PK_PRIV")
+        N_WALLET=$(cargo run -q -p tools-cli -- key-to-wallet "$N_PK_PRIV")
+        echo "   Coordinator PubKey: ${N_PUB:0:20}..."
+        echo "   Coordinator Wallet: $N_WALLET"
+        
+        # Register via Gateway (port 8443)
+        curl -k -s -X POST -H "Content-Type: application/json" \
+            -d "{\"node_pk\":\"$N_PUB\", \"api_url\":\"https://pms-engine:8080\", \"wallet_address\":\"$N_WALLET\"}" \
+            https://127.0.0.1:8443/v1/register > /dev/null
+        
+        echo -e "${GREEN}✅ Node registered (via Gateway)${NC}"
+
+        # Generate credentials file
+        generate_credentials_file
+
         echo ""
         echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-        echo -e "${GREEN}✅ 3-Node Test Cluster is READY!${NC}"
+        echo -e "${GREEN}✅ 4-SERVICE VPS ARCHITECTURE READY! (Single Writer Mode)${NC}"
         echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
         echo ""
-        echo "Nodes:"
-        echo "  - Node 1 (Coordinator): https://127.0.0.1:8080"
-        echo "  - Node 2:               https://127.0.0.1:8081"
-        echo "  - Node 3:               https://127.0.0.1:8082"
+        echo "Services (All Mandatory):"
+        echo "  - Gateway (Public):  https://127.0.0.1:8443  ← SOLE ENTRY POINT"
+        echo "  - Dashboard:         https://127.0.0.1:8443/dashboard/"
+        echo "  - Engine (Internal): https://pms-engine:8080 (Docker network only)"
+        echo "  - Prometheus:        http://127.0.0.1:9091"
+        echo "  - RocksDB:           Docker volume 'rocksdb_data'"
         echo ""
-        echo "Run tests:"
-        echo "  cargo test docker_stress_sync --ignored -- --nocapture"
+        echo -e "${BLUE}📄 All credentials saved to: pms-credentials.txt${NC}"
+        echo ""
+        echo "Run tests (via Gateway):"
+        echo "  cargo test -p pms-server --test distributed_tx_e2e -- --ignored --nocapture"
         ;;
     down)
         stop_cluster
@@ -354,7 +576,8 @@ case "$1" in
         cleanup
         ;;
     status)
-        docker compose -f docker-compose.test.yml ps 2>/dev/null || echo "No cluster running"
+        echo -e "${BLUE}📊 Stack Status:${NC}"
+        docker compose -f docker-compose.test.yml ps 2>/dev/null || echo "No stack running"
         ;;
     *)
         show_usage

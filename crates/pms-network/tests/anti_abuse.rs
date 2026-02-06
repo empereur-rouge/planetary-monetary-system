@@ -116,6 +116,7 @@ async fn start_server(addr: &str) -> Arc<Server> {
         meta.network_id,
         meta.protocol_version,
         Arc::new(wallet),
+        &pms_config::P2pConfig::default(),
     );
     let s2 = srv.clone();
     let addr = addr.to_owned();

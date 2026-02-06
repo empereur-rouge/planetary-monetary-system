@@ -209,10 +209,33 @@ pub async fn wallet_send_tx(
     }
 
     // ============================================================
+    // 3) Chiffrement (recipients_xpk de base + AUTO-ADD ADMINS)
     // ============================================================
-    // 3) Chiffrement (recipients_xpk de base, le client doit avoir inclus l'admin si besoin)
-    // ============================================================
-    let recipients_xpk = body.recipients_xpk.clone();
+    // Si des frais sont payés vers une adresse admin, on DOIT ajouter
+    // la clé publique (X25519) de cet admin dans la liste des destinataires
+    // pour qu'il puisse déchiffrer et voir l'UTXO (et donc son solde).
+    let mut recipients_xpk = body.recipients_xpk.clone();
+
+    // On parcourt les outputs pour repérer les adresses admin
+    for out in &tx.outputs {
+        // Vérifie si c'est une adresse admin connue
+        if settings
+            .admin
+            .wallet_addresses
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(&out.address))
+        {
+            // On décode l'adresse pour extraire la X25519 PubKey
+            // Format Bech32 : (H20, XPK_Hex)
+            if let Ok((_h20, xpk)) = pms_wallet::decode_address(&out.address) {
+                // On l'ajoute si elle n'est pas déjà présente
+                if !recipients_xpk.contains(&xpk) {
+                    recipients_xpk.push(xpk);
+                }
+            }
+        }
+    }
+
     let plain = PlainPayload::TxUtxo(tx);
     let enc = match EncryptedPayload::encrypt_for_plain(&plain, &recipients_xpk) {
         Ok(e) => e,

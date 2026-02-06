@@ -220,7 +220,7 @@ impl Wallet {
                 let signing_key = k256::ecdsa::SigningKey::from_slice(&priv_bytes)
                     .map_err(|e| anyhow::anyhow!("Invalid ECDSA private key from file: {e}"))?;
                 let verify_key = signing_key.verifying_key();
-                let pub_hex = hex::encode(verify_key.to_sec1_bytes());
+                let pub_hex = hex::encode(verify_key.to_encoded_point(false).as_bytes());
 
                 let mut w = Wallet {
                     private_key_b64: priv_b64,
@@ -256,6 +256,37 @@ impl Wallet {
 
     pub fn x25519_pub_hex(&self) -> &str {
         &self.x25519_pub_hex
+    }
+
+    /// Crée un wallet depuis une clé privée hexadécimale (64 chars).
+    /// Ne génère pas de mnémonique.
+    pub fn from_hex(priv_hex: &str) -> Result<Self, String> {
+        let priv_bytes = hex::decode(priv_hex).map_err(|e| format!("Invalid hex: {}", e))?;
+        if priv_bytes.len() != 32 {
+            return Err(format!("Expected 32 bytes, got {}", priv_bytes.len()));
+        }
+
+        let priv_b64 = STANDARD.encode(&priv_bytes);
+
+        // Dérive la PubKey ECDSA
+        let signing_key = k256::ecdsa::SigningKey::from_slice(&priv_bytes)
+            .map_err(|e| format!("Invalid ECDSA private key: {}", e))?;
+        let verify_key = signing_key.verifying_key();
+        let pub_hex = hex::encode(verify_key.to_encoded_point(false).as_bytes());
+
+        let mut w = Wallet {
+            private_key_b64: priv_b64,
+            public_key_hex: pub_hex,
+            x25519_pub_hex: String::new(),
+            mnemonic_words: None,
+        };
+
+        // Dérive X25519
+        if let Some((_, pk)) = w.derive_x25519_pair_from_private_key_b64() {
+            w.x25519_pub_hex = pk;
+        }
+
+        Ok(w)
     }
 }
 

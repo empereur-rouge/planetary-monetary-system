@@ -8,8 +8,20 @@ pub async fn select_parents_deterministic<S: DagStorage + Send + Sync>(
     store: &S,
     k: usize,
     window: usize,
+    enforce_single_writer: bool,
 ) -> anyhow::Result<Vec<String>> {
-    // 0) genesis id RAM (si présent)
+    // 0a) Single Writer Optimization:
+    // Si activé, on veut juste le dernier bloc connu (chaîne linéaire).
+    if enforce_single_writer {
+        // On suppose que recent_ids(1) retourne le dernier bloc inséré/connu.
+        let recents = store.recent_ids(1).await?;
+        if let Some(last) = recents.first() {
+            return Ok(vec![last.clone()]);
+        }
+        // Si vide, on tombe dans le cas Genesis plus bas.
+    }
+
+    // 0b) genesis id RAM (si présent)
     let genesis_id = dag
         .blocks
         .iter()

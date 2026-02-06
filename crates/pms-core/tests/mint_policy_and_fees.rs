@@ -259,7 +259,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
         },
         secrets: SecretSettings {
             node_identity_key_path: "".to_string(),
-            admin_wallet_file: "".to_string(),
+            admin_wallet_file: None,
         },
         validation: ValidationSettings {
             min_pow_leading_zero_bits: 0,
@@ -278,6 +278,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             coordinator_public_key: None,
             coordinator_x25519_public_key: None,
             coordinator_tx_only: false,
+            enforce_single_writer: false, // Tests need multi-writer flexibility
         },
         fees: FeesSettings {
             epsilon: "0.001".to_string(),
@@ -288,6 +289,8 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             platform_address: None,
             platform_address_signature: None,
             platform_fee_ratio: "0.45".to_string(),
+            treasury_addresses: vec![],
+            distribution_interval_sec: 600,
             // Fee distribution fields
             treasury_fee_percent: 15,
             creator_fee_percent: 45,
@@ -303,6 +306,8 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
         p2p: P2pConfig {
             known_peers: String::new(),
             bind_addr: None,
+            allowed_peer_ips: vec![],
+            strict_whitelist: false,
         },
     };
 

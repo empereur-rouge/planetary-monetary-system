@@ -41,10 +41,12 @@ rate_limit_rps = 5000
 burst = 5000
 
 [fees]
+treasury_addresses = ["pms1urnkfvgyzdtkny9rnhkm0prcgrsrcpnd787qgx0hxj75rrsfteurau68t5uqhlqydfke72wmxzcvg6rglsrqlfjcn3"]
 epsilon = "0.001"
 scan_limit = 2000
 mode = "uniform"
-enforce_fee_recipient = false # Désactivé pour les tests
+enforce_fee_recipient = false  # Désactivé pour les tests
+distribution_interval_sec = 10 # Distribution rapide pour les tests (10s)
 # AUTHORITY PUBLIC KEYS - List of Authorities that can sign Cube attributes
 # Each key represents a different application backend allowed to generate Cubes.
 # Format: SEC1 compressed hex (e.g., "03..." for secp256k1)
@@ -77,5 +79,5 @@ enforce_fee_recipient = false    # Désactivé pour les tests
 
 # COORDINATOR PUBLIC KEY - Dérivée de node1.key
 # Seul Node 1 peut minter car il a la clé privée correspondante
-coordinator_public_key = "03a1829d324538dee1265c879b720e42e15d19a4dbf464f0943a03b5d29aad02ff"
-coordinator_x25519_public_key = "67c953bb1b0151a66d0304fb3c0c564ef6212c71e74820703b9d2c8d9b0fd462"
+coordinator_public_key = "048ed8777536028e76a4c381d72c0d51b04a38df785ede531058667c062797aab63623816bea08882ea1f7f31b92d30ca59208b21ff7d3bc653855be530ad470d4"
+coordinator_x25519_public_key = "30d023a2d8c1fdd7f2b6b58d5051d17db1ddd52bb3213c9cf8b8dac0f60cfa3b"

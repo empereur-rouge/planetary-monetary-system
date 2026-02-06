@@ -65,11 +65,17 @@ pub async fn submit_block_http_to(
 pub async fn submit_block_http(wb: &WireBlock) -> anyhow::Result<(StatusCode, Option<String>)> {
     let settings = load_config()?;
 
-    let base = settings
+    let raw_addr = settings
         .client
         .as_ref()
         .map(|c| c.api_addr.as_str())
-        .unwrap_or("https://127.0.0.1:8080");
+        .unwrap_or("127.0.0.1:8080");
+
+    let base = if raw_addr.contains("://") {
+        raw_addr.to_string()
+    } else {
+        format!("https://{}", raw_addr)
+    };
 
     let allow_insecure = settings
         .client
@@ -77,7 +83,7 @@ pub async fn submit_block_http(wb: &WireBlock) -> anyhow::Result<(StatusCode, Op
         .map(|c| c.allow_insecure_tls)
         .unwrap_or(true);
 
-    submit_block_http_to(base, wb, allow_insecure).await
+    submit_block_http_to(&base, wb, allow_insecure).await
 }
 
 /// Construit un client HTTP(s) adapté au mode réseau.

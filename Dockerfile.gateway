@@ -1,0 +1,71 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Dockerfile.gateway - PMS Gateway (API Proxy + Dashboard)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# VPS 1: The sole public entry point to the PMS network.
+# All external requests MUST go through Gateway → Engine (internal).
+# Also serves the admin dashboard at /dashboard/
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1: Build Dashboard Frontend
+# ─────────────────────────────────────────────────────────────────────────────
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app
+COPY pms-dashboard/package*.json ./
+RUN npm install
+COPY pms-dashboard/ .
+RUN npm run build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2: Build Gateway Binary
+# ─────────────────────────────────────────────────────────────────────────────
+FROM rustlang/rust:nightly AS builder
+
+RUN apt-get update && apt-get install -y \
+    clang \
+    libclang-dev \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+# Build only the gateway binary
+RUN cargo build --release -p pms-gateway
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3: Runtime Image
+# ─────────────────────────────────────────────────────────────────────────────
+FROM debian:trixie-slim AS runtime
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the gateway binary
+COPY --from=builder /app/target/release/pms-gateway /usr/local/bin/pms-gateway
+
+# Copy the dashboard static files
+COPY --from=frontend-builder /app/dist /app/dashboard
+
+# Create TLS directory (will be mounted as volume)
+RUN mkdir -p /app/tls
+
+# Gateway listens on 8443
+EXPOSE 8443
+
+# Environment variables (can be overridden in docker-compose)
+ENV RUST_LOG=info,pms_gateway=debug
+ENV UPSTREAM_URL=https://pms-engine:8080
+ENV LISTEN_ADDR=0.0.0.0:8443
+ENV TLS_CERT=/app/tls/cert.pem
+ENV TLS_KEY=/app/tls/key.pem
+ENV DASHBOARD_PATH=/app/dashboard
+
+CMD ["pms-gateway"]

@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use pms_config::load_config;
 use pms_wallet::decode_address;
-use pms_wallet::utxo_store::{gather_address_utxos_dec, gather_wallet_utxos_dec};
+use pms_wallet::utxo_store::gather_wallet_utxos_dec;
 use axum::extract::Path;
 
 #[derive(serde::Serialize)]
@@ -111,27 +111,38 @@ pub async fn balance_by_address(
     }))
 }
 
+/// Response format for UTXOs - matches the expected test format
+#[derive(serde::Serialize)]
+pub struct UtxoFlatItem {
+    #[serde(rename = "txId")]
+    pub tx_id: String,
+    #[serde(rename = "outIdx")]
+    pub out_idx: u32,
+    pub amount: String,
+    pub address: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct UtxoFlatResp {
+    pub utxos: Vec<UtxoFlatItem>,
+}
+
 pub async fn get_utxos_by_address(
     State(app): State<AppState>,
     Path(address): Path<String>,
-) -> Result<Json<UtxoResp>, (StatusCode, String)> {
-    let settings = load_config().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    // Use address-based gathering (plaintext only, no keys needed)
-    let utxos_dec = gather_address_utxos_dec(&app.store, &settings.address.hrp, &address, 2000)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+) -> Result<Json<UtxoFlatResp>, (StatusCode, String)> {
+    // Read from in-memory UTXO set (RAM) instead of RocksDB for consistency with /v1/balance
+    let utxos = app.srv.adapter_arc().utxos_by_address(&address).await;
 
-    let list = utxos_dec
+    let list = utxos
         .into_iter()
-        .map(|u| UtxoItem {
-            address: address.clone(),
-            amount: u.amount.to_string(),
-            outpoint: Outpoint {
-                txid: u.txid,
-                index: u.index,
-            },
+        .map(|(output_id, tx_output)| UtxoFlatItem {
+            tx_id: output_id.txid,
+            out_idx: output_id.index,
+            amount: tx_output.amount,
+            address: tx_output.address,
         })
         .collect();
 
-    Ok(Json(UtxoResp { utxos: list }))
+    Ok(Json(UtxoFlatResp { utxos: list }))
 }

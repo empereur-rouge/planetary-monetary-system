@@ -1,21 +1,24 @@
 // ============================================================================
-// Distributed Transaction Processing - E2E Test
+// Distributed Transaction Processing - E2E Test (Single Writer Mode)
 // ============================================================================
 //
-// Tests the complete flow:
+// Tests the complete flow via GATEWAY (sole public entry point):
 // 1. Node registration via /v1/register
 // 2. TX submission and fee accumulation
 // 3. Fee pool status check via /v1/fee_pool
 // 4. Distribution via /admin/distribute_fees
 //
 // Run with: cargo test -p pms-server --test distributed_tx_e2e -- --ignored --nocapture
+// Prerequisites: ./scripts/docker_test.sh setup
 
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const NODE1_URL: &str = "https://localhost:8080";
-const COORDINATOR_URL: &str = "https://localhost:8080"; // Same for single-node test
+// Gateway is the SOLE entry point - Engine is internal only!
+const GATEWAY_URL: &str = "https://localhost:8443";
+const NODE1_URL: &str = "https://localhost:8443"; // Alias for backward compat
+const COORDINATOR_URL: &str = "https://localhost:8443"; // All via Gateway
 
 /// Test the distributed TX processing flow
 #[tokio::test]
@@ -230,8 +233,8 @@ fn test_node_registry() {
     let mut registry = NodeRegistry::new();
 
     // Register nodes
-    registry.register("node1".to_string(), "http://node1:8080".to_string());
-    registry.register("node2".to_string(), "http://node2:8080".to_string());
+    registry.register("node1".to_string(), "http://node1:8080".to_string(), None);
+    registry.register("node2".to_string(), "http://node2:8080".to_string(), None);
 
     // Check active nodes
     let nodes = registry.get_active_nodes();

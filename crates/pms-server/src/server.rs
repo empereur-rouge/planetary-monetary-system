@@ -17,6 +17,7 @@ use lru::LruCache;
 use pms_config::{ServerConfig, TlsConfig};
 use pms_interface::NetDagAdapter;
 use pms_network::messages::NetMsg;
+use pms_storage::DagStorage;
 use pms_storage::rocks_store::store::RocksStore;
 use pms_storage::store::PutResult;
 use pms_wallet::{SignerBackend, Wallet};
@@ -37,6 +38,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+// Note: SEEN_TTL sera utilisé pour le cache d'inventaire quand le mode multi-writer sera activé
+#[allow(dead_code)]
 const SEEN_TTL: Duration = Duration::from_secs(60);
 
 /// Serveur P2P générique, paramétré par un `DagAdapter`.
@@ -62,6 +65,8 @@ pub struct Server {
     node_wallet: Arc<Wallet>,
     /// Canal pour agréger les diffusions (batching)
     broadcast_tx: mpsc::Sender<String>,
+    allowed_peer_ips: Vec<String>,
+    strict_whitelist: bool,
 }
 
 #[derive(Debug)]
@@ -77,13 +82,14 @@ struct PeerState {
 }
 
 impl Server {
-    /// Construit un serveur autour d’un adapter.
+    /// Construit un serveur autour d'un adapter.
     /// On retourne un `Arc<Self>` car on a besoin de cloner le serveur dans les tâches spawnées.
     pub fn new(
         adapter: Arc<dyn NetDagAdapter>,
         network_id: impl Into<String>,
         protocol_version: u32,
         node_wallet: Arc<Wallet>,
+        p2p_config: &pms_config::P2pConfig,
     ) -> Arc<Self> {
         let node_id = node_wallet.encoded_public_key();
 
@@ -103,6 +109,8 @@ impl Server {
             protocol_version,
             node_wallet,
             broadcast_tx,
+            allowed_peer_ips: p2p_config.allowed_peer_ips.clone(),
+            strict_whitelist: p2p_config.strict_whitelist,
         });
 
         // Lancement du worker d'agrégation
@@ -180,6 +188,87 @@ impl Server {
         self.node_wallet.clone()
     }
 
+    /// Retourne la liste des adresses des pairs P2P connectés
+    pub fn get_p2p_peers(&self) -> Vec<String> {
+        self.peers.iter().map(|p| p.key().to_string()).collect()
+    }
+
+    fn is_peer_allowed(&self, addr: &SocketAddr) -> bool {
+        if self.allowed_peer_ips.is_empty() {
+            return true;
+        }
+        let ip_str = addr.ip().to_string();
+        self.allowed_peer_ips
+            .iter()
+            .any(|allowed| allowed == &ip_str || allowed == "*")
+    }
+
+    /// Connect to a peer dynamically (Outbound)
+    pub async fn connect_to_peer(
+        self: Arc<Self>,
+        addr_str: String,
+        tls_config: Option<TlsConfig>,
+    ) -> anyhow::Result<()> {
+        // Resolve hostname (e.g. "node1:8080" -> 172.18.0.3:8080)
+        let addr = tokio::net::lookup_host(&addr_str)
+            .await
+            .map_err(|e| anyhow::anyhow!("DNS Lookup failed for '{}': {}", addr_str, e))?
+            .next()
+            .ok_or_else(|| {
+                anyhow::anyhow!("Could not resolve address: {} (no results)", addr_str)
+            })?;
+
+        if let Some(tls) = tls_config {
+            use rustls::pki_types::{IpAddr, ServerName};
+
+            let client_config =
+                crate::tls::load_client_config(&tls.cert_pem, &tls.key_pem, tls.ca_pem.as_deref())?;
+            let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+
+            // SNI: If it looks like an IP, use IpAddress, otherwise DnsName
+            let host_part = addr_str.split(':').next().unwrap_or(&addr_str);
+            let domain = if let Ok(ip_addr) = host_part.parse::<std::net::IpAddr>() {
+                let sni_ip = match ip_addr {
+                    std::net::IpAddr::V4(ip) => IpAddr::V4(ip.into()),
+                    std::net::IpAddr::V6(ip) => IpAddr::V6(ip.into()),
+                };
+                ServerName::IpAddress(sni_ip)
+            } else {
+                ServerName::try_from(host_part)
+                    .map_err(|_| anyhow::anyhow!("Invalid DNS name: {}", host_part))?
+                    .to_owned()
+            };
+
+            tracing::info!(
+                "🔌 Connecting TLS to {} ({:?}) SNI={:?}",
+                addr_str,
+                addr,
+                domain
+            );
+
+            let stream = TcpStream::connect(addr).await.map_err(|e| {
+                tracing::error!("❌ TCP Connect failed to {}: {}", addr, e);
+                e
+            })?;
+            tracing::info!("✅ TCP Connected to {}", addr);
+
+            let tls_stream = connector.connect(domain, stream).await.map_err(|e| {
+                tracing::error!("❌ TLS Handshake failed to {}: {}", addr, e);
+                e
+            })?;
+            tracing::info!("✅ TLS Handshake success with {}", addr);
+
+            let (r, w) = tokio::io::split(tls_stream);
+            self.handle_new_peer_from_io(r, w, addr, false).await?;
+        } else {
+            tracing::info!("🔌 Connecting TCP to {} (No TLS)", addr);
+            let stream = TcpStream::connect(addr).await?;
+            let (r, w) = tokio::io::split(stream);
+            self.handle_new_peer_from_io(r, w, addr, false).await?;
+        }
+        Ok(())
+    }
+
     pub async fn run(
         self: Arc<Self>,
         cfg: Arc<ServerConfig>,
@@ -189,6 +278,15 @@ impl Server {
         let ready = Arc::new(AtomicBool::new(false));
 
         tracing::info!(target="pms_stats", ptr=?Arc::as_ptr(&stats), "stats_ptr run()");
+        tracing::info!("🔑 Local Node Identity: {}", self.node_id);
+
+        // 0) Initialize Metrics from Store
+        if let Ok(count) = store.block_count().await {
+            crate::metrics::PMS_BLOCKS_TOTAL.set(count as i64);
+            tracing::info!("📊 Metrics initialized: PMS_BLOCKS_TOTAL = {}", count);
+        } else {
+            tracing::warn!("⚠️ Failed to initialize PMS_BLOCKS_TOTAL from store");
+        }
 
         // 1) Logger périodique des stats (persist / gossip)
         {
@@ -431,6 +529,10 @@ impl Server {
         stream: TcpStream,
         sa: SocketAddr,
     ) -> anyhow::Result<()> {
+        if self.strict_whitelist && !self.is_peer_allowed(&sa) {
+            tracing::warn!("🚫 Rejected P2P connection from {} (not in whitelist)", sa);
+            return Ok(());
+        }
         let (r, w) = tokio::io::split(stream);
         self.handle_new_peer_from_io(r, w, sa, true).await // inbound = true
     }
@@ -588,6 +690,9 @@ impl Server {
                 }
                 let msg = parsed.unwrap();
 
+                // Add general log for incoming message type
+                println!("[SRV] {} -> Recv Msg: {:?}", sa, msg);
+
                 if !handshaked {
                     match msg {
                         NetMsg::Hello { proto, node_id, .. } => {
@@ -700,6 +805,7 @@ impl Server {
                             // if this.seen_inv_recently_and_mark(&id).await {
                             //     continue;
                             // }
+                            eprintln!("[SRV] Processing Inv ID: {}", id.get(..8).unwrap_or(&id));
                             let mut inflight = this.inflight_fetch.lock().await;
                             if let Some(ts) = inflight.get(&id) {
                                 if ts.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS {
@@ -750,18 +856,28 @@ impl Server {
                     }
                     NetMsg::GetTips { limit } => {
                         let ids = this.adapter.top_tips(limit).await.unwrap_or_default();
+                        println!("[SRV] Serving GetTips: {} tips", ids.len());
                         let _ = this.unicast(&sa, NetMsg::Tips { ids }).await;
                     }
                     NetMsg::Tips { ids } => {
                         let mut to_fetch = Vec::new();
+                        println!("[SRV] Processing Tips: {} ids", ids.len());
                         for id in ids {
                             if this.adapter.have_block(&id).await {
                                 continue;
                             }
-                            if this.seen_inv_recently_and_mark(&id).await {
-                                continue;
-                            }
+                            // BUG FIX: Don't check seen_inv for Tips!
+                            // Tips are authoritative sync info. If we don't have the block and it's not inflight,
+                            // we must fetch it, even if we saw an Inv recently (e.g. failed fetch).
+                            // if this.seen_inv_recently_and_mark(&id).await { countinue; }
                             let mut inflight = this.inflight_fetch.lock().await;
+                            let in_inflight = inflight.contains_key(&id);
+                            println!(
+                                "[SRV] Tips {}: have=false, inflight={}",
+                                id.get(..8).unwrap_or(&id),
+                                in_inflight
+                            );
+
                             if let Some(ts) = inflight.get(&id) {
                                 if ts.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS {
                                     continue;
@@ -773,6 +889,7 @@ impl Server {
                             }
                         }
                         if !to_fetch.is_empty() {
+                            println!("[SRV] Sending GetBlocks for {} items", to_fetch.len());
                             let _ = this.unicast(&sa, NetMsg::GetBlocks { ids: to_fetch }).await;
                         }
                     }
@@ -888,59 +1005,6 @@ impl Server {
         Ok(())
     }
 
-    pub async fn connect_tls(
-        self: &Arc<Self>,
-        addr: &str,
-        client_config: Arc<rustls::ClientConfig>,
-    ) -> anyhow::Result<()> {
-        use tokio_rustls::TlsConnector;
-
-        // 1. TCP Connect
-        let stream = TcpStream::connect(addr)
-            .await
-            .map_err(|e| anyhow::anyhow!("TCP connect failed to {}: {}", addr, e))?;
-
-        let sa = stream.peer_addr()?;
-
-        // 2. TLS Handshake
-        let connector = TlsConnector::from(client_config);
-
-        let host_str = addr.split(':').next().unwrap_or(addr);
-        let domain = rustls::pki_types::ServerName::try_from(host_str)
-            .map_err(|_| anyhow::anyhow!("Invalid DNS name: {}", host_str))?
-            .to_owned();
-
-        let tls_stream = connector
-            .connect(domain, stream)
-            .await
-            .map_err(|e| anyhow::anyhow!("TLS handshake failed to {}: {}", addr, e))?;
-
-        // 3. Handle Peer (outbound connection - we initiated it)
-        let (r, w) = tokio::io::split(tls_stream);
-        self.handle_new_peer_from_io(r, w, sa, false).await?; // inbound = false
-
-        // 4. Hello / Ping (Duplicate logic from dial - maybe refactor later)
-        let (tx, rx) = oneshot::channel::<()>();
-        self.pong_waiters.insert(sa, tx);
-
-        let _ = self
-            .unicast(
-                &sa,
-                NetMsg::Hello {
-                    proto: 1,
-                    node_id: self.node_id.clone(),
-                    nonce: random::<u64>(),
-                    ping_ms: PING_EVERY_MS,
-                },
-            )
-            .await;
-
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), rx).await;
-        let _ = self.unicast(&sa, NetMsg::GetTips { limit: 64 }).await;
-
-        Ok(())
-    }
-
     /// Traite un lot de blocks (ou un seul) avec gestion récursive des orphelins.
     pub async fn process_incoming_blocks(
         &self,
@@ -963,6 +1027,7 @@ impl Server {
                 continue; // déjà vu en gossip récemment et pas demandé explicitement
             }
             */
+            eprintln!("[SRV] Processing block {}", wb.id.get(..8).unwrap_or(&wb.id));
             if self.adapter.have_block(&wb.id).await {
                 continue;
             }
@@ -982,6 +1047,7 @@ impl Server {
                     }
 
                     // Register dependency: when 'p' arrives, re-process 'wb'
+                    eprintln!("[SRV] Add dep: parent={} child={}", p.get(..8).unwrap_or(p), wb.id.get(..8).unwrap_or(&wb.id));
                     self.parent_dependency
                         .entry(p.clone())
                         .or_default()
@@ -990,6 +1056,11 @@ impl Server {
             }
 
             if missing_any {
+                eprintln!(
+                    "[SRV] Orphan {} missing {} parents",
+                    wb.id.get(..8).unwrap_or(&wb.id),
+                    missing_to_fetch.len()
+                );
                 // ====== BENCHMARK: Log orphelin ======
                 tracing::info!(
                     target = "pms_bench",
@@ -1019,7 +1090,11 @@ impl Server {
             let persist_start = tokio::time::Instant::now();
             // =======================================
 
-            match self.adapter.persist_block(&wb).await {
+            println!("[SRV] Calling persist_block for {}", wb.id.get(..8).unwrap_or(&wb.id));
+            let result = self.adapter.persist_block(&wb).await;
+            println!("[SRV] persist_block returned: {:?}", result);
+
+            match result {
                 Ok(PutResult::Inserted) => {
                     // ====== BENCHMARK: Log bloc validé ======
                     let persist_ms = persist_start.elapsed().as_millis();
@@ -1043,15 +1118,23 @@ impl Server {
 
                     // Unblock orphans
                     if let Some((_, children)) = self.parent_dependency.remove(&wb.id) {
+                        eprintln!(
+                            "[SRV] Unblocking parent={} -> {} children",
+                            wb.id.get(..8).unwrap_or(&wb.id),
+                            children.len()
+                        );
                         for child_id in children {
                             if let Some((_, child_wb)) = self.orphans.remove(&child_id) {
-                                // eprintln!("[SRV] Unblocking orphan {}", child_id);
+                                eprintln!("[SRV] Queueing unblocked child {}", child_id.get(..8).unwrap_or(&child_id));
                                 process_queue.push_back(child_wb);
+                            } else {
+                                eprintln!("[SRV] Orphan {} missing from map!", child_id.get(..8).unwrap_or(&child_id));
                             }
                         }
                     }
                 }
                 Ok(PutResult::AlreadyExists) => {
+                    eprintln!("[SRV] Block {} already exists, skipping", wb.id.get(..8).unwrap_or(&wb.id));
                     // Check orphans just in case
                     if let Some((_, children)) = self.parent_dependency.remove(&wb.id) {
                         for child_id in children {
@@ -1117,6 +1200,8 @@ impl Server {
 
     /// Vérifie si on a déjà vu cet *Inv* récemment.
     /// Renvoie true si déjà vu (donc à ignorer), false sinon (et le marque vu).
+    /// Note: Utilisé pour le mode multi-writer (pas encore activé).
+    #[allow(dead_code)]
     async fn seen_inv_recently_and_mark(&self, id: &str) -> bool {
         let now = Instant::now();
         let mut cache = self.seen_invs.lock().await;

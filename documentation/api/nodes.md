@@ -16,7 +16,7 @@ Enregistre un nouveau nœud dans le registre distribué.
 {
   "node_id": "node_abc123",
   "public_key": "04abc...",
-  "endpoint": "https://node1.example.com:3000",
+  "endpoint": "https://node1.example.com:8443",
   "capabilities": ["tx_processing", "block_validation"],
   "signature": "304..."
 }
@@ -53,14 +53,14 @@ Liste tous les nœuds enregistrés.
   "nodes": [
     {
       "node_id": "node_abc123",
-      "endpoint": "https://node1.example.com:3000",
+      "endpoint": "https://node1.example.com:8443",
       "last_heartbeat": 1706000000000,
       "status": "active",
       "capabilities": ["tx_processing"]
     },
     {
       "node_id": "node_def456",
-      "endpoint": "https://node2.example.com:3000",
+      "endpoint": "https://node2.example.com:8443",
       "last_heartbeat": 1705999000000,
       "status": "stale",
       "capabilities": ["block_validation"]

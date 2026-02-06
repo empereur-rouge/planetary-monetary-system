@@ -33,7 +33,7 @@ Soumet un bloc signé au DAG. C'est le point d'entrée principal pour toutes les
 | `id` | string | Hash SHA256 du bloc (calculé à partir du contenu) |
 | `parents` | string[] | IDs des blocs parents (tips du DAG) |
 | `payload_json` | string | Payload JSON sérialisé (voir types ci-dessous) |
-| `nonce` | number | Nonce pour le PoW |
+| `nonce` | number | Nonce (réservé, peut être 0) |
 | `network_id` | string | ID du réseau ("mainnet", "testnet") |
 | `protocol_version` | number | Version du protocole (actuellement 1) |
 | `signer_pk_hex` | string | Clé publique ECDSA du signataire (hex) |
@@ -102,8 +102,11 @@ Soumet un bloc signé au DAG. C'est le point d'entrée principal pour toutes les
 
 ### Validation effectuée
 
+> [!NOTE]
+> PMS est un DAG privé. Le **serveur est l'autorité finale** de validation.
+
 1. ✅ **Signature** : Vérification ECDSA de `signature_hex`
-2. ✅ **PoW** : Vérification du nonce et bits de leading zeros
+2. ✅ **Autorité** : Vérification que le signataire est autorisé (Coordinator ou wallet connu)
 3. ✅ **Parents** : Les parents doivent exister dans le DAG
 4. ✅ **Network ID** : Doit correspondre au réseau configuré
 5. ✅ **Unicité** : Le block ID ne doit pas déjà exister
@@ -123,7 +126,7 @@ Soumet un bloc signé au DAG. C'est le point d'entrée principal pour toutes les
 | HTTP | Code | Description |
 |------|------|-------------|
 | 401 | `INVALID_SIGNATURE` | Signature du bloc invalide |
-| 400 | `INVALID_POW` | Proof of Work insuffisant |
+| 403 | `UNAUTHORIZED` | Signataire non autorisé |
 | 400 | `INVALID_PARENTS` | Parents inconnus ou invalides |
 | 409 | `DUPLICATE_BLOCK` | Bloc déjà existant |
 | 422 | `INVALID_PAYLOAD` | Payload malformé |
@@ -131,7 +134,7 @@ Soumet un bloc signé au DAG. C'est le point d'entrée principal pour toutes les
 ### Exemple
 
 ```bash
-curl -X POST http://localhost:3000/submit/block \
+curl -k -X POST https://localhost:8443/submit/block \
   -H "Content-Type: application/json" \
   -d '{
     "id": "abc123...",
@@ -168,13 +171,13 @@ data: {"id":"def456...","payload_json":"..."}
 ### Exemple avec curl
 
 ```bash
-curl -N http://localhost:3000/blocks/stream
+curl -k -N https://localhost:8443/blocks/stream
 ```
 
 ### Exemple JavaScript
 
 ```javascript
-const events = new EventSource('http://localhost:3000/blocks/stream');
+const events = new EventSource('https://localhost:8443/blocks/stream');
 
 events.addEventListener('block', (e) => {
   const block = JSON.parse(e.data);

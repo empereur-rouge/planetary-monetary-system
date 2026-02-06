@@ -569,6 +569,15 @@ impl DagStorage for RocksStore {
         Ok(out)
     }
 
+    async fn block_count(&self) -> Result<u64> {
+        let cf_idx = self.cf("idx_blocks");
+        let count = self
+            .db
+            .iterator_cf(cf_idx, rocksdb::IteratorMode::Start)
+            .count();
+        Ok(count as u64)
+    }
+
     async fn export_json(&self) -> anyhow::Result<String> {
         let cf_idx = self.cf("idx_blocks");
         let cf_blocks = self.cf("blocks");

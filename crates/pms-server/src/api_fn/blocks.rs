@@ -63,19 +63,18 @@ pub async fn submit_block(
 
     // 0c) Coordinator Filter: Reject regular TXs if configured (force use of Worker Nodes)
     if st.settings.validation.coordinator_tx_only {
-        let is_privileged = if let Some(ref json) = wb.payload_json {
-            if let Ok(envelope) = serde_json::from_str::<PayloadEnvelope>(json) {
-                match envelope {
+        let is_privileged = wb
+            .payload_json
+            .as_ref()
+            .and_then(|json| serde_json::from_str::<PayloadEnvelope>(json).ok())
+            .map(|envelope| {
+                matches!(
+                    envelope,
                     PayloadEnvelope::Plain(PlainPayload::Milestone { .. })
-                    | PayloadEnvelope::Plain(PlainPayload::ConfigUpdate(_)) => true,
-                    _ => false,
-                }
-            } else {
-                false // Unparseable or empty -> treat as non-privileged/invalid
-            }
-        } else {
-            false // No payload -> treat as non-privileged
-        };
+                        | PayloadEnvelope::Plain(PlainPayload::ConfigUpdate(_))
+                )
+            })
+            .unwrap_or(false);
 
         if !is_privileged {
             tracing::warn!(
@@ -136,23 +135,19 @@ pub async fn submit_block(
 /// This replaces immediate reward block creation for horizontal scaling
 async fn accumulate_fee_if_tx(st: &AppState, wb: &WireBlock) {
     // Extract transaction fee from payload
-    let fee = match extract_tx_fee(wb) {
+    let fee = match extract_tx_fee(wb, st) {
         Some(f) if f > Decimal::ZERO => f,
-        _ => return, // No tx or no fee, nothing to accumulate
+        _ => {
+            eprintln!("❌ extract_tx_fee failed or zero for block {}", &wb.id);
+            return;
+        }
     };
 
     // Get the block signer (node that created/submitted this block)
     // Si absent, on utilise "unknown" mais on logue un warning car c'est anormal.
     let signer_pk = if wb.signer_pk_hex.is_empty() {
-        // ⚠️ ALERTE SÉCURITÉ : Un bloc de transaction sans signer est suspect !
-        // En production, tous les blocs devraient être signés.
-        // Cela peut indiquer :
-        //   1. Un bug côté client SDK
-        //   2. Une tentative de soumission anonyme
-        //   3. Une configuration require_signed_submit=false en dev
-        tracing::warn!(
-            "⚠️ SECURITY: TX block {} has no signer_pk! Fee credited to 'unknown'. \
-             This should not happen in production.",
+        eprintln!(
+            "⚠️ SECURITY: TX block {} has no signer_pk! Fee credited to 'unknown'.",
             &wb.id[..16.min(wb.id.len())]
         );
         "unknown".to_string()
@@ -164,7 +159,7 @@ async fn accumulate_fee_if_tx(st: &AppState, wb: &WireBlock) {
     {
         let mut pool = st.fee_pool.write().await;
         pool.add_fee(fee, &signer_pk);
-        tracing::debug!(
+        eprintln!(
             "💰 Fee accumulated: {} PMS from node {}... (pool total: {} PMS, {} txs)",
             fee,
             &signer_pk[..20.min(signer_pk.len())],
@@ -237,14 +232,15 @@ fn extract_nft_burn_action(wb: &WireBlock) -> Option<NftBurnAction> {
     let payload_json = wb.payload_json.as_ref()?;
     let envelope: PayloadEnvelope = serde_json::from_str(payload_json).ok()?;
 
-    match envelope {
-        PayloadEnvelope::Plain(PlainPayload::Nft(action)) => match action {
-            pms_types_nft::NftAction::Burn { token_id, burner } => {
-                Some(NftBurnAction { token_id, burner })
-            }
-            _ => None,
-        },
-        _ => None,
+    // Pattern matching direct pour éviter les matchs imbriqués
+    if let PayloadEnvelope::Plain(PlainPayload::Nft(pms_types_nft::NftAction::Burn {
+        token_id,
+        burner,
+    })) = envelope
+    {
+        Some(NftBurnAction { token_id, burner })
+    } else {
+        None
     }
 }
 
@@ -259,7 +255,7 @@ fn extract_nft_burn_action(wb: &WireBlock) -> Option<NftBurnAction> {
 #[allow(dead_code)]
 async fn _create_reward_block_if_coordinator_legacy(st: &AppState, wb: &WireBlock) {
     // Extract transaction fee from payload
-    let fee = match extract_tx_fee(wb) {
+    let fee = match extract_tx_fee(wb, st) {
         Some(f) if f > Decimal::ZERO => f,
         _ => return, // No tx or no fee, skip reward block
     };
@@ -488,14 +484,93 @@ async fn _create_reward_block_if_coordinator_legacy(st: &AppState, wb: &WireBloc
     }
 }
 
-/// Extract transaction fee from a WireBlock's payload
-fn extract_tx_fee(wb: &WireBlock) -> Option<Decimal> {
-    let payload_json = wb.payload_json.as_ref()?;
-    let envelope: PayloadEnvelope = serde_json::from_str(payload_json).ok()?;
+fn extract_tx_fee(wb: &WireBlock, st: &AppState) -> Option<Decimal> {
+    let payload_json = if let Some(json) = &wb.payload_json {
+        json
+    } else {
+        eprintln!("extract_tx_fee: payload_json is None for block {}", wb.id);
+        return None;
+    };
+
+    let envelope: PayloadEnvelope = match serde_json::from_str(payload_json) {
+        Ok(env) => env,
+        Err(e) => {
+            eprintln!(
+                "extract_tx_fee: JSON parse error for block {}: {}",
+                wb.id, e
+            );
+            eprintln!("extract_tx_fee: JSON content: {}", payload_json);
+            return None;
+        }
+    };
 
     match envelope {
-        PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx)) => Decimal::from_str(&tx.fee).ok(),
-        _ => None,
+        PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx)) => match Decimal::from_str(&tx.fee) {
+            Ok(fee) => Some(fee),
+            Err(e) => {
+                eprintln!(
+                    "extract_tx_fee: Fee parse error for block {}: {} (fee='{}')",
+                    wb.id, e, tx.fee
+                );
+                None
+            }
+        },
+        PayloadEnvelope::Encrypted(enc) => {
+            // Try to decrypt with node's private key
+            let x25519_sk = match st.node_wallet.x25519_sk_hex() {
+                Some(k) => k,
+                None => {
+                    eprintln!(
+                        "extract_tx_fee: No x25519 secret key available to decrypt block {}",
+                        wb.id
+                    );
+                    return None;
+                }
+            };
+
+            match enc.decrypt_with(&x25519_sk) {
+                Ok(plaintext) => {
+                    // Try to deserialize plaintext as PlainPayload
+                    // Note: usually the internal payload is the struct itself (TxUtxo) or PlainPayload enum?
+                    // Based on legacy code: "PlainPayload::EncryptedReward" wraps payload.
+                    // But here we are decrypting a TX.
+                    // Let's try parsing as PlainPayload first.
+                    match serde_json::from_slice::<PlainPayload>(&plaintext) {
+                        Ok(PlainPayload::TxUtxo(tx)) => match Decimal::from_str(&tx.fee) {
+                            Ok(fee) => Some(fee),
+                            Err(e) => {
+                                eprintln!(
+                                    "extract_tx_fee: Fee parse error (decrypted) for block {}: {} (fee='{}')",
+                                    wb.id, e, tx.fee
+                                );
+                                None
+                            }
+                        },
+                        Ok(_) => {
+                            // Valid payload but not TxUtxo (e.g. NftAction, etc.)
+                            // eprintln!("extract_tx_fee: Decrypted payload is not TxUtxo for block {}", wb.id);
+                            None
+                        }
+                        Err(_) => {
+                            // Fallback: try parsing as TxUtxo directly?
+                            // Some older code might serialize the struct directly.
+                            // But pms typically uses PlainPayload.
+                            // Let's log if it fails.
+                            // eprintln!("extract_tx_fee: Failed to deserialize decrypted payload as PlainPayload");
+                            None
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Decryption failed - likely not a recipient.
+                    None
+                }
+            }
+        }
+        _ => {
+            eprintln!("extract_tx_fee: Envelope mismatch for block {}", wb.id);
+            None
+        }
     }
 }
 

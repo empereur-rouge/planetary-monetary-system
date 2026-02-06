@@ -3,10 +3,11 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 //
 // Ce module gère la distribution des frais de transaction entre :
-// - Le Treasury (wallets admin) : 15% par défaut
-// - Le créateur du bloc (node qui traite) : 45% par défaut
-// - Les signataires des blocs parents : 40% par défaut (20% chacun)
+// - Le Treasury (wallets admin) : 30% par défaut
+// - Le créateur du bloc (node qui traite) : 70% par défaut
+// - [DÉSACTIVÉ: Single Writer] Les signataires des blocs parents : 0% par défaut
 //
+// Note: La part "Parents" est obsolète en mode Single Writer (chaîne linéaire).
 // Voir Chapitre 5 du Rust Book pour les structures et méthodes.
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -50,10 +51,12 @@ pub struct FeeDistributionConfig {
 
 impl Default for FeeDistributionConfig {
     fn default() -> Self {
+        // [SINGLE WRITER] Nouvelle répartition (pas de "Parents")
+        // Treasury reçoit 65% (Sécurité/Réserve), Creator reçoit 35% (Infra)
         Self {
-            treasury_percent: 15,
-            creator_percent: 45,
-            parents_percent: 40,
+            treasury_percent: 65,
+            creator_percent: 35,
+            parents_percent: 0, // Désactivé en mode Single Writer
         }
     }
 }
@@ -115,18 +118,32 @@ pub async fn compute_fee_outputs<S: DagStorage>(
     let parents_total =
         total_fee * Decimal::from_u8(config.parents_percent).unwrap() / Decimal::from(100);
 
-    // 1) Treasury (choisit une adresse pseudo-aléatoirement si plusieurs)
-    if !treasury_addresses.is_empty() && treasury_amount > Decimal::ZERO {
-        // Simple pseudo-random based on timestamp
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as usize)
-            .unwrap_or(0);
-        let idx = seed % treasury_addresses.len();
-        outputs.push(FeeOutput {
-            address: treasury_addresses[idx].clone(),
-            amount: treasury_amount.normalize().to_string(),
-        });
+    // 1) Treasury
+    if treasury_amount > Decimal::ZERO {
+        if !treasury_addresses.is_empty() {
+            // Cas normal : on a des adresses de trésorerie
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as usize)
+                .unwrap_or(0);
+            let idx = seed % treasury_addresses.len();
+            outputs.push(FeeOutput {
+                address: treasury_addresses[idx].clone(),
+                amount: treasury_amount.normalize().to_string(),
+            });
+        } else {
+            // [FALLBACK SÉCURITÉ] Si aucun wallet Treasury, tout va au Créateur pour éviter de brûler les fonds
+            eprintln!("[FEE] Warning: No treasury wallet configured. Fallback to creator.");
+            // On ajoute simplement ce montant à la part créateur existante ci-dessous ?
+            // Non, on l'ajoute directement ici comme un output distinct (ou on le somme).
+            // Pour être propre, on l'ajoute à la variable `creator_amount`.
+            // Mais `creator_amount` est une variable locale immutable issue du calcul initial.
+            // On va créer un output vers le creator tout de suite.
+            outputs.push(FeeOutput {
+                address: creator_address.to_string(),
+                amount: treasury_amount.normalize().to_string(),
+            });
+        }
     }
 
     // 2) Créateur du bloc
@@ -376,21 +393,117 @@ pub async fn perform_fee_distribution(
         );
     }
 
-    // 2b. NODE FEES
-    {
+    // 2b. TREASURY TAX (First cut)
+    let treasury_percent = Decimal::from(settings.fees.treasury_fee_percent);
+    let mut node_pool_amount = total_node_fees;
+
+    if treasury_percent > Decimal::ZERO && total_node_fees > Decimal::ZERO {
+        let treasury_cut = (total_node_fees * treasury_percent / Decimal::from(100)).round_dp(8);
+        if treasury_cut > Decimal::ZERO {
+            // Get treasury wallets: prefer loaded file, fallback to config
+            let treasury_wallets = if !state.treasury_wallets.is_empty() {
+                &state.treasury_wallets.list
+            } else {
+                &settings.fees.treasury_addresses
+            };
+
+            if !treasury_wallets.is_empty() {
+                // Pick random treasury wallet or first one
+                let target = &treasury_wallets[0];
+                all_outputs.push(TxOutput {
+                    address: target.clone(),
+                    amount: treasury_cut.to_string(),
+                });
+                total_distributed += treasury_cut;
+                node_pool_amount -= treasury_cut;
+                tracing::info!(
+                    "🏛️ Treasury Tax ({}%): {} PMS -> {}",
+                    settings.fees.treasury_fee_percent,
+                    treasury_cut,
+                    &target[..20.min(target.len())]
+                );
+            } else {
+                // [FALLBACK SÉCURITÉ] Pas de treasury wallet → On laisse les fonds dans le pool pour les Nœuds/Créateur
+                // On ne déduit PAS `treasury_cut` de `node_pool_amount`.
+                tracing::warn!(
+                    "⚠️ Treasury tax enabled but no treasury addresses configured! Keeping {} PMS in node pool distribution (fallback to nodes).",
+                    treasury_cut
+                );
+            }
+        }
+    }
+
+    // 2c. NODE FEES (Remaining amount distributed by share)
+    if node_pool_amount > Decimal::ZERO {
         let registry = state.node_registry.read().await;
         let nodes = registry.get_active_nodes();
 
-        for (node_pk, _share_pct, share_amount) in &shares {
-            if *share_amount <= Decimal::ZERO {
+        for (node_pk, share_pct, _original_share_amount) in &shares {
+            // Recalculate share amount based on remaining pool
+            let share_amount = (node_pool_amount * *share_pct).round_dp(8);
+
+            if share_amount <= Decimal::ZERO {
                 continue;
             }
-            if let Some(node) = nodes.iter().find(|n| &n.node_pk == node_pk) {
-                // TODO: Use real reward address
-                tracing::debug!(
-                    "Found node {} with api_url {}, but no reward address yet",
-                    &node_pk[..16.min(node_pk.len())],
-                    node.api_url
+
+            // Find node info to get wallet address
+            let node_info = nodes.iter().find(|n| &n.node_pk == node_pk);
+            let mut target_address = None;
+
+            if let Some(node) = node_info {
+                if let Some(addr) = &node.wallet_address {
+                    target_address = Some(addr.clone());
+                } else {
+                    tracing::warn!(
+                        "⚠️ Node {} has no registered wallet address!",
+                        &node_pk[..10]
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    "⚠️ Node {} disappeared from registry during distribution!",
+                    &node_pk[..10]
+                );
+            }
+
+            // If no target address found (node missing or no wallet), fallback to Treasury
+            if target_address.is_none() {
+                // Determine fallback treasury address (same logic as tax)
+                let fallback = if !state.treasury_wallets.is_empty() {
+                    Some(state.treasury_wallets.list[0].clone())
+                } else if !settings.fees.treasury_addresses.is_empty() {
+                    Some(settings.fees.treasury_addresses[0].clone())
+                } else {
+                    None
+                };
+
+                if let Some(addr) = fallback {
+                    tracing::warn!(
+                        "⚠️ Redirecting {} PMS for node {} to Treasury (fallback)",
+                        share_amount,
+                        &node_pk[..10]
+                    );
+                    target_address = Some(addr);
+                }
+            }
+
+            if let Some(addr) = target_address {
+                all_outputs.push(TxOutput {
+                    address: addr.clone(),
+                    amount: share_amount.to_string(),
+                });
+                total_distributed += share_amount;
+                tracing::info!(
+                    "👷 Node Reward: {} PMS -> {} (Node: {})",
+                    share_amount,
+                    &addr[..20.min(addr.len())],
+                    &node_pk[..10]
+                );
+            } else {
+                tracing::error!(
+                    "❌ FAILED to distribute {} PMS for Node {}: No wallet & No Treasury fallback!",
+                    share_amount,
+                    &node_pk[..10]
                 );
             }
         }
@@ -471,19 +584,17 @@ pub async fn perform_fee_distribution(
             let _ = state.srv.enqueue_broadcast(reward_wb.id.clone()).await;
 
             // 5. UPDATE UTXOS DIRECTLY
-            let mut idx = 0u32;
-            for output in &all_outputs {
+            for (idx, output) in all_outputs.iter().enumerate() {
                 state
                     .srv
                     .adapter_arc()
                     .add_utxo(
                         reward_wb.id.clone(),
-                        idx,
+                        idx as u32,
                         output.address.clone(),
                         output.amount.clone(),
                     )
                     .await;
-                idx += 1;
             }
 
             // 6. RESET POOL
@@ -531,9 +642,10 @@ mod tests {
     #[test]
     fn fee_distribution_config_default_sums_to_100() {
         let config = FeeDistributionConfig::default();
-        assert_eq!(config.treasury_percent, 15);
-        assert_eq!(config.creator_percent, 45);
-        assert_eq!(config.parents_percent, 40);
+        // [SINGLE WRITER] Nouvelle répartition: 65% Treasury, 35% Creator, 0% Parents
+        assert_eq!(config.treasury_percent, 65);
+        assert_eq!(config.creator_percent, 35);
+        assert_eq!(config.parents_percent, 0);
         assert!(config.validate().is_ok());
     }
 
