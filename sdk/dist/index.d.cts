@@ -398,6 +398,32 @@ interface BurnNftResponse {
     /** Remboursement (si cube authentique avec signature Authority valide) */
     refund: RefundPreview | null;
 }
+/** Requête pour préparer une transaction de transfert */
+interface PrepareTxRequest {
+    /** Adresse Bech32 de l'expéditeur */
+    from: string;
+    /** Adresse Bech32 du destinataire */
+    to: string;
+    /** Montant à envoyer (décimal, ex: "100.5") */
+    amount: string;
+}
+/** Détail d'un UTXO utilisé comme input */
+interface UtxoDetail {
+    txid: string;
+    index: number;
+    amount: string;
+}
+/** Réponse de /v1/tx/prepare - transaction non-signée */
+interface PrepareTxResponse {
+    /** Transaction non-signée (unlocks vide) */
+    unsigned_tx: TxUtxo;
+    /** Hash SHA256 du message à signer (hex) */
+    tx_hash: string;
+    /** Frais calculés */
+    fee: string;
+    /** Détail des UTXOs sélectionnés */
+    inputs_detail: UtxoDetail[];
+}
 /** Réponse de getNft - informations complètes d'un NFT */
 interface NftResponse {
     /** Token ID du NFT */
@@ -536,6 +562,33 @@ declare class PmsClient {
      * Récupère les UTXOs d'une adresse.
      */
     getUtxos(address: string): Promise<Utxo[]>;
+    /**
+     * Prépare une transaction de transfert via le serveur.
+     * Le serveur sélectionne les UTXOs et calcule les frais.
+     * Le client doit ensuite signer le `tx_hash` retourné.
+     *
+     * @param params - Paramètres de la transaction
+     * @param params.from - Adresse Bech32 de l'expéditeur
+     * @param params.to - Adresse Bech32 du destinataire
+     * @param params.amount - Montant à envoyer (décimal, ex: "100.5")
+     * @returns Transaction non-signée avec hash à signer
+     *
+     * @example
+     * ```typescript
+     * // 1. Préparer la transaction
+     * const prepared = await client.prepareTx({
+     *     from: wallet.address,
+     *     to: "pms1recipient...",
+     *     amount: "100.0"
+     * });
+     *
+     * // 2. Signer le hash
+     * const signature = wallet.sign(fromHex(prepared.tx_hash));
+     *
+     * // 3. Soumettre via /wallet/tx/send (à implémenter)
+     * ```
+     */
+    prepareTx(params: PrepareTxRequest): Promise<PrepareTxResponse>;
     /**
      * Récupère la balance d'une adresse.
      */
@@ -763,4 +816,4 @@ declare function formatAmount(sats: bigint): string;
  */
 declare function decryptPayload(encrypted: EncryptedPayload, recipientPrivateKeyHex: string): string;
 
-export { type BalanceInfo, type Block, type BurnNftResponse, type CoordinatorInfoResponse, type CubeAttributes, type HistoryItem, type MintCubeResponse, type NftMetadata, type NftResponse, PmsClient, type PmsClientConfig, PmsWallet, type RuntimeConfig, type SubmitResponse, type SupplyInfo, type Utxo, type WalletHistoryResp, decryptPayload, formatAmount, fromHex, isValidMnemonic, parseAmount, toHex };
+export { type BalanceInfo, type Block, type BurnNftResponse, type CoordinatorInfoResponse, type CubeAttributes, type HistoryItem, type MintCubeResponse, type NftMetadata, type NftResponse, PmsClient, type PmsClientConfig, PmsWallet, type PrepareTxRequest, type PrepareTxResponse, type RuntimeConfig, type SubmitResponse, type SupplyInfo, type Utxo, type UtxoDetail, type WalletHistoryResp, decryptPayload, formatAmount, fromHex, isValidMnemonic, parseAmount, toHex };

@@ -60,4 +60,26 @@ pub enum PlainPayload {
         /// ID du bloc de transaction associé
         tx_block_id: String,
     },
+    /// Enregistrement d'un nouveau token (Coordinator seulement)
+    TokenCreate(TokenMetadata),
+}
+
+/// Métadonnées d'un token enregistré dans le DAG.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenMetadata {
+    /// Identifiant unique du token (ex: "edenite")
+    pub asset_id: String,
+    /// Symbole court (ex: "EDEN")
+    pub symbol: String,
+    /// Nom complet (ex: "Edenite Token")
+    pub name: String,
+    /// Nombre de décimales (ex: 8)
+    pub decimals: u8,
+    /// Supply maximum (None = illimité)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_supply: Option<String>,
+    /// Adresse du créateur
+    pub creator: String,
+    /// Clé publique autorisée à mint ce token
+    pub mint_authority: String,
 }

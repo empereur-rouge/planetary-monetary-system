@@ -150,6 +150,115 @@ curl -k -X POST https://localhost:8443/submit/block \
 
 ---
 
+## POST `/v1/tx/prepare`
+
+Prépare une transaction non-signée pour transfert wallet-à-wallet. Le serveur sélectionne les UTXOs, calcule les frais, et retourne une transaction prête à être signée par le client.
+
+> 💡 **Flow recommandé** : Utiliser cet endpoint pour obtenir une TX non-signée, puis signer localement et soumettre via `/wallet/tx/send`.
+
+### Request Body
+
+```json
+{
+  "from": "pms1sender_address...",
+  "to": "pms1recipient_address...",
+  "amount": "100.50"
+}
+```
+
+| Champ | Type | Requis | Description |
+|-------|------|--------|-------------|
+| `from` | string | ✅ | Adresse Bech32 de l'expéditeur |
+| `to` | string | ✅ | Adresse Bech32 du destinataire |
+| `amount` | string | ✅ | Montant à envoyer (décimal, ex: "100.5") |
+
+### Response (Succès)
+
+```json
+{
+  "unsigned_tx": {
+    "inputs": [
+      { "out": { "txid": "abc123...", "index": 0 } }
+    ],
+    "outputs": [
+      { "address": "pms1recipient...", "amount": "100.50" },
+      { "address": "pms1sender...", "amount": "49.47" },
+      { "address": "pms1admin...", "amount": "0.03" }
+    ],
+    "fee": "0.03",
+    "unlocks": []
+  },
+  "tx_hash": "sha256_hex_to_sign",
+  "fee": "0.03",
+  "inputs_detail": [
+    { "txid": "abc123...", "index": 0, "amount": "150.00" }
+  ]
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `unsigned_tx` | Transaction | Transaction prête à signer (unlocks vide) |
+| `tx_hash` | string | Hash SHA256 du message à signer (hex) |
+| `fee` | string | Frais calculés |
+| `inputs_detail` | UtxoDetail[] | UTXOs sélectionnés comme inputs |
+
+### Flow de signature client
+
+```typescript
+// 1. Préparer la TX
+const { unsigned_tx, tx_hash } = await fetch('/v1/tx/prepare', {
+  method: 'POST',
+  body: JSON.stringify({ from, to, amount })
+}).then(r => r.json());
+
+// 2. Signer le hash avec la clé privée ECDSA
+const signature = secp256k1.sign(
+  Buffer.from(tx_hash, 'hex'),
+  privateKey
+);
+
+// 3. Remplir les unlocks
+const signed_tx = {
+  ...unsigned_tx,
+  unlocks: [{
+    pubkey_hex: publicKeyHex,
+    signature_b64: Buffer.from(signature.toDER()).toString('base64')
+  }]
+};
+
+// 4. Soumettre
+await fetch('/wallet/tx/send', {
+  method: 'POST',
+  body: JSON.stringify({
+    tx: signed_tx,
+    recipients_xpk: [sender_xpk, recipient_xpk]
+  })
+});
+```
+
+### Response (Erreurs)
+
+| HTTP | Code | Description |
+|------|------|-------------|
+| 400 | `INVALID_AMOUNT` | Montant invalide ou <= 0 |
+| 422 | `NO_UTXOS` | Aucun UTXO disponible pour l'expéditeur |
+| 422 | `INSUFFICIENT_BALANCE` | Solde insuffisant (amount + fee) |
+
+### Exemple
+
+```bash
+curl -k -X POST https://localhost:8443/v1/tx/prepare \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "pms1qw508d6qejxtdg4y5r3zarvary0c5xw7k...",
+    "to": "pms1qrp33g0q5c5txsp9arysrx4k6zdkfs4n...",
+    "amount": "100.0"
+  }'
+```
+
+---
+
 ## GET `/blocks/stream`
 
 Stream SSE (Server-Sent Events) des nouveaux blocs ajoutés au DAG.

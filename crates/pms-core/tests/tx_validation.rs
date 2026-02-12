@@ -26,6 +26,7 @@ fn mint_block(addr: &str, amount: &str, parent: &str) -> (Block, OutputId) {
     let txo = TxOutput {
         address: addr.into(),
         amount: amount.into(),
+        asset_id: None,
     };
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
         outputs: vec![txo],
@@ -80,6 +81,7 @@ fn accept_valid_tx() -> Result<()> {
         outputs: vec![TxOutput {
             address: "B".into(),
             amount: "9.0".into(),
+            asset_id: None,
         }],
         fee: "1.0".into(),
         unlocks: vec![],
@@ -119,6 +121,7 @@ fn reject_double_spend_intra_block() -> Result<()> {
         outputs: vec![TxOutput {
             address: wallet_addr.clone(),
             amount: "4.5".into(),
+            asset_id: None,
         }],
         fee: "0.5".into(),
         unlocks: vec![],
@@ -140,6 +143,7 @@ fn reject_double_spend_intra_block() -> Result<()> {
         outputs: vec![TxOutput {
             address: wallet_addr.clone(),
             amount: "4.0".into(),
+            asset_id: None,
         }],
         fee: "1.0".into(),
         unlocks: vec![],

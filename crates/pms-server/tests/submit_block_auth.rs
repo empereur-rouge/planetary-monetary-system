@@ -212,6 +212,7 @@ async fn signed_encrypted_mint_is_accepted() -> Result<()> {
         outputs: vec![TxOutput {
             address: addr,
             amount: "1000".to_string(),
+            asset_id: None,
         }],
     };
 

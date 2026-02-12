@@ -22,6 +22,8 @@ export interface TxOutput {
     address: string;
     /** Montant en format décimal (ex: "10.50000000") */
     amount: string;
+    /** Asset ID (undefined/null = PMS natif, "edenite" = token custom) */
+    asset_id?: string;
 }
 
 /** UTXO complet avec sa référence */
@@ -73,7 +75,8 @@ export type PlainPayload =
     | { Nft: NftAction }
     | { ConfigUpdate: ConfigUpdate }
     | { Reward: RewardPayload }
-    | { EncryptedReward: EncryptedRewardPayload };
+    | { EncryptedReward: EncryptedRewardPayload }
+    | { TokenCreate: TokenMetadata };
 
 /** Payload de récompense (Mining/Fees) */
 export interface RewardPayload {
@@ -169,6 +172,24 @@ export type NftAction =
     | { Burn: { token_id: string; burner: string } }
     | { BatchBurn: { token_ids: string[]; burner: string } }
     | { Use: { token_id: string; user: string; action_type: string } };
+
+/** Métadonnées d'un token enregistré dans le DAG */
+export interface TokenMetadata {
+    /** Identifiant unique du token (ex: "edenite") */
+    asset_id: string;
+    /** Symbole court (ex: "EDEN") */
+    symbol: string;
+    /** Nom complet (ex: "Edenite Token") */
+    name: string;
+    /** Nombre de décimales (ex: 8) */
+    decimals: number;
+    /** Supply maximum (undefined = illimité) */
+    max_supply?: string;
+    /** Adresse du créateur */
+    creator: string;
+    /** Clé publique autorisée à mint ce token */
+    mint_authority: string;
+}
 
 /** Mise à jour de configuration */
 export type ConfigUpdate =
@@ -289,6 +310,41 @@ export interface PrepareTransferRequest {
 /** Réponse de préparation de transfert */
 export interface PrepareTransferResponse {
     action: NftAction;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TX Prepare Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Requête pour préparer une transaction de transfert */
+export interface PrepareTxRequest {
+    /** Adresse Bech32 de l'expéditeur */
+    from: string;
+    /** Adresse Bech32 du destinataire */
+    to: string;
+    /** Montant à envoyer (décimal, ex: "100.5") */
+    amount: string;
+    /** Asset ID (undefined = PMS natif, "edenite" = token custom) */
+    asset_id?: string;
+}
+
+/** Détail d'un UTXO utilisé comme input */
+export interface UtxoDetail {
+    txid: string;
+    index: number;
+    amount: string;
+}
+
+/** Réponse de /v1/tx/prepare - transaction non-signée */
+export interface PrepareTxResponse {
+    /** Transaction non-signée (unlocks vide) */
+    unsigned_tx: TxUtxo;
+    /** Hash SHA256 du message à signer (hex) */
+    tx_hash: string;
+    /** Frais calculés */
+    fee: string;
+    /** Détail des UTXOs sélectionnés */
+    inputs_detail: UtxoDetail[];
 }
 
 /** Réponse de getNft - informations complètes d'un NFT */

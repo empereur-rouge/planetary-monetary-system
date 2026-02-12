@@ -9,14 +9,14 @@ pub struct UtxoApply {
     pub txid: String,
     /// Entrées : (prev_txid, index)
     pub inputs: Vec<(String, u32)>,
-    /// Sorties : (address, amount_decstr)
-    pub outputs: Vec<(String, String)>,
+    /// Sorties : (address, amount_decstr, asset_id)
+    pub outputs: Vec<(String, String, Option<String>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UtxoDelta {
-    pub spend: Vec<(String, u32)>,                  // (txid, index)
-    pub create: Vec<(String, u32, String, String)>, // (txid, index, address, amount)
+    pub spend: Vec<(String, u32)>,                                  // (txid, index)
+    pub create: Vec<(String, u32, String, String, Option<String>)>, // (txid, index, address, amount, asset_id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +25,8 @@ pub struct UtxoValue {
     pub address: String,
     #[serde(rename = "amt")]
     pub amount: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "ast")]
+    pub asset_id: Option<String>,
 }
 
 impl RocksStore {
@@ -60,7 +62,7 @@ impl RocksStore {
         let cf_applied = self.cf_tx_applied();
         if self
             .db
-            .get_cf(cf_applied, Self::k_tx_applied_key(&tx.txid))?
+            .get_cf(&cf_applied, Self::k_tx_applied_key(&tx.txid))?
             .is_some()
         {
             return Ok(false);
@@ -70,7 +72,7 @@ impl RocksStore {
         let cf_utxo = self.cf_utxo();
         for (ptx, idx) in &tx.inputs {
             let key = Self::k_utxo_key(ptx, *idx);
-            if self.db.get_cf(cf_utxo, &key)?.is_none() {
+            if self.db.get_cf(&cf_utxo, &key)?.is_none() {
                 // au moins une entrée manquante -> conflit / double dépense
                 return Ok(false);
             }
@@ -82,7 +84,7 @@ impl RocksStore {
         // Consomme les entrées
         for (ptx, idx) in &tx.inputs {
             let key = Self::k_utxo_key(ptx, *idx);
-            batch.delete_cf(cf_utxo, key);
+            batch.delete_cf(&cf_utxo, key);
         }
 
         // Crée les sorties: outpoints = `${txid}:${i}`
@@ -90,17 +92,23 @@ impl RocksStore {
         struct OutVal<'a> {
             addr: &'a str,
             amt: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            ast: Option<&'a str>,
         }
 
-        for (i, (addr, amount)) in tx.outputs.iter().enumerate() {
+        for (i, (addr, amount, asset_id)) in tx.outputs.iter().enumerate() {
             let key = Self::k_utxo_key(&tx.txid, i as u32);
-            let val = OutVal { addr, amt: amount };
+            let val = OutVal {
+                addr,
+                amt: amount,
+                ast: asset_id.as_deref(),
+            };
             let json = serde_json::to_vec(&val)?;
-            batch.put_cf(cf_utxo, key, json);
+            batch.put_cf(&cf_utxo, key, json);
         }
 
         // Marque la transaction comme appliquée (idempotence future)
-        batch.put_cf(cf_applied, Self::k_tx_applied_key(&tx.txid), b"");
+        batch.put_cf(&cf_applied, Self::k_tx_applied_key(&tx.txid), b"");
 
         // 4) Commit atomique
         self.db.write(batch)?;
@@ -109,7 +117,7 @@ impl RocksStore {
     pub fn get_utxo(&self, txid: &str, index: u32) -> Result<Option<UtxoValue>> {
         let cf_utxo = self.cf_utxo();
         let key = Self::k_utxo_key(txid, index);
-        if let Some(val) = self.db.get_cf(cf_utxo, key)? {
+        if let Some(val) = self.db.get_cf(&cf_utxo, key)? {
             let u: UtxoValue = serde_json::from_slice(&val)?;
             Ok(Some(u))
         } else {

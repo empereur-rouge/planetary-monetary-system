@@ -91,16 +91,31 @@ impl NetDagAdapter for MockAdapter {
         (Decimal::ZERO, 0)
     }
 
+    async fn circulating_supply_by_asset(&self, _asset_id: Option<&str>) -> (Decimal, u64) {
+        (Decimal::ZERO, 0)
+    }
+
     async fn balance_by_address(&self, _address: &str) -> Decimal {
         Decimal::ZERO
     }
 
-    async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+    async fn utxos_by_address(
+        &self,
+        _address: &str,
+    ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
         Vec::new()
     }
 
-    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String) {
+    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {
         // No-op for mock, unless we want to verify UTXOs
+    }
+
+    async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool {
+        false // Mock: no-op
+    }
+
+    async fn get_utxo(&self, _output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
+        None // Mock: no UTXOs stored
     }
 }
 
@@ -187,9 +202,8 @@ async fn test_automated_fee_distribution() {
             platform_address: None,
             platform_address_signature: None,
             platform_fee_ratio: "0.0".into(),
-            treasury_fee_percent: 15,
-            creator_fee_percent: 45,
-            parents_fee_percent: 40,
+            treasury_fee_percent: 35,
+            coordinator_fee_percent: 65,
             block_reward: "0.0".into(),
             annual_inflation_percent: 0.0,
             treasury_reward_percent: 0,
@@ -199,6 +213,8 @@ async fn test_automated_fee_distribution() {
             authority_keys_last_rotation: None,
             treasury_addresses: vec![],
             distribution_interval_sec: 1, // 1 second interval for test
+            daily_inflation_enabled: false,
+            daily_inflation_interval_sec: 86400,
         },
         p2p: P2pConfig {
             known_peers: "".into(),
@@ -206,6 +222,7 @@ async fn test_automated_fee_distribution() {
             allowed_peer_ips: vec![],
             strict_whitelist: false,
         },
+        ledgers: vec![],
     };
 
     // 5. Create Server with MockAdapter
@@ -229,6 +246,7 @@ async fn test_automated_fee_distribution() {
         1,
         node_wallet.clone(),
         &settings.p2p,
+        None,
     );
 
     // 6. Seed Genesis Block (so we have a tip)
@@ -280,6 +298,7 @@ async fn test_automated_fee_distribution() {
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
+        ledger_mgr: None,
     };
 
     // 8. Spawn Distributor

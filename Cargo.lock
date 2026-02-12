@@ -321,6 +321,7 @@ dependencies = [
  "pms-config",
  "pms-core",
  "pms-interface",
+ "pms-ledger",
  "pms-server",
  "pms-storage",
  "pms-types-block",
@@ -2508,8 +2509,22 @@ name = "pms-ledger"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dashmap 6.1.0",
  "pms-config",
+ "pms-core",
+ "pms-interface",
+ "pms-storage",
+ "pms-types-block",
+ "pms-utils",
+ "pms-wallet",
+ "pms-wire",
  "rand 0.10.0-rc.5",
+ "rocksdb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2608,14 +2623,17 @@ dependencies = [
  "pms-testkit",
  "pms-types",
  "pms-types-nft",
+ "pms-types-payload",
  "pms-wire",
  "rocksdb",
+ "rust_decimal",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]

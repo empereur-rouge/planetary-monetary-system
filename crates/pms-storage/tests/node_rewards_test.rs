@@ -174,23 +174,24 @@ async fn test_distribution_calculation() -> Result<()> {
     Ok(())
 }
 
-/// Test: RuntimeConfig avec node_fee_bps
+/// Test: RuntimeConfig avec treasury_fee_bps
 #[tokio::test]
-async fn test_runtime_config_node_fee() -> Result<()> {
+async fn test_runtime_config_treasury_fee() -> Result<()> {
     let tr = test_rocks_store("node_rewards_config").await?;
     let store = tr.store.clone();
 
-    // Config par défaut
+    // Config par défaut (Coordinator 67%, Treasury 33%)
     let config = store.get_runtime_config()?;
-    assert_eq!(config.node_fee_bps, 3000); // 30%
+    assert_eq!(config.coordinator_fee_bps, 6700); // 67%
+    assert_eq!(config.treasury_fee_bps, 3300); // 33%
 
     // Modifier via ConfigUpdate
     use pms_config::{ConfigUpdate, RuntimeConfig};
 
-    let update = ConfigUpdate::SetNodeFee { bps: 2500 };
+    let update = ConfigUpdate::SetTreasuryFee { bps: 4000 };
     let new_config = config.apply_update(&update, "test-block", 12345);
 
-    assert_eq!(new_config.node_fee_bps, 2500);
+    assert_eq!(new_config.treasury_fee_bps, 4000);
     assert_eq!(new_config.updated_at_block, "test-block");
 
     Ok(())

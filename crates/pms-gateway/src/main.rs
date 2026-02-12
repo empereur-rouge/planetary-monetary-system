@@ -20,8 +20,7 @@ mod routes;
 /// Si aucune origine n'est configurée ou si "*" est présent, autorise toutes les origines.
 /// ATTENTION: En production, configurez CORS_ALLOWED_ORIGINS avec les domaines autorisés.
 fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
-    let is_permissive = allowed_origins.is_empty()
-        || allowed_origins.iter().any(|o| o == "*");
+    let is_permissive = allowed_origins.is_empty() || allowed_origins.iter().any(|o| o == "*");
 
     if is_permissive {
         tracing::warn!("⚠️  CORS permissif activé (toutes origines). Configurez CORS_ALLOWED_ORIGINS en production!");
@@ -166,18 +165,33 @@ async fn main() -> Result<()> {
         .route("/v1/wallet/{address}/utxos", get(routes::proxy_get))
         // Balance route (proxy)
         .route("/v1/balance", post(routes::proxy_post))
+        // TX prepare (proxy) - Prepares unsigned transaction for client signing
+        .route("/v1/tx/prepare", post(routes::proxy_post))
         // Supply & Coordinator (proxy)
         .route("/v1/supply", get(routes::proxy_get))
         .route("/v1/coordinator/info", get(routes::proxy_get))
         // History (proxy)
         .route("/wallet/history", post(routes::proxy_post))
+        // Wallet TX send (proxy) - Submit signed transaction
+        .route("/wallet/tx/send", post(routes::proxy_post))
         // NFT transfer prepare (proxy)
         .route("/v1/nft/transfer/prepare", post(routes::proxy_post))
         // Admin routes (proxy)
         .route("/admin/ping", get(routes::proxy_get))
         .route("/admin/distribute_fees", post(routes::proxy_post))
+        // Admin Config API - RuntimeConfig Hot-Swap
+        .route("/admin/config", get(routes::proxy_get))
+        .route("/admin/config", post(routes::proxy_post))
         // Metrics (proxy to engine)
         .route("/metrics", get(routes::proxy_get))
+        // Multi-ledger public/admin routes (proxy to engine)
+        .route("/v1/ledgers", get(routes::proxy_get))
+        .route("/admin/ledgers", get(routes::proxy_get))
+        .route("/admin/ledgers/create", post(routes::proxy_post))
+        .route("/admin/ledgers/{ledger_id}", get(routes::proxy_get))
+        // Per-ledger catch-all: forwards /l/{ledger_id}/... to engine
+        .route("/l/{ledger_id}/{*rest}", get(routes::proxy_get))
+        .route("/l/{ledger_id}/{*rest}", post(routes::proxy_post))
         .with_state(state.clone())
         .layer(GovernorLayer::new(governor_conf))
         .layer(RequestBodyLimitLayer::new(settings.max_body_bytes))
@@ -185,7 +199,10 @@ async fn main() -> Result<()> {
 
     // Dashboard static files (if configured)
     let dashboard_service = settings.dashboard_path.as_ref().map(|path| {
-        tracing::info!("📊 Dashboard enabled at /dashboard/ (serving from {})", path);
+        tracing::info!(
+            "📊 Dashboard enabled at /dashboard/ (serving from {})",
+            path
+        );
         let index_file = format!("{}/index.html", path);
         ServeDir::new(path).not_found_service(ServeFile::new(index_file))
     });

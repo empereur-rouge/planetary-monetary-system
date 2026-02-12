@@ -1,6 +1,6 @@
 use crate::{
-    Address, Admin, Auth, Client, FeesSettings, Limits, LoadError, Network, NetworkMode, P2pConfig,
-    Rocks, SecretSettings, TlsConfig, ValidationSettings,
+    Address, Admin, Auth, Client, FeesSettings, LedgerDef, Limits, LoadError, Network, NetworkMode,
+    P2pConfig, Rocks, SecretSettings, TlsConfig, ValidationSettings,
 };
 use anyhow::{Result, bail};
 
@@ -25,9 +25,32 @@ pub struct Settings {
     pub validation: ValidationSettings,
     pub fees: FeesSettings,
     pub p2p: P2pConfig,
+    /// Multi-ledger definitions. Si absent, un seul ledger "main" est créé
+    /// automatiquement à partir de [rocks] et [network].
+    #[serde(default)]
+    pub ledgers: Vec<LedgerDef>,
 }
 
 impl Settings {
+    /// Retourne les définitions de ledgers effectives.
+    /// Si aucun `[[ledgers]]` n'est défini dans la config, génère automatiquement
+    /// un seul ledger "main" à partir de [rocks] et [network] (rétrocompatibilité).
+    pub fn effective_ledgers(&self) -> Vec<LedgerDef> {
+        if self.ledgers.is_empty() {
+            vec![LedgerDef {
+                id: "main".to_string(),
+                network_id: self.network.network_id.clone(),
+                prefix: self.rocks.prefix.clone(),
+                protocol_version: self.network.protocol_version,
+                tip_limit: Some(self.rocks.tip_limit),
+                fees: None,
+                validation: None,
+            }]
+        } else {
+            self.ledgers.clone()
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         // 1) Prefix attendu selon le mode
         let expected_prefix = match self.network.mode {

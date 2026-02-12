@@ -7,6 +7,13 @@
 
     let interval: any;
 
+    function safeFormat(value: any, fractionDigits: number = 8): string {
+        if (value === null || value === undefined || value === "") return "-";
+        const num = parseFloat(value);
+        if (isNaN(num)) return "-";
+        return num.toLocaleString(undefined, { maximumFractionDigits: fractionDigits });
+    }
+
     // TPS Chart Data
     let tpsHistory: number[] = new Array(30).fill(0);
     let chartLabels: string[] = new Array(30).fill("");
@@ -178,45 +185,37 @@
             <h3>Circulating Supply</h3>
             <div class="value">
                 {supplyInfo
-                    ? parseFloat(supplyInfo.circulating_supply).toLocaleString(
-                          undefined,
-                          { maximumFractionDigits: 8 },
-                      )
+                    ? safeFormat(supplyInfo.circulating_supply, 8)
                     : "-"}
             </div>
             <div class="label">PMS</div>
         </div>
 
         <div
-            class="glass-panel card"
+            class="glass-panel card wallet-card"
             in:fly={{ y: 20, duration: 500, delay: 350 }}
         >
-            <h3>Node Reward (Identity)</h3>
-            <div class="value">
-                {supplyInfo && supplyInfo.node_balance
-                    ? parseFloat(supplyInfo.node_balance).toLocaleString(
-                          undefined,
-                          { maximumFractionDigits: 4 },
-                      )
-                    : "-"}
+            <h3>Wallet Balances</h3>
+            <div class="wallet-rows">
+                <div class="wallet-row">
+                    <span class="wallet-label">Node Identity</span>
+                    <span class="wallet-value">
+                        {supplyInfo ? safeFormat(supplyInfo.node_balance, 4) : "-"} PMS
+                    </span>
+                </div>
+                <div class="wallet-row">
+                    <span class="wallet-label">Coordinator</span>
+                    <span class="wallet-value">
+                        {supplyInfo ? safeFormat(supplyInfo.admin_balance, 4) : "-"} PMS
+                    </span>
+                </div>
+                <div class="wallet-row">
+                    <span class="wallet-label">Treasury</span>
+                    <span class="wallet-value">
+                        {supplyInfo ? safeFormat(supplyInfo.treasury_balance, 4) : "-"} PMS
+                    </span>
+                </div>
             </div>
-            <div class="label">PMS (Rewards)</div>
-        </div>
-
-        <div
-            class="glass-panel card"
-            in:fly={{ y: 20, duration: 500, delay: 375 }}
-        >
-            <h3>Treasury</h3>
-            <div class="value">
-                {supplyInfo && supplyInfo.treasury_balance
-                    ? parseFloat(supplyInfo.treasury_balance).toLocaleString(
-                          undefined,
-                          { maximumFractionDigits: 4 },
-                      )
-                    : "-"}
-            </div>
-            <div class="label">PMS (Reserves)</div>
         </div>
 
         <!-- Real-time Chart -->
@@ -236,45 +235,6 @@
         </div>
 
         <div class="split-tables">
-            <!-- Peer List -->
-            <div
-                class="glass-panel"
-                in:fly={{ y: 20, duration: 500, delay: 500 }}
-            >
-                <h3>Network Peers</h3>
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Address</th>
-                                <th>Role</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {#each $networkPeers as peer}
-                                <tr>
-                                    <td class="mono"
-                                        >{peer.id
-                                            ? peer.id.substring(0, 16)
-                                            : "???"}...</td
-                                    >
-                                    <td class="mono">{peer.address}</td>
-                                    <td>{peer.role || "Node"}</td>
-                                </tr>
-                            {/each}
-                            {#if $networkPeers.length === 0}
-                                <tr
-                                    ><td colspan="3" class="empty"
-                                        >No peers connected</td
-                                    ></tr
-                                >
-                            {/if}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
             <!-- Treasury Details -->
             <div
                 class="glass-panel"
@@ -295,11 +255,7 @@
                                     <tr>
                                         <td class="mono">{wallet.address}</td>
                                         <td class="mono number">
-                                            {parseFloat(
-                                                wallet.balance,
-                                            ).toLocaleString(undefined, {
-                                                maximumFractionDigits: 4,
-                                            })} PMS
+                                            {safeFormat(wallet.balance, 4)} PMS
                                         </td>
                                     </tr>
                                 {/each}
@@ -400,8 +356,37 @@
         opacity: 0.7;
     }
 
-    .wide {
-        grid-column: 1 / -1;
+    .wallet-card {
+        min-height: 180px;
+    }
+
+    .wallet-rows {
+        width: 100%;
+        margin-top: auto;
+    }
+
+    .wallet-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.4rem 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .wallet-row:last-child {
+        border-bottom: none;
+    }
+
+    .wallet-label {
+        font-size: 0.85rem;
+        color: var(--color-fg-secondary);
+    }
+
+    .wallet-value {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: var(--color-fg-primary);
+        font-family: monospace;
     }
 
     .wide-chart {
@@ -463,7 +448,7 @@
     .split-tables {
         grid-column: 1 / -1;
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+        grid-template-columns: 1fr;
         gap: 1.5rem;
     }
 

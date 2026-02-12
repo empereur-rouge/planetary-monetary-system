@@ -106,11 +106,10 @@ fn test_fees_settings_defaults() {
 
     // Vérifier les valeurs par défaut
     assert_eq!(fees.ratio, "0.035");
-    assert_eq!(fees.base_fee, "0.001");
+    assert_eq!(fees.base_fee, "0.0000001");
     assert_eq!(fees.platform_fee_ratio, "0.45");
-    assert_eq!(fees.treasury_fee_percent, 15);
-    assert_eq!(fees.creator_fee_percent, 45);
-    assert_eq!(fees.parents_fee_percent, 40);
+    assert_eq!(fees.treasury_fee_percent, 35);
+    assert_eq!(fees.coordinator_fee_percent, 65);
     assert_eq!(fees.block_reward, "0.1");
     assert_eq!(fees.distribution_interval_sec, 600);
 }

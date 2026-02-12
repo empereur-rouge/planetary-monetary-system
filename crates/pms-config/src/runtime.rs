@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 /// Ces paramètres peuvent être changés par le Coordinator via une transaction
 /// `PlainPayload::ConfigUpdate`. Ils sont persistés dans RocksDB et chargés
 /// au démarrage du nœud.
+///
+/// # Single Writer Mode (Private DAG)
+/// En mode Single Writer, seuls le Coordinator et le Treasury reçoivent les fees.
+/// - `coordinator_fee_bps` : Part du Coordinator (défaut: 67%)
+/// - `treasury_fee_bps` : Part du Treasury (défaut: 33%)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
     /// Taux de commission sur les transactions (en basis points, 100 = 1%)
@@ -18,11 +23,13 @@ pub struct RuntimeConfig {
     /// Frais fixes par transaction (ex: "0.001")
     pub base_fee: String,
 
-    /// Part des fees allant à la plateforme (en basis points, 2000 = 20%)
-    pub platform_fee_bps: u32,
+    /// Part des fees allant au Coordinator (en basis points, 6700 = 67%)
+    /// [SINGLE WRITER] Remplace l'ancien `platform_fee_bps`
+    pub coordinator_fee_bps: u32,
 
-    /// Part des fees allant au pool des nœuds (en basis points, 3000 = 30%)
-    pub node_fee_bps: u32,
+    /// Part des fees allant au Treasury (en basis points, 3300 = 33%)
+    /// [SINGLE WRITER] Remplace l'ancien `node_fee_bps`
+    pub treasury_fee_bps: u32,
 
     /// Nombre minimum de bits de zéro pour le PoW
     pub min_pow_bits: u8,
@@ -43,11 +50,11 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            fee_rate_bps: 240,             // 1%
-            base_fee: "0.001".to_string(), // Frais fixes par défaut
-            platform_fee_bps: 2000,        // 20% des fees
-            node_fee_bps: 3000,            // 30% des fees pour les nœuds
-            min_pow_bits: 8,               // Difficulté minimale
+            fee_rate_bps: 300,                 // 3% de commission totale
+            base_fee: "0.0000001".to_string(), // Frais fixes par défaut
+            coordinator_fee_bps: 6700,         // 67% des fees au Coordinator
+            treasury_fee_bps: 3300,            // 33% des fees au Treasury
+            min_pow_bits: 8,                   // Difficulté minimale
             max_mint_per_block: 1_000_000,
             mint_enabled: true,
             updated_at_block: String::new(),
@@ -75,8 +82,11 @@ impl RuntimeConfig {
             ConfigUpdate::SetBaseFee { fee } => {
                 new_config.base_fee = fee.clone();
             }
-            ConfigUpdate::SetPlatformFee { bps } => {
-                new_config.platform_fee_bps = *bps;
+            ConfigUpdate::SetCoordinatorFee { bps } => {
+                new_config.coordinator_fee_bps = *bps;
+            }
+            ConfigUpdate::SetTreasuryFee { bps } => {
+                new_config.treasury_fee_bps = *bps;
             }
             ConfigUpdate::SetMinPow { bits } => {
                 new_config.min_pow_bits = *bits;
@@ -87,9 +97,6 @@ impl RuntimeConfig {
             ConfigUpdate::SetMintEnabled { enabled } => {
                 new_config.mint_enabled = *enabled;
             }
-            ConfigUpdate::SetNodeFee { bps } => {
-                new_config.node_fee_bps = *bps;
-            }
             ConfigUpdate::BatchUpdate(updates) => {
                 for u in updates {
                     new_config = new_config.apply_update(u, block_id, timestamp);
@@ -98,6 +105,18 @@ impl RuntimeConfig {
         }
 
         new_config
+    }
+
+    /// Valide que les pourcentages totalisent 100% (10000 bps)
+    pub fn validate_fee_split(&self) -> Result<(), String> {
+        let total = self.coordinator_fee_bps + self.treasury_fee_bps;
+        if total != 10000 {
+            return Err(format!(
+                "Coordinator + Treasury fees must sum to 10000 bps (100%), got {} bps",
+                total
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -112,8 +131,13 @@ pub enum ConfigUpdate {
     /// Modifier les frais fixes
     SetBaseFee { fee: String },
 
-    /// Modifier la part plateforme (basis points, max 10000 = 100%)
-    SetPlatformFee { bps: u32 },
+    /// Modifier la part du Coordinator (basis points, max 10000 = 100%)
+    /// [SINGLE WRITER] Remplace l'ancien `SetPlatformFee`
+    SetCoordinatorFee { bps: u32 },
+
+    /// Modifier la part du Treasury (basis points, max 10000 = 100%)
+    /// [SINGLE WRITER] Remplace l'ancien `SetNodeFee`
+    SetTreasuryFee { bps: u32 },
 
     /// Modifier la difficulté PoW minimale
     SetMinPow { bits: u8 },
@@ -123,9 +147,6 @@ pub enum ConfigUpdate {
 
     /// Activer/désactiver le minting
     SetMintEnabled { enabled: bool },
-
-    /// Modifier la part des fees pour les nœuds (basis points)
-    SetNodeFee { bps: u32 },
 
     /// Appliquer plusieurs updates en une transaction
     BatchUpdate(Vec<ConfigUpdate>),
@@ -137,11 +158,11 @@ impl ConfigUpdate {
         match self {
             Self::SetFeeRate { bps } => format!("SetFeeRate({}bps)", bps),
             Self::SetBaseFee { fee } => format!("SetBaseFee({})", fee),
-            Self::SetPlatformFee { bps } => format!("SetPlatformFee({}bps)", bps),
+            Self::SetCoordinatorFee { bps } => format!("SetCoordinatorFee({}bps)", bps),
+            Self::SetTreasuryFee { bps } => format!("SetTreasuryFee({}bps)", bps),
             Self::SetMinPow { bits } => format!("SetMinPow({}bits)", bits),
             Self::SetMaxMint { amount } => format!("SetMaxMint({})", amount),
             Self::SetMintEnabled { enabled } => format!("SetMintEnabled({})", enabled),
-            Self::SetNodeFee { bps } => format!("SetNodeFee({}bps)", bps),
             Self::BatchUpdate(updates) => {
                 format!("BatchUpdate({} items)", updates.len())
             }
@@ -192,5 +213,43 @@ mod tests {
 
         assert_eq!(new_config.fee_rate_bps, 150);
         assert!(!new_config.mint_enabled);
+    }
+
+    #[test]
+    fn test_default_fee_split_is_valid() {
+        let config = RuntimeConfig::default();
+        // 67% + 33% = 100%
+        assert_eq!(config.coordinator_fee_bps, 6700);
+        assert_eq!(config.treasury_fee_bps, 3300);
+        assert!(config.validate_fee_split().is_ok());
+    }
+
+    #[test]
+    fn test_invalid_fee_split() {
+        let mut config = RuntimeConfig::default();
+        config.coordinator_fee_bps = 5000;
+        config.treasury_fee_bps = 3000; // Total = 8000, pas 10000
+
+        assert!(config.validate_fee_split().is_err());
+    }
+
+    #[test]
+    fn test_apply_coordinator_fee_update() {
+        let config = RuntimeConfig::default();
+        let update = ConfigUpdate::SetCoordinatorFee { bps: 7000 };
+
+        let new_config = config.apply_update(&update, "block-003", 1234567890);
+
+        assert_eq!(new_config.coordinator_fee_bps, 7000);
+    }
+
+    #[test]
+    fn test_apply_treasury_fee_update() {
+        let config = RuntimeConfig::default();
+        let update = ConfigUpdate::SetTreasuryFee { bps: 4000 };
+
+        let new_config = config.apply_update(&update, "block-004", 1234567890);
+
+        assert_eq!(new_config.treasury_fee_bps, 4000);
     }
 }

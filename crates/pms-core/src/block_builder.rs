@@ -79,16 +79,14 @@ where
     }
 
     pub fn build(self) -> Block {
+        // mine() already sorts parents internally when canonicalize_parents is set
         let (nonce, id) = self.mine();
 
-        // on peut maintenant démonter `self` (il n’a pas été consommé par mine)
         let BlockMineBuilder {
             mut parents,
             payload,
-            difficulty_leading_zeros: _,
-            compute_id: _,
-            id_exists: _,
             canonicalize_parents,
+            ..
         } = self;
 
         if canonicalize_parents {

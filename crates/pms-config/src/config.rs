@@ -190,17 +190,14 @@ pub struct FeesSettings {
     pub treasury_addresses: Vec<String>,
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Fee Distribution (Treasury Tax + Fee Sharing)
+    // Fee Distribution (Coordinator + Treasury)
     // ═══════════════════════════════════════════════════════════════════════
-    /// Percentage of fees going to treasury (admin wallets). Default: 15%
+    /// Percentage of fees going to treasury wallets. Default: 35%
     #[serde(default = "default_treasury_fee_percent")]
     pub treasury_fee_percent: u8,
-    /// Percentage of fees going to block creator. Default: 45%
-    #[serde(default = "default_creator_fee_percent")]
-    pub creator_fee_percent: u8,
-    /// Percentage of fees going to parent block signers (split equally). Default: 40%
-    #[serde(default = "default_parents_fee_percent")]
-    pub parents_fee_percent: u8,
+    /// Percentage of fees going to coordinator. Default: 65%
+    #[serde(default = "default_coordinator_fee_percent")]
+    pub coordinator_fee_percent: u8,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Block Rewards (Inflation)
@@ -239,6 +236,16 @@ pub struct FeesSettings {
     pub distribution_interval_sec: u64,
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Scheduled Inflation Mint
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Enable daily scheduled inflation mint. Default: false.
+    #[serde(default)]
+    pub daily_inflation_enabled: bool,
+    /// Interval in seconds for scheduled inflation mint. Default: 86400 (24h).
+    #[serde(default = "default_daily_inflation_interval_sec")]
+    pub daily_inflation_interval_sec: u64,
+
+    // ═══════════════════════════════════════════════════════════════════════
     // TÂCHE 6: Audit des clés Authority - rotation recommandée
     // ═══════════════════════════════════════════════════════════════════════
     /// Date de dernière rotation des clés Authority (format ISO 8601: "2025-01-15")
@@ -252,7 +259,7 @@ fn default_fee_ratio() -> String {
     "0.035".to_string()
 }
 fn default_base_fee() -> String {
-    "0.001".to_string()
+    "0.0000001".to_string()
 }
 fn default_platform_fee_ratio() -> String {
     "0.45".to_string()
@@ -260,16 +267,16 @@ fn default_platform_fee_ratio() -> String {
 fn default_distribution_interval_sec() -> u64 {
     600
 }
+fn default_daily_inflation_interval_sec() -> u64 {
+    86400 // 24 hours
+}
 
-// Fee distribution defaults
+// Fee distribution defaults (coordinator + treasury = 100%)
 fn default_treasury_fee_percent() -> u8 {
-    15
+    35
 }
-fn default_creator_fee_percent() -> u8 {
-    45
-}
-fn default_parents_fee_percent() -> u8 {
-    40
+fn default_coordinator_fee_percent() -> u8 {
+    65
 }
 
 // Block reward defaults
@@ -299,4 +306,55 @@ fn default_enforce_single_writer() -> bool {
 pub enum FeePickMode {
     Uniform,
     RoundRobin,
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-Ledger Configuration
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Configuration d'un ledger individuel.
+/// Chaque ledger a son propre prefix RocksDB, network_id, et éventuellement
+/// des settings de validation/fees spécifiques.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LedgerDef {
+    /// Identifiant unique du ledger (ex: "main", "nft", "client-acme")
+    pub id: String,
+    /// Network ID pour le protocole P2P (ex: "pms-main", "pms-nft")
+    pub network_id: String,
+    /// Prefix RocksDB pour isoler les données (ex: "pms:main", "nft")
+    pub prefix: String,
+    /// Version du protocole P2P
+    #[serde(default = "default_protocol_version")]
+    pub protocol_version: u32,
+    /// Tip limit override (sinon hérite du global)
+    #[serde(default)]
+    pub tip_limit: Option<usize>,
+    /// Fee settings override pour ce ledger
+    #[serde(default)]
+    pub fees: Option<LedgerFeesOverride>,
+    /// Validation settings override pour ce ledger
+    #[serde(default)]
+    pub validation: Option<LedgerValidationOverride>,
+}
+
+/// Overrides de fees pour un ledger spécifique.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LedgerFeesOverride {
+    pub ratio: Option<String>,
+    pub base_fee: Option<String>,
+    pub platform_fee_ratio: Option<String>,
+    pub block_reward: Option<String>,
+}
+
+/// Overrides de validation pour un ledger spécifique.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LedgerValidationOverride {
+    pub max_inputs: Option<usize>,
+    pub max_outputs: Option<usize>,
+    pub max_tx_bytes: Option<usize>,
+    pub enforce_single_writer: Option<bool>,
+}
+
+fn default_protocol_version() -> u32 {
+    1
 }

@@ -171,7 +171,14 @@ create_test_compose() {
     echo -e "${YELLOW}🔑 Updating coordinator keys in config...${NC}"
     COORD_PRIV_KEY=$(cat etc/pms/coordinator-wallet.json | jq -r '.private_key_hex')
     cargo run -p tools-cli -- derive-coordinator "$COORD_PRIV_KEY" "etc/config/config.docker-test.toml"
-    
+
+    # Update authority_public_keys with the coordinator's compressed public key
+    COORD_COMPRESSED_PUB=$(cargo run -q -p tools-cli -- priv-to-pub "$COORD_PRIV_KEY")
+    echo -e "${YELLOW}🔑 Updating authority_public_keys...${NC}"
+    export COORD_COMPRESSED_PUB
+    perl -0777 -i -pe 's/authority_public_keys\s*=\s*\[.*?\]/authority_public_keys = [\n    "$ENV{COORD_COMPRESSED_PUB}",\n]/s' etc/config/config.docker-test.toml
+    echo "   Authority key: ${COORD_COMPRESSED_PUB:0:20}..."
+
     echo -e "${YELLOW}🐳 Creating docker-compose.test.yml (4-Service VPS Architecture)...${NC}"
     cat > docker-compose.test.yml << 'COMPOSE_EOF'
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -530,6 +537,18 @@ case "$1" in
             export TREASURY_ADDR
             perl -i -pe 's/^\[fees\]$/[fees]\ntreasury_addresses = ["$ENV{TREASURY_ADDR}"]/' etc/config/config.docker-test.toml
         fi
+
+        # Create treasury-wallets.json with the treasury address and sign it
+        echo -e "${YELLOW}🏦 Creating signed treasury-wallets.json...${NC}"
+        cat > etc/pms/treasury-wallets.json << EOF
+{
+  "wallets": ["$TREASURY_ADDR"],
+  "signature": ""
+}
+EOF
+        # Sign with coordinator key
+        cargo run -q -p tools-cli -- treasury-sign etc/pms/node.key etc/pms/treasury-wallets.json
+        echo -e "${GREEN}✅ Treasury wallets signed by coordinator${NC}"
 
         create_test_compose
         build_and_start

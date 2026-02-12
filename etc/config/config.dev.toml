@@ -41,6 +41,7 @@ scan_limit = 2000
 mode = "uniform" # "uniform" | "round_robin"
 seed = 42        # optionnel (tests / déterminisme)
 enforce_fee_recipient = true
+treasury_addresses = ["pms1z053s5nyhpsewdn5cv9wl3kse3h8wt0zv2vpkv7kt798jdy3vctvj7fqns5huaupn03ejw4tffgg26m9yq4s6f8wtr"]
 
 [auth]
 require_signed_submit = false

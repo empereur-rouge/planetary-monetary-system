@@ -63,6 +63,14 @@ export type {
     WalletHistoryResp,
     HistoryItem,
     RuntimeConfig,
+
+    // Transaction Preparation
+    PrepareTxRequest,
+    PrepareTxResponse,
+    UtxoDetail,
+
+    // Token Registry
+    TokenMetadata,
 } from "./types";
 
 // ============================================================================

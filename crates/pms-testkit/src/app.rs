@@ -57,6 +57,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         settings.network.protocol_version,
         node_wallet.clone(),
         &settings.p2p,
+        None, // no multi-ledger in tests
     );
 
     // 7) ServerConfig minimal (ports pas utilisés ici)
@@ -92,6 +93,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
+        ledger_mgr: None,
     };
 
     // 10) Router axum
@@ -149,6 +151,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         settings.network.protocol_version,
         node_wallet.clone(),
         &settings.p2p,
+        None,
     );
 
     // 7) ServerConfig minimal
@@ -184,6 +187,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
+        ledger_mgr: None,
     };
 
     // 10) Router
@@ -250,6 +254,7 @@ pub async fn make_test_ctx_with_admin(
         settings.network.protocol_version,
         node_wallet.clone(),
         &settings.p2p,
+        None,
     );
 
     // 7) ServerConfig minimal
@@ -285,6 +290,7 @@ pub async fn make_test_ctx_with_admin(
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
+        ledger_mgr: None,
     };
 
     // 10) Router

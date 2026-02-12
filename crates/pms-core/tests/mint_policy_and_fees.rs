@@ -66,6 +66,7 @@ async fn mint_policy_enforced_on_admin_vs_non_admin() -> anyhow::Result<()> {
     let outputs = vec![TxOutput {
         address: "dummy-address-for-test".to_string(),
         amount: "10".to_string(),
+        asset_id: None,
     }];
     let mint_payload = PayloadEnvelope::Plain(PlainPayload::Mint { outputs });
 
@@ -199,6 +200,7 @@ async fn dev_mode_mint_signed_by_admin_is_accepted() -> anyhow::Result<()> {
     let outputs = vec![TxOutput {
         address: "dummy-address-for-test".to_string(),
         amount: "10".to_string(),
+        asset_id: None,
     }];
     let mint_payload = PayloadEnvelope::Plain(PlainPayload::Mint { outputs });
 
@@ -292,9 +294,8 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             treasury_addresses: vec![],
             distribution_interval_sec: 600,
             // Fee distribution fields
-            treasury_fee_percent: 15,
-            creator_fee_percent: 45,
-            parents_fee_percent: 40,
+            treasury_fee_percent: 35,
+            coordinator_fee_percent: 65,
             block_reward: "0.1".to_string(),
             annual_inflation_percent: 2.0,
             creator_reward_percent: 70,
@@ -302,6 +303,8 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             burn_percent: 10,
             authority_public_keys: vec![],
             authority_keys_last_rotation: None,
+            daily_inflation_enabled: false,
+            daily_inflation_interval_sec: 86400,
         },
         p2p: P2pConfig {
             known_peers: String::new(),
@@ -309,6 +312,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             allowed_peer_ips: vec![],
             strict_whitelist: false,
         },
+        ledgers: vec![],
     };
 
     // WireBlock signé par un "non-admin"
@@ -327,6 +331,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
     let outputs = vec![TxOutput {
         address: "any".into(),
         amount: "1".into(),
+        asset_id: None,
     }];
 
     let res = validate_mint_policy(&outputs, &wb, &settings);

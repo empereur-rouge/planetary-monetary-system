@@ -9,10 +9,9 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 use crate::api::AppState;
-use axum::{Json, extract::State};
-use pms_config::{load_config, treasury_wallets::load_treasury_wallets};
+use axum::{Json, extract::{Query, State}};
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Réponse de l'endpoint /v1/supply
 #[derive(Debug, Serialize)]
@@ -36,6 +35,10 @@ pub struct CirculatingSupplyResponse {
     /// Détail par wallet de trésorerie
     #[serde(default)]
     pub treasury_details: Vec<TreasuryWalletDetail>,
+
+    /// Asset ID queried (None = PMS natif)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,50 +47,63 @@ pub struct TreasuryWalletDetail {
     pub balance: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SupplyQuery {
+    /// Optional asset_id filter. If absent, returns PMS native supply.
+    pub asset_id: Option<String>,
+}
+
 /// GET /v1/supply - Retourne le supply circulant
+/// Query params: ?asset_id=edenite (optional, default = PMS natif)
 pub async fn get_circulating_supply(
     State(state): State<AppState>,
+    Query(query): Query<SupplyQuery>,
 ) -> Json<CirculatingSupplyResponse> {
     // Accède au ShardedUtxoSet via l'adapter du serveur
     let adapter = state.srv.adapter_arc();
 
     // Calcule le supply via la méthode du trait
-    let (total, count) = adapter.circulating_supply().await;
+    let (total, count) = if let Some(ref asset_id) = query.asset_id {
+        adapter.circulating_supply_by_asset(Some(asset_id)).await
+    } else {
+        adapter.circulating_supply().await
+    };
 
-    // Charger la config pour les adresses spéciales
-    // Note: En prod, on pourrait cacher ces adresses dans AppState pour éviter de recharger la config
+    let settings = &state.settings;
     let mut admin_bal = Decimal::ZERO;
-    let mut node_bal = Decimal::ZERO;
     let mut treasury_bal = Decimal::ZERO;
     let mut treasury_details = Vec::new();
 
-    if let Ok(config) = load_config() {
-        // 1. Admin Wallet Balance (local node admin)
-        if let Some(path) = &config.secrets.admin_wallet_file {
-            if let Ok(wallet) = pms_wallet::Wallet::load_from_file(path) {
-                let admin_addr = wallet.get_address(&config.address.hrp);
-                admin_bal = adapter.balance_by_address(&admin_addr).await;
-            }
+    // 1. Admin Wallet Balance (coordinator)
+    if let Some(path) = &settings.secrets.admin_wallet_file {
+        if let Ok(wallet) = pms_wallet::Wallet::load_from_file(path) {
+            let addr = wallet.get_address(&settings.address.hrp);
+            admin_bal = adapter.balance_by_address(&addr).await;
         }
+    }
 
-        // 1b. Node Identity Balance (Rewards)
-        let node_addr = state.node_wallet.get_address(&config.address.hrp);
-        node_bal = adapter.balance_by_address(&node_addr).await;
+    // 2. Node Identity Balance (rewards)
+    let node_addr = state.node_wallet.get_address(&settings.address.hrp);
+    let node_bal = adapter.balance_by_address(&node_addr).await;
 
-        // 2. Treasury Balance (as configured on this node)
-        if let Some(path) = &config.admin.treasury_wallets_file {
-            if let Some(coord_pk) = &config.validation.coordinator_public_key {
-                if let Ok(wallets) = load_treasury_wallets(path, coord_pk) {
-                    for addr in wallets.list {
-                        let bal = adapter.balance_by_address(&addr).await;
-                        treasury_bal += bal;
-                        treasury_details.push(TreasuryWalletDetail {
-                            address: addr,
-                            balance: bal.to_string(),
-                        });
-                    }
-                }
-            }
+    // 3. Treasury Balance - pre-loaded wallets, fallback to fees config
+    if !state.treasury_wallets.is_empty() {
+        for addr in &state.treasury_wallets.list {
+            let bal = adapter.balance_by_address(addr).await;
+            treasury_bal += bal;
+            treasury_details.push(TreasuryWalletDetail {
+                address: addr.clone(),
+                balance: bal.to_string(),
+            });
+        }
+    } else {
+        for addr in &settings.fees.treasury_addresses {
+            let bal = adapter.balance_by_address(addr).await;
+            treasury_bal += bal;
+            treasury_details.push(TreasuryWalletDetail {
+                address: addr.clone(),
+                balance: bal.to_string(),
+            });
         }
     }
 
@@ -98,5 +114,6 @@ pub async fn get_circulating_supply(
         node_balance: node_bal.to_string(),
         treasury_balance: treasury_bal.to_string(),
         treasury_details,
+        asset_id: query.asset_id,
     })
 }

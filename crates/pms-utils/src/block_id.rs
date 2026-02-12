@@ -45,6 +45,7 @@ pub fn compute_block_id(
                 PlainPayload::ConfigUpdate(_) => "ConfigUpdate",
                 PlainPayload::Reward { .. } => "Reward",
                 PlainPayload::EncryptedReward { .. } => "EncryptedReward",
+                PlainPayload::TokenCreate(_) => "TokenCreate",
             }
             .to_string();
 

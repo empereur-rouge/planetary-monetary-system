@@ -789,6 +789,7 @@ async fn mine_mint(
     let output = TxOutput {
         address: to_addr.to_string(),
         amount: amount.to_string(),
+        asset_id: None,
     };
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
         outputs: vec![output],
@@ -850,12 +851,14 @@ async fn send_tx(
     let mut outputs = vec![TxOutput {
         address: recipient_addr.to_string(),
         amount: amount.to_string(),
+        asset_id: None,
     }];
 
     if change_amount != "0.0" && change_amount != "0" {
         outputs.push(TxOutput {
             address: change_addr.to_string(),
             amount: change_amount.to_string(),
+            asset_id: None,
         });
     }
 
@@ -951,12 +954,14 @@ async fn send_tx_fast(
     let mut outputs = vec![TxOutput {
         address: recipient_addr.to_string(),
         amount: amount.to_string(),
+        asset_id: None,
     }];
 
     if fee_amount != "0.0" {
         outputs.push(TxOutput {
             address: fee_addr.to_string(),
             amount: fee_amount.to_string(),
+            asset_id: None,
         });
     }
 
@@ -964,6 +969,7 @@ async fn send_tx_fast(
         outputs.push(TxOutput {
             address: change_addr.to_string(),
             amount: change_amount.to_string(),
+            asset_id: None,
         });
     }
 

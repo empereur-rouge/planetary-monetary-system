@@ -57,14 +57,26 @@ impl pms_interface::NetDagAdapter for MockAdapter {
     async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) {
         (rust_decimal::Decimal::ZERO, 0)
     }
+    async fn circulating_supply_by_asset(&self, _asset_id: Option<&str>) -> (rust_decimal::Decimal, u64) {
+        (rust_decimal::Decimal::ZERO, 0)
+    }
     async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
         rust_decimal::Decimal::ZERO
     }
-    async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+    async fn utxos_by_address(
+        &self,
+        _address: &str,
+    ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
         Vec::new()
     }
-    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String) {
+    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {
         // Mock: no-op
+    }
+    async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool {
+        false // Mock: no-op
+    }
+    async fn get_utxo(&self, _output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
+        None // Mock: no UTXOs stored
     }
 }
 
@@ -82,6 +94,7 @@ async fn test_parallel_orphan_fetch_logic() {
         1,
         wallet,
         &pms_config::P2pConfig::default(),
+        None,
     );
 
     // Create Block with 2 missing parents

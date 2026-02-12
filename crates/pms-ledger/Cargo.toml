@@ -5,5 +5,21 @@ edition = "2024"
 
 [dependencies]
 rand = "0.10.0-rc.5"
-pms-config = {path="../pms-config"}
+pms-config = { path = "../pms-config" }
+pms-storage = { path = "../pms-storage" }
+pms-core = { path = "../pms-core" }
+pms-interface = { path = "../pms-interface" }
+pms-types-block = { path = "../pms-types-block" }
+pms-utils = { path = "../pms-utils" }
+pms-wire = { path = "../pms-wire" }
+pms-wallet = { path = "../pms-wallet" }
 anyhow = "1.0.100"
+dashmap = "6"
+rocksdb = "0.24.0"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -20,7 +20,7 @@ impl NftStorage for RocksStore {
     /// Récupère le propriétaire d'un NFT par son token_id.
     fn get_owner(&self, token_id: &str) -> Result<Option<String>> {
         let cf_nft = self.cf("nft_ownership");
-        if let Some(v) = self.db.get_cf(cf_nft, token_id.as_bytes())? {
+        if let Some(v) = self.db.get_cf(&cf_nft, token_id.as_bytes())? {
             Ok(Some(String::from_utf8(v.to_vec())?))
         } else {
             Ok(None)
@@ -43,7 +43,7 @@ impl NftStorage for RocksStore {
 
         // 2. Mettre à jour nft_ownership (token -> new_owner)
         self.db
-            .put_cf(cf_ownership, token_id.as_bytes(), new_owner.as_bytes())?;
+            .put_cf(&cf_ownership, token_id.as_bytes(), new_owner.as_bytes())?;
 
         // 3. Si l'ancien propriétaire est différent, le retirer de sa liste
         if let Some(ref prev) = old_owner {
@@ -73,7 +73,7 @@ impl NftStorage for RocksStore {
         }
 
         // 2. Supprimer l'entrée principale
-        self.db.delete_cf(cf_ownership, token_id.as_bytes())?;
+        self.db.delete_cf(&cf_ownership, token_id.as_bytes())?;
 
         Ok(())
     }
@@ -84,7 +84,7 @@ impl NftStorage for RocksStore {
     fn get_by_owner(&self, owner: &str) -> Result<Vec<String>> {
         let cf_by_owner = self.cf("nfts_by_owner");
 
-        if let Some(v) = self.db.get_cf(cf_by_owner, owner.as_bytes())? {
+        if let Some(v) = self.db.get_cf(&cf_by_owner, owner.as_bytes())? {
             // La valeur est un JSON array: ["token1", "token2", ...]
             let tokens: Vec<String> = serde_json::from_slice(&v)?;
             Ok(tokens)
@@ -98,7 +98,7 @@ impl NftStorage for RocksStore {
     /// Retourne `None` si le token n'existe pas.
     fn get_block_id(&self, token_id: &str) -> Result<Option<String>> {
         let cf_block_ids = self.cf("nft_block_ids");
-        if let Some(v) = self.db.get_cf(cf_block_ids, token_id.as_bytes())? {
+        if let Some(v) = self.db.get_cf(&cf_block_ids, token_id.as_bytes())? {
             Ok(Some(String::from_utf8(v.to_vec())?))
         } else {
             Ok(None)
@@ -111,14 +111,14 @@ impl NftStorage for RocksStore {
     fn set_block_id(&self, token_id: &str, block_id: &str) -> Result<()> {
         let cf_block_ids = self.cf("nft_block_ids");
         self.db
-            .put_cf(cf_block_ids, token_id.as_bytes(), block_id.as_bytes())?;
+            .put_cf(&cf_block_ids, token_id.as_bytes(), block_id.as_bytes())?;
         Ok(())
     }
 
     /// Supprime la référence au bloc d'un NFT (lors du Burn).
     fn delete_block_id(&self, token_id: &str) -> Result<()> {
         let cf_block_ids = self.cf("nft_block_ids");
-        self.db.delete_cf(cf_block_ids, token_id.as_bytes())?;
+        self.db.delete_cf(&cf_block_ids, token_id.as_bytes())?;
         Ok(())
     }
 }
@@ -132,7 +132,7 @@ impl RocksStore {
 
         // Récupérer la liste actuelle (ou créer une liste vide)
         let mut tokens: Vec<String> =
-            if let Some(v) = self.db.get_cf(cf_by_owner, owner.as_bytes())? {
+            if let Some(v) = self.db.get_cf(&cf_by_owner, owner.as_bytes())? {
                 serde_json::from_slice(&v)?
             } else {
                 Vec::new()
@@ -145,7 +145,7 @@ impl RocksStore {
 
         // Sérialiser et sauvegarder
         let json = serde_json::to_vec(&tokens)?;
-        self.db.put_cf(cf_by_owner, owner.as_bytes(), &json)?;
+        self.db.put_cf(&cf_by_owner, owner.as_bytes(), &json)?;
 
         Ok(())
     }
@@ -154,7 +154,7 @@ impl RocksStore {
     fn remove_token_from_owner_list(&self, owner: &str, token_id: &str) -> Result<()> {
         let cf_by_owner = self.cf("nfts_by_owner");
 
-        if let Some(v) = self.db.get_cf(cf_by_owner, owner.as_bytes())? {
+        if let Some(v) = self.db.get_cf(&cf_by_owner, owner.as_bytes())? {
             let mut tokens: Vec<String> = serde_json::from_slice(&v)?;
 
             // Retirer le token de la liste
@@ -162,11 +162,11 @@ impl RocksStore {
 
             if tokens.is_empty() {
                 // Si la liste est vide, supprimer l'entrée complètement
-                self.db.delete_cf(cf_by_owner, owner.as_bytes())?;
+                self.db.delete_cf(&cf_by_owner, owner.as_bytes())?;
             } else {
                 // Sinon, sauvegarder la liste mise à jour
                 let json = serde_json::to_vec(&tokens)?;
-                self.db.put_cf(cf_by_owner, owner.as_bytes(), &json)?;
+                self.db.put_cf(&cf_by_owner, owner.as_bytes(), &json)?;
             }
         }
 

@@ -64,6 +64,7 @@ async fn test_history_encrypted_reward() -> Result<()> {
     let tx_out = TxOutput {
         address: my_addr.clone(),
         amount: "100".into(),
+        asset_id: None,
     };
     let pt = serde_json::to_vec(&tx_out)?;
 

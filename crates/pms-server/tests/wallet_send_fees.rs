@@ -201,7 +201,7 @@ async fn wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo() -> anyhow::
         let ua = pms_storage::rocks_store::utxo::UtxoApply {
             txid: u.id.txid.clone(),
             inputs: vec![],
-            outputs: vec![(manual_addr, u.amount.clone())],
+            outputs: vec![(manual_addr, u.amount.clone(), None)],
         };
         ctx.store
             .utxo_apply_tx_atomic(&ua)
@@ -213,10 +213,11 @@ async fn wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo() -> anyhow::
     // Ton code doit l’ajouter automatiquement quand fee>0.
     // Fee calculation: 3.5% of taxable_amount + 0.001 base = ~0.141 for 4.00
     let taxable_amount = "4.00";
-    let fee_policy = FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio, 18);
+    let fee_policy = FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio);
     let fee = fee_policy
         .compute_fee(taxable_amount)
-        .expect("fee computation");
+        .expect("fee computation")
+        .to_string();
     let hrp = ctx.settings.address.hrp.as_str();
     // u defined above
     eprintln!(
@@ -331,10 +332,11 @@ async fn wallet_send_tx_fee_is_materialized_and_zeroed_and_visible_to_admin() ->
 
     // Compute fee dynamically using FeePolicy from settings
     let taxable_amount = "4.00";
-    let fee_policy = FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio, 18);
+    let fee_policy = FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio);
     let fee = fee_policy
         .compute_fee(taxable_amount)
-        .expect("fee computation");
+        .expect("fee computation")
+        .to_string();
     let body = serde_json::json!({
         "tx": {
             "inputs": [{ "out": { "txid": u.txid, "index": u.index } }],
@@ -432,10 +434,11 @@ async fn wallet_send_tx_does_not_duplicate_fee_output_if_already_present() -> an
 
     // Compute fee dynamically using FeePolicy from settings
     let taxable_amount = "4.00";
-    let fee_policy = FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio, 18);
+    let fee_policy = FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio);
     let fee = fee_policy
         .compute_fee(taxable_amount)
-        .expect("fee computation");
+        .expect("fee computation")
+        .to_string();
 
     // client inclut déjà l’output fee
     let body = serde_json::json!({

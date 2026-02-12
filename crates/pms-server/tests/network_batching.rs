@@ -76,16 +76,31 @@ impl NetDagAdapter for MockAdapter {
         (rust_decimal::Decimal::ZERO, 0)
     }
 
+    async fn circulating_supply_by_asset(&self, _asset_id: Option<&str>) -> (rust_decimal::Decimal, u64) {
+        (rust_decimal::Decimal::ZERO, 0)
+    }
+
     async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
         rust_decimal::Decimal::ZERO
     }
 
-    async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+    async fn utxos_by_address(
+        &self,
+        _address: &str,
+    ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
         Vec::new()
     }
 
-    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String) {
+    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {
         // Mock: no-op
+    }
+
+    async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool {
+        false // Mock: no-op
+    }
+
+    async fn get_utxo(&self, _output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
+        None // Mock: no UTXOs stored
     }
 }
 
@@ -110,6 +125,7 @@ async fn test_network_batching_enqueue() -> Result<()> {
         1,
         wallet,
         &pms_config::P2pConfig::default(),
+        None,
     );
 
     // Enqueue multiple IDs rapidly
@@ -142,6 +158,7 @@ async fn test_network_batching_high_load() -> Result<()> {
         1,
         wallet,
         &pms_config::P2pConfig::default(),
+        None,
     );
 
     // Enqueue 1000 IDs (should trigger size-based flush at 100)
@@ -172,6 +189,7 @@ async fn test_network_batching_empty_tick() -> Result<()> {
         1,
         wallet,
         &pms_config::P2pConfig::default(),
+        None,
     );
 
     // Don't enqueue anything, just let the worker tick a few times
@@ -201,6 +219,7 @@ async fn test_network_batching_concurrent() -> Result<()> {
         1,
         wallet,
         &pms_config::P2pConfig::default(),
+        None,
     );
 
     // Spawn multiple tasks that enqueue concurrently

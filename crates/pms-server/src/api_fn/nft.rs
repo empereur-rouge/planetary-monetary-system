@@ -46,6 +46,7 @@ async fn create_refund_utxo_block(
     let outputs = vec![TxOutput {
         address: recipient.to_string(),
         amount: amount.to_string(),
+        asset_id: None,
     }];
 
     let payload = PayloadEnvelope::Plain(PlainPayload::Mint { outputs });

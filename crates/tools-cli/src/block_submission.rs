@@ -204,6 +204,7 @@ pub async fn action_make_mint(
         outputs: vec![TxOutput {
             address: w.get_address(&hrp),
             amount: amount.clone(),
+            asset_id: None,
         }],
     };
 
@@ -284,12 +285,14 @@ pub async fn action_send_tokens(
     let mut outputs = vec![TxOutput {
         address: dest_addr.clone(),
         amount: amount_str.clone(),
+        asset_id: None,
     }];
     if change > Decimal::ZERO {
         let change_addr = make_address(&hrp, &w_pub, &w_xpk);
         outputs.push(TxOutput {
             address: change_addr,
             amount: change.to_string(),
+            asset_id: None,
         });
     }
 
@@ -389,12 +392,14 @@ pub async fn action_send_tokens_headless(
     let mut outputs = vec![TxOutput {
         address: dest_addr.to_string(),
         amount: amount_str.to_string(),
+        asset_id: None,
     }];
     if change > Decimal::ZERO {
         let change_addr = make_address(&hrp, &w_pub, &w_xpk);
         outputs.push(TxOutput {
             address: change_addr,
             amount: change.to_string(),
+            asset_id: None,
         });
     }
 
@@ -471,6 +476,7 @@ pub async fn action_make_mint_headless(
         outputs: vec![TxOutput {
             address: w.get_address(&hrp),
             amount: amount_str.to_string(),
+            asset_id: None,
         }],
     };
 

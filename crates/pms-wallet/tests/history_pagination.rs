@@ -86,6 +86,7 @@ async fn history_pagination_by_time_and_id_rocks() -> Result<()> {
             outputs: vec![TxOutput {
                 address: my_addr.clone(),
                 amount: format!("{}", 100 + i),
+                asset_id: None,
             }],
         };
         let enc = EncryptedPayload::encrypt_for_plain(&plain, &[my_xpk.clone()])
@@ -104,6 +105,7 @@ async fn history_pagination_by_time_and_id_rocks() -> Result<()> {
             outputs: vec![TxOutput {
                 address: "8e1_other_addr_____".into(),
                 amount: "7".into(),
+                asset_id: None,
             }],
         };
         let enc_o = EncryptedPayload::encrypt_for_plain(&other, &[my_xpk.clone()])

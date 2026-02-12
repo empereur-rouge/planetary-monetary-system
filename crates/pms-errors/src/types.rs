@@ -69,4 +69,20 @@ pub enum ValidationError {
 
     #[error("config error: {0}")]
     ConfigError(String),
+
+    // Multi-token
+    #[error("asset balance mismatch: asset={asset_id:?}, inputs={inputs}, outputs={outputs}")]
+    AssetBalanceMismatch {
+        asset_id: Option<String>,
+        inputs: String,
+        outputs: String,
+    },
+    #[error("token not registered: {0}")]
+    TokenNotRegistered(String),
+    #[error("unauthorized token mint: {0}")]
+    UnauthorizedTokenMint(String),
+    #[error("token max supply exceeded: {0}")]
+    MaxSupplyExceeded(String),
+    #[error("token already exists: {0}")]
+    TokenAlreadyExists(String),
 }

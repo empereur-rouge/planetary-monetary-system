@@ -162,7 +162,8 @@ pub async fn internal_submit_block(
 pub struct ConfigResp {
     fee_rate_bps: u32,
     base_fee: String,
-    platform_fee_bps: u32,
+    coordinator_fee_bps: u32,
+    treasury_fee_bps: u32,
 }
 
 pub async fn internal_config(State(app): State<AppState>) -> impl IntoResponse {
@@ -174,7 +175,8 @@ pub async fn internal_config(State(app): State<AppState>) -> impl IntoResponse {
     Json(ConfigResp {
         fee_rate_bps: cfg.fee_rate_bps,
         base_fee: cfg.base_fee,
-        platform_fee_bps: cfg.platform_fee_bps,
+        coordinator_fee_bps: cfg.coordinator_fee_bps,
+        treasury_fee_bps: cfg.treasury_fee_bps,
     })
 }
 pub async fn internal_metrics() -> impl IntoResponse {

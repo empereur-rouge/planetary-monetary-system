@@ -1,8 +1,6 @@
 use crate::{
     api::AppState,
-    fee_distribution::{
-        BlockRewardConfig, FeeDistributionConfig, compute_block_reward_outputs, compute_fee_outputs,
-    },
+    fee_distribution::{FeeDistributionConfig, compute_fee_outputs},
 };
 use axum::Json;
 use axum::extract::State;
@@ -11,16 +9,16 @@ use http::StatusCode;
 use pms_config::RuntimeConfig;
 use pms_storage::{ConfigStorage, DagStorage, PutResult};
 use pms_token::FeePolicy;
-use pms_types::{Block, Transaction, TxOutput};
+use pms_types::{Block, OutputId, Transaction, TxInput, TxOutput};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use pms_utils::{check_pow_leading_zero_bits, compute_block_id};
 use pms_wallet::SignerBackend;
 use pms_wallet::signing_wire::canonical_wireblock_message;
 use pms_wire::{WireBlock, WireMeta};
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
+// use sha2::{Digest, Sha256};
 
 #[derive(Debug, Deserialize)]
 pub struct WalletSendTxRequest {
@@ -79,18 +77,21 @@ pub async fn wallet_send_tx(
     let fee_policy = FeePolicy::new(
         &runtime_config.base_fee,
         &ratio_dec.to_string(), // Convert config bps to ratio string (ex: "0.01")
-        18,
     );
 
     // b) STRICT: Verify Inputs == Outputs (No implicit fees)
     //    We must fetch inputs to sum them up.
+    //    FIX: Use adapter RAM cache (ShardedUtxoSet) instead of store (RocksDB)
+    //    to match prepareTx behavior and avoid desync with async persistence.
+    let adapter = state.srv.adapter_arc();
     let mut total_inputs = Decimal::ZERO;
     for input in &tx.inputs {
-        match state
-            .store
-            .get_utxo(&input.out.txid, input.out.index as u32)
-        {
-            Ok(Some(u)) => {
+        let output_id = pms_types::OutputId {
+            txid: input.out.txid.clone(),
+            index: input.out.index,
+        };
+        match adapter.get_utxo(&output_id).await {
+            Some(u) => {
                 if let Ok(amt) = Decimal::from_str_exact(&u.amount) {
                     total_inputs += amt;
                 } else {
@@ -100,18 +101,12 @@ pub async fn wallet_send_tx(
                     );
                 }
             }
-            Ok(None) => {
+            None => {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(
                         json!({ "error": format!("input utxo not found (double spend?): {}:{}", input.out.txid, input.out.index) }),
                     ),
-                );
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": format!("db error fetching utxo: {}", e) })),
                 );
             }
         }
@@ -140,46 +135,52 @@ pub async fn wallet_send_tx(
         );
     }
 
-    // c) Identifier H20 Sender pour exclure le Change
-    //    Unlock[0] contient la pubkey du sender.
-    let sender_h20 = if let Some(first_unlock) = tx.unlocks.first() {
-        if let Ok(pub_bytes) = hex::decode(&first_unlock.pubkey_hex) {
-            let hash = Sha256::digest(&pub_bytes);
-            hex::encode(&hash[..20])
-        } else {
-            String::new()
-        }
+    // c) Identifier Sender Address pour exclure le Change
+    //    On récupère l'adresse du sender depuis le premier UTXO input.
+    //    Cela évite les problèmes de format H20 vs adresse Bech32.
+    let sender_address: Option<String> = if let Some(first_input) = tx.inputs.first() {
+        let output_id = pms_types::OutputId {
+            txid: first_input.out.txid.clone(),
+            index: first_input.out.index,
+        };
+        adapter
+            .get_utxo(&output_id)
+            .await
+            .map(|u| u.address.clone())
     } else {
-        String::new()
+        None
     };
 
-    // c) Identifier les outputs de frais (vers un wallet admin)
-    //    On tolère n'importe quel admin de la liste
+    // c) Identifier les outputs de frais (vers un wallet admin ou treasury)
+    //    On tolère n'importe quel admin ou treasury de la liste
     let mut provided_fee = Decimal::ZERO;
     let mut taxable_amount = Decimal::ZERO;
 
     for out in &tx.outputs {
-        // 1. Check Admin (Fee)
-        if settings
+        // 1. Check Admin or Treasury (Fee)
+        let is_admin = settings
             .admin
             .wallet_addresses
             .iter()
-            .any(|a| a.eq_ignore_ascii_case(&out.address))
-        {
+            .any(|a| a.eq_ignore_ascii_case(&out.address));
+
+        let is_treasury = settings
+            .fees
+            .treasury_addresses
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(&out.address));
+
+        if is_admin || is_treasury {
             if let Ok(amt) = Decimal::from_str_exact(&out.amount) {
                 provided_fee += amt;
             }
         }
-        // 2. Check Sender (Change/Self) - compare H20
+        // 2. Check Sender (Change/Self) - compare address directly
         else {
-            let is_sender = if !sender_h20.is_empty() {
-                match pms_wallet::decode_address(&out.address) {
-                    Ok((h20, _xpk)) => h20 == sender_h20,
-                    Err(_) => false,
-                }
-            } else {
-                false
-            };
+            let is_sender = sender_address
+                .as_ref()
+                .map(|s| s.eq_ignore_ascii_case(&out.address))
+                .unwrap_or(false);
 
             if !is_sender {
                 if let Ok(amt) = Decimal::from_str_exact(&out.amount) {
@@ -190,10 +191,12 @@ pub async fn wallet_send_tx(
     }
 
     // c) Calculer le fee attendu
-    let expected_fee_str = fee_policy
+    // compute_fee() retourne maintenant un Amount avec précision garantie à 8 décimales
+    let expected_fee = fee_policy
         .compute_fee(&taxable_amount.to_string())
-        .unwrap_or("0.0".to_string());
-    let expected_fee_dec = Decimal::from_str_exact(&expected_fee_str).unwrap_or(Decimal::ZERO);
+        .map(|a| a.inner()) // Convertir Amount -> Decimal
+        .unwrap_or(Decimal::ZERO);
+    let expected_fee_dec = expected_fee;
 
     // d) Vérifier (avec une petite tolérance epsilon si besoin, mais Decimal est précis)
     if provided_fee < expected_fee_dec {
@@ -264,12 +267,19 @@ pub async fn wallet_send_tx(
         },
     };
 
-    // If we have fewer than 2 parents and genesis isn't already included,
-    // add genesis as supplementary parent
-    if parents.len() < 2 {
-        let genesis_id = Block::genesis(compute_block_id).id;
-        if !parents.contains(&genesis_id) {
-            parents.push(genesis_id);
+    // Single Writer Mode: exactly 1 parent required
+    // Regular DAG mode: 2 parents required (add genesis if needed)
+    if settings.validation.enforce_single_writer {
+        // Keep only the first parent
+        parents.truncate(1);
+    } else {
+        // If we have fewer than 2 parents and genesis isn't already included,
+        // add genesis as supplementary parent
+        if parents.len() < 2 {
+            let genesis_id = Block::genesis(compute_block_id).id;
+            if !parents.contains(&genesis_id) {
+                parents.push(genesis_id);
+            }
         }
     }
 
@@ -370,6 +380,40 @@ pub async fn wallet_send_tx(
 
     match res {
         PutResult::Inserted => {
+            // ============================================================
+            // FIX: Apply UTXO delta manually for encrypted payloads
+            // persist_block only handles Plain payloads, so we need to
+            // update the UTXO cache ourselves for encrypted transactions.
+            // ============================================================
+            // Extract the tx from the plain payload (tx was moved into it at line 244)
+            if let PlainPayload::TxUtxo(ref tx) = plain {
+                // Spend inputs (remove from UTXO cache)
+                for input in &tx.inputs {
+                    let output_id = pms_types::OutputId {
+                        txid: input.out.txid.clone(),
+                        index: input.out.index,
+                    };
+                    adapter.remove_utxo(&output_id).await;
+                }
+                // Create outputs (add to UTXO cache)
+                for (idx, output) in tx.outputs.iter().enumerate() {
+                    adapter
+                        .add_utxo(
+                            wb.id.clone(),
+                            idx as u32,
+                            output.address.clone(),
+                            output.amount.clone(),
+                            output.asset_id.clone(),
+                        )
+                        .await;
+                }
+                tracing::info!(
+                    "📦 UTXO delta applied for encrypted TX: -{} inputs, +{} outputs",
+                    tx.inputs.len(),
+                    tx.outputs.len()
+                );
+            }
+
             // Announce the new block to the network for gossip propagation
             state.srv.enqueue_broadcast(wb.id.clone()).await;
 
@@ -391,17 +435,15 @@ pub async fn wallet_send_tx(
 
             if is_coordinator {
                 // Crée un bloc de reward séparé qui distribue:
-                // - 15% Treasury, 45% Creator, 40% Parents (des tx fees)
+                // - 65% Coordinator, 35% Treasury (des tx fees)
                 // - 70% Creator, 20% Treasury, 10% Burn (block rewards)
 
-                // Config depuis settings
-                let fee_config = FeeDistributionConfig::from_percents(
+                let fee_config = FeeDistributionConfig::new(
+                    settings.fees.coordinator_fee_percent,
                     settings.fees.treasury_fee_percent,
-                    settings.fees.creator_fee_percent,
-                    settings.fees.parents_fee_percent,
                 );
 
-                let creator_address = node_wallet.get_address("8e");
+                let coordinator_address = node_wallet.get_address("8e");
 
                 // Get treasury addresses: prefer signed list from AppState, fallback to config
                 let treasury_addrs: Vec<String> = if !state.treasury_wallets.is_empty() {
@@ -410,46 +452,32 @@ pub async fn wallet_send_tx(
                         state.treasury_wallets.len()
                     );
                     state.treasury_wallets.list.clone()
+                } else if !settings.fees.treasury_addresses.is_empty() {
+                    tracing::debug!(
+                        "Using {} treasury addresses from config",
+                        settings.fees.treasury_addresses.len()
+                    );
+                    settings.fees.treasury_addresses.clone()
                 } else {
                     tracing::debug!(
-                        "Treasury wallets empty, using {} admin addresses as fallback",
+                        "Treasury empty, using {} admin addresses as fallback",
                         settings.admin.wallet_addresses.len()
                     );
                     settings.admin.wallet_addresses.clone()
                 };
-                tracing::debug!(
-                    "Treasury distribution to {} addresses",
-                    treasury_addrs.len()
-                );
 
-                // Calcul des fee outputs (15% treasury, 45% creator, 40% parents)
+                // Calcul des fee outputs (65% coordinator, 35% treasury)
                 let fee_outputs_raw = compute_fee_outputs(
                     fee_dec,
                     &treasury_addrs,
-                    &creator_address,
-                    &parents,
-                    &state.store,
-                    "8e",
+                    &coordinator_address,
                     &fee_config,
-                )
-                .await;
-
-                // Calcul des block reward outputs (70% creator, 20% treasury, 10% burn)
-                let reward_config = BlockRewardConfig::default();
-                let treasury_addr = state
-                    .treasury_wallets
-                    .first()
-                    .cloned()
-                    .or_else(|| settings.admin.wallet_addresses.first().cloned())
-                    .unwrap_or_else(|| creator_address.clone());
-                let (reward_outputs_raw, burned_amount) =
-                    compute_block_reward_outputs(&creator_address, &treasury_addr, &reward_config);
+                );
 
                 // Log fee distribution details for debugging
                 tracing::info!(
-                    "Fee distribution: {} fee outputs, {} reward outputs, {} treasury addrs",
+                    "Fee distribution: {} fee outputs, {} treasury addrs",
                     fee_outputs_raw.len(),
-                    reward_outputs_raw.len(),
                     treasury_addrs.len()
                 );
                 for fo in &fee_outputs_raw {
@@ -460,30 +488,23 @@ pub async fn wallet_send_tx(
                     );
                 }
 
-                // Si on a des outputs à distribuer, créer un reward block
-                if !fee_outputs_raw.is_empty() || !reward_outputs_raw.is_empty() {
+                // Si on a des fee outputs à distribuer, créer un reward block
+                if !fee_outputs_raw.is_empty() {
                     // Convertir en TxOutput
                     let fee_txouts: Vec<TxOutput> = fee_outputs_raw
                         .iter()
                         .map(|fo| TxOutput {
                             address: fo.address.clone(),
                             amount: fo.amount.clone(),
+                            asset_id: None, // fees always PMS
                         })
                         .collect();
 
-                    let reward_txouts: Vec<TxOutput> = reward_outputs_raw
-                        .iter()
-                        .map(|fo| TxOutput {
-                            address: fo.address.clone(),
-                            amount: fo.amount.clone(),
-                        })
-                        .collect();
-
-                    // Payload Reward
+                    // Payload Reward (fees only, no block rewards)
                     let reward_payload = PlainPayload::Reward {
                         fee_outputs: fee_txouts,
-                        reward_outputs: reward_txouts,
-                        burned: burned_amount.to_string(),
+                        reward_outputs: vec![],
+                        burned: "0".to_string(),
                         tx_block_id: wb.id.clone(),
                     };
 
@@ -566,4 +587,345 @@ pub async fn wallet_send_tx(
             Json(json!({ "status": "rejected", "reason": reason })),
         ),
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// POST /v1/tx/prepare - Prépare une transaction non-signée pour le client
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Requête pour préparer une transaction.
+/// Le client fournit les adresses et le montant, le serveur construit la TX.
+#[derive(Debug, Deserialize)]
+pub struct PrepareTxRequest {
+    /// Adresse Bech32 de l'expéditeur
+    pub from: String,
+    /// Adresse Bech32 du destinataire
+    pub to: String,
+    /// Montant à envoyer (string décimale, ex: "100.5")
+    pub amount: String,
+    /// Asset ID (None = PMS natif, Some("edenite") = token custom)
+    #[serde(default)]
+    pub asset_id: Option<String>,
+}
+
+/// Détail d'un UTXO sélectionné comme input
+#[derive(Debug, Serialize)]
+pub struct UtxoDetail {
+    pub txid: String,
+    pub index: u32,
+    pub amount: String,
+}
+
+/// Réponse contenant la transaction non-signée prête à être signée par le client.
+#[derive(Debug, Serialize)]
+pub struct PrepareTxResponse {
+    /// Transaction non-signée (unlocks vides, à remplir par le client)
+    pub unsigned_tx: Transaction,
+    /// Hash SHA256 du message à signer (hex)
+    /// Le client doit signer ce hash avec sa clé privée ECDSA
+    pub tx_hash: String,
+    /// Frais calculés (string décimale)
+    pub fee: String,
+    /// Détail des UTXOs sélectionnés comme inputs
+    pub inputs_detail: Vec<UtxoDetail>,
+}
+
+/// POST /v1/tx/prepare
+///
+/// Prépare une transaction de transfert wallet-à-wallet.
+/// Le serveur sélectionne les UTXOs, calcule les frais, et construit la TX.
+/// Le client reçoit la TX non-signée et le hash à signer.
+///
+/// # Flow complet
+/// 1. Client appelle POST /v1/tx/prepare avec {from, to, amount}
+/// 2. Serveur retourne {unsigned_tx, tx_hash, fee}
+/// 3. Client signe `tx_hash` avec sa clé privée ECDSA
+/// 4. Client remplit `unsigned_tx.unlocks` avec sa signature
+/// 5. Client appelle POST /wallet/tx/send avec la TX signée
+pub async fn prepare_tx(
+    State(state): State<AppState>,
+    Json(req): Json<PrepareTxRequest>,
+) -> impl IntoResponse {
+    // ════════════════════════════════════════════════════════════════════════
+    // 1) Parse et validation du montant demandé
+    // ════════════════════════════════════════════════════════════════════════
+    let amount_dec = match Decimal::from_str_exact(&req.amount) {
+        Ok(d) if d > Decimal::ZERO => d,
+        Ok(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "amount must be > 0" })),
+            );
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid amount decimal format" })),
+            );
+        }
+    };
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 2) Charger la policy de frais depuis la config runtime
+    // ════════════════════════════════════════════════════════════════════════
+    let runtime_config = state
+        .store
+        .get_runtime_config()
+        .unwrap_or_else(|_| RuntimeConfig::default());
+
+    let ratio_dec = Decimal::from(runtime_config.fee_rate_bps) / Decimal::from(10000);
+    let fee_policy = FeePolicy::new(&runtime_config.base_fee, &ratio_dec.to_string());
+
+    // Calcul des frais sur le montant envoyé (taxable = amount vers destination)
+    // compute_fee() retourne un Amount arrondi à 8 décimales
+    let fee_dec = fee_policy
+        .compute_fee(&amount_dec.to_string())
+        .map(|a| a.inner())
+        .unwrap_or(Decimal::ZERO);
+
+    // For PMS native: total_needed = amount + fee
+    // For custom tokens: total_needed = amount only (fee is separate in PMS)
+    let total_needed = if req.asset_id.is_some() {
+        amount_dec // Custom token: only need the amount from token UTXOs
+    } else {
+        amount_dec + fee_dec // PMS: amount + fee from same pool
+    };
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 3) Récupérer les UTXOs de l'expéditeur (via adapter RAM)
+    //    Filtrés par asset_id (None = PMS natif uniquement)
+    // ════════════════════════════════════════════════════════════════════════
+    let adapter = state.srv.adapter_arc();
+    let all_utxos = adapter.utxos_by_address(&req.from).await;
+
+    // Filter by asset_id: only select UTXOs matching the requested asset
+    let utxos: Vec<_> = all_utxos
+        .into_iter()
+        .filter(|(_, tx_output)| tx_output.asset_id == req.asset_id)
+        .collect();
+
+    if utxos.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "no UTXOs found for sender address",
+                "address": req.from,
+                "asset_id": req.asset_id
+            })),
+        );
+    }
+
+    // For custom tokens, also check PMS UTXOs for fee coverage
+    let pms_utxos: Vec<_> = if req.asset_id.is_some() && fee_dec > Decimal::ZERO {
+        adapter
+            .utxos_by_address(&req.from)
+            .await
+            .into_iter()
+            .filter(|(_, tx_output)| tx_output.asset_id.is_none())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 4) Coin Selection (algorithme simple: largest-first)
+    //    On sélectionne les plus gros UTXOs jusqu'à couvrir total_needed
+    // ════════════════════════════════════════════════════════════════════════
+    let mut utxo_list: Vec<_> = utxos
+        .into_iter()
+        .filter_map(|(output_id, tx_output)| {
+            Decimal::from_str_exact(&tx_output.amount)
+                .ok()
+                .map(|amt| (output_id, tx_output, amt))
+        })
+        .collect();
+
+    // Trier par montant décroissant (largest-first)
+    utxo_list.sort_by(|a, b| b.2.cmp(&a.2));
+
+    let mut selected_inputs: Vec<(OutputId, TxOutput, Decimal)> = Vec::new();
+    let mut selected_sum = Decimal::ZERO;
+
+    for (output_id, tx_output, amt) in utxo_list {
+        if selected_sum >= total_needed {
+            break;
+        }
+        selected_sum += amt;
+        selected_inputs.push((output_id, tx_output, amt));
+    }
+
+    // Vérifier qu'on a assez de fonds
+    if selected_sum < total_needed {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "insufficient balance",
+                "available": selected_sum.to_string(),
+                "required": total_needed.to_string(),
+                "amount": amount_dec.to_string(),
+                "fee": fee_dec.to_string()
+            })),
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 5) Construire les inputs (TxInput)
+    // ════════════════════════════════════════════════════════════════════════
+    let mut tx_inputs: Vec<TxInput> = selected_inputs
+        .iter()
+        .map(|(output_id, _, _)| TxInput {
+            out: output_id.clone(),
+        })
+        .collect();
+
+    let mut inputs_detail: Vec<UtxoDetail> = selected_inputs
+        .iter()
+        .map(|(output_id, _, amt)| UtxoDetail {
+            txid: output_id.txid.clone(),
+            index: output_id.index,
+            amount: amt.to_string(),
+        })
+        .collect();
+
+    // 5b) For custom token transfers, also select PMS UTXOs for fee payment
+    let mut pms_change = Decimal::ZERO;
+    if req.asset_id.is_some() && fee_dec > Decimal::ZERO {
+        let mut pms_list: Vec<_> = pms_utxos
+            .into_iter()
+            .filter_map(|(output_id, tx_output)| {
+                Decimal::from_str_exact(&tx_output.amount)
+                    .ok()
+                    .map(|amt| (output_id, tx_output, amt))
+            })
+            .collect();
+        pms_list.sort_by(|a, b| b.2.cmp(&a.2));
+
+        let mut pms_selected_sum = Decimal::ZERO;
+        for (output_id, _, amt) in &pms_list {
+            if pms_selected_sum >= fee_dec {
+                break;
+            }
+            pms_selected_sum += *amt;
+            tx_inputs.push(TxInput { out: output_id.clone() });
+            inputs_detail.push(UtxoDetail {
+                txid: output_id.txid.clone(),
+                index: output_id.index,
+                amount: amt.to_string(),
+            });
+        }
+
+        if pms_selected_sum < fee_dec {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "insufficient PMS balance for fee",
+                    "pms_available": pms_selected_sum.to_string(),
+                    "fee_required": fee_dec.to_string()
+                })),
+            );
+        }
+        pms_change = pms_selected_sum - fee_dec;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 6) Construire les outputs
+    //    - Output 1: destination (to, amount, asset_id)
+    //    - Output 2: change vers sender (from, change, asset_id) [si > 0]
+    //    - Output 3: frais vers admin (admin, fee, None=PMS)
+    //    - Output 4: PMS change vers sender [si custom token + PMS change > 0]
+    // ════════════════════════════════════════════════════════════════════════
+    let mut tx_outputs: Vec<TxOutput> = Vec::new();
+
+    // Output destination
+    tx_outputs.push(TxOutput {
+        address: req.to.clone(),
+        amount: amount_dec.to_string(),
+        asset_id: req.asset_id.clone(),
+    });
+
+    // Change (retour vers l'expéditeur) — same asset as the transfer
+    let change = selected_sum - total_needed;
+    if change > Decimal::ZERO {
+        tx_outputs.push(TxOutput {
+            address: req.from.clone(),
+            amount: change.to_string(),
+            asset_id: req.asset_id.clone(),
+        });
+    }
+
+    // Output frais vers admin wallet (fallback: treasury/coordinator)
+    if fee_dec > Decimal::ZERO {
+        // Priority: 1. admin.wallet_addresses, 2. fees.treasury_addresses, 3. error (no valid recipient)
+        let admin_addr = state
+            .settings
+            .admin
+            .wallet_addresses
+            .first()
+            .cloned()
+            .or_else(|| state.settings.fees.treasury_addresses.first().cloned());
+
+        let admin_addr = match admin_addr {
+            Some(addr) => addr,
+            None => {
+                tracing::warn!("prepareTx: No admin or treasury address configured for fees!");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "no admin wallet configured for fees" })),
+                );
+            }
+        };
+
+        tx_outputs.push(TxOutput {
+            address: admin_addr,
+            amount: fee_dec.to_string(),
+            asset_id: None, // fees always PMS
+        });
+    }
+
+    // PMS change (only for custom token transfers where we also spent PMS for fees)
+    if pms_change > Decimal::ZERO {
+        tx_outputs.push(TxOutput {
+            address: req.from.clone(),
+            amount: pms_change.to_string(),
+            asset_id: None, // PMS change
+        });
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 7) Construire la Transaction non-signée
+    //    unlocks est vide - le client doit le remplir après avoir signé
+    // ════════════════════════════════════════════════════════════════════════
+    let unsigned_tx = Transaction {
+        inputs: tx_inputs,
+        outputs: tx_outputs,
+        fee: fee_dec.to_string(),
+        unlocks: vec![], // À remplir par le client
+    };
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 8) Calculer le hash à signer
+    //    Le client signera ce hash avec sa clé privée ECDSA
+    // ════════════════════════════════════════════════════════════════════════
+    let tx_hash = match unsigned_tx.signing_message() {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("failed to compute tx hash: {}", e) })),
+            );
+        }
+    };
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 9) Retourner la réponse
+    // ════════════════════════════════════════════════════════════════════════
+    (
+        StatusCode::OK,
+        Json(json!(PrepareTxResponse {
+            unsigned_tx,
+            tx_hash,
+            fee: fee_dec.to_string(),
+            inputs_detail,
+        })),
+    )
 }

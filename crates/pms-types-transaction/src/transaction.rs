@@ -20,6 +20,9 @@ pub struct TxInput {
 pub struct TxOutput {
     pub address: String,
     pub amount: String,
+    /// None = PMS natif. Some("edenite") = token custom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

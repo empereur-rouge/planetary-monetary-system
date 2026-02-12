@@ -54,19 +54,46 @@ impl ShardedUtxoSet {
     }
 
     /// Applique un delta complet (spend + create) de manière concurrente.
-    /// Ceci est appelé APRÈS la persistance réussie dans RocksDB.
+    /// Groups operations by shard to minimize lock acquisitions.
     pub async fn apply_diff(&self, spends: &[OutputId], creates: &[(OutputId, TxOutput)]) {
-        // Note: Idéalement on grouperait par shard pour lock une seule fois par shard.
-        // Ici on fait simple pour commencer.
+        use std::collections::HashMap as StdHashMap;
 
-        // Spends
+        // Group spends by shard index
+        let mut spend_by_shard: StdHashMap<usize, Vec<&OutputId>> = StdHashMap::new();
         for sp in spends {
-            self.remove(sp).await;
+            spend_by_shard
+                .entry(Self::shard_index(sp))
+                .or_default()
+                .push(sp);
         }
 
-        // Creates
+        // Group creates by shard index
+        let mut create_by_shard: StdHashMap<usize, Vec<(&OutputId, &TxOutput)>> = StdHashMap::new();
         for (id, out) in creates {
-            self.add(id.clone(), out.clone()).await;
+            create_by_shard
+                .entry(Self::shard_index(id))
+                .or_default()
+                .push((id, out));
+        }
+
+        // Collect all affected shard indices
+        let mut affected: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        affected.extend(spend_by_shard.keys());
+        affected.extend(create_by_shard.keys());
+
+        // Process each shard with a single write lock
+        for shard_idx in affected {
+            let mut shard = self.shards[shard_idx].write().await;
+            if let Some(sp_list) = spend_by_shard.get(&shard_idx) {
+                for sp in sp_list {
+                    shard.remove(*sp);
+                }
+            }
+            if let Some(cr_list) = create_by_shard.get(&shard_idx) {
+                for (id, out) in cr_list {
+                    shard.insert((*id).clone(), (*out).clone());
+                }
+            }
         }
     }
 
@@ -79,12 +106,9 @@ impl ShardedUtxoSet {
         total
     }
 
-    /// Calcule le supply total en circulation (somme de tous les UTXOs).
+    /// Calcule le supply PMS natif en circulation (asset_id == None uniquement).
     ///
-    /// Cette méthode itère sur tous les shards et additionne les montants.
     /// Retourne (supply_total, nombre_utxos).
-    ///
-    /// **Note**: Opération potentiellement lente car elle lock tous les shards.
     pub async fn circulating_supply(&self) -> (rust_decimal::Decimal, usize) {
         use rust_decimal::Decimal;
         use std::str::FromStr;
@@ -95,19 +119,51 @@ impl ShardedUtxoSet {
         for shard in &self.shards {
             let locked = shard.read().await;
             for (_outpoint, output) in locked.iter() {
-                if let Ok(amount) = Decimal::from_str(&output.amount) {
-                    total += amount;
-                    count += 1;
+                if output.asset_id.is_none() {
+                    if let Ok(amount) = Decimal::from_str(&output.amount) {
+                        total += amount;
+                        count += 1;
+                    }
                 }
             }
         }
         (total, count)
     }
 
-    /// Calcule la balance d'une adresse en parcourant tous les UTXOs.
-    ///
-    /// **Note**: Opération potentiellement lente car elle lock tous les shards.
+    /// Calcule le supply d'un token spécifique.
+    pub async fn circulating_supply_by_asset(&self, asset_id: Option<&str>) -> (rust_decimal::Decimal, usize) {
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let mut total = Decimal::ZERO;
+        let mut count = 0usize;
+
+        for shard in &self.shards {
+            let locked = shard.read().await;
+            for (_outpoint, output) in locked.iter() {
+                let matches = match (&output.asset_id, asset_id) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                };
+                if matches {
+                    if let Ok(amount) = Decimal::from_str(&output.amount) {
+                        total += amount;
+                        count += 1;
+                    }
+                }
+            }
+        }
+        (total, count)
+    }
+
+    /// Calcule la balance PMS d'une adresse (rétrocompatible).
     pub async fn balance_by_address(&self, address: &str) -> rust_decimal::Decimal {
+        self.balance_by_address_and_asset(address, None).await
+    }
+
+    /// Calcule la balance d'une adresse pour un asset spécifique.
+    pub async fn balance_by_address_and_asset(&self, address: &str, asset_id: Option<&str>) -> rust_decimal::Decimal {
         use rust_decimal::Decimal;
         use std::str::FromStr;
 
@@ -117,8 +173,15 @@ impl ShardedUtxoSet {
             let locked = shard.read().await;
             for (_outpoint, output) in locked.iter() {
                 if output.address == address {
-                    if let Ok(amount) = Decimal::from_str(&output.amount) {
-                        total += amount;
+                    let matches = match (&output.asset_id, asset_id) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => a == b,
+                        _ => false,
+                    };
+                    if matches {
+                        if let Ok(amount) = Decimal::from_str(&output.amount) {
+                            total += amount;
+                        }
                     }
                 }
             }
@@ -126,9 +189,7 @@ impl ShardedUtxoSet {
         total
     }
 
-    /// Retourne tous les UTXOs d'une adresse.
-    ///
-    /// **Note**: Opération potentiellement lente car elle lock tous les shards.
+    /// Retourne tous les UTXOs d'une adresse (tous les assets).
     pub async fn utxos_by_address(&self, address: &str) -> Vec<(OutputId, TxOutput)> {
         let mut result = Vec::new();
 

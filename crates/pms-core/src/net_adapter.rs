@@ -68,8 +68,8 @@ where
         if let Ok(runtime_config) = self.store.get_runtime_config() {
             policy.update_from_runtime_config(&runtime_config);
             tracing::trace!(
-                "RuntimeConfig applied: fee_ratio={}, pow_bits={}",
-                runtime_config.platform_fee_bps,
+                "RuntimeConfig applied: coordinator_fee={}bps, pow_bits={}",
+                runtime_config.coordinator_fee_bps,
                 runtime_config.min_pow_bits
             );
         }
@@ -118,8 +118,7 @@ where
                     );
                     return Ok(PutResult::Rejected(format!(
                         "single_writer: only Coordinator can create blocks. Got signer: {}, expected: {}",
-                        &wb.signer_pk_hex,
-                        expected_pk
+                        &wb.signer_pk_hex, expected_pk
                     )));
                 }
             }
@@ -295,10 +294,11 @@ where
             match self.store.apply_config_update(update, &wb.id, timestamp) {
                 Ok(new_config) => {
                     tracing::info!(
-                        "✅ Config update applied: {} - fee_rate={}bps, platform_fee={}bps",
+                        "✅ Config update applied: {} - fee_rate={}bps, coordinator={}bps, treasury={}bps",
                         update.description(),
                         new_config.fee_rate_bps,
-                        new_config.platform_fee_bps
+                        new_config.coordinator_fee_bps,
+                        new_config.treasury_fee_bps
                     );
                 }
                 Err(e) => {
@@ -357,9 +357,9 @@ where
         // En mode Single Writer, on impose exactement 1 parent par bloc.
         // Cela garantit une chaîne linéaire au lieu d'un DAG.
         if settings.validation.enforce_single_writer {
-            let is_genesis = payload.as_ref().is_some_and(|p| {
-                matches!(p, PayloadEnvelope::Plain(PlainPayload::Genesis))
-            });
+            let is_genesis = payload
+                .as_ref()
+                .is_some_and(|p| matches!(p, PayloadEnvelope::Plain(PlainPayload::Genesis)));
 
             // Genesis: 0 parents, Non-genesis: exactement 1 parent
             if !is_genesis && wb.parents.len() != 1 {
@@ -451,19 +451,12 @@ where
         }
         let t_utxo_val = t_utxo_val_start.elapsed();
 
-        // 4.b) Validation DAG complète - BYPASSED for lock-free performance
-        // Parents are already validated via parents_exist_in_store (step 4.a)
-        // Double-spend is checked via ShardedUtxoSet (step 4.new)
-        // The locked DAG validation was causing 27-280ms latency!
+        // 4.b) DAG validation is handled by the lock-free pipeline:
+        //   - Parent existence: checked in step 4.a (RAM DAG + store)
+        //   - Double-spend / UTXO: checked in step 4.new (ShardedUtxoSet)
+        //   - Structural checks: steps 2.d, 2.e, 2.f above
+        // The legacy locked validate_block() was removed as it caused 27-280ms latency.
         let t_dag_val_start = std::time::Instant::now();
-        // DISABLED: This was the bottleneck!
-        // {
-        //     use crate::validate_block;
-        //     let dag = self.dag.lock().await;
-        //     if let Err(e) = validate_block(&dag, &block, policy) {
-        //         return Ok(PutResult::Rejected(format!("dag validation failed: {e}")));
-        //     }
-        // }
         let t_dag_val = t_dag_val_start.elapsed();
 
         // ============================================================
@@ -499,6 +492,7 @@ where
                             i as u32,
                             out.address.clone(),
                             out.amount.clone(),
+                            out.asset_id.clone(),
                         )
                     })
                     .collect();
@@ -527,27 +521,38 @@ where
                             i as u32,
                             out.address.clone(),
                             out.amount.clone(),
+                            out.asset_id.clone(),
                         )
                     })
                     .collect();
 
-                // Accumulation du pool de fees pour les nœuds
-                // Calcul: fee * (node_fee_bps / 10000)
+                // Accumulation du pool de fees pour le Treasury
+                // Calcul: fee * (treasury_fee_bps / 10000)
                 if let Ok(runtime_config) = self.store.get_runtime_config() {
-                    if runtime_config.node_fee_bps > 0 {
+                    if runtime_config.treasury_fee_bps > 0 {
                         // Parse fee (format décimal: "1.50000000")
                         if let Ok(fee_decimal) = rust_decimal::Decimal::from_str_exact(&tx.fee) {
-                            // Convertir en satoshis (8 décimales)
-                            let fee_sats = (fee_decimal * rust_decimal::Decimal::from(100_000_000))
+                            // Convertir en satoshis (8 décimales) with overflow protection
+                            let fee_sats = match (fee_decimal * rust_decimal::Decimal::from(100_000_000))
                                 .to_u64()
-                                .unwrap_or(0);
+                            {
+                                Some(v) => v,
+                                None => {
+                                    tracing::error!(
+                                        "Fee overflow: {} exceeds u64 range, capping",
+                                        fee_decimal
+                                    );
+                                    u64::MAX
+                                }
+                            };
 
-                            // Part pour les nœuds
-                            let node_portion =
-                                fee_sats * u64::from(runtime_config.node_fee_bps) / 10000;
+                            // Part pour le Treasury (use u128 intermediate to prevent overflow)
+                            let treasury_portion = ((fee_sats as u128)
+                                * u128::from(runtime_config.treasury_fee_bps)
+                                / 10000) as u64;
 
-                            if node_portion > 0 {
-                                if let Err(e) = self.store.add_to_fee_pool(node_portion) {
+                            if treasury_portion > 0 {
+                                if let Err(e) = self.store.add_to_fee_pool(treasury_portion) {
                                     tracing::warn!("Failed to add to fee pool: {}", e);
                                 }
                             }
@@ -569,15 +574,15 @@ where
                 let mut create = Vec::new();
                 let mut idx = 0u32;
 
-                // Add fee distribution outputs
+                // Add fee distribution outputs (always PMS native)
                 for out in fee_outputs {
-                    create.push((sb.id.clone(), idx, out.address.clone(), out.amount.clone()));
+                    create.push((sb.id.clone(), idx, out.address.clone(), out.amount.clone(), None));
                     idx += 1;
                 }
 
-                // Add block reward outputs
+                // Add block reward outputs (always PMS native)
                 for out in reward_outputs {
-                    create.push((sb.id.clone(), idx, out.address.clone(), out.amount.clone()));
+                    create.push((sb.id.clone(), idx, out.address.clone(), out.amount.clone(), None));
                     idx += 1;
                 }
 
@@ -609,7 +614,7 @@ where
                     })
                     .await;
             }
-            for (txid, idx, addr, amount) in &d.create {
+            for (txid, idx, addr, amount, asset_id) in &d.create {
                 self.utxos
                     .add(
                         pms_types::OutputId {
@@ -619,6 +624,7 @@ where
                         pms_types::TxOutput {
                             address: addr.clone(),
                             amount: amount.clone(),
+                            asset_id: asset_id.clone(),
                         },
                     )
                     .await;
@@ -706,6 +712,7 @@ where
                                             let out = pms_types::TxOutput {
                                                 address: reward_address.clone(),
                                                 amount: amount_str,
+                                                asset_id: None, // rewards always PMS
                                             };
 
                                             reward_utxos.push((
@@ -920,18 +927,34 @@ where
         (dec, count as u64)
     }
 
+    async fn circulating_supply_by_asset(&self, asset_id: Option<&str>) -> (rust_decimal::Decimal, u64) {
+        let (dec, count) = self.utxos.circulating_supply_by_asset(asset_id).await;
+        (dec, count as u64)
+    }
+
     async fn balance_by_address(&self, address: &str) -> rust_decimal::Decimal {
         self.utxos.balance_by_address(address).await
     }
 
-    async fn utxos_by_address(&self, address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+    async fn utxos_by_address(
+        &self,
+        address: &str,
+    ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
         self.utxos.utxos_by_address(address).await
     }
 
-    async fn add_utxo(&self, txid: String, index: u32, address: String, amount: String) {
+    async fn add_utxo(&self, txid: String, index: u32, address: String, amount: String, asset_id: Option<String>) {
         use pms_types::{OutputId, TxOutput};
         self.utxos
-            .add(OutputId { txid, index }, TxOutput { address, amount })
+            .add(OutputId { txid, index }, TxOutput { address, amount, asset_id })
             .await;
+    }
+
+    async fn remove_utxo(&self, output_id: &pms_types::OutputId) -> bool {
+        self.utxos.remove(output_id).await.is_some()
+    }
+
+    async fn get_utxo(&self, output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
+        self.utxos.get(output_id).await
     }
 }

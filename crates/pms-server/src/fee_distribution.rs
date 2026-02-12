@@ -3,21 +3,14 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 //
 // Ce module gère la distribution des frais de transaction entre :
-// - Le Treasury (wallets admin) : 30% par défaut
-// - Le créateur du bloc (node qui traite) : 70% par défaut
-// - [DÉSACTIVÉ: Single Writer] Les signataires des blocs parents : 0% par défaut
+// - Le Coordinator : 65% par défaut
+// - Le Treasury (wallets admin) : 35% par défaut
 //
-// Note: La part "Parents" est obsolète en mode Single Writer (chaîne linéaire).
-// Voir Chapitre 5 du Rust Book pour les structures et méthodes.
+// Mode centralisé : seul le Coordinator traite les transactions.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-use pms_storage::DagStorage;
-use pms_wallet::make_address;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crate::api::AppState;
 use anyhow::Result;
 use pms_storage::PutResult;
@@ -38,42 +31,35 @@ pub struct FeeOutput {
     pub amount: String,
 }
 
-/// Configuration pour la distribution des fees
+/// Configuration pour la distribution des fees (Coordinator + Treasury)
 #[derive(Debug, Clone)]
 pub struct FeeDistributionConfig {
+    /// Pourcentage vers le coordinator
+    pub coordinator_percent: u8,
     /// Pourcentage vers le treasury (admin wallets)
     pub treasury_percent: u8,
-    /// Pourcentage vers le créateur du bloc
-    pub creator_percent: u8,
-    /// Pourcentage vers les parents (réparti entre eux)
-    pub parents_percent: u8,
 }
 
 impl Default for FeeDistributionConfig {
     fn default() -> Self {
-        // [SINGLE WRITER] Nouvelle répartition (pas de "Parents")
-        // Treasury reçoit 65% (Sécurité/Réserve), Creator reçoit 35% (Infra)
         Self {
-            treasury_percent: 65,
-            creator_percent: 35,
-            parents_percent: 0, // Désactivé en mode Single Writer
+            coordinator_percent: 65,
+            treasury_percent: 35,
         }
     }
 }
 
 impl FeeDistributionConfig {
-    /// Crée une config depuis les settings (pour intégration future)
-    pub fn from_percents(treasury: u8, creator: u8, parents: u8) -> Self {
+    pub fn new(coordinator: u8, treasury: u8) -> Self {
         Self {
+            coordinator_percent: coordinator,
             treasury_percent: treasury,
-            creator_percent: creator,
-            parents_percent: parents,
         }
     }
 
     /// Valide que les pourcentages totalisent 100%
     pub fn validate(&self) -> Result<(), String> {
-        let total = self.treasury_percent + self.creator_percent + self.parents_percent;
+        let total = self.coordinator_percent + self.treasury_percent;
         if total != 100 {
             return Err(format!("Fee percentages must sum to 100, got {}", total));
         }
@@ -81,147 +67,61 @@ impl FeeDistributionConfig {
     }
 }
 
-/// Calcule les outputs de fee pour une transaction
+/// Calcule les outputs de fee pour une transaction (Coordinator + Treasury)
 ///
 /// # Arguments
 /// * `total_fee` - Le montant total des fees
-/// * `treasury_addresses` - Liste des adresses admin (choisie aléatoirement)
-/// * `creator_address` - Adresse du node créant le bloc
-/// * `parent_ids` - IDs des blocs parents
-/// * `store` - Store pour récupérer les signers des parents
-/// * `hrp` - Préfixe Bech32m (ex: "8e")
+/// * `treasury_addresses` - Liste des adresses treasury (choisie pseudo-aléatoirement)
+/// * `coordinator_address` - Adresse du coordinator
 /// * `config` - Configuration de distribution
 ///
 /// # Returns
 /// Liste des FeeOutput à inclure dans le payload
-pub async fn compute_fee_outputs<S: DagStorage>(
+pub fn compute_fee_outputs(
     total_fee: Decimal,
     treasury_addresses: &[String],
-    creator_address: &str,
-    parent_ids: &[String],
-    store: &Arc<S>,
-    hrp: &str,
+    coordinator_address: &str,
     config: &FeeDistributionConfig,
 ) -> Vec<FeeOutput> {
     let mut outputs = Vec::new();
 
-    // Valide la config (log si erreur mais continue avec fallback)
     if let Err(e) = config.validate() {
         eprintln!("[FEE] Config validation error: {}, using defaults", e);
     }
 
-    // Calcul des montants
+    let coordinator_amount =
+        total_fee * Decimal::from_u8(config.coordinator_percent).unwrap() / Decimal::from(100);
     let treasury_amount =
         total_fee * Decimal::from_u8(config.treasury_percent).unwrap() / Decimal::from(100);
-    let creator_amount =
-        total_fee * Decimal::from_u8(config.creator_percent).unwrap() / Decimal::from(100);
-    let parents_total =
-        total_fee * Decimal::from_u8(config.parents_percent).unwrap() / Decimal::from(100);
 
-    // 1) Treasury
+    // 1) Coordinator
+    if coordinator_amount > Decimal::ZERO {
+        outputs.push(FeeOutput {
+            address: coordinator_address.to_string(),
+            amount: coordinator_amount.normalize().to_string(),
+        });
+    }
+
+    // 2) Treasury
     if treasury_amount > Decimal::ZERO {
         if !treasury_addresses.is_empty() {
-            // Cas normal : on a des adresses de trésorerie
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos() as usize)
-                .unwrap_or(0);
-            let idx = seed % treasury_addresses.len();
+            use rand::Rng;
+            let idx = rand::rng().random_range(0..treasury_addresses.len());
             outputs.push(FeeOutput {
                 address: treasury_addresses[idx].clone(),
                 amount: treasury_amount.normalize().to_string(),
             });
         } else {
-            // [FALLBACK SÉCURITÉ] Si aucun wallet Treasury, tout va au Créateur pour éviter de brûler les fonds
-            eprintln!("[FEE] Warning: No treasury wallet configured. Fallback to creator.");
-            // On ajoute simplement ce montant à la part créateur existante ci-dessous ?
-            // Non, on l'ajoute directement ici comme un output distinct (ou on le somme).
-            // Pour être propre, on l'ajoute à la variable `creator_amount`.
-            // Mais `creator_amount` est une variable locale immutable issue du calcul initial.
-            // On va créer un output vers le creator tout de suite.
+            // Fallback: pas de treasury wallet -> tout au coordinator
+            eprintln!("[FEE] Warning: No treasury wallet configured. Fallback to coordinator.");
             outputs.push(FeeOutput {
-                address: creator_address.to_string(),
+                address: coordinator_address.to_string(),
                 amount: treasury_amount.normalize().to_string(),
             });
         }
     }
 
-    // 2) Créateur du bloc
-    if creator_amount > Decimal::ZERO {
-        outputs.push(FeeOutput {
-            address: creator_address.to_string(),
-            amount: creator_amount.normalize().to_string(),
-        });
-    }
-
-    // 3) Parents (split égal entre eux)
-    let parent_addresses = get_parent_signer_addresses(parent_ids, store, hrp).await;
-    if !parent_addresses.is_empty() && parents_total > Decimal::ZERO {
-        let per_parent = parents_total / Decimal::from(parent_addresses.len());
-        for addr in parent_addresses {
-            outputs.push(FeeOutput {
-                address: addr,
-                amount: per_parent.normalize().to_string(),
-            });
-        }
-    } else {
-        // Fallback: si pas de parents avec adresse, le créateur récupère cette part
-        if parents_total > Decimal::ZERO {
-            outputs.push(FeeOutput {
-                address: creator_address.to_string(),
-                amount: parents_total.normalize().to_string(),
-            });
-        }
-    }
-
     outputs
-}
-
-/// Récupère les adresses des signataires des blocs parents
-///
-/// Pour chaque parent :
-/// 1. Récupère le bloc depuis le store
-/// 2. Extrait signer_pk_hex et metadata.signer_x25519_hex
-/// 3. Construit l'adresse Bech32m
-///
-/// Les parents sans signer ou sans X25519 key sont ignorés.
-async fn get_parent_signer_addresses<S: DagStorage>(
-    parent_ids: &[String],
-    store: &Arc<S>,
-    hrp: &str,
-) -> Vec<String> {
-    let mut addresses = Vec::new();
-
-    for parent_id in parent_ids {
-        // Récupère le bloc parent
-        let parent_block = match store.get_block(parent_id).await {
-            Ok(Some(b)) => b,
-            _ => continue,
-        };
-
-        // Le signer_pk_hex est dans le StoredBlock
-        let signer_pk = &parent_block.signer_pk_hex;
-        if signer_pk.is_empty() {
-            continue;
-        }
-
-        // Le X25519 key est dans metadata
-        let x25519_hex = parent_block
-            .metadata
-            .as_ref()
-            .and_then(|m| m.signer_x25519_hex.clone())
-            .unwrap_or_default();
-
-        if x25519_hex.is_empty() {
-            continue;
-        }
-
-        // Construit l'adresse Bech32m
-        let address = make_address(hrp, signer_pk, &x25519_hex);
-        addresses.push(address);
-    }
-
-    addresses
 }
 
 /// Configuration pour les récompenses de bloc (inflation)
@@ -384,6 +284,7 @@ pub async fn perform_fee_distribution(
         all_outputs.push(TxOutput {
             address: wallet_address.clone(),
             amount: amount.to_string(),
+            asset_id: None,
         });
         total_distributed += *amount;
         tracing::info!(
@@ -413,6 +314,7 @@ pub async fn perform_fee_distribution(
                 all_outputs.push(TxOutput {
                     address: target.clone(),
                     amount: treasury_cut.to_string(),
+                    asset_id: None,
                 });
                 total_distributed += treasury_cut;
                 node_pool_amount -= treasury_cut;
@@ -491,6 +393,7 @@ pub async fn perform_fee_distribution(
                 all_outputs.push(TxOutput {
                     address: addr.clone(),
                     amount: share_amount.to_string(),
+                    asset_id: None,
                 });
                 total_distributed += share_amount;
                 tracing::info!(
@@ -593,6 +496,7 @@ pub async fn perform_fee_distribution(
                         idx as u32,
                         output.address.clone(),
                         output.amount.clone(),
+                        None, // rewards always PMS
                     )
                     .await;
             }
@@ -629,6 +533,231 @@ pub async fn perform_fee_distribution(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Scheduled Daily Inflation Mint
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Exécute un mint d'inflation quotidien basé sur le supply en circulation.
+/// daily_amount = circulating_supply * annual_inflation_percent / 365
+/// Distribué selon creator_reward_percent / treasury_reward_percent / burn_percent.
+pub async fn perform_daily_inflation_mint(state: &AppState) -> Result<DistributeFeesResult> {
+    let settings = &state.settings;
+    let node_wallet = &state.node_wallet;
+
+    // Only Coordinator can mint
+    let is_coordinator = if let Some(coord_pk) = &settings.validation.coordinator_public_key {
+        node_wallet.encoded_public_key() == *coord_pk
+    } else {
+        true
+    };
+
+    if !is_coordinator {
+        return Ok(DistributeFeesResult {
+            success: false,
+            reward_block_id: None,
+            total_distributed: "0".to_string(),
+            num_recipients: 0,
+        });
+    }
+
+    // 1. GET CIRCULATING SUPPLY
+    let (circulating_supply, _) = state.srv.adapter_arc().circulating_supply().await;
+    if circulating_supply <= Decimal::ZERO {
+        tracing::info!("📊 Inflation mint skipped: circulating supply is 0");
+        return Ok(DistributeFeesResult {
+            success: true,
+            reward_block_id: None,
+            total_distributed: "0".to_string(),
+            num_recipients: 0,
+        });
+    }
+
+    // 2. CALCULATE DAILY AMOUNT
+    let annual_rate = Decimal::from_f64(settings.fees.annual_inflation_percent)
+        .unwrap_or(Decimal::ZERO)
+        / Decimal::from(100);
+    let daily_amount = (circulating_supply * annual_rate / Decimal::from(365)).round_dp(8);
+
+    if daily_amount <= Decimal::ZERO {
+        tracing::info!("📊 Inflation mint skipped: daily amount rounds to 0");
+        return Ok(DistributeFeesResult {
+            success: true,
+            reward_block_id: None,
+            total_distributed: "0".to_string(),
+            num_recipients: 0,
+        });
+    }
+
+    tracing::info!(
+        "📊 Inflation mint: supply={}, rate={}%/year, daily={}",
+        circulating_supply,
+        settings.fees.annual_inflation_percent,
+        daily_amount
+    );
+
+    // 3. COMPUTE DISTRIBUTION
+    let creator_pct = Decimal::from(settings.fees.creator_reward_percent);
+    let treasury_pct = Decimal::from(settings.fees.treasury_reward_percent);
+    // burn_percent is implicit (not minted)
+
+    let coordinator_amount = (daily_amount * creator_pct / Decimal::from(100)).round_dp(8);
+    let treasury_amount = (daily_amount * treasury_pct / Decimal::from(100)).round_dp(8);
+
+    let coordinator_address = node_wallet.get_address("8e");
+    let treasury_addr = if !state.treasury_wallets.is_empty() {
+        state.treasury_wallets.list[0].clone()
+    } else if !settings.fees.treasury_addresses.is_empty() {
+        settings.fees.treasury_addresses[0].clone()
+    } else {
+        coordinator_address.clone()
+    };
+
+    let mut all_outputs: Vec<TxOutput> = Vec::new();
+    let mut total_distributed = Decimal::ZERO;
+
+    if coordinator_amount > Decimal::ZERO {
+        all_outputs.push(TxOutput {
+            address: coordinator_address.clone(),
+            amount: coordinator_amount.normalize().to_string(),
+            asset_id: None,
+        });
+        total_distributed += coordinator_amount;
+    }
+
+    if treasury_amount > Decimal::ZERO {
+        all_outputs.push(TxOutput {
+            address: treasury_addr.clone(),
+            amount: treasury_amount.normalize().to_string(),
+            asset_id: None,
+        });
+        total_distributed += treasury_amount;
+    }
+
+    if all_outputs.is_empty() {
+        return Ok(DistributeFeesResult {
+            success: true,
+            reward_block_id: None,
+            total_distributed: "0".to_string(),
+            num_recipients: 0,
+        });
+    }
+
+    let num_recipients = all_outputs.len();
+    let burned = daily_amount - total_distributed;
+
+    tracing::info!(
+        "📊 Inflation distribution: {} coordinator, {} treasury, {} burned",
+        coordinator_amount,
+        treasury_amount,
+        burned
+    );
+
+    // 4. RESOLVE PARENT
+    let parent_id = match state.srv.adapter_arc().top_tips(1).await {
+        Ok(tips) if !tips.is_empty() => tips[0].clone(),
+        _ => {
+            return Ok(DistributeFeesResult {
+                success: false,
+                reward_block_id: None,
+                total_distributed: "0".to_string(),
+                num_recipients: 0,
+            });
+        }
+    };
+
+    // 5. CREATE MINT BLOCK
+    let mint_payload = PlainPayload::Mint {
+        outputs: all_outputs.clone(),
+    };
+
+    let coordinator_x25519 = node_wallet.x25519_pub_hex().to_string();
+    let mut block = Block {
+        id: String::new(),
+        parents: vec![parent_id],
+        payload: Some(PayloadEnvelope::Plain(mint_payload)),
+        nonce: 0,
+        metadata: Some(pms_types_block::BlockMetadata {
+            signer_x25519_hex: Some(coordinator_x25519),
+            description: Some(format!(
+                "Daily inflation: {} PMS ({}%/year, {} burned)",
+                total_distributed, settings.fees.annual_inflation_percent, burned
+            )),
+            ..Default::default()
+        }),
+        signer_pk: None,
+        signature: None,
+    };
+    block.id = compute_block_id(&block.parents, &block.payload, block.nonce);
+
+    // PoW
+    let min_bits = state.srv.adapter_arc().min_pow_leading_zero_bits();
+    if min_bits > 0 {
+        while !check_pow_leading_zero_bits(&block.id, min_bits) {
+            block.nonce += 1;
+            block.id = compute_block_id(&block.parents, &block.payload, block.nonce);
+        }
+    }
+
+    // 6. BUILD WIREBLOCK & SIGN
+    let payload_json = serde_json::to_string(&block.payload)?;
+    let mut wb = WireBlock {
+        id: block.id.clone(),
+        parents: block.parents.clone(),
+        payload_json: Some(payload_json),
+        nonce: block.nonce,
+        network_id: state._cfg.network.network_id.clone(),
+        protocol_version: state._cfg.network.protocol_version as u16,
+        signer_pk_hex: node_wallet.encoded_public_key(),
+        signature_hex: String::new(),
+        metadata: block.metadata.clone(),
+    };
+
+    let msg = canonical_wireblock_message(&wb);
+    wb.signature_hex = node_wallet.sign(&msg)?;
+
+    // 7. PERSIST & UPDATE UTXOs
+    match state.srv.adapter_arc().persist_block(&wb).await {
+        Ok(PutResult::Inserted) => {
+            let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
+
+            for (idx, output) in all_outputs.iter().enumerate() {
+                state
+                    .srv
+                    .adapter_arc()
+                    .add_utxo(
+                        wb.id.clone(),
+                        idx as u32,
+                        output.address.clone(),
+                        output.amount.clone(),
+                        None, // inflation always PMS
+                    )
+                    .await;
+            }
+
+            tracing::info!(
+                "📊 Daily inflation minted: {} PMS to {} wallets (block: {})",
+                total_distributed,
+                num_recipients,
+                &wb.id[..16]
+            );
+
+            Ok(DistributeFeesResult {
+                success: true,
+                reward_block_id: Some(wb.id),
+                total_distributed: total_distributed.to_string(),
+                num_recipients,
+            })
+        }
+        Ok(PutResult::AlreadyExists) => {
+            anyhow::bail!("Inflation block already exists")
+        }
+        Ok(PutResult::Rejected(r)) => {
+            anyhow::bail!("Inflation block rejected: {}", r)
+        }
+        Err(e) => anyhow::bail!("Storage error: {}", e),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Unit Tests
 // ═══════════════════════════════════════════════════════════════════════════════
 #[cfg(test)]
@@ -642,16 +771,14 @@ mod tests {
     #[test]
     fn fee_distribution_config_default_sums_to_100() {
         let config = FeeDistributionConfig::default();
-        // [SINGLE WRITER] Nouvelle répartition: 65% Treasury, 35% Creator, 0% Parents
-        assert_eq!(config.treasury_percent, 65);
-        assert_eq!(config.creator_percent, 35);
-        assert_eq!(config.parents_percent, 0);
+        assert_eq!(config.coordinator_percent, 65);
+        assert_eq!(config.treasury_percent, 35);
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn fee_distribution_config_validation_rejects_invalid_sum() {
-        let config = FeeDistributionConfig::from_percents(20, 50, 40); // = 110
+        let config = FeeDistributionConfig::new(60, 50); // = 110
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("must sum to 100"));
@@ -659,7 +786,7 @@ mod tests {
 
     #[test]
     fn fee_distribution_config_accepts_valid_custom() {
-        let config = FeeDistributionConfig::from_percents(10, 60, 30);
+        let config = FeeDistributionConfig::new(70, 30);
         assert!(config.validate().is_ok());
     }
 

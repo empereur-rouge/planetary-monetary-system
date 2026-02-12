@@ -20,6 +20,7 @@ pub fn mk_block(id: &str, parents: Vec<BlockId>, meta: &WireMeta) -> StoredBlock
         outputs: vec![TxOutput {
             address: "addr".into(),
             amount: "1.0".into(),
+            asset_id: None,
         }],
     };
 

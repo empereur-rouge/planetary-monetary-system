@@ -16,6 +16,7 @@ fn mvp_encrypt_decrypt_confidential_type_only() {
         outputs: vec![TxOutput {
             address: "wallet123".to_string(),
             amount: "42.00000000".to_string(),
+            asset_id: None,
         }],
     };
     let pt = serde_json::to_vec(&mint_block).unwrap();
@@ -36,6 +37,7 @@ fn mvp_encrypt_decrypt_confidential_type_only() {
         PlainPayload::ConfigUpdate(_) => println!("Type = ConfigUpdate"),
         PlainPayload::Reward { .. } => println!("Type = Reward"),
         PlainPayload::EncryptedReward { .. } => println!("Type = EncryptedReward"),
+        PlainPayload::TokenCreate(_) => println!("Type = TokenCreate"),
     }
 
     // Vérif : bien du bon type

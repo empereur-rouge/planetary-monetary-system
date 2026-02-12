@@ -31,9 +31,8 @@ burst = 200
 [fees]
 epsilon = "0.001"
 mode = "uniform"
-treasury_fee_percent = 15
-creator_fee_percent = 45
-parents_fee_percent = 40
+treasury_fee_percent = 35
+coordinator_fee_percent = 65
 distribution_interval_sec = 600
 block_reward = "0.1"
 annual_inflation_percent = 3.0

@@ -40,13 +40,13 @@ async fn apply_tx_atomic_ok_then_conflict_rocks() -> Result<()> {
     let cf_utxo = ts.store.cf("utxo"); // cf("<prefix>:utxo")
     ts.store
         .db
-        .put_cf(cf_utxo, b"coinbase1:0", br#"{"addr":"A","amt":"1.0"}"#)?;
+        .put_cf(&cf_utxo, b"coinbase1:0", br#"{"addr":"A","amt":"1.0"}"#)?;
 
     // 2) t1 consomme coinbase1:0 -> OK (retour true)
     let t1 = UtxoApply {
         txid: "t1".into(),
         inputs: vec![("coinbase1".into(), 0)],
-        outputs: vec![("A".into(), "1.0".into())],
+        outputs: vec![("A".into(), "1.0".into(), None)],
     };
     let ok1 = ts.store.utxo_apply_tx_atomic(&t1).await?;
     assert!(ok1, "t1 doit passer");
@@ -55,7 +55,7 @@ async fn apply_tx_atomic_ok_then_conflict_rocks() -> Result<()> {
     let t2 = UtxoApply {
         txid: "t2".into(),
         inputs: vec![("coinbase1".into(), 0)],
-        outputs: vec![("B".into(), "1.0".into())],
+        outputs: vec![("B".into(), "1.0".into(), None)],
     };
     let ok2 = ts.store.utxo_apply_tx_atomic(&t2).await?;
     assert!(!ok2, "t2 doit être rejetée (double-spend)");

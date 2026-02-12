@@ -5,7 +5,12 @@ use crate::helpers::{be_to_ts, le_to_u64, now_ms_i64, parse_time_index_key, ts_t
 use crate::{DagStorage, PutResult, StoredBlock};
 use anyhow::{Context, Result};
 use pms_wire::WireBlock;
-use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options};
+use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options};
+
+/// Thread-safe DB handle usable with `Arc<PmsDb>`.
+/// `MultiThreaded` mode allows `create_cf(&self, ...)` (no `&mut self` needed),
+/// enabling dynamic column family creation for new ledgers at runtime.
+pub type PmsDb = DBWithThreadMode<MultiThreaded>;
 use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
@@ -16,8 +21,8 @@ use tokio::time::{Duration, MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 
 pub struct RocksStore {
-    /// handle RocksDB partagé
-    pub db: Arc<DB>,
+    /// handle RocksDB partagé (MultiThreaded for dynamic CF creation)
+    pub db: Arc<PmsDb>,
     /// nombre max de tips qu'on garde (même rôle que RedisStore.tip_limit)
     pub tip_limit: usize,
     /// namespace logique (équivalent prefix Redis)
@@ -86,6 +91,7 @@ impl RocksStore {
             "node_block_counts", // Block count per node: node_pk -> count
             "node_fee_pool", // Fee pool: single key "pool" -> amount (u64)
             "node_reward_addresses", // Reward addresses: node_pk -> address
+            "token_registry",        // Token registry: asset_id -> TokenMetadata (JSON)
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -93,7 +99,7 @@ impl RocksStore {
 
         // 3) Si le dossier existe déjà, on valide les CF existantes
         if Path::new(&path).exists() {
-            let existing = DB::list_cf(&db_opts, &path).unwrap_or_default();
+            let existing = PmsDb::list_cf(&db_opts, &path).unwrap_or_default();
             let existing_prefixed: BTreeSet<String> = existing
                 .iter()
                 .filter(|cf| *cf != "default")
@@ -106,7 +112,7 @@ impl RocksStore {
                 .any(|cf| !cf.starts_with(&format!("{prefix}:")));
             if wrong_prefix {
                 anyhow::bail!(
-                    "Incohérence: DB contient d’autres prefixes. prefix='{prefix}', existantes={existing_prefixed:?}"
+                    "Incohérence: DB contient d'autres prefixes. prefix='{prefix}', existantes={existing_prefixed:?}"
                 );
             }
 
@@ -156,8 +162,8 @@ impl RocksStore {
             cf_descs.push(ColumnFamilyDescriptor::new(name.clone(), opts));
         }
 
-        // 6) Ouverture DB + CF
-        let db = DB::open_cf_descriptors(&db_opts, &path, cf_descs)
+        // 6) Ouverture DB + CF (MultiThreaded for dynamic CF creation support)
+        let db = PmsDb::open_cf_descriptors(&db_opts, &path, cf_descs)
             .with_context(|| format!("open RocksDB at {}", path.display()))?;
 
         Ok(Self {
@@ -168,6 +174,135 @@ impl RocksStore {
         })
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Multi-Ledger: shared DB with multiple prefixes
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Liste des column families de base requises par chaque prefix/ledger.
+    pub const CF_NAMES: &[&str] = &[
+        "blocks",
+        "idx_blocks",
+        "by_time",
+        "id2ts",
+        "final",
+        "last_ms",
+        "children_count",
+        "tips",
+        "children_set",
+        "ver",
+        "utxo",
+        "utxo_spent",
+        "tx_applied",
+        "nft_ownership",
+        "nfts_by_owner",
+        "nft_block_ids",
+        "runtime_config",
+        "config_history",
+        "node_block_counts",
+        "node_fee_pool",
+        "node_reward_addresses",
+        "token_registry",
+    ];
+
+    /// Ouvre un RocksDB avec les column families de **plusieurs prefixes** à la fois.
+    /// Retourne un `Arc<DB>` partageable entre N `RocksStore` instances.
+    pub async fn open_db_multi_prefix(
+        path: &str,
+        prefixes: &[String],
+    ) -> Result<Arc<PmsDb>> {
+        let path = PathBuf::from(path);
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("create_dir_all({})", path.display()))?;
+
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+        db_opts.increase_parallelism(num_cpus::get() as i32);
+        db_opts.set_max_background_jobs(4);
+        db_opts.set_level_compaction_dynamic_level_bytes(true);
+        db_opts.set_write_buffer_size(64 * 1024 * 1024);
+        db_opts.set_max_write_buffer_number(3);
+        db_opts.set_target_file_size_base(64 * 1024 * 1024);
+
+        fn cf_opts_with_bloom() -> Options {
+            let mut opts = Options::default();
+            opts.set_optimize_filters_for_hits(true);
+            let mut table_opts = BlockBasedOptions::default();
+            table_opts.set_bloom_filter(10.0, false);
+            opts.set_block_based_table_factory(&table_opts);
+            opts
+        }
+
+        // Collect all required CFs across all prefixes
+        let mut cf_descs = vec![ColumnFamilyDescriptor::new(
+            "default".to_string(),
+            Options::default(),
+        )];
+
+        for prefix in prefixes {
+            for &cf_name in Self::CF_NAMES {
+                let full = format!("{prefix}:{cf_name}");
+                let mut opts = if cf_name == "blocks"
+                    || cf_name == "id2ts"
+                    || cf_name == "idx_blocks"
+                    || cf_name == "tips"
+                    || cf_name == "utxo"
+                    || cf_name == "utxo_spent"
+                {
+                    cf_opts_with_bloom()
+                } else {
+                    Options::default()
+                };
+                opts.create_if_missing(true);
+                cf_descs.push(ColumnFamilyDescriptor::new(full, opts));
+            }
+        }
+
+        // Also include any existing CFs that might belong to other prefixes
+        if path.exists() {
+            let existing = PmsDb::list_cf(&db_opts, &path).unwrap_or_default();
+            // Re-collect declared names properly
+            let mut declared_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+            declared_names.insert("default".to_string());
+            for prefix in prefixes {
+                for &cf_name in Self::CF_NAMES {
+                    declared_names.insert(format!("{prefix}:{cf_name}"));
+                }
+            }
+
+            for cf in existing {
+                if cf != "default" && !declared_names.contains(&cf) {
+                    let mut opts = Options::default();
+                    opts.create_if_missing(true);
+                    cf_descs.push(ColumnFamilyDescriptor::new(cf, opts));
+                }
+            }
+        }
+
+        let db = PmsDb::open_cf_descriptors(&db_opts, &path, cf_descs)
+            .with_context(|| format!("open multi-prefix RocksDB at {}", path.display()))?;
+
+        Ok(Arc::new(db))
+    }
+
+    /// Crée un `RocksStore` à partir d'un `Arc<DB>` déjà ouvert (multi-ledger).
+    /// Le prefix doit correspondre à des column families déjà créées dans la DB.
+    pub fn from_shared_db(
+        db: Arc<PmsDb>,
+        prefix: impl Into<String>,
+        tip_limit: usize,
+        checkpoint_interval_secs: Option<u64>,
+    ) -> Self {
+        let checkpoint_interval =
+            Duration::from_secs(checkpoint_interval_secs.unwrap_or(24 * 3600));
+        Self {
+            db,
+            tip_limit,
+            prefix: prefix.into(),
+            checkpoint_interval,
+        }
+    }
+
     pub async fn put_block(&self, b: &StoredBlock) -> Result<PutResult> {
         let cf_blocks = self.cf("blocks");
         let cf_idx = self.cf("idx_blocks");
@@ -175,9 +310,9 @@ impl RocksStore {
         let key = b.id.as_bytes();
 
         // 1. check existence
-        if self.db.get_cf(cf_blocks, key)?.is_some() {
+        if self.db.get_cf(&cf_blocks, key)?.is_some() {
             // déjà là → Always register in idx_blocks just in case (idempotent)
-            self.db.put_cf(cf_idx, key, b"")?;
+            self.db.put_cf(&cf_idx, key, b"")?;
             return Ok(PutResult::AlreadyExists);
         }
 
@@ -185,8 +320,8 @@ impl RocksStore {
         let json = serde_json::to_vec(b)?;
 
         // 3. store
-        self.db.put_cf(cf_blocks, key, json)?;
-        self.db.put_cf(cf_idx, key, b"")?;
+        self.db.put_cf(&cf_blocks, key, json)?;
+        self.db.put_cf(&cf_idx, key, b"")?;
 
         Ok(PutResult::Inserted)
     }
@@ -202,7 +337,7 @@ impl RocksStore {
 
         // Collect newest first (exactly tip_limit à garder)
         let mut newest: Vec<Vec<u8>> = Vec::new();
-        for kv in self.db.iterator_cf(cf_time, rocksdb::IteratorMode::End) {
+        for kv in self.db.iterator_cf(&cf_time, rocksdb::IteratorMode::End) {
             let (k, _v) = kv?;
             newest.push(k.to_vec());
             if newest.len() >= self.tip_limit {
@@ -220,13 +355,13 @@ impl RocksStore {
         let keep: HashSet<Vec<u8>> = newest.iter().cloned().collect();
 
         // Supprime toutes celles qui ne sont PAS dans keep
-        for kv in self.db.iterator_cf(cf_time, rocksdb::IteratorMode::Start) {
+        for kv in self.db.iterator_cf(&cf_time, rocksdb::IteratorMode::Start) {
             let (k, _v) = kv?;
             let kvec = k.to_vec();
             if !keep.contains(&kvec) {
-                self.db.delete_cf(cf_time, &kvec)?;
+                self.db.delete_cf(&cf_time, &kvec)?;
                 if let Some((_ts, bid)) = parse_time_index_key(&kvec) {
-                    self.db.delete_cf(cf_i2t, bid.as_bytes())?;
+                    self.db.delete_cf(&cf_i2t, bid.as_bytes())?;
                 }
             }
         }
@@ -243,7 +378,7 @@ impl RocksStore {
 
         // 1. Collecte toutes les tips : (id, ts)
         let mut tips: Vec<(String, i64)> = Vec::new();
-        for kv in self.db.iterator_cf(cf_tips, rocksdb::IteratorMode::Start) {
+        for kv in self.db.iterator_cf(&cf_tips, rocksdb::IteratorMode::Start) {
             let (k, v) = kv?;
             let id = String::from_utf8(k.to_vec())?;
             let ts = be_to_i64(&v)?; // on va écrire ce helper juste après
@@ -262,7 +397,7 @@ impl RocksStore {
 
         // 5. Supprime les autres dans cf_tips.
         for (id, _) in tips.into_iter().skip(self.tip_limit) {
-            self.db.delete_cf(cf_tips, id.as_bytes())?;
+            self.db.delete_cf(&cf_tips, id.as_bytes())?;
         }
 
         Ok(())
@@ -273,7 +408,7 @@ impl RocksStore {
         let cf_i2t = self.cf("id2ts");
         let mut out = HashMap::with_capacity(ids.len());
         for id in ids {
-            if let Some(raw) = self.db.get_cf(cf_i2t, id.as_bytes())? {
+            if let Some(raw) = self.db.get_cf(&cf_i2t, id.as_bytes())? {
                 if raw.len() == 8 {
                     let mut be = [0u8; 8];
                     be.copy_from_slice(&raw);
@@ -396,7 +531,7 @@ impl RocksStore {
         opts.create_if_missing(false);
 
         // false => pas d'erreur si des WAL existent, pas de lock exclusif
-        let db = DB::open_for_read_only(&opts, path, false)
+        let db = PmsDb::open_for_read_only(&opts, path, false)
             .map_err(|e| anyhow::anyhow!("open_read_only: {e}"))?;
 
         Ok(Self {
@@ -458,7 +593,7 @@ impl RocksStore {
         cf_names.push("default".to_string());
         cf_names.extend(required.into_iter());
 
-        let db = DB::open_cf_as_secondary(&db_opts, &primary, &secondary, &cf_names).with_context(
+        let db = PmsDb::open_cf_as_secondary(&db_opts, &primary, &secondary, &cf_names).with_context(
             || {
                 format!(
                     "open RocksDB secondary at {} (primary={})",
@@ -485,7 +620,7 @@ impl DagStorage for RocksStore {
 
     async fn get_block(&self, id: &str) -> Result<Option<StoredBlock>> {
         let cf_blocks = self.cf("blocks");
-        if let Some(v) = self.db.get_cf(cf_blocks, id.as_bytes())? {
+        if let Some(v) = self.db.get_cf(&cf_blocks, id.as_bytes())? {
             let sb: StoredBlock = serde_json::from_slice(&v)?;
             Ok(Some(sb))
         } else {
@@ -499,7 +634,7 @@ impl DagStorage for RocksStore {
 
         // 1. bump count
         let key_parent = parent.as_bytes();
-        let cur = self.db.get_cf(cf_count, key_parent)?;
+        let cur = self.db.get_cf(&cf_count, key_parent)?;
         let newcount = match cur {
             Some(v) if v.len() == 8 => {
                 let n = le_to_u64(&v);
@@ -507,7 +642,7 @@ impl DagStorage for RocksStore {
             }
             _ => 1u64,
         };
-        self.db.put_cf(cf_count, key_parent, u64_to_le(newcount))?;
+        self.db.put_cf(&cf_count, key_parent, u64_to_le(newcount))?;
 
         // 2. record edge parent->child
         // concat key: parent || 0x00 || child
@@ -515,13 +650,13 @@ impl DagStorage for RocksStore {
         edge_key.extend_from_slice(parent.as_bytes());
         edge_key.push(0);
         edge_key.extend_from_slice(child.as_bytes());
-        self.db.put_cf(cf_set, edge_key, b"")?;
+        self.db.put_cf(&cf_set, edge_key, b"")?;
 
         Ok(())
     }
     async fn children_count(&self, id: &str) -> Result<u64> {
         let cf_count = self.cf("children_count");
-        if let Some(v) = self.db.get_cf(cf_count, id.as_bytes())? {
+        if let Some(v) = self.db.get_cf(&cf_count, id.as_bytes())? {
             if v.len() == 8 {
                 return Ok(le_to_u64(&v));
             }
@@ -532,14 +667,14 @@ impl DagStorage for RocksStore {
     async fn add_tip(&self, id: &str) -> Result<()> {
         let cf_tips = self.cf("tips");
         let ts = now_ms_i64();
-        self.db.put_cf(cf_tips, id.as_bytes(), ts_to_be(ts))?;
+        self.db.put_cf(&cf_tips, id.as_bytes(), ts_to_be(ts))?;
         self.trim_tips()?;
         Ok(())
     }
 
     async fn remove_tip(&self, id: &str) -> Result<()> {
         let cf_tips = self.cf("tips");
-        self.db.delete_cf(cf_tips, id.as_bytes())?;
+        self.db.delete_cf(&cf_tips, id.as_bytes())?;
         Ok(())
     }
 
@@ -547,7 +682,7 @@ impl DagStorage for RocksStore {
         let cf_tips = self.cf("tips");
         // collect all tips
         let mut v: Vec<(String, i64)> = Vec::new();
-        for kv in self.db.iterator_cf(cf_tips, rocksdb::IteratorMode::Start) {
+        for kv in self.db.iterator_cf(&cf_tips, rocksdb::IteratorMode::Start) {
             let (k, val) = kv?;
             let id = String::from_utf8(k.to_vec())?;
             let ts = if val.len() == 8 { be_to_ts(&val) } else { 0 };
@@ -562,7 +697,7 @@ impl DagStorage for RocksStore {
     async fn all_block_ids(&self) -> Result<Vec<String>> {
         let cf_idx = self.cf("idx_blocks");
         let mut out = Vec::new();
-        for kv in self.db.iterator_cf(cf_idx, rocksdb::IteratorMode::Start) {
+        for kv in self.db.iterator_cf(&cf_idx, rocksdb::IteratorMode::Start) {
             let (k, _v) = kv?;
             out.push(String::from_utf8(k.to_vec())?);
         }
@@ -573,7 +708,7 @@ impl DagStorage for RocksStore {
         let cf_idx = self.cf("idx_blocks");
         let count = self
             .db
-            .iterator_cf(cf_idx, rocksdb::IteratorMode::Start)
+            .iterator_cf(&cf_idx, rocksdb::IteratorMode::Start)
             .count();
         Ok(count as u64)
     }
@@ -584,7 +719,7 @@ impl DagStorage for RocksStore {
 
         // 1. collect all ids from idx_blocks CF
         let mut ids = Vec::new();
-        for kv in iter_cf_all(&self.db, cf_idx) {
+        for kv in iter_cf_all(&self.db, &cf_idx) {
             let (k, _v) = kv?;
             let id = String::from_utf8(k.to_vec())?;
             ids.push(id);
@@ -593,7 +728,7 @@ impl DagStorage for RocksStore {
         // 2. fetch StoredBlock for each id
         let mut out: Vec<StoredBlock> = Vec::with_capacity(ids.len());
         for id in ids {
-            if let Some(raw) = self.db.get_cf(cf_blocks, id.as_bytes())? {
+            if let Some(raw) = self.db.get_cf(&cf_blocks, id.as_bytes())? {
                 let sb: StoredBlock = serde_json::from_slice(&raw)?;
                 out.push(sb);
             }
@@ -607,7 +742,7 @@ impl DagStorage for RocksStore {
         let cf_blocks = self.cf("blocks");
         let mut all_blocks = Vec::new();
 
-        for kv in iter_cf_all(&self.db, cf_blocks) {
+        for kv in iter_cf_all(&self.db, &cf_blocks) {
             let (_k, v) = kv?;
             let sb: StoredBlock = serde_json::from_slice(&v)?;
             all_blocks.push(sb);
@@ -636,7 +771,7 @@ impl DagStorage for RocksStore {
         let cf_children_set = self.cf("children_set");
 
         // Sanity: ensure CF exist (they should, since new() created them).
-        let _ = (cf_blocks, cf_idx, cf_tips, cf_children_cnt, cf_children_set);
+        let _ = (&cf_blocks, &cf_idx, &cf_tips, &cf_children_cnt, &cf_children_set);
 
         // 2. insert / update idx
         for b in &blocks {
@@ -655,14 +790,14 @@ impl DagStorage for RocksStore {
         //
         {
             // wipe children_count CF
-            for kv in iter_cf_all(&self.db, self.cf("children_count")) {
+            for kv in iter_cf_all(&self.db, &self.cf("children_count")) {
                 let (k, _) = kv?;
-                self.db.delete_cf(self.cf("children_count"), &k)?;
+                self.db.delete_cf(&self.cf("children_count"), &k)?;
             }
             // wipe children_set CF
-            for kv in iter_cf_all(&self.db, self.cf("children_set")) {
+            for kv in iter_cf_all(&self.db, &self.cf("children_set")) {
                 let (k, _) = kv?;
-                self.db.delete_cf(self.cf("children_set"), &k)?;
+                self.db.delete_cf(&self.cf("children_set"), &k)?;
             }
         }
 
@@ -678,9 +813,9 @@ impl DagStorage for RocksStore {
         //    - remove_tip(parent) pour chaque parent
         {
             // wipe tips
-            for kv in iter_cf_all(&self.db, cf_tips) {
+            for kv in iter_cf_all(&self.db, &cf_tips) {
                 let (k, _) = kv?;
-                self.db.delete_cf(cf_tips, &k)?;
+                self.db.delete_cf(&cf_tips, &k)?;
             }
 
             // tous en tip
@@ -715,7 +850,7 @@ impl DagStorage for RocksStore {
     async fn load_final(&self) -> Result<Vec<String>> {
         let cf_final = self.cf("final");
         let mut out = Vec::new();
-        for kv in self.db.iterator_cf(cf_final, rocksdb::IteratorMode::Start) {
+        for kv in self.db.iterator_cf(&cf_final, rocksdb::IteratorMode::Start) {
             let (k, _v) = kv?;
             out.push(String::from_utf8(k.to_vec())?);
         }
@@ -724,7 +859,7 @@ impl DagStorage for RocksStore {
 
     async fn load_last_milestone(&self) -> Result<Option<String>> {
         let cf_ms = self.cf("last_ms");
-        if let Some(v) = self.db.get_cf(cf_ms, b"last")? {
+        if let Some(v) = self.db.get_cf(&cf_ms, b"last")? {
             Ok(Some(String::from_utf8(v.to_vec())?))
         } else {
             Ok(None)
@@ -735,7 +870,7 @@ impl DagStorage for RocksStore {
         let cf_time = self.cf("by_time");
         let mut out = Vec::new();
 
-        for kv in self.db.iterator_cf(cf_time, rocksdb::IteratorMode::End) {
+        for kv in self.db.iterator_cf(&cf_time, rocksdb::IteratorMode::End) {
             let (k, _v) = kv?;
             if let Some((_ts, id)) = parse_time_index_key(&k) {
                 out.push(id);
@@ -765,7 +900,7 @@ impl DagStorage for RocksStore {
         };
 
         let mut ids = Vec::with_capacity(limit + 1);
-        let mut iter = self.db.iterator_cf(cf_time, start_mode);
+        let mut iter = self.db.iterator_cf(&cf_time, start_mode);
 
         // Si on a un curseur, la 1re entrée peut être exactement (ts,id) → sauter
         if after_ts.is_some() && after_id.is_some() {
@@ -800,7 +935,7 @@ impl DagStorage for RocksStore {
         // Construire next_cursor depuis le dernier id renvoyé
         let next_cursor = ids.last().and_then(|last_id| {
             self.db
-                .get_cf(cf_i2t, last_id.as_bytes())
+                .get_cf(&cf_i2t, last_id.as_bytes())
                 .ok()
                 .flatten()
                 .and_then(|v| {
@@ -822,7 +957,7 @@ impl DagStorage for RocksStore {
         let cf_blocks = self.cf("blocks");
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
-            if let Some(v) = self.db.get_cf(cf_blocks, id.as_bytes())? {
+            if let Some(v) = self.db.get_cf(&cf_blocks, id.as_bytes())? {
                 if let Ok(sb) = serde_json::from_slice::<StoredBlock>(&v) {
                     out.push(WireBlock {
                         id: sb.id,
@@ -847,14 +982,14 @@ impl DagStorage for RocksStore {
         }
         let cf_final = self.cf("final");
         for id in ids {
-            self.db.put_cf(cf_final, id.as_bytes(), b"")?;
+            self.db.put_cf(&cf_final, id.as_bytes(), b"")?;
         }
         Ok(())
     }
 
     async fn persist_last_milestone(&self, id: &str) -> Result<()> {
         let cf_ms = self.cf("last_ms");
-        self.db.put_cf(cf_ms, b"last", id.as_bytes())?;
+        self.db.put_cf(&cf_ms, b"last", id.as_bytes())?;
         Ok(())
     }
 
@@ -867,7 +1002,7 @@ impl DagStorage for RocksStore {
 
         // 0) bloc déjà là ? → idempotent
         let cf_blocks = self.cf("blocks");
-        if self.db.get_cf(cf_blocks, b.id.as_bytes())?.is_some() {
+        if self.db.get_cf(&cf_blocks, b.id.as_bytes())?.is_some() {
             return Ok(false);
         }
 
@@ -882,23 +1017,25 @@ impl DagStorage for RocksStore {
             // SPENDS
             for (txid, idx) in &d.spend {
                 let key = make_utxo_key(txid, *idx);
-                batch.delete_cf(cf_utxo, &key);
-                batch.put_cf(cf_utxo_spent, &key, b.id.as_bytes());
+                batch.delete_cf(&cf_utxo, &key);
+                batch.put_cf(&cf_utxo_spent, &key, b.id.as_bytes());
             }
 
             // CREATES
-            for (txid, idx, addr, amt) in &d.create {
+            for (txid, idx, addr, amt, asset_id) in &d.create {
                 let key = make_utxo_key(txid, *idx);
 
                 #[derive(Serialize)]
                 struct OutVal<'a> {
                     addr: &'a str,
                     amt: &'a str,
+                    #[serde(default, skip_serializing_if = "Option::is_none", rename = "ast")]
+                    asset_id: Option<&'a str>,
                 }
 
-                let val = OutVal { addr, amt };
+                let val = OutVal { addr, amt, asset_id: asset_id.as_deref() };
                 let json = serde_json::to_vec(&val)?;
-                batch.put_cf(cf_utxo, &key, &json);
+                batch.put_cf(&cf_utxo, &key, &json);
             }
         }
 
@@ -921,8 +1058,8 @@ fn make_utxo_key(txid: &str, index: u32) -> Vec<u8> {
 }
 
 fn iter_cf_all<'a>(
-    db: &'a rocksdb::DB,
-    cf: &'a rocksdb::ColumnFamily,
+    db: &'a PmsDb,
+    cf: &impl rocksdb::AsColumnFamilyRef,
 ) -> impl Iterator<Item = anyhow::Result<(Box<[u8]>, Box<[u8]>)>> + 'a {
     db.iterator_cf(cf, IteratorMode::Start).map(|res| {
         let (k, v) = res?;

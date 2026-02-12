@@ -31,3 +31,7 @@ pub const SEEN_CAPACITY: usize = 10_000; // borne mémoire
 pub const MAX_BLOCKS_BATCH: usize = 512; // (was 32)
 pub const MAX_INFLIGHT_GETBLOCK: usize = 100_000; // (was 128)
 pub const INFLIGHT_TTL_MS: u128 = 10_000; // 10s TTL pour les requêtes en vol
+
+// Orphan cache bounds (memory safety)
+pub const MAX_ORPHANS: usize = 10_000; // max orphan blocks in memory
+pub const MAX_PARENT_DEPS: usize = 20_000; // max parent→children dependency entries

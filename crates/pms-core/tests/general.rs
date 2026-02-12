@@ -22,6 +22,7 @@ fn test_export_dag_json() {
             outputs: vec![TxOutput {
                 address: format!("addr{i}"),
                 amount: "10.0".into(),
+                asset_id: None,
             }],
         };
         let pt = serde_json::to_vec(&mint_block).unwrap();

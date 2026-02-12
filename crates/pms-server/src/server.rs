@@ -8,7 +8,8 @@
 use crate::api;
 use crate::limits::{
     HANDSHAKE_TIMEOUT_MS, MAX_BLOCKS_BATCH, MAX_INFLIGHT_GETBLOCK, MAX_LINE_BYTES,
-    MAX_PARSE_ERRORS, PER_PEER_Q_CAP, PING_EVERY_MS, RATE_BURST, RATE_MSGS_PER_SEC, SEEN_CAPACITY,
+    MAX_ORPHANS, MAX_PARENT_DEPS, MAX_PARSE_ERRORS, PER_PEER_Q_CAP, PING_EVERY_MS,
+    RATE_BURST, RATE_MSGS_PER_SEC, SEEN_CAPACITY,
 };
 use crate::rate::TokenBucket;
 use crate::stats::Stats;
@@ -63,6 +64,9 @@ pub struct Server {
     broadcast_tx: mpsc::Sender<String>,
     allowed_peer_ips: Vec<String>,
     strict_whitelist: bool,
+    /// Multi-ledger manager (optional). When present, P2P routes blocks
+    /// to the correct ledger based on `network_id` in WireBlock metadata.
+    ledger_mgr: Option<Arc<pms_ledger::LedgerManager>>,
 }
 
 #[derive(Debug)]
@@ -86,6 +90,7 @@ impl Server {
         protocol_version: u32,
         node_wallet: Arc<Wallet>,
         p2p_config: &pms_config::P2pConfig,
+        ledger_mgr: Option<Arc<pms_ledger::LedgerManager>>,
     ) -> Arc<Self> {
         let node_id = node_wallet.encoded_public_key();
 
@@ -107,6 +112,7 @@ impl Server {
             broadcast_tx,
             allowed_peer_ips: p2p_config.allowed_peer_ips.clone(),
             strict_whitelist: p2p_config.strict_whitelist,
+            ledger_mgr,
         });
 
         // Lancement du worker d'agrégation
@@ -164,9 +170,121 @@ impl Server {
         let _ = self.broadcast(&NetMsg::Inv { ids }).await;
     }
 
+    /// Crée un Server "API-only" sans broadcast worker ni P2P.
+    /// Utilisé pour les routes per-ledger dans le multi-ledger,
+    /// où seul l'adapter est nécessaire (pas le réseau P2P).
+    pub fn api_only(
+        adapter: Arc<dyn NetDagAdapter>,
+        network_id: impl Into<String>,
+        protocol_version: u32,
+        node_wallet: Arc<Wallet>,
+    ) -> Arc<Self> {
+        let node_id = node_wallet.encoded_public_key();
+        // Canal dummy (jamais consommé — pas de broadcast worker)
+        let (broadcast_tx, _rx) = mpsc::channel(1);
+
+        Arc::new(Self {
+            adapter,
+            peers: DashMap::new(),
+            pong_waiters: DashMap::new(),
+            node_id,
+            seen_invs: Mutex::new(LruCache::new(SEEN_CAPACITY.try_into().unwrap())),
+            inflight_fetch: Mutex::new(HashMap::new()),
+            orphans: DashMap::new(),
+            parent_dependency: DashMap::new(),
+            network_id: network_id.into(),
+            protocol_version,
+            node_wallet,
+            broadcast_tx,
+            allowed_peer_ips: vec![],
+            strict_whitelist: false,
+            ledger_mgr: None,
+        })
+        // NOTE: pas de spawn_broadcast_worker ici — API-only
+    }
+
     pub fn adapter_arc(&self) -> Arc<dyn NetDagAdapter> {
         self.adapter.clone()
     }
+
+    // ── Multi-ledger P2P helpers ────────────────────────────────────
+
+    /// Returns the adapter for a specific `network_id` (from ledger manager),
+    /// falling back to the default adapter if no match or no ledger manager.
+    fn adapter_for_network(&self, network_id: &str) -> Arc<dyn NetDagAdapter> {
+        if let Some(mgr) = &self.ledger_mgr {
+            if let Some(l) = mgr.get_by_network_id(network_id) {
+                return l.adapter.clone();
+            }
+        }
+        self.adapter.clone()
+    }
+
+    /// Returns all adapters (one per ledger). Falls back to just the default
+    /// adapter if no ledger manager is configured.
+    fn all_adapters(&self) -> Vec<Arc<dyn NetDagAdapter>> {
+        if let Some(mgr) = &self.ledger_mgr {
+            mgr.list_all()
+                .into_iter()
+                .map(|l| l.adapter.clone())
+                .collect()
+        } else {
+            vec![self.adapter.clone()]
+        }
+    }
+
+    /// Checks if any ledger has this block.
+    async fn have_block_any(&self, id: &str) -> bool {
+        for a in self.all_adapters() {
+            if a.have_block(id).await {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Gets a block from any ledger.
+    async fn get_block_any(&self, id: &str) -> Option<WireBlock> {
+        for a in self.all_adapters() {
+            if let Ok(Some(wb)) = a.get_block(id).await {
+                return Some(wb);
+            }
+        }
+        None
+    }
+
+    /// Gets blocks by IDs, searching across all ledgers.
+    async fn get_blocks_any(&self, ids: &[String]) -> Vec<WireBlock> {
+        if self.ledger_mgr.is_none() {
+            return self
+                .adapter
+                .get_blocks_by_ids(ids)
+                .await
+                .unwrap_or_default();
+        }
+        let mut result = Vec::new();
+        for a in self.all_adapters() {
+            if let Ok(blocks) = a.get_blocks_by_ids(ids).await {
+                result.extend(blocks);
+            }
+        }
+        result
+    }
+
+    /// Aggregates tips from all ledgers.
+    async fn all_tips(&self, limit: usize) -> Vec<String> {
+        if self.ledger_mgr.is_none() {
+            return self.adapter.top_tips(limit).await.unwrap_or_default();
+        }
+        let mut all = Vec::new();
+        for a in self.all_adapters() {
+            if let Ok(tips) = a.top_tips(limit).await {
+                all.extend(tips);
+            }
+        }
+        all
+    }
+
     /// Ajoute un ID de bloc à la file de diffusion.
     /// Il sera groupé avec d'autres IDs pour optimiser le réseau.
     pub async fn enqueue_broadcast(&self, id: String) {
@@ -655,13 +773,27 @@ impl Server {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             let mut line = String::new();
+            // Idle timeout: disconnect peers that send nothing for 60s
+            let idle_timeout = Duration::from_secs(60);
 
-            while reader
-                .read_line(&mut line)
-                .await
-                .ok()
-                .filter(|&n| n > 0)
-                .is_some()
+            loop {
+                let read_result = tokio::time::timeout(
+                    idle_timeout,
+                    reader.read_line(&mut line),
+                ).await;
+
+                let bytes_read = match read_result {
+                    Ok(Ok(n)) if n > 0 => n,
+                    Ok(Ok(_)) => break,  // EOF
+                    Ok(Err(_)) => break, // Read error
+                    Err(_) => {
+                        // Timeout: peer idle too long
+                        tracing::debug!("Peer {} idle timeout ({}s)", sa, idle_timeout.as_secs());
+                        this.peers.remove(&sa);
+                        break;
+                    }
+                };
+                let _ = bytes_read;
             {
                 if !handshaked && Instant::now() > handshake_deadline {
                     this.peers.remove(&sa);
@@ -792,8 +924,8 @@ impl Server {
                         eprintln!("[SRV] {} <- Inv({} ids)", sa, ids.len());
                         let mut to_fetch = Vec::with_capacity(ids.len());
                         for id in ids {
-                            // Check storage first (authoritative)
-                            if this.adapter.have_block(&id).await {
+                            // Check all ledgers (multi-ledger aware)
+                            if this.have_block_any(&id).await {
                                 continue;
                             }
                             // Check gossip cache - DISABLED: was causing premature filtering
@@ -829,19 +961,19 @@ impl Server {
                         }
                     }
                     NetMsg::GetBlock { id } => {
-                        if let Ok(Some(wb)) = this.adapter.get_block(&id).await {
+                        // Search across all ledgers
+                        if let Some(wb) = this.get_block_any(&id).await {
                             let _ = this.unicast(&sa, NetMsg::Blocks { blocks: vec![wb] }).await;
                         }
                     }
                     NetMsg::GetBlocks { ids } => {
                         eprintln!("[SRV] {sa} -> GetBlocks({} ids)", ids.len());
-                        if let Ok(blocks) = this.adapter.get_blocks_by_ids(&ids).await {
-                            if !blocks.is_empty() {
-                                eprintln!("[SRV] Sending {} blocks to {}", blocks.len(), sa);
-                                let _ = this.unicast(&sa, NetMsg::Blocks { blocks }).await;
-                            } else {
-                                eprintln!("[SRV] GetBlocks returned empty for {} ids", ids.len());
-                            }
+                        let blocks = this.get_blocks_any(&ids).await;
+                        if !blocks.is_empty() {
+                            eprintln!("[SRV] Sending {} blocks to {}", blocks.len(), sa);
+                            let _ = this.unicast(&sa, NetMsg::Blocks { blocks }).await;
+                        } else {
+                            eprintln!("[SRV] GetBlocks returned empty for {} ids", ids.len());
                         }
                     }
                     NetMsg::Blocks { mut blocks } => {
@@ -851,7 +983,8 @@ impl Server {
                         this.process_incoming_blocks(blocks, sa).await;
                     }
                     NetMsg::GetTips { limit } => {
-                        let ids = this.adapter.top_tips(limit).await.unwrap_or_default();
+                        // Aggregate tips from all ledgers
+                        let ids = this.all_tips(limit).await;
                         println!("[SRV] Serving GetTips: {} tips", ids.len());
                         let _ = this.unicast(&sa, NetMsg::Tips { ids }).await;
                     }
@@ -859,7 +992,8 @@ impl Server {
                         let mut to_fetch = Vec::new();
                         println!("[SRV] Processing Tips: {} ids", ids.len());
                         for id in ids {
-                            if this.adapter.have_block(&id).await {
+                            // Check all ledgers
+                            if this.have_block_any(&id).await {
                                 continue;
                             }
                             // BUG FIX: Don't check seen_inv for Tips!
@@ -892,7 +1026,8 @@ impl Server {
                     NetMsg::Hello { .. } | NetMsg::HelloAck { .. } => {}
                 }
                 line.clear();
-            }
+            } // end inner block
+            } // end loop
             this.pong_waiters.remove(&sa);
         });
 
@@ -1010,8 +1145,15 @@ impl Server {
         let mut process_queue = blocks.into();
 
         while let Some(mut wb) = process_queue.pop_front() {
-            wb.network_id = self.network_id.clone();
-            wb.protocol_version = self.protocol_version as u16;
+            // Multi-ledger: if block has no network_id, use the server's default
+            if wb.network_id.is_empty() {
+                wb.network_id = self.network_id.clone();
+            }
+            if wb.protocol_version == 0 {
+                wb.protocol_version = self.protocol_version as u16;
+            }
+            // Resolve the correct adapter for this block's network
+            let block_adapter = self.adapter_for_network(&wb.network_id);
 
             let was_inflight = {
                 let mut inflight = self.inflight_fetch.lock().await;
@@ -1023,8 +1165,8 @@ impl Server {
                 continue; // déjà vu en gossip récemment et pas demandé explicitement
             }
             */
-            eprintln!("[SRV] Processing block {}", wb.id.get(..8).unwrap_or(&wb.id));
-            if self.adapter.have_block(&wb.id).await {
+            eprintln!("[SRV] Processing block {} (net={})", wb.id.get(..8).unwrap_or(&wb.id), &wb.network_id);
+            if block_adapter.have_block(&wb.id).await {
                 continue;
             }
 
@@ -1034,7 +1176,7 @@ impl Server {
             let mut missing_any = false;
 
             for p in &wb.parents {
-                if !self.adapter.have_block(p).await {
+                if !block_adapter.have_block(p).await {
                     missing_any = true;
                     // If not in orphans, we need to fetch it.
                     // If it IS in orphans, we are already waiting for its parents, so just depend on it.
@@ -1042,22 +1184,33 @@ impl Server {
                         missing_to_fetch.push(p.clone());
                     }
 
-                    // Register dependency: when 'p' arrives, re-process 'wb'
-                    eprintln!("[SRV] Add dep: parent={} child={}", p.get(..8).unwrap_or(p), wb.id.get(..8).unwrap_or(&wb.id));
-                    self.parent_dependency
-                        .entry(p.clone())
-                        .or_default()
-                        .push(wb.id.clone());
+                    // Register dependency: when 'p' arrives, re-process 'wb' (bounded)
+                    if self.parent_dependency.len() < MAX_PARENT_DEPS {
+                        eprintln!("[SRV] Add dep: parent={} child={}", p.get(..8).unwrap_or(p), wb.id.get(..8).unwrap_or(&wb.id));
+                        self.parent_dependency
+                            .entry(p.clone())
+                            .or_default()
+                            .push(wb.id.clone());
+                    }
                 }
             }
 
             if missing_any {
+                // SAFETY: Enforce orphan cache bound to prevent memory exhaustion
+                if self.orphans.len() >= MAX_ORPHANS {
+                    tracing::warn!(
+                        "Orphan cache full ({} entries), dropping block {}",
+                        self.orphans.len(),
+                        wb.id.get(..8).unwrap_or(&wb.id)
+                    );
+                    continue;
+                }
+
                 eprintln!(
                     "[SRV] Orphan {} missing {} parents",
                     wb.id.get(..8).unwrap_or(&wb.id),
                     missing_to_fetch.len()
                 );
-                // ====== BENCHMARK: Log orphelin ======
                 tracing::info!(
                     target = "pms_bench",
                     event = "block_orphaned",
@@ -1065,8 +1218,6 @@ impl Server {
                     missing_parents = missing_to_fetch.len(),
                     "Block orphaned waiting for parents"
                 );
-                // =====================================
-                // eprintln!("[SRV] {sa} Orphan {} missing {} parents (fetching {})", wb.id, wb.parents.len(), missing_to_fetch.len());
                 self.orphans.insert(wb.id.clone(), wb.clone());
 
                 for pid in missing_to_fetch {
@@ -1086,8 +1237,8 @@ impl Server {
             let persist_start = tokio::time::Instant::now();
             // =======================================
 
-            println!("[SRV] Calling persist_block for {}", wb.id.get(..8).unwrap_or(&wb.id));
-            let result = self.adapter.persist_block(&wb).await;
+            println!("[SRV] Calling persist_block for {} (net={})", wb.id.get(..8).unwrap_or(&wb.id), &wb.network_id);
+            let result = block_adapter.persist_block(&wb).await;
             println!("[SRV] persist_block returned: {:?}", result);
 
             match result {
@@ -1152,36 +1303,34 @@ impl Server {
                     // ==================================
                     eprintln!("[SRV] {sa} persist REJECT id={} reason={}", wb.id, reason);
 
-                    if reason.contains("parent") && reason.contains("missing") {
-                        let parts: Vec<&str> = reason.split_whitespace().collect();
-                        if let Some(idx) = parts.iter().position(|&r| r == "parent") {
-                            if let Some(pid) = parts.get(idx + 1) {
-                                let pid_clean = pid.trim().to_string();
-                                if pid_clean.len() == 64 {
-                                    eprintln!(
-                                        "[SRV] {sa} -> GetBlock(missing parent={})",
-                                        pid_clean
-                                    );
+                    // Extract missing parent ID from structured rejection messages
+                    let missing_parent_id = extract_missing_parent_id(&reason);
+                    if let Some(pid_clean) = missing_parent_id {
+                        eprintln!(
+                            "[SRV] {sa} -> GetBlock(missing parent={})",
+                            pid_clean
+                        );
 
-                                    // Save orphan & dep
-                                    self.orphans.insert(wb.id.clone(), wb.clone());
-                                    self.parent_dependency
-                                        .entry(pid_clean.clone())
-                                        .or_default()
-                                        .push(wb.id.clone());
-
-                                    // Request parent
-                                    let mut inflight = self.inflight_fetch.lock().await;
-                                    if inflight.len() < crate::limits::MAX_INFLIGHT_GETBLOCK
-                                        || inflight.contains_key(&pid_clean)
-                                    {
-                                        inflight.insert(pid_clean.clone(), Instant::now());
-                                        let _ = self
-                                            .broadcast(&NetMsg::GetBlock { id: pid_clean })
-                                            .await;
-                                    }
-                                }
+                        // Save orphan & dep (bounded)
+                        if self.orphans.len() < MAX_ORPHANS {
+                            self.orphans.insert(wb.id.clone(), wb.clone());
+                            if self.parent_dependency.len() < MAX_PARENT_DEPS {
+                                self.parent_dependency
+                                    .entry(pid_clean.clone())
+                                    .or_default()
+                                    .push(wb.id.clone());
                             }
+                        }
+
+                        // Request parent
+                        let mut inflight = self.inflight_fetch.lock().await;
+                        if inflight.len() < crate::limits::MAX_INFLIGHT_GETBLOCK
+                            || inflight.contains_key(&pid_clean)
+                        {
+                            inflight.insert(pid_clean.clone(), Instant::now());
+                            let _ = self
+                                .broadcast(&NetMsg::GetBlock { id: pid_clean })
+                                .await;
                         }
                     } else {
                         crate::metrics::BLOCKS_REJECTED.inc();
@@ -1200,5 +1349,22 @@ impl Server {
         while cache.len() > SEEN_CAPACITY {
             cache.pop_lru();
         }
+    }
+}
+
+/// Extracts a 64-char hex parent ID from a rejection reason string.
+/// Handles formats like:
+///   - "dag validation failed: parent {hex64} not found"
+///   - "parent {hex64} missing"
+fn extract_missing_parent_id(reason: &str) -> Option<String> {
+    // Look for "parent" keyword followed by a 64-char hex string
+    let parts: Vec<&str> = reason.split_whitespace().collect();
+    let idx = parts.iter().position(|&r| r == "parent")?;
+    let candidate = parts.get(idx + 1)?;
+    let clean = candidate.trim();
+    if clean.len() == 64 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(clean.to_string())
+    } else {
+        None
     }
 }

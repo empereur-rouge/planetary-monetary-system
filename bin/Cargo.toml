@@ -16,6 +16,7 @@ pms-utils = { path = "../crates/pms-utils" }
 pms-config = { path = "../crates/pms-config" }
 pms-wire = { path = "../crates/pms-wire" }
 pms-wallet = { path = "../crates/pms-wallet" }
+pms-ledger = { path = "../crates/pms-ledger" }
 tokio = "1.47.1"
 owo-colors = "4"
 tracing-log = "0.2.0"

@@ -41,17 +41,24 @@ rate_limit_rps = 5000
 burst = 5000
 
 [fees]
-treasury_addresses = ["pms1urnkfvgyzdtkny9rnhkm0prcgrsrcpnd787qgx0hxj75rrsfteurau68t5uqhlqydfke72wmxzcvg6rglsrqlfjcn3"]
+treasury_addresses = ["pms1622lzmxyzup3s0a9zk93qczucx6reczg2sswqp382zst9h7g5tsc2xc8madxf0984lpgjpxu0drhaals3gysv4zm88"]
 epsilon = "0.001"
 scan_limit = 2000
 mode = "uniform"
 enforce_fee_recipient = false  # Désactivé pour les tests
 distribution_interval_sec = 10 # Distribution rapide pour les tests (10s)
+# Scheduled Inflation Mint
+daily_inflation_enabled = true
+daily_inflation_interval_sec = 60  # 60s pour tester (86400 = 24h en prod)
+annual_inflation_percent = 3.0
+treasury_reward_percent = 20
+creator_reward_percent = 70
+burn_percent = 10
 # AUTHORITY PUBLIC KEYS - List of Authorities that can sign Cube attributes
 # Each key represents a different application backend allowed to generate Cubes.
 # Format: SEC1 compressed hex (e.g., "03..." for secp256k1)
 authority_public_keys = [
-    "03a1829d324538dee1265c879b720e42e15d19a4dbf464f0943a03b5d29aad02ff", # Clicker backend (Coordinator key for testing)
+    "02f251bc56b8916b0ae3fc950fbc10a12f5e8fb96feaa76728142b60351d7642d0",
 ]
 authority_keys_last_rotation = "2026-01-15"
 
@@ -79,5 +86,5 @@ enforce_fee_recipient = false    # Désactivé pour les tests
 
 # COORDINATOR PUBLIC KEY - Dérivée de node1.key
 # Seul Node 1 peut minter car il a la clé privée correspondante
-coordinator_public_key = "048ed8777536028e76a4c381d72c0d51b04a38df785ede531058667c062797aab63623816bea08882ea1f7f31b92d30ca59208b21ff7d3bc653855be530ad470d4"
-coordinator_x25519_public_key = "30d023a2d8c1fdd7f2b6b58d5051d17db1ddd52bb3213c9cf8b8dac0f60cfa3b"
+coordinator_public_key = "04f251bc56b8916b0ae3fc950fbc10a12f5e8fb96feaa76728142b60351d7642d0239e440792757e6b064d25e7647639e6e5652feb8010fccb09ab026b818103fc"
+coordinator_x25519_public_key = "a080765ffca10c779d84a2f7f18726413b204bd4449d20cbbe21c87cfc6b4f2a"

@@ -3,7 +3,7 @@ use crate::validations::amount::{amount_parse_non_neg_dec, amount_parse_pos_dec}
 use pms_errors::ValidationError;
 use pms_types::{PayloadEnvelope, PlainPayload, Transaction};
 use rust_decimal::Decimal;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub fn utxo_no_double_spend(dag: &Dag, tx: &Transaction) -> Result<(), ValidationError> {
     let mut seen = HashSet::new();
@@ -60,7 +60,7 @@ pub fn utxo_sufficient_funds(dag: &Dag, tx: &Transaction) -> Result<(), Validati
 /// Vérifie:
 /// 1. Pas de doublons internes (inputs).
 /// 2. Existence des inputs dans l'UTXO set (anti-double-spend + input exists).
-/// 3. Solvabilité (Inputs >= Outputs + Fee).
+/// 3. Conservation par asset : sum(inputs[asset]) == sum(outputs[asset]) pour chaque asset.
 pub async fn validate_transaction_async(
     utxos: &crate::utxo::ShardedUtxoSet,
     tx: &Transaction,
@@ -74,40 +74,55 @@ pub async fn validate_transaction_async(
         }
     }
 
-    // 2. Récupération des inputs (lecture parallèle par shard)
-    let mut out_sum = Decimal::ZERO;
-    for o in &tx.outputs {
-        out_sum += amount_parse_pos_dec(&o.amount)?;
-    }
-    // let need = out_sum + fee; // implicit fees forbidden
-
-    let mut in_sum = Decimal::ZERO;
-
+    // 2. Grouper les inputs par asset_id
+    let mut inputs_by_asset: HashMap<Option<String>, Decimal> = HashMap::new();
     for inp in &tx.inputs {
-        // Lecture async sans bloquer tout le monde
         let output_opt = utxos.get(&inp.out).await;
         match output_opt {
             Some(out) => {
-                in_sum += amount_parse_pos_dec(&out.amount)?;
+                let amount = amount_parse_pos_dec(&out.amount)?;
+                *inputs_by_asset.entry(out.asset_id.clone()).or_insert(Decimal::ZERO) += amount;
             }
             None => {
-                // Si pas dans l'UTXO set => soit n'existe pas, soit déjà dépensé.
-                // Dans les deux cas : invalide.
                 tracing::warn!("Input missing: {:?}", inp.out);
                 return Err(ValidationError::MissingInput);
             }
         }
     }
 
-    if in_sum != out_sum {
-        tracing::warn!(
-            "Strict validation failed: inputs ({}) != outputs ({}) (implicit fees not allowed)",
-            in_sum,
-            out_sum
-        );
-        return Err(ValidationError::InsufficientFunds); // Or a new error variant "BalancedTransactionRequired"?
-        // Using InsufficientFunds for compatibility or add new variant if possible.
-        // Actually, let's keep it simple.
+    // 3. Grouper les outputs par asset_id
+    let mut outputs_by_asset: HashMap<Option<String>, Decimal> = HashMap::new();
+    for o in &tx.outputs {
+        let amount = amount_parse_pos_dec(&o.amount)?;
+        *outputs_by_asset.entry(o.asset_id.clone()).or_insert(Decimal::ZERO) += amount;
+    }
+
+    // 4. Vérifier la conservation par asset
+    for (asset_id, in_sum) in &inputs_by_asset {
+        let out_sum = outputs_by_asset.get(asset_id).copied().unwrap_or(Decimal::ZERO);
+        if *in_sum != out_sum {
+            tracing::warn!(
+                "Asset balance mismatch: asset={:?}, inputs={}, outputs={}",
+                asset_id, in_sum, out_sum
+            );
+            return Err(ValidationError::AssetBalanceMismatch {
+                asset_id: asset_id.clone(),
+                inputs: in_sum.to_string(),
+                outputs: out_sum.to_string(),
+            });
+        }
+    }
+
+    // 5. Vérifier qu'aucun output ne crée un asset sans input correspondant
+    for (asset_id, _) in &outputs_by_asset {
+        if !inputs_by_asset.contains_key(asset_id) {
+            tracing::warn!("Output creates asset without input: {:?}", asset_id);
+            return Err(ValidationError::AssetBalanceMismatch {
+                asset_id: asset_id.clone(),
+                inputs: "0".to_string(),
+                outputs: outputs_by_asset[asset_id].to_string(),
+            });
+        }
     }
 
     Ok(())

@@ -40,6 +40,7 @@ async fn test_metadata_persistence_and_supply() {
     let output = TxOutput {
         address: "addr_test".to_string(),
         amount: "100.0".to_string(),
+        asset_id: None,
     };
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
         outputs: vec![output],
@@ -94,6 +95,7 @@ async fn test_metadata_persistence_and_supply() {
             TxOutput {
                 address: "addr_test".into(),
                 amount: "100.0".into(),
+                asset_id: None,
             },
         )
         .await;

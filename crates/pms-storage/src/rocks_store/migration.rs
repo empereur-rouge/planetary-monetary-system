@@ -1,16 +1,18 @@
 use crate::rocks_store::store::RocksStore;
 use crate::{CURRENT_VER, DagStorage, MigError};
 use anyhow::anyhow;
+use std::sync::Arc;
+use rocksdb::BoundColumnFamily;
 
 impl RocksStore {
     // --- helpers internes versionning ------------------------------------
 
-    fn cf_ver(&self) -> &rocksdb::ColumnFamily {
+    fn cf_ver(&self) -> Arc<BoundColumnFamily<'_>> {
         self.cf("ver")
     }
 
     pub async fn get_version(&self) -> anyhow::Result<i64> {
-        if let Some(v) = self.db.get_cf(self.cf_ver(), b"ver")? {
+        if let Some(v) = self.db.get_cf(&self.cf_ver(), b"ver")? {
             let s = String::from_utf8(v)?;
             let parsed: i64 = s.parse().unwrap_or(0);
             Ok(parsed)
@@ -21,7 +23,7 @@ impl RocksStore {
 
     async fn set_version(&self, v: i64) -> anyhow::Result<()> {
         let s = v.to_string();
-        self.db.put_cf(self.cf_ver(), b"ver", s.as_bytes())?;
+        self.db.put_cf(&self.cf_ver(), b"ver", s.as_bytes())?;
         Ok(())
     }
 
@@ -58,11 +60,11 @@ impl RocksStore {
         // Avant: .map_err(MigError::Any)?
         // Après: closure qui convertit rocksdb::Error -> anyhow::Error -> MigError
         self.db
-            .put_cf(cf_idx, b"__init__", b"")
+            .put_cf(&cf_idx, b"__init__", b"")
             .map_err(|e| MigError::Any(anyhow!(e)))?;
 
         self.db
-            .delete_cf(cf_idx, b"__init__")
+            .delete_cf(&cf_idx, b"__init__")
             .map_err(|e| MigError::Any(anyhow!(e)))?;
 
         Ok(())
@@ -84,8 +86,13 @@ impl RocksStore {
     // les doubles-incréments si la migration est rejouée (même choix que Redis).
     async fn mig_1_to_2(&self) -> std::result::Result<(), MigError> {
         let ids = self.all_block_ids().await.map_err(MigError::Any)?;
+        let total = ids.len();
+        tracing::info!("Migration 1→2: rebuilding tips for {} blocks", total);
 
-        for id in ids {
+        for (i, id) in ids.iter().enumerate() {
+            if i > 0 && i % 10_000 == 0 {
+                tracing::info!("Migration 1→2: processed {}/{} blocks ({:.1}%)", i, total, (i as f64 / total as f64) * 100.0);
+            }
             let maybe_b = self.get_block(&id).await.map_err(MigError::Any)?;
             let b = match maybe_b {
                 Some(b) => b,
@@ -95,12 +102,11 @@ impl RocksStore {
             self.add_tip(&b.id).await.map_err(MigError::Any)?;
 
             for p in &b.parents {
-                // si tu voulais aussi reconstruire children_count:
-                // self.add_child_edge(p, &b.id).await.map_err(MigError::Any)?;
-                let _ = self.remove_tip(p).await; // ignore l'erreur comme Redis le faisait
+                let _ = self.remove_tip(p).await;
             }
         }
 
+        tracing::info!("Migration 1→2: completed ({} blocks processed)", total);
         Ok(())
     }
 }

@@ -1,7 +1,26 @@
 # Changelog
 
 ## [Unreleased]
+- **fix(utxo)**: Fixed bug where encrypted transactions didn't update UTXO cache. Added `remove_utxo()` method to `NetDagAdapter` trait and implemented manual UTXO delta application in `wallet_send_tx` for encrypted payloads.
+- **feat(interface)**: Added `remove_utxo()` and `get_utxo()` methods to `NetDagAdapter` trait for complete UTXO cache management.
+- **test(server)**: Added `encrypted_utxo_delta_test.rs` with 2 regression tests verifying encrypted transactions correctly consume inputs and create outputs in UTXO cache.
+- **fix(token)**: Fixed fee precision bug - fees could exceed 8 decimals (e.g., `0.00106478824`). Enriched `Amount` type with arithmetic operators (`Add`, `Sub`, `Mul`, `Div`) that auto-round to 8 decimals after each operation.
+- **refactor(token)**: BREAKING: Simplified `FeePolicy::new()` signature from 3 args to 2 args (removed `precision` parameter, now uses `Amount::DECIMALS` constant). `compute_fee()` now returns `Amount` instead of `String`.
+- **test(server)**: Added `fee_consistency_test.rs` with 2 tests verifying that `/v1/tx/prepare` and `/wallet/tx/send` use identical fee calculation logic.
+- **fix(api)**: Fixed fee calculation mismatch in `wallet_send_tx` - sender address now compared directly instead of H20 derivation, ensuring change outputs are correctly excluded from taxable amount.
+- **refactor(config)**: Simplified RuntimeConfig for Single Writer mode (BREAKING):
+  - Replaced `platform_fee_bps` → `coordinator_fee_bps` (default: 6700 = 67%)
+  - Replaced `node_fee_bps` → `treasury_fee_bps` (default: 3300 = 33%)
+  - Replaced `SetPlatformFee`/`SetNodeFee` → `SetCoordinatorFee`/`SetTreasuryFee` in ConfigUpdate
+  - Added `validate_fee_split()` to ensure coordinator + treasury = 100%
+  - Updated tests, API docs, and all usages
+- **feat(api)**: Added Admin Config API for runtime configuration changes:
+  - `GET /admin/config` - Retrieve current RuntimeConfig
+  - `POST /admin/config` - Modify RuntimeConfig parameters (fee_rate_bps, base_fee, coordinator_fee_bps, treasury_fee_bps, min_pow_bits, max_mint_per_block, mint_enabled)
+  - Protected by `require_local_or_admin` middleware (requires admin token)
+  - Changes persisted to RocksDB with full audit history
 - **feat**: Single Writer Protocol Lock (`enforce_single_writer` in `[validation]` config):
+
   - Only Coordinator can create blocks (signature verified at protocol level).
   - Linear chain enforced (exactly 1 parent per block, except genesis).
   - Finality is immediate (no k-depth, no orphans, no conflicts).
@@ -23,6 +42,8 @@
 - fix: automatic inclusion of admin XPK in encrypted recipients for fee outputs to ensure Treasury visibility
 - fix: Fixed `mint_security` and `mint_security_full` test compilation by aligning `ValidatePolicy` initialization with new fields.
 - refactor: Updated `net_adapter.rs` to strictly use injected policy for Single Writer enforcement, fixing test overrides.
+- feat(api): Added `POST /v1/tx/prepare` endpoint for preparing unsigned wallet-to-wallet transactions (UTXO selection, fee calculation, client-side signing flow).
+- feat(sdk): Added `client.prepareTx()` method and `PrepareTxRequest`/`PrepareTxResponse` types for server-side transaction preparation.
 
 
 All notable changes to the PMS DAG will be documented in this file.

@@ -76,6 +76,7 @@ async fn e2e_scenario_1_minting_balance() -> Result<()> {
         let output = TxOutput {
             address: wallet_addr.clone(),
             amount: "50.0".to_string(),
+            asset_id: None,
         };
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
             outputs: vec![output],
@@ -258,6 +259,7 @@ async fn e2e_scenario_2_transaction_fees() -> Result<()> {
         let output = TxOutput {
             address: to_addr.to_string(),
             amount: amount.to_string(),
+            asset_id: None,
         };
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
             outputs: vec![output],
@@ -387,6 +389,7 @@ async fn e2e_scenario_2_transaction_fees() -> Result<()> {
             .map(|(addr, amt)| TxOutput {
                 address: addr.to_string(),
                 amount: amt.to_string(),
+                asset_id: None,
             })
             .collect();
 
@@ -394,6 +397,7 @@ async fn e2e_scenario_2_transaction_fees() -> Result<()> {
         tx_outputs.push(TxOutput {
             address: admin_addr.to_string(),
             amount: fee.to_string(),
+            asset_id: None,
         });
 
         let mut tx = Transaction {
@@ -710,6 +714,7 @@ async fn e2e_scenario_3_history() -> Result<()> {
         let output = TxOutput {
             address: to_addr.to_string(),
             amount: amount.to_string(),
+            asset_id: None,
         };
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
             outputs: vec![output],
@@ -772,10 +777,12 @@ async fn e2e_scenario_3_history() -> Result<()> {
                 TxOutput {
                     address: recipient_addr.to_string(),
                     amount: amount.to_string(),
+                    asset_id: None,
                 },
                 TxOutput {
                     address: change_addr.to_string(),
                     amount: change_amount.to_string(),
+                    asset_id: None,
                 },
             ],
             fee: "0.0".to_string(),
@@ -946,6 +953,7 @@ async fn e2e_scenario_4_double_spend() -> Result<()> {
         let output = TxOutput {
             address: to_addr.to_string(),
             amount: amount.to_string(),
+            asset_id: None,
         };
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
             outputs: vec![output],
@@ -1002,6 +1010,7 @@ async fn e2e_scenario_4_double_spend() -> Result<()> {
             outputs: vec![TxOutput {
                 address: recipient_addr.to_string(),
                 amount: amount.to_string(),
+                asset_id: None,
             }],
             fee: "0.0".to_string(),
             unlocks: vec![],

@@ -361,6 +361,41 @@ var PmsClient = class {
     const res = await this.fetch(`/v1/wallet/${address}/utxos`);
     return res.utxos ?? [];
   }
+  // ═══════════════════════════════════════════════════════════════════════
+  // Préparation de Transaction (Server-Side)
+  // ═══════════════════════════════════════════════════════════════════════
+  /**
+   * Prépare une transaction de transfert via le serveur.
+   * Le serveur sélectionne les UTXOs et calcule les frais.
+   * Le client doit ensuite signer le `tx_hash` retourné.
+   * 
+   * @param params - Paramètres de la transaction
+   * @param params.from - Adresse Bech32 de l'expéditeur
+   * @param params.to - Adresse Bech32 du destinataire
+   * @param params.amount - Montant à envoyer (décimal, ex: "100.5")
+   * @returns Transaction non-signée avec hash à signer
+   * 
+   * @example
+   * ```typescript
+   * // 1. Préparer la transaction
+   * const prepared = await client.prepareTx({
+   *     from: wallet.address,
+   *     to: "pms1recipient...",
+   *     amount: "100.0"
+   * });
+   * 
+   * // 2. Signer le hash
+   * const signature = wallet.sign(fromHex(prepared.tx_hash));
+   * 
+   * // 3. Soumettre via /wallet/tx/send (à implémenter)
+   * ```
+   */
+  async prepareTx(params) {
+    return this.fetch("/v1/tx/prepare", {
+      method: "POST",
+      body: JSON.stringify(params)
+    });
+  }
   /**
    * Récupère la balance d'une adresse.
    */
@@ -577,8 +612,8 @@ var PmsClient = class {
       throw new Error("No UTXOs available");
     }
     const netConfig = await this.getNetworkConfig();
-    const baseFeeSats = parseAmount(netConfig.base_fee);
-    const feeRateBps = BigInt(netConfig.fee_rate_bps);
+    const baseFeeSats = parseAmount(netConfig.base_fee || "0");
+    const feeRateBps = BigInt(netConfig.fee_rate_bps || 0);
     const amountSats = parseAmount(amount);
     const variableFee = amountSats * feeRateBps / 10000n;
     const fee = baseFeeSats + variableFee;
@@ -587,7 +622,7 @@ var PmsClient = class {
     const selectedUtxos = [];
     for (const utxo of utxos) {
       selectedUtxos.push(utxo);
-      selectedSats += parseAmount(utxo.amount);
+      selectedSats += parseAmount(utxo.amount || "0");
       if (selectedSats >= totalNeeded) break;
     }
     if (selectedSats < totalNeeded) {

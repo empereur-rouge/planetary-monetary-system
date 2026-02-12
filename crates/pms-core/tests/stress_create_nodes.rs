@@ -16,6 +16,7 @@ fn stress_create_1000_blocks_and_check_parents() {
             outputs: vec![TxOutput {
                 address: "8xtest".into(),
                 amount: "10.00000000".into(),
+                asset_id: None,
             }],
         }));
         let _b = dag
@@ -103,6 +104,7 @@ fn stress_create_100_encrypted_blocks_and_check_parents() {
             outputs: vec![TxOutput {
                 address: "8xtestaddr".to_string(),
                 amount: "10.00000000".to_string(),
+                asset_id: None,
             }],
         };
         let pt = serde_json::to_vec(&mint_block).expect("serde mint_block");

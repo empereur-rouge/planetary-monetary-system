@@ -17,7 +17,7 @@ impl ConfigStorage for RocksStore {
             .cf_handle(&format!("{}:runtime_config", self.prefix))
             .context("CF runtime_config not found")?;
 
-        match self.db.get_cf(cf, b"current")? {
+        match self.db.get_cf(&cf, b"current")? {
             Some(bytes) => {
                 let config: RuntimeConfig = serde_json::from_slice(&bytes)
                     .context("Failed to deserialize RuntimeConfig")?;
@@ -35,7 +35,7 @@ impl ConfigStorage for RocksStore {
             .context("CF runtime_config not found")?;
 
         let bytes = serde_json::to_vec(config)?;
-        self.db.put_cf(cf, b"current", &bytes)?;
+        self.db.put_cf(&cf, b"current", &bytes)?;
         Ok(())
     }
 
@@ -49,7 +49,7 @@ impl ConfigStorage for RocksStore {
         // Clé: timestamp:block_id pour ordre chronologique
         let key = format!("{}:{}", entry.timestamp, entry.block_id);
         let bytes = serde_json::to_vec(entry)?;
-        self.db.put_cf(cf, key.as_bytes(), &bytes)?;
+        self.db.put_cf(&cf, key.as_bytes(), &bytes)?;
         Ok(())
     }
 
@@ -61,7 +61,7 @@ impl ConfigStorage for RocksStore {
             .context("CF config_history not found")?;
 
         let mut entries = Vec::new();
-        let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
 
         for result in iter {
             let (_, value) = result?;

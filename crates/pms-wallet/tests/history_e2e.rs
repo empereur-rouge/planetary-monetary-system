@@ -63,6 +63,7 @@ async fn history_e2e_scan_decrypt_filter_by_address_rocks() -> Result<()> {
         outputs: vec![TxOutput {
             address: my_addr.clone(),
             amount: "42".into(),
+            asset_id: None,
         }],
     };
     let enc_mint = EncryptedPayload::encrypt_for_plain(&plain_mint, &[my_xpk.clone()])
@@ -115,6 +116,7 @@ async fn history_e2e_scan_decrypt_filter_by_address_rocks() -> Result<()> {
         outputs: vec![TxOutput {
             address: other_addr.into(),
             amount: "13".into(),
+            asset_id: None,
         }],
         fee: "0".into(),
         unlocks: vec![Unlock {

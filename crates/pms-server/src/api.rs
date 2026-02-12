@@ -1,6 +1,6 @@
 // pms-server/src/api
 use crate::Server;
-use crate::admin::{admin_compact, admin_ping};
+use crate::admin::{admin_compact, admin_get_config, admin_ping, admin_update_config};
 use crate::api_fn::blocks::{get_block_by_id, submit_block};
 use crate::api_fn::coordinator::get_coordinator_info;
 use crate::api_fn::dag::get_tips;
@@ -9,24 +9,29 @@ use crate::api_fn::milestone::{distribute_fees, get_fee_pool_status};
 use crate::api_fn::nft::{burn_nft, get_nft, get_nfts_by_owner, mint_nft, prepare_nft_transfer};
 use crate::api_fn::nodes::{connect_peer, list_nodes, list_peers, node_heartbeat, register_node};
 use crate::api_fn::stream_blocks::stream_blocks;
+use crate::api_fn::ledger::{admin_create_ledger, admin_get_ledger, admin_list_ledgers, list_ledgers};
 use crate::api_fn::supply::get_circulating_supply;
-use crate::api_fn::transaction::wallet_send_tx;
+use crate::api_fn::token::{admin_create_token, admin_mint_token, get_token, list_tokens};
+use crate::api_fn::transaction::{prepare_tx, wallet_send_tx};
 use crate::api_fn::wallet::{balance_by_address, wallet_balance};
 use crate::helper::resolve_admin_token;
 use crate::stats::Stats;
 use crate::tls::load_tls;
 use anyhow::Result;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::{
     Router,
     middleware::{self, Next},
-    routing::{get, post},
+    routing::{any, get, post},
 };
+use axum::Json;
 use axum_server::bind_rustls;
 use axum_server::tls_rustls::RustlsConfig;
 use pms_config::{ServerConfig, Settings, TreasuryWallets, load_config, load_treasury_wallets};
+use serde_json::json;
+use tower::ServiceExt as _;
 use pms_storage::rocks_store::store::RocksStore;
 use pms_wallet::Wallet;
 use std::net::SocketAddr;
@@ -70,6 +75,9 @@ pub struct AppState {
     pub node_registry: crate::node_registry::SharedNodeRegistry,
     /// Fee pool for accumulating fees until Milestone distribution
     pub fee_pool: crate::fee_pool::SharedFeePool,
+    /// Multi-ledger manager (Phase 2).
+    /// Quand présent, les routes /l/{ledger_id}/* sont actives.
+    pub ledger_mgr: Option<Arc<pms_ledger::LedgerManager>>,
 }
 
 /// Middleware to check if request is allowed for admin routes.
@@ -116,6 +124,131 @@ async fn require_local_or_admin(
 
     // Block otherwise
     (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+}
+
+/// Construit les routes ledger-scoped (celles qui dépendent de l'adapter/store d'un ledger).
+/// Utilisé à la fois pour les routes par défaut et pour les routes `/l/{ledger_id}/`.
+fn build_ledger_scoped_routes() -> Router<AppState> {
+    // Endpoint: /submit/block (Main ingestion)
+    let submit = Router::new().route("/submit/block", post(submit_block));
+
+    let wallet = Router::new()
+        .route("/wallet/tx/send", post(wallet_send_tx))
+        .route("/wallet/balance", post(wallet_balance))
+        .route("/wallet/history", post(get_wallet_history))
+        .route("/v1/balance", post(balance_by_address))
+        .route("/v1/tx/prepare", post(prepare_tx));
+
+    let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
+
+    let supply = Router::new()
+        .route("/v1/supply", get(get_circulating_supply))
+        .route("/v1/fee_pool", get(get_fee_pool_status));
+
+    let token_routes = Router::new()
+        .route("/v1/tokens", get(list_tokens))
+        .route("/v1/tokens/{asset_id}", get(get_token));
+
+    let history = Router::new()
+        .route("/v1/history/encrypted", get(get_encrypted_history))
+        .route("/v1/history/plain", get(get_plain_history));
+
+    let dag_routes = Router::new()
+        .route("/v1/dag/tips", post(get_tips))
+        .route("/v1/config", get(crate::api_fn::config::get_config))
+        .route("/v1/blocks/{id}", get(get_block_by_id));
+
+    let nft_sensitive_governor = Box::new(
+        GovernorConfigBuilder::default()
+            .per_second(1000)
+            .burst_size(2000)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .unwrap(),
+    );
+
+    let nft_routes = Router::new()
+        .route("/v1/nft/{token_id}", get(get_nft))
+        .route("/v1/wallet/{address}/nfts", get(get_nfts_by_owner))
+        .route("/v1/nft/mint", post(mint_nft))
+        .route("/v1/nft/burn", post(burn_nft))
+        .route("/v1/nft/transfer/prepare", post(prepare_nft_transfer))
+        .route(
+            "/v1/wallet/{address}/utxos",
+            get(crate::api_fn::wallet::get_utxos_by_address),
+        )
+        .layer(GovernorLayer::new(nft_sensitive_governor));
+
+    let coordinator_routes = Router::new().route("/v1/coordinator/info", get(get_coordinator_info));
+
+    Router::new()
+        .merge(submit)
+        .merge(wallet)
+        .merge(blocks)
+        .merge(supply)
+        .merge(token_routes)
+        .merge(history)
+        .merge(dag_routes)
+        .merge(nft_routes)
+        .merge(coordinator_routes)
+}
+
+/// Dynamic handler for per-ledger routes: `/l/{ledger_id}/{*rest}`
+///
+/// Resolves the ledger from LedgerManager at request time, builds a per-ledger
+/// AppState, and forwards the request through `build_ledger_scoped_routes()`.
+/// This allows dynamically created ledgers to be accessible immediately.
+async fn dynamic_ledger_handler(
+    State(state): State<AppState>,
+    axum::extract::Path((ledger_id, rest)): axum::extract::Path<(String, String)>,
+    req: Request,
+) -> Response {
+    let mgr = match &state.ledger_mgr {
+        Some(m) => m,
+        None => {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "multi-ledger not enabled"})))
+                .into_response()
+        }
+    };
+    let instance = match mgr.get(&ledger_id) {
+        Some(i) => i,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("ledger '{}' not found", ledger_id)})),
+            )
+                .into_response()
+        }
+    };
+
+    // Build per-ledger AppState
+    let mut ledger_state = state.clone();
+    ledger_state.srv = crate::Server::api_only(
+        instance.adapter.clone(),
+        &instance.def.network_id,
+        instance.def.protocol_version,
+        state.node_wallet.clone(),
+    );
+    ledger_state.store = instance.store.clone();
+
+    // Build a router with ledger-scoped routes
+    let router = build_ledger_scoped_routes().with_state(ledger_state);
+
+    // Reconstruct request with stripped path (remove /l/{ledger_id} prefix)
+    let (mut parts, body) = req.into_parts();
+    let query = parts
+        .uri
+        .query()
+        .map(|q| format!("?{}", q))
+        .unwrap_or_default();
+    let new_uri = format!("/{}{}", rest, query);
+    parts.uri = new_uri.parse().unwrap_or_else(|_| "/".parse().unwrap());
+    let forwarded = Request::from_parts(parts, body);
+
+    match router.oneshot(forwarded).await {
+        Ok(response) => response,
+        Err(infallible) => match infallible {},
+    }
 }
 
 /// Construit le Router HTTP complet (public + admin + debug) avec les layers de sécurité.
@@ -179,81 +312,22 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/admin/ping", get(admin_ping))
         .route("/admin/compact", post(admin_compact))
         .route("/admin/distribute_fees", post(distribute_fees))
-        // TODO: /admin/stats
+        // Admin Config API - Hot-Swap de la RuntimeConfig
+        .route("/admin/config", get(admin_get_config))
+        .route("/admin/config", post(admin_update_config))
+        // Admin Token API - Create and Mint custom tokens
+        .route("/admin/tokens/create", post(admin_create_token))
+        .route("/admin/tokens/mint", post(admin_mint_token))
+        // Admin Ledger API - Create and manage ledgers
+        .route("/admin/ledgers", get(admin_list_ledgers))
+        .route("/admin/ledgers/create", post(admin_create_ledger))
+        .route("/admin/ledgers/{ledger_id}", get(admin_get_ledger))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_local_or_admin,
         ));
 
-    // Endpoint: /submit/block (Main ingestion)
-    let submit = Router::new().route("/submit/block", post(submit_block));
-    // TODO: enforce signature logic inside submit_block if not already present
-
-    let wallet = Router::new()
-        .route("/wallet/tx/send", post(wallet_send_tx))
-        .route("/wallet/balance", post(wallet_balance))
-        .route("/wallet/history", post(get_wallet_history))
-        .route("/v1/balance", post(balance_by_address));
-
-    let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
-
-    let supply = Router::new()
-        .route("/v1/supply", get(get_circulating_supply))
-        .route("/v1/fee_pool", get(get_fee_pool_status));
-
-    let history = Router::new()
-        .route("/v1/history/encrypted", get(get_encrypted_history))
-        .route("/v1/history/plain", get(get_plain_history));
-
-    let dag_routes = Router::new()
-        .route("/v1/dag/tips", post(get_tips))
-        .route("/v1/config", get(crate::api_fn::config::get_config))
-        // Endpoint for fetching single block
-        .route("/v1/blocks/{id}", get(get_block_by_id));
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // TÂCHE 5: Rate-limiting strict pour les endpoints NFT sensibles
-    // ═══════════════════════════════════════════════════════════════════════
-    // Les opérations mint/burn sont critiques et potentiellement coûteuses.
-    // On applique un rate-limit plus strict que le global (5 req/s, burst 10)
-    // pour éviter les abus et les attaques par épuisement de ressources.
-    //
-    // Voir tower-governor documentation pour les détails de configuration.
-    let nft_sensitive_governor = Box::new(
-        GovernorConfigBuilder::default()
-            .per_second(1000) // High limit for E2E testing (was: 5)
-            .burst_size(2000) // High burst for E2E testing (was: 10)
-            .key_extractor(SmartIpKeyExtractor)
-            .finish()
-            .unwrap(),
-    );
-
-    // Endpoint: /v1/nft/:token_id (Query NFT ownership)
-    // NOTE: Axum 0.7+ utilise {param} au lieu de :param pour les captures de route
-    let nft_routes = Router::new()
-        .route("/v1/nft/{token_id}", get(get_nft))
-        // Endpoint: /v1/wallet/{address}/nfts (List NFTs by owner)
-        .route("/v1/wallet/{address}/nfts", get(get_nfts_by_owner))
-        // Endpoint: /v1/nft/mint (Generic mint signed by Coordinator)
-        // Rate-limited plus strictement via layer ci-dessous
-        .route("/v1/nft/mint", post(mint_nft))
-        // Endpoint: /v1/nft/burn (Burn NFT signed by owner)
-        // Rate-limited plus strictement via layer ci-dessous
-        .route("/v1/nft/burn", post(burn_nft))
-        // Endpoint: /v1/nft/transfer/prepare (Coordinator re-encryption)
-        .route("/v1/nft/transfer/prepare", post(prepare_nft_transfer))
-        // Endpoint: /v1/wallet/{address}/utxos (Fetch plain UTXOs)
-        .route(
-            "/v1/wallet/{address}/utxos",
-            get(crate::api_fn::wallet::get_utxos_by_address),
-        )
-        // Appliquer le rate-limiter strict aux routes NFT sensibles
-        .layer(GovernorLayer::new(nft_sensitive_governor));
-
-    // Endpoint: /v1/coordinator/info (Get coordinator public keys)
-    let coordinator_routes = Router::new().route("/v1/coordinator/info", get(get_coordinator_info));
-
-    // Node registry endpoints for distributed TX processing
+    // Node registry endpoints for distributed TX processing (global, not per-ledger)
     let node_routes = Router::new()
         .route("/v1/register", post(register_node))
         .route("/v1/nodes", get(list_nodes))
@@ -261,10 +335,22 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/v1/peers/connect", post(connect_peer))
         .route("/v1/heartbeat", post(node_heartbeat));
 
+    // Multi-ledger endpoints (global)
+    let ledger_routes = Router::new().route("/v1/ledgers", get(list_ledgers));
+
     let debug = Router::new().route("/debug/slow", get(debug_slow));
 
     // Endpoint: /dashboard (Static Files)
     let dashboard = Router::new().nest_service("/dashboard", ServeDir::new("pms-dashboard/dist"));
+
+    // Ledger-scoped routes (default ledger)
+    let default_ledger_routes = build_ledger_scoped_routes();
+
+    // Dynamic per-ledger routing: /l/{ledger_id}/{*rest}
+    // Resolves the ledger at request time from LedgerManager, so newly created
+    // ledgers become available immediately without restart.
+    let per_ledger_router: Router<AppState> =
+        Router::new().route("/l/{ledger_id}/{*rest}", any(dynamic_ledger_handler));
 
     // Combine all
     Router::new()
@@ -274,15 +360,10 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .merge(ready)
         .merge(metrics)
         .merge(admin)
-        .merge(submit)
-        .merge(wallet)
-        .merge(blocks)
-        .merge(supply)
-        .merge(history)
-        .merge(dag_routes)
-        .merge(nft_routes)
-        .merge(coordinator_routes)
+        .merge(default_ledger_routes)
         .merge(node_routes)
+        .merge(ledger_routes)
+        .merge(per_ledger_router)
         .merge(debug)
         .merge(dashboard)
         .with_state(state)
@@ -444,12 +525,18 @@ pub async fn serve_api(
         treasury_wallets,
         node_registry: crate::node_registry::create_registry(),
         fee_pool: crate::fee_pool::create_fee_pool(),
+        ledger_mgr: None,
     };
 
     // ═══════════════════════════════════════════════════════════════════════
     // AUTOMATED FEE DISTRIBUTION TASK
     // ═══════════════════════════════════════════════════════════════════════
     spawn_fee_distributor_task(state.clone());
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SCHEDULED INFLATION MINT TASK
+    // ═══════════════════════════════════════════════════════════════════════
+    spawn_inflation_mint_task(state.clone());
 
     // 🔹 Construit le Router complet
     let app = build_api_router(state, &settings);
@@ -549,6 +636,46 @@ pub fn spawn_fee_distributor_task(state: AppState) {
                     }
                     Err(e) => {
                         tracing::error!("❌ Automated distribution failed: {}", e);
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Spawns the scheduled inflation mint task if enabled in configuration.
+pub fn spawn_inflation_mint_task(state: AppState) {
+    let settings = &state.settings;
+    if settings.fees.daily_inflation_enabled && settings.fees.annual_inflation_percent > 0.0 {
+        let state_inflation = state.clone();
+        let interval_sec = settings.fees.daily_inflation_interval_sec;
+
+        tokio::spawn(async move {
+            tracing::info!(
+                "📊 Inflation Mint Service started (interval: {}s, rate: {}%/year)",
+                interval_sec,
+                state_inflation.settings.fees.annual_inflation_percent
+            );
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+
+            // consume first tick (immediate)
+            interval.tick().await;
+
+            loop {
+                interval.tick().await;
+
+                match crate::fee_distribution::perform_daily_inflation_mint(&state_inflation).await
+                {
+                    Ok(res) => {
+                        if res.success && res.total_distributed != "0" {
+                            tracing::info!(
+                                "📊 Inflation mint success: {} PMS distributed",
+                                res.total_distributed
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Inflation mint failed: {}", e);
                     }
                 }
             }

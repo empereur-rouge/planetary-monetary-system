@@ -44,6 +44,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
         1,
         wallet.clone(),
         &pms_config::P2pConfig::default(),
+        None,
     );
     let ready = Arc::new(AtomicBool::new(true));
     let stats = Arc::new(Stats::new());
@@ -61,6 +62,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
         treasury_wallets: pms_config::TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
+        ledger_mgr: None,
     };
 
     // 4) Insert Blocks manually into Store (to bypass validation/mining for speed)
@@ -95,6 +97,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
         outputs: vec![TxOutput {
             address: "addr1".into(),
             amount: "100".into(),
+            asset_id: None,
         }],
     };
     let sb_plain = StoredBlock {

@@ -25,6 +25,8 @@ pub enum WalletTxError {
 pub struct Payment {
     pub to: String,
     pub amount: String, // "10.00000000"
+    /// Asset ID (None = PMS natif, Some("edenite") = token custom)
+    pub asset_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -48,17 +50,19 @@ pub fn build_utxo_tx_with_fee_checked(
         outs.push(TxOutput {
             address: p.to,
             amount: a.to_string(),
+            asset_id: p.asset_id,
         });
     }
-    let fee_str = fee_policy
+    // compute_fee() retourne maintenant un Amount arrondi à 8 décimales
+    let fee = fee_policy
         .compute_fee(&sum_out.to_string())
         .map_err(|_| WalletTxError::FeeComputation)?;
-    let fee = Amount::parse(&fee_str, PMS.decimals).map_err(|_| WalletTxError::FeeComputation)?;
 
-    if !fee.0.is_zero() {
+    if !fee.is_zero() {
         outs.push(TxOutput {
             address: fee_recipient.to_string(),
             amount: fee.to_string(),
+            asset_id: None,
         });
     }
 
@@ -82,6 +86,7 @@ pub fn build_utxo_tx_with_fee_checked(
         outs.push(TxOutput {
             address: from_address.to_string(),
             amount: Amount(change).to_string(),
+            asset_id: None,
         });
     }
 

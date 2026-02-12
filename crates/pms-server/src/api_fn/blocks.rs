@@ -135,13 +135,13 @@ async fn accumulate_fee_if_tx(st: &AppState, wb: &WireBlock) {
     };
 
     // Get the block signer (node that created/submitted this block)
-    // Si absent, on utilise "unknown" mais on logue un warning car c'est anormal.
+    // persist_block() already rejects blocks without signer_pk, so this is defensive only
     let signer_pk = if wb.signer_pk_hex.is_empty() {
-        eprintln!(
-            "⚠️ SECURITY: TX block {} has no signer_pk! Fee credited to 'unknown'.",
+        tracing::error!(
+            "SECURITY: TX block {} reached fee tracking without signer_pk! Skipping fee accumulation.",
             &wb.id[..16.min(wb.id.len())]
         );
-        "unknown".to_string()
+        return;
     } else {
         wb.signer_pk_hex.clone()
     };

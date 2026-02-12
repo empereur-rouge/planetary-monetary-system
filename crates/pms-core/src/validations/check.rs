@@ -99,9 +99,8 @@ impl ValidatePolicy {
     /// Version avec gestion d'erreur pour les problèmes de configuration de sécurité.
     /// Préférer cette version dans le code de production pour une meilleure gestion des erreurs.
     pub fn try_from_global_config() -> Result<Self, ValidationError> {
-        let settings = load_config().map_err(|e| {
-            ValidationError::ConfigError(format!("failed to load config: {e}"))
-        })?;
+        let settings = load_config()
+            .map_err(|e| ValidationError::ConfigError(format!("failed to load config: {e}")))?;
         let mut p = Self::from_settings(&settings.validation);
 
         // Logic for Platform Address Security via Signed Config
@@ -205,8 +204,8 @@ impl ValidatePolicy {
     /// modifiés via `PlainPayload::ConfigUpdate`.
     pub fn update_from_runtime_config(&mut self, config: &pms_config::RuntimeConfig) {
         // Convertir basis points en Decimal ratio
-        // platform_fee_bps: 2000 = 20% = 0.20
-        self.platform_fee_ratio = Decimal::from(config.platform_fee_bps) / Decimal::from(10000);
+        // coordinator_fee_bps: 6700 = 67% = 0.67
+        self.platform_fee_ratio = Decimal::from(config.coordinator_fee_bps) / Decimal::from(10000);
 
         // PoW minimum bits
         self.min_pow_leading_zero_bits = config.min_pow_bits;
@@ -391,6 +390,27 @@ pub fn validate_block(
                 } else {
                     return Err(ValidationError::Other(
                         "EncryptedReward not enabled (no coordinator_public_key configured)",
+                    ));
+                }
+            }
+            PlainPayload::TokenCreate(_) => {
+                // SECURITY: Only Coordinator can register new tokens
+                if let Some(coord_pk) = &policy.coordinator_public_key {
+                    if let Some(spk) = &b.signer_pk {
+                        if spk != coord_pk {
+                            return Err(ValidationError::InvalidSignature(format!(
+                                "TokenCreate signed by unauthorized key: {}. Expected Coordinator: {}",
+                                spk, coord_pk
+                            )));
+                        }
+                    } else {
+                        return Err(ValidationError::InvalidSignature(
+                            "TokenCreate block must be signed by Coordinator".into(),
+                        ));
+                    }
+                } else {
+                    return Err(ValidationError::Other(
+                        "TokenCreate not enabled (no coordinator_public_key configured)",
                     ));
                 }
             }

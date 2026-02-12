@@ -131,7 +131,106 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 ---
 
+## GET `/admin/config`
+
+Récupère la configuration runtime actuelle du serveur.
+
+### Response
+
+```json
+{
+  "fee_rate_bps": 300,
+  "base_fee": "0.001",
+  "coordinator_fee_bps": 6700,
+  "treasury_fee_bps": 3300,
+  "min_pow_bits": 8,
+  "max_mint_per_block": 1000000,
+  "mint_enabled": true,
+  "updated_at_block": "admin-1707350000000",
+  "updated_at_timestamp": 1707350000000
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `fee_rate_bps` | u32 | Taux de commission (basis points, 100 = 1%) |
+| `base_fee` | string | Frais fixes par transaction |
+| `coordinator_fee_bps` | u32 | Part des fees pour le Coordinator (basis points, 6700 = 67%) |
+| `treasury_fee_bps` | u32 | Part des fees pour le Treasury (basis points, 3300 = 33%) |
+| `min_pow_bits` | u8 | Difficulté PoW minimum |
+| `max_mint_per_block` | u64 | Maximum de tokens mintables par bloc |
+| `mint_enabled` | bool | Minting activé ou non |
+| `updated_at_block` | string | ID du bloc/action de dernière mise à jour |
+| `updated_at_timestamp` | i64 | Timestamp de dernière mise à jour (ms) |
+
+### Exemple
+
+```bash
+curl -k -H "Authorization: Bearer $TOKEN" https://localhost:8443/admin/config
+```
+
+---
+
+## POST `/admin/config`
+
+Modifie un ou plusieurs paramètres de la configuration runtime.
+
+> 💡 Les changements sont persistés dans RocksDB et appliqués immédiatement (Hot-Swap).
+
+### Request Body
+
+Un `ConfigUpdate` JSON. Plusieurs types disponibles :
+
+| Type | Format | Description |
+|------|--------|-------------|
+| `SetFeeRate` | `{"SetFeeRate": {"bps": 300}}` | Modifier le taux de commission |
+| `SetBaseFee` | `{"SetBaseFee": {"fee": "0.002"}}` | Modifier les frais fixes |
+| `SetCoordinatorFee` | `{"SetCoordinatorFee": {"bps": 7000}}` | Modifier la part Coordinator (67%→70%) |
+| `SetTreasuryFee` | `{"SetTreasuryFee": {"bps": 3000}}` | Modifier la part Treasury (33%→30%) |
+| `SetMinPow` | `{"SetMinPow": {"bits": 10}}` | Modifier la difficulté PoW |
+| `SetMaxMint` | `{"SetMaxMint": {"amount": 500000}}` | Modifier le max mint par bloc |
+| `SetMintEnabled` | `{"SetMintEnabled": {"enabled": false}}` | Activer/désactiver le minting |
+| `BatchUpdate` | `{"BatchUpdate": [...]}` | Appliquer plusieurs updates |
+
+> ⚠️ **Important**: La somme de `coordinator_fee_bps` + `treasury_fee_bps` doit toujours égaler 10000 (100%).
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "update_applied": "SetCoordinatorFee(7000bps)",
+  "config": {
+    "fee_rate_bps": 300,
+    "coordinator_fee_bps": 7000,
+    "treasury_fee_bps": 3000,
+    "..."
+  }
+}
+```
+
+### Exemples
+
+**Modifier la part du Coordinator :**
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"SetCoordinatorFee": {"bps": 7000}}' \
+  https://localhost:8443/admin/config
+```
+
+**Modifier plusieurs paramètres (BatchUpdate) :**
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"BatchUpdate": [{"SetCoordinatorFee": {"bps": 7000}}, {"SetTreasuryFee": {"bps": 3000}}]}' \
+  https://localhost:8443/admin/config
+```
+
+---
+
 ## GET `/metrics`
+
 
 Expose les métriques au format Prometheus.
 

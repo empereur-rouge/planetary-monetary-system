@@ -61,6 +61,7 @@ async fn test_history_reward_plain() -> Result<()> {
         fee_outputs: vec![TxOutput {
             address: my_addr.clone(),
             amount: "10".into(),
+            asset_id: None,
         }],
         reward_outputs: vec![],
         burned: "0".into(),

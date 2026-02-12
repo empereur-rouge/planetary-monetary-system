@@ -2,16 +2,9 @@ use anyhow::Result;
 use clap::Parser;
 
 use pms_config::{ServerConfig, load_config};
-use pms_core::CoreAdapter;
-use pms_core::concurrent_dag::ConcurrentDag;
-use pms_interface::NetDagAdapter;
+use pms_ledger::LedgerManager;
 use pms_server::Server;
-use pms_storage::DagStorage;
-use pms_storage::rocks_store::store::RocksStore;
-use pms_types_block::Block;
-use pms_utils::compute_block_id;
 use pms_wallet::Wallet;
-use pms_wire::WireMeta;
 use rustls::crypto::ring;
 use std::env;
 use std::path::PathBuf;
@@ -92,58 +85,36 @@ async fn main() -> Result<()> {
         );
     }
 
-    let store = Arc::new(
-        RocksStore::new(
-            &settings.rocks.path,
-            settings.rocks.tip_limit,
-            settings.rocks.prefix.clone(),
-            settings.rocks.checkpoint_interval_secs,
-        )
-        .await?,
+    // 3b) Multi-Ledger Bootstrap
+    eprintln!(
+        "[BOOT] Bootstrapping {} ledger(s)...",
+        settings.effective_ledgers().len()
     );
+    let ledger_mgr = Arc::new(LedgerManager::bootstrap(&settings).await?);
 
-    if let Err(e) = store.ensure_schema().await {
-        eprintln!("[BOOT] Rocks ensure_schema failed: {e}");
+    for lid in ledger_mgr.list_ids() {
+        eprintln!("  ✅ Ledger '{}' ready", lid);
     }
+
+    // Use default ledger ("main") for P2P Server & backward-compat store
+    let default_ledger = ledger_mgr
+        .default_ledger()
+        .expect("At least one ledger must exist");
+    let store = default_ledger.store.clone();
+    let adapter = default_ledger.adapter.clone();
 
     if let Err(e) = store.bootstrap_once_for_production() {
         eprintln!("[BOOT] bootstrap_once_for_production skipped → {e}");
     }
 
-    eprintln!("✅ Opened RocksDB");
-
-    // 4) Concurrent DAG
-    let ids = store.all_block_ids().await?;
-    if ids.is_empty() {
-        let g = Block::genesis(compute_block_id);
-
-        let meta = WireMeta {
-            network_id: settings.network.network_id.clone(),
-            protocol_version: settings.network.protocol_version,
-        };
-
-        store.persist_genesis(&g, &meta).await?;
-    }
-
-    // Load DAG from store into concurrent structure (RAM)
-    println!("[BOOT] Loading concurrent DAG from RocksDB...");
-    let dag = Arc::new(ConcurrentDag::bootstrap_from_store(&*store).await?);
-    println!("[BOOT] Loaded {} blocks into DAG", dag.len());
-
-    // 5) Adapter & Server
-    let core_adapter = CoreAdapter::new(dag.clone(), store.clone());
-
-    // Bootstrapping UTXO (Sharding Phase 4)
-    eprintln!("[BOOT] Bootstrapping Sharded UTXO set...");
-    core_adapter.bootstrap_utxos().await?;
-
-    let adapter: Arc<dyn NetDagAdapter> = core_adapter;
+    // 5) Server P2P (uses default ledger's adapter)
     let srv = Server::new(
         adapter.clone(),
         &settings.network.network_id,
         settings.network.protocol_version,
         node_wallet.clone(),
         &settings.p2p,
+        Some(ledger_mgr.clone()),
     );
 
     // Capture admin_token before move
@@ -252,6 +223,7 @@ async fn main() -> Result<()> {
             treasury_wallets: pms_config::TreasuryWallets::empty(),
             node_registry: pms_server::node_registry::create_registry(),
             fee_pool: pms_server::fee_pool::create_fee_pool(),
+            ledger_mgr: Some(ledger_mgr.clone()),
         };
 
         eprintln!("🔧 Launching Internal API at {}", addr);

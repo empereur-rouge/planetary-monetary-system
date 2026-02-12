@@ -93,6 +93,10 @@ impl NetDagAdapter for DummyAdapter {
         (rust_decimal::Decimal::ZERO, 0)
     }
 
+    async fn circulating_supply_by_asset(&self, _asset_id: Option<&str>) -> (rust_decimal::Decimal, u64) {
+        (rust_decimal::Decimal::ZERO, 0)
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Méthodes UTXO (dummy implementations pour les tests)
     // ═══════════════════════════════════════════════════════════════════════
@@ -103,13 +107,26 @@ impl NetDagAdapter for DummyAdapter {
     }
 
     /// Retourne les UTXOs d'une adresse (vide pour le DummyAdapter)
-    async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+    async fn utxos_by_address(
+        &self,
+        _address: &str,
+    ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
         Vec::new()
     }
 
     /// Ajoute un UTXO (no-op pour le DummyAdapter)
-    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String) {
+    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {
         // Dummy: on ne stocke pas les UTXOs dans ce mock
+    }
+
+    /// Supprime un UTXO du cache (no-op pour le DummyAdapter)
+    async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool {
+        false // Dummy: pas de gestion UTXO
+    }
+
+    /// Récupère un UTXO spécifique (None pour le DummyAdapter)
+    async fn get_utxo(&self, _output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
+        None // Dummy: pas de gestion UTXO
     }
 }
 
@@ -122,6 +139,7 @@ async fn start_server(addr: &str) -> Arc<Server> {
         meta.protocol_version,
         Arc::new(wallet),
         &pms_config::P2pConfig::default(),
+        None,
     );
     let s2 = srv.clone();
     let addr = addr.to_owned();

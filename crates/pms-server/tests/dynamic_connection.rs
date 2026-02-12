@@ -50,6 +50,7 @@ async fn spawn_node(port: u16, seed: u8) -> Arc<Server> {
         settings.network.protocol_version,
         node_wallet.clone(),
         &settings.p2p,
+        None,
     );
 
     let server_cfg = Arc::new(ServerConfig {

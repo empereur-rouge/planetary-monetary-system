@@ -45,6 +45,9 @@ import type {
     PrepareTransferRequest,
     PrepareTransferResponse,
     NftAction,
+    PrepareTxRequest,
+    PrepareTxResponse,
+    TokenMetadata,
 } from "./types";
 import { DEFAULT_CONFIG, type BalanceInfo } from "./types";
 import { PmsWallet } from "./wallet";
@@ -133,9 +136,26 @@ export class PmsClient {
 
     /**
      * Récupère les informations de supply.
+     * @param assetId - Optionnel: ID du token (undefined = PMS natif)
      */
-    async getSupply(): Promise<SupplyInfo> {
-        return this.fetch("/v1/supply");
+    async getSupply(assetId?: string): Promise<SupplyInfo> {
+        const query = assetId ? `?asset_id=${encodeURIComponent(assetId)}` : "";
+        return this.fetch(`/v1/supply${query}`);
+    }
+
+    /**
+     * Liste tous les tokens enregistrés.
+     */
+    async listTokens(): Promise<TokenMetadata[]> {
+        const res = await this.fetch<{ tokens: TokenMetadata[] }>("/v1/tokens");
+        return res.tokens ?? [];
+    }
+
+    /**
+     * Récupère les métadonnées d'un token par son asset_id.
+     */
+    async getToken(assetId: string): Promise<TokenMetadata> {
+        return this.fetch<TokenMetadata>(`/v1/tokens/${encodeURIComponent(assetId)}`);
     }
 
     /**
@@ -144,6 +164,43 @@ export class PmsClient {
     async getUtxos(address: string): Promise<Utxo[]> {
         const res = await this.fetch<{ utxos: Utxo[] }>(`/v1/wallet/${address}/utxos`);
         return res.utxos ?? [];
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Préparation de Transaction (Server-Side)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Prépare une transaction de transfert via le serveur.
+     * Le serveur sélectionne les UTXOs et calcule les frais.
+     * Le client doit ensuite signer le `tx_hash` retourné.
+     * 
+     * @param params - Paramètres de la transaction
+     * @param params.from - Adresse Bech32 de l'expéditeur
+     * @param params.to - Adresse Bech32 du destinataire
+     * @param params.amount - Montant à envoyer (décimal, ex: "100.5")
+     * @returns Transaction non-signée avec hash à signer
+     * 
+     * @example
+     * ```typescript
+     * // 1. Préparer la transaction
+     * const prepared = await client.prepareTx({
+     *     from: wallet.address,
+     *     to: "pms1recipient...",
+     *     amount: "100.0"
+     * });
+     * 
+     * // 2. Signer le hash
+     * const signature = wallet.sign(fromHex(prepared.tx_hash));
+     * 
+     * // 3. Soumettre via /wallet/tx/send (à implémenter)
+     * ```
+     */
+    async prepareTx(params: PrepareTxRequest): Promise<PrepareTxResponse> {
+        return this.fetch<PrepareTxResponse>("/v1/tx/prepare", {
+            method: "POST",
+            body: JSON.stringify(params),
+        });
     }
 
     /**

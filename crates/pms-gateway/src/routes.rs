@@ -130,7 +130,8 @@ pub async fn submit_block(
 pub struct ConfigResp {
     fee_rate_bps: u32,
     base_fee: String,
-    platform_fee_bps: u32,
+    coordinator_fee_bps: u32,
+    treasury_fee_bps: u32,
 }
 
 pub async fn get_config(State(state): State<GatewayState>) -> impl IntoResponse {
@@ -145,7 +146,8 @@ pub async fn get_config(State(state): State<GatewayState>) -> impl IntoResponse 
             Json(ConfigResp {
                 fee_rate_bps: 0,
                 base_fee: "0".into(),
-                platform_fee_bps: 0,
+                coordinator_fee_bps: 0,
+                treasury_fee_bps: 0,
             }),
         ),
     }
@@ -162,10 +164,17 @@ pub async fn proxy_post(
     let path = original_uri.path();
 
     match state.engine_client.proxy_post(path, headers, body).await {
-        Ok((status, resp_body)) => (status, resp_body),
+        Ok((status, resp_body, content_type)) => {
+            let ct = content_type.unwrap_or_else(|| "application/json".to_string());
+            (status, [(http::header::CONTENT_TYPE, ct)], resp_body)
+        }
         Err(e) => {
             tracing::warn!("Proxy POST {} failed: {}", path, e);
-            (StatusCode::BAD_GATEWAY, format!("Gateway error: {}", e))
+            (
+                StatusCode::BAD_GATEWAY,
+                [(http::header::CONTENT_TYPE, "text/plain".to_string())],
+                format!("Gateway error: {}", e),
+            )
         }
     }
 }
@@ -179,10 +188,17 @@ pub async fn proxy_get(
     let path = original_uri.path();
 
     match state.engine_client.proxy_get(path, headers).await {
-        Ok((status, resp_body)) => (status, resp_body),
+        Ok((status, resp_body, content_type)) => {
+            let ct = content_type.unwrap_or_else(|| "application/json".to_string());
+            (status, [(http::header::CONTENT_TYPE, ct)], resp_body)
+        }
         Err(e) => {
             tracing::warn!("Proxy GET {} failed: {}", path, e);
-            (StatusCode::BAD_GATEWAY, format!("Gateway error: {}", e))
+            (
+                StatusCode::BAD_GATEWAY,
+                [(http::header::CONTENT_TYPE, "text/plain".to_string())],
+                format!("Gateway error: {}", e),
+            )
         }
     }
 }
