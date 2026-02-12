@@ -10,6 +10,7 @@ export default defineConfig({
       '/metrics': 'http://127.0.0.1:8080',
       '/v1': 'http://127.0.0.1:8080',
       '/admin': 'http://127.0.0.1:8080',
+      '/l/': 'http://127.0.0.1:8080',
     }
   }
 })

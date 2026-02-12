@@ -1,7 +1,7 @@
 <script lang="ts">
     import { onMount, onDestroy } from "svelte";
-    import { apiCall } from "./api";
-    import { nodeStatus, networkPeers, adminToken } from "./stores";
+    import { apiCall, ledgerApiCall } from "./api";
+    import { nodeStatus, networkPeers, adminToken, ledgerList, selectedLedgerId, type LedgerSummary } from "./stores";
     import PerformanceChart from "./PerformanceChart.svelte";
     import { fade, fly } from "svelte/transition";
 
@@ -20,28 +20,54 @@
     let lastBlockCount = 0;
     let lastTime = Date.now();
 
-    // New Data States
+    // Data States
     let supplyInfo: any = null;
     let nodeInfo: any = null;
 
+    // Ledger management
+    let ledgers: LedgerSummary[] = [];
+    let showCreateForm = false;
+    let createError = "";
+    let createLoading = false;
+    let newId = "";
+    let newNetworkId = "";
+    let newPrefix = "";
+
+    async function fetchLedgers() {
+        try {
+            const res = await apiCall("/admin/ledgers");
+            const list: LedgerSummary[] = res.ledgers || [];
+            ledgerList.set(list);
+            ledgers = list;
+            // Reset if selected ledger no longer exists
+            const currentId = $selectedLedgerId;
+            if (currentId && !list.find((l) => l.id === currentId)) {
+                selectedLedgerId.set(null);
+            }
+        } catch (e) {
+            console.error("Failed to fetch ledgers", e);
+            ledgerList.set([]);
+            ledgers = [];
+        }
+    }
+
     async function fetchData() {
         try {
-            // Parallel fetch for independent data
             const [metricsText, registryRes, p2pRes, supplyRes, nodeRes] =
                 await Promise.all([
                     apiCall("/metrics").catch((err) => {
                         console.error("Metrics failed", err);
                         return "";
                     }),
-                    apiCall("/v1/nodes").catch((err) => {
+                    ledgerApiCall("/v1/nodes").catch((err) => {
                         console.error("Nodes failed", err);
                         return { nodes: [] };
                     }),
-                    apiCall("/v1/peers").catch((err) => {
+                    ledgerApiCall("/v1/peers").catch((err) => {
                         console.error("Peers failed", err);
                         return [];
                     }),
-                    apiCall("/v1/supply").catch((err) => {
+                    ledgerApiCall("/v1/supply").catch((err) => {
                         console.error("Supply failed", err);
                         return null;
                     }),
@@ -62,15 +88,12 @@
                 role: "Node",
             }));
 
-            // p2pRes is array of strings or objects depending on version, let's assume strings for now based on previous code
-            // But if it fails it returns empty array
             const p2pPeers = (p2pRes || []).map((addr: string, i: number) => ({
                 id: `peer-${i}`,
                 address: addr,
                 role: "P2P",
             }));
 
-            // Merge: Show both Registry Nodes AND P2P Peers
             const allPeers = [...registryNodes, ...p2pPeers];
             networkPeers.set(allPeers);
         } catch (e) {
@@ -89,25 +112,18 @@
             }
         });
 
-        // Update store
         nodeStatus.set(data);
 
-        // Calculate TPS
         const currentBlocks = parseInt(data["pms_blocks_total"] || "0");
         const now = Date.now();
 
         if (lastBlockCount > 0) {
             const deltaBlocks = currentBlocks - lastBlockCount;
-            const deltaTime = (now - lastTime) / 1000; // seconds
+            const deltaTime = (now - lastTime) / 1000;
 
-            // Filter out crazy jumps if reload happened or long pause
             if (deltaTime > 0 && deltaTime < 10) {
                 const tps = Math.max(0, deltaBlocks / deltaTime);
-
-                // Shift history
                 tpsHistory = [...tpsHistory.slice(1), tps];
-
-                // Update Labels
                 const timeStr = new Date().toLocaleTimeString();
                 chartLabels = [...chartLabels.slice(1), timeStr];
             }
@@ -117,7 +133,57 @@
         lastTime = now;
     }
 
-    onMount(() => {
+    function resetDashboardData() {
+        tpsHistory = new Array(30).fill(0);
+        chartLabels = new Array(30).fill("");
+        lastBlockCount = 0;
+        lastTime = Date.now();
+        supplyInfo = null;
+        nodeInfo = null;
+        networkPeers.set([]);
+        nodeStatus.set(null);
+    }
+
+    function onLedgerChange(event: Event) {
+        const select = event.target as HTMLSelectElement;
+        const value = select.value;
+        selectedLedgerId.set(value === "" ? null : value);
+        resetDashboardData();
+        fetchData();
+    }
+
+    function selectLedger(id: string) {
+        selectedLedgerId.set(id);
+        resetDashboardData();
+        fetchData();
+    }
+
+    async function createLedger() {
+        createError = "";
+        createLoading = true;
+        try {
+            await apiCall("/admin/ledgers/create", "POST", {
+                id: newId,
+                network_id: newNetworkId,
+                prefix: newPrefix,
+            });
+            await fetchLedgers();
+            selectedLedgerId.set(newId);
+            newId = "";
+            newNetworkId = "";
+            newPrefix = "";
+            showCreateForm = false;
+            resetDashboardData();
+            fetchData();
+        } catch (e: any) {
+            createError = e.message || "Creation failed";
+        } finally {
+            createLoading = false;
+        }
+    }
+
+    onMount(async () => {
+        await fetchLedgers();
         fetchData();
         interval = setInterval(fetchData, 2000);
     });
@@ -134,7 +200,7 @@
 <div class="dashboard" in:fade>
     <header class="glass-panel">
         <div class="brand">
-            <div class="logo">PMS Node (Fixed)</div>
+            <div class="logo">PMS Node</div>
             {#if nodeInfo}
                 <span class="badge" title="Network ID">{nodeInfo.network}</span>
                 <span class="badge outline" title="Node Role"
@@ -142,16 +208,103 @@
                 >
             {/if}
         </div>
+
+        {#if ledgers.length > 1}
+            <div class="ledger-selector">
+                <label class="ledger-label" for="ledger-select">Ledger</label>
+                <select
+                    id="ledger-select"
+                    class="ledger-dropdown"
+                    value={$selectedLedgerId || ""}
+                    on:change={onLedgerChange}
+                >
+                    <option value="">Default</option>
+                    {#each ledgers as ledger}
+                        <option value={ledger.id}
+                            >{ledger.id} ({ledger.network_id})</option
+                        >
+                    {/each}
+                </select>
+            </div>
+        {/if}
+
         <div class="actions">
             <button class="secondary" on:click={logout}>Logout</button>
         </div>
     </header>
 
     <div class="grid">
+        <!-- Ledger Management Section -->
+        <div
+            class="glass-panel card ledger-management"
+            in:fly={{ y: 20, duration: 500, delay: 0 }}
+        >
+            <div class="ledger-header-row">
+                <h3>Ledgers</h3>
+                <button
+                    class="secondary small"
+                    on:click={() => (showCreateForm = !showCreateForm)}
+                >
+                    {showCreateForm ? "Cancel" : "+ New Ledger"}
+                </button>
+            </div>
+
+            <div class="ledger-grid">
+                {#each ledgers as ledger}
+                    <button
+                        class="ledger-chip"
+                        class:active={$selectedLedgerId === ledger.id ||
+                            (!$selectedLedgerId && ledgers.length === 1)}
+                        on:click={() => selectLedger(ledger.id)}
+                    >
+                        <span class="chip-name">{ledger.id}</span>
+                        <span class="chip-meta"
+                            >{ledger.block_count} blocks</span
+                        >
+                    </button>
+                {/each}
+            </div>
+
+            {#if showCreateForm}
+                <div
+                    class="create-form"
+                    transition:fly={{ y: -10, duration: 200 }}
+                >
+                    <div class="form-row">
+                        <input
+                            bind:value={newId}
+                            placeholder="Ledger ID (ex: nft)"
+                        />
+                        <input
+                            bind:value={newNetworkId}
+                            placeholder="Network ID (ex: pms-nft)"
+                        />
+                        <input
+                            bind:value={newPrefix}
+                            placeholder="DB Prefix (ex: nft)"
+                        />
+                    </div>
+                    {#if createError}
+                        <p class="form-error">{createError}</p>
+                    {/if}
+                    <button
+                        class="primary"
+                        on:click={createLedger}
+                        disabled={createLoading ||
+                            !newId ||
+                            !newNetworkId ||
+                            !newPrefix}
+                    >
+                        {createLoading ? "Creating..." : "Create Ledger"}
+                    </button>
+                </div>
+            {/if}
+        </div>
+
         <!-- Status Cards -->
         <div
             class="glass-panel card"
-            in:fly={{ y: 20, duration: 500, delay: 0 }}
+            in:fly={{ y: 20, duration: 500, delay: 50 }}
         >
             <h3>DAG Size</h3>
             <div class="value">{$nodeStatus?.pms_blocks_total || "0"}</div>
@@ -171,7 +324,7 @@
 
         <div
             class="glass-panel card"
-            in:fly={{ y: 20, duration: 500, delay: 200 }}
+            in:fly={{ y: 20, duration: 500, delay: 150 }}
         >
             <h3>Peers</h3>
             <div class="value">{$networkPeers.length}</div>
@@ -180,7 +333,7 @@
 
         <div
             class="glass-panel card"
-            in:fly={{ y: 20, duration: 500, delay: 300 }}
+            in:fly={{ y: 20, duration: 500, delay: 200 }}
         >
             <h3>Circulating Supply</h3>
             <div class="value">
@@ -193,7 +346,7 @@
 
         <div
             class="glass-panel card wallet-card"
-            in:fly={{ y: 20, duration: 500, delay: 350 }}
+            in:fly={{ y: 20, duration: 500, delay: 250 }}
         >
             <h3>Wallet Balances</h3>
             <div class="wallet-rows">
@@ -221,7 +374,7 @@
         <!-- Real-time Chart -->
         <div
             class="glass-panel card wide-chart"
-            in:fly={{ y: 20, duration: 500, delay: 400 }}
+            in:fly={{ y: 20, duration: 500, delay: 300 }}
         >
             <h3>Throughput (Transactions Per Second)</h3>
             <div class="chart-wrapper">
@@ -238,7 +391,7 @@
             <!-- Treasury Details -->
             <div
                 class="glass-panel"
-                in:fly={{ y: 20, duration: 500, delay: 600 }}
+                in:fly={{ y: 20, duration: 500, delay: 400 }}
             >
                 <h3>Treasury Wallets</h3>
                 <div class="table-container">
@@ -319,6 +472,53 @@
         border: 1px solid var(--color-border);
     }
 
+    /* Ledger selector in header */
+    .ledger-selector {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .ledger-label {
+        font-size: 0.75rem;
+        color: var(--color-fg-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        font-weight: 600;
+    }
+
+    .ledger-dropdown {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--color-border);
+        color: var(--color-fg-primary);
+        padding: 0.4em 2em 0.4em 0.8em;
+        border-radius: 8px;
+        font-size: 0.9rem;
+        font-family: inherit;
+        outline: none;
+        cursor: pointer;
+        transition: border-color 0.2s;
+        -webkit-appearance: none;
+        appearance: none;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23a1a1aa' d='M2 4l4 4 4-4'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 0.5em center;
+    }
+
+    .ledger-dropdown:focus {
+        border-color: var(--color-accent);
+    }
+
+    .ledger-dropdown:hover {
+        background-color: rgba(255, 255, 255, 0.08);
+        border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .ledger-dropdown option {
+        background: #18181b;
+        color: var(--color-fg-primary);
+    }
+
     .grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -389,6 +589,85 @@
         font-family: monospace;
     }
 
+    /* Ledger management section */
+    .ledger-management {
+        grid-column: 1 / -1;
+        min-height: auto;
+    }
+
+    .ledger-header-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+    }
+
+    .ledger-grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+
+    .ledger-chip {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        padding: 0.6rem 1rem;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--color-border);
+        cursor: pointer;
+        transition: all 0.2s;
+        color: inherit;
+    }
+
+    .ledger-chip:hover {
+        background: rgba(255, 255, 255, 0.08);
+        border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .ledger-chip.active {
+        border-color: var(--color-accent);
+        background: rgba(109, 40, 217, 0.15);
+    }
+
+    .chip-name {
+        font-weight: 600;
+        color: var(--color-fg-primary);
+        font-size: 0.95rem;
+    }
+
+    .chip-meta {
+        font-size: 0.75rem;
+        color: var(--color-fg-secondary);
+        margin-top: 0.2rem;
+    }
+
+    .create-form {
+        margin-top: 1rem;
+    }
+
+    .form-row {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+    }
+
+    .form-row input {
+        flex: 1;
+    }
+
+    .form-error {
+        color: var(--color-error);
+        font-size: 0.85rem;
+        margin: 0.5rem 0;
+    }
+
+    button.small {
+        font-size: 0.8rem;
+        padding: 0.4em 0.8em;
+    }
+
     .wide-chart {
         grid-column: 1 / -1;
         min-height: 400px;
@@ -455,11 +734,10 @@
     .table-container {
         overflow-x: auto;
         margin-top: 1rem;
-        max-height: 400px; /* Limit height but allow scroll */
+        max-height: 400px;
         overflow-y: auto;
     }
 
-    /* Scrollbar styling for table */
     .table-container::-webkit-scrollbar {
         height: 8px;
         width: 8px;

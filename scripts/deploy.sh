@@ -20,7 +20,7 @@
 set -e
 
 VPS_IP="${1:-}"
-VPS_USER="${2:-root}"
+VPS_USER="${2:-pms}"
 
 # Domaine hardcodé
 DOMAIN_NAME="pms-network.com"
@@ -227,12 +227,19 @@ if [ ! -f etc/config/config.prod.toml ]; then
     echo "   Generating etc/config/config.prod.toml from template..."
     cp etc/config/config.prod.template.toml etc/config/config.prod.toml
 
+    # Inject admin token into config
+    sed -i "s|REPLACE_WITH_YOUR_SECRET_TOKEN|\$ADMIN_TOKEN|g" etc/config/config.prod.toml
+    echo -e "   \${GREEN}✅ Admin token injected into config.prod.toml\${NC}"
+
     # If not initializing coordinator, comment out admin_wallet_file
     if [ "\$DO_INIT_COORD" != "true" ]; then
          echo "   Adapting config for non-coordinator node..."
          sed -i 's|admin_wallet_file =|# admin_wallet_file =|g' etc/config/config.prod.toml
     fi
 fi
+
+# Always update admin token in existing config (in case token changed between deploys)
+sed -i "s|^admin_api_token = .*|admin_api_token = \"\$ADMIN_TOKEN\"|g" etc/config/config.prod.toml
 
 # --- Caddyfile ---
 echo -e "\${YELLOW}📝 Generating Caddyfile.prod for \$DOMAIN_NAME...\${NC}"

@@ -1,5 +1,5 @@
 import { get } from 'svelte/store';
-import { adminToken } from './stores';
+import { adminToken, selectedLedgerId, ledgerList } from './stores';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
@@ -44,4 +44,15 @@ export async function apiCall(endpoint: string, method = 'GET', body?: any) {
         console.error('API Call failed:', err);
         throw err;
     }
+}
+
+export function ledgerPrefix(): string {
+    const id = get(selectedLedgerId);
+    const list = get(ledgerList);
+    if (!id || list.length <= 1) return '';
+    return `/l/${id}`;
+}
+
+export async function ledgerApiCall(endpoint: string, method = 'GET', body?: any) {
+    return apiCall(`${ledgerPrefix()}${endpoint}`, method, body);
 }
