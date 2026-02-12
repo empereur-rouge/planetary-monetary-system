@@ -25,8 +25,11 @@ etc/secrets/
 *.log
 wallet-seed-*.json
 
-# Configuration spécifique (à adapter si besoin)
+# Wallet secrets (seul le template doit être tracké)
 etc/pms/admin-wallet.json
+etc/pms/coordinator-wallet.json
+etc/pms/treasury-wallet.json
+etc/pms/treasury-wallets.json
 etc/pms/node-identity.key
 etc/pms/node*.key
 etc/pms/treasury-keys/
@@ -38,6 +41,9 @@ benchmark_results/
 # Test data (large files)
 big.json
 *.bak
+
+# RocksDB data (local dev/test)
+data/
 
 # Docker data (persistent volumes)
 docker_data/
@@ -55,6 +61,7 @@ docker_data/
 etc/config/config.prod.toml
 Caddyfile.prod
 docker-compose.prod.yml
-
-docker_data/
 docker_bin/
+
+# PMS
+pms-credentials.txt

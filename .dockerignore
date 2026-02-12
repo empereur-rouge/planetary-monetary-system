@@ -2,26 +2,37 @@ target/
 .git/
 .idea/
 .vscode/
-data/
 *.log
 .DS_Store
 
-# Scripts and Docs (User Request)
+# Scripts and Docs
 scripts/
 documentation/
+docs/
 
 # Environment & Secrets
 .env
-.env.example
+.env.*
 secrets/
 wallet-seed-*.json
+etc/pms/
+*.key
+*.pem
+pms-credentials.txt
 
 # Data & Backups
+data/
 backups/
 benchmark_results/
 docker_bin/
 docker_data/
 exports/
+
+# SDK (TypeScript, not needed for Rust build)
+sdk/
+
+# Dashboard node_modules (npm install in Dockerfile)
+pms-dashboard/node_modules/
 
 # Test Outputs
 test_output*.txt
