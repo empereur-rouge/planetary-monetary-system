@@ -94,6 +94,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
         ledger_mgr: None,
+        ledger_id: "main".into(),
     };
 
     // 10) Router axum
@@ -188,6 +189,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
         ledger_mgr: None,
+        ledger_id: "main".into(),
     };
 
     // 10) Router
@@ -291,6 +293,7 @@ pub async fn make_test_ctx_with_admin(
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
         ledger_mgr: None,
+        ledger_id: "main".into(),
     };
 
     // 10) Router

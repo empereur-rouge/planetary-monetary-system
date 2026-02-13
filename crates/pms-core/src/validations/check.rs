@@ -235,10 +235,40 @@ fn verify_config_signature(address: &str, sig_hex: &str, pk_hex: &str) -> bool {
     verify_key.verify(address.as_bytes(), &sig).is_ok()
 }
 
-/// Point d’entrée UNIQUE.
+/// Vérifie que le bloc est signé par le Coordinator.
+/// Utilisé pour les payloads Coordinator-only (Compliance, Config, etc.).
+fn require_coordinator_signature(
+    b: &Block,
+    policy: &ValidatePolicy,
+    action_name: &str,
+) -> Result<(), ValidationError> {
+    if let Some(coord_pk) = &policy.coordinator_public_key {
+        if let Some(spk) = &b.signer_pk {
+            if spk != coord_pk {
+                return Err(ValidationError::InvalidSignature(format!(
+                    "{} signed by unauthorized key: {}. Expected Coordinator: {}",
+                    action_name, spk, coord_pk
+                )));
+            }
+        } else {
+            return Err(ValidationError::InvalidSignature(format!(
+                "{} block must be signed by Coordinator",
+                action_name
+            )));
+        }
+    } else {
+        return Err(ValidationError::InvalidSignature(format!(
+            "{} not enabled (no coordinator_public_key configured)",
+            action_name
+        )));
+    }
+    Ok(())
+}
+
+/// Point d'entrée UNIQUE.
 /// - Ordonne du moins cher → plus cher.
-/// - Court-circuite dès qu’une règle échoue.
-/// - Délègue le “métier” à de petites fonctions pures.
+/// - Court-circuite dès qu'une règle échoue.
+/// - Délègue le "métier" à de petites fonctions pures.
 pub fn validate_block(
     dag: &Dag,
     b: &Block,
@@ -411,6 +441,105 @@ pub fn validate_block(
                 } else {
                     return Err(ValidationError::Other(
                         "TokenCreate not enabled (no coordinator_public_key configured)",
+                    ));
+                }
+            }
+            PlainPayload::BridgeLock { inputs, dest_ledger_id, dest_address, .. } => {
+                // SECURITY: Only Coordinator can create BridgeLock blocks
+                if let Some(coord_pk) = &policy.coordinator_public_key {
+                    if let Some(spk) = &b.signer_pk {
+                        if spk != coord_pk {
+                            return Err(ValidationError::InvalidSignature(format!(
+                                "BridgeLock signed by unauthorized key: {}. Expected Coordinator: {}",
+                                spk, coord_pk
+                            )));
+                        }
+                    } else {
+                        return Err(ValidationError::InvalidSignature(
+                            "BridgeLock block must be signed by Coordinator".into(),
+                        ));
+                    }
+                } else {
+                    return Err(ValidationError::Other(
+                        "BridgeLock not enabled (no coordinator_public_key configured)",
+                    ));
+                }
+                if inputs.is_empty() {
+                    return Err(ValidationError::Other(
+                        "BridgeLock: at least one input required",
+                    ));
+                }
+                if dest_ledger_id.is_empty() || dest_address.is_empty() {
+                    return Err(ValidationError::Other(
+                        "BridgeLock: dest_ledger_id and dest_address required",
+                    ));
+                }
+            }
+            PlainPayload::BridgeMint { outputs, lock_block_id, source_ledger_id } => {
+                // SECURITY: Only Coordinator can create BridgeMint blocks
+                if let Some(coord_pk) = &policy.coordinator_public_key {
+                    if let Some(spk) = &b.signer_pk {
+                        if spk != coord_pk {
+                            return Err(ValidationError::InvalidSignature(format!(
+                                "BridgeMint signed by unauthorized key: {}. Expected Coordinator: {}",
+                                spk, coord_pk
+                            )));
+                        }
+                    } else {
+                        return Err(ValidationError::InvalidSignature(
+                            "BridgeMint block must be signed by Coordinator".into(),
+                        ));
+                    }
+                } else {
+                    return Err(ValidationError::Other(
+                        "BridgeMint not enabled (no coordinator_public_key configured)",
+                    ));
+                }
+                if outputs.is_empty() {
+                    return Err(ValidationError::Other(
+                        "BridgeMint: at least one output required",
+                    ));
+                }
+                if lock_block_id.is_empty() || source_ledger_id.is_empty() {
+                    return Err(ValidationError::Other(
+                        "BridgeMint: lock_block_id and source_ledger_id required",
+                    ));
+                }
+            }
+            PlainPayload::Freeze { address, .. } => {
+                require_coordinator_signature(b, policy, "Freeze")?;
+                if address.trim().is_empty() {
+                    return Err(ValidationError::Other(
+                        "Freeze: address cannot be empty",
+                    ));
+                }
+            }
+            PlainPayload::Unfreeze { address, freeze_block_id, .. } => {
+                require_coordinator_signature(b, policy, "Unfreeze")?;
+                if address.trim().is_empty() || freeze_block_id.trim().is_empty() {
+                    return Err(ValidationError::Other(
+                        "Unfreeze: address and freeze_block_id required",
+                    ));
+                }
+            }
+            PlainPayload::Seize { inputs, outputs, from_address, .. } => {
+                require_coordinator_signature(b, policy, "Seize")?;
+                if inputs.is_empty() || outputs.is_empty() {
+                    return Err(ValidationError::Other(
+                        "Seize: inputs and outputs required",
+                    ));
+                }
+                if from_address.trim().is_empty() {
+                    return Err(ValidationError::Other(
+                        "Seize: from_address cannot be empty",
+                    ));
+                }
+            }
+            PlainPayload::Reverse { original_block_id, inputs, outputs, .. } => {
+                require_coordinator_signature(b, policy, "Reverse")?;
+                if original_block_id.trim().is_empty() || inputs.is_empty() || outputs.is_empty() {
+                    return Err(ValidationError::Other(
+                        "Reverse: original_block_id, inputs and outputs required",
                     ));
                 }
             }

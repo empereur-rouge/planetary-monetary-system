@@ -2385,6 +2385,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
+name = "pms-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pms-config",
+ "pms-interface",
+ "pms-ledger",
+ "pms-storage",
+ "pms-types",
+ "pms-types-payload",
+ "pms-types-transaction",
+ "pms-utils",
+ "pms-wallet",
+ "pms-wire",
+ "rocksdb",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pms-config"
 version = "0.1.0"
 dependencies = [
@@ -2571,6 +2595,7 @@ dependencies = [
  "k256",
  "lru",
  "once_cell",
+ "pms-bridge",
  "pms-config",
  "pms-core",
  "pms-interface",

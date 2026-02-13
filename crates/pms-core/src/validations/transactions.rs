@@ -1,7 +1,7 @@
 use crate::Dag;
 use crate::validations::amount::{amount_parse_non_neg_dec, amount_parse_pos_dec};
 use pms_errors::ValidationError;
-use pms_types::{PayloadEnvelope, PlainPayload, Transaction};
+use pms_types::{PayloadEnvelope, PlainPayload, TxInput, Transaction};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 
@@ -123,6 +123,60 @@ pub async fn validate_transaction_async(
                 outputs: outputs_by_asset[asset_id].to_string(),
             });
         }
+    }
+
+    Ok(())
+}
+
+/// Validation ASYNC des inputs d'un BridgeLock.
+/// Vérifie :
+/// 1. Pas de doublons internes.
+/// 2. Tous les inputs existent dans l'UTXO set.
+/// 3. sum(inputs) >= amount demandé (pour le même asset_id).
+pub async fn validate_bridge_lock_async(
+    utxos: &crate::utxo::ShardedUtxoSet,
+    inputs: &[TxInput],
+    amount: &str,
+    asset_id: &Option<String>,
+) -> Result<(), ValidationError> {
+    use crate::validations::amount::amount_parse_pos_dec;
+
+    // 1. Doublons internes
+    let mut seen = HashSet::new();
+    for inp in inputs {
+        let key = (inp.out.txid.clone(), inp.out.index);
+        if !seen.insert(key) {
+            return Err(ValidationError::DoubleSpend);
+        }
+    }
+
+    // 2. Somme des inputs (par asset)
+    let mut in_sum = Decimal::ZERO;
+    for inp in inputs {
+        let output_opt = utxos.get(&inp.out).await;
+        match output_opt {
+            Some(out) => {
+                // Vérifier que l'asset_id correspond
+                if &out.asset_id != asset_id {
+                    return Err(ValidationError::AssetBalanceMismatch {
+                        asset_id: asset_id.clone(),
+                        inputs: format!("{:?}", out.asset_id),
+                        outputs: format!("{:?}", asset_id),
+                    });
+                }
+                in_sum += amount_parse_pos_dec(&out.amount)?;
+            }
+            None => {
+                tracing::warn!("BridgeLock input missing: {:?}", inp.out);
+                return Err(ValidationError::MissingInput);
+            }
+        }
+    }
+
+    // 3. sum(inputs) >= amount
+    let required = amount_parse_pos_dec(amount)?;
+    if in_sum < required {
+        return Err(ValidationError::InsufficientFunds);
     }
 
     Ok(())

@@ -9,11 +9,18 @@ use crate::api_fn::milestone::{distribute_fees, get_fee_pool_status};
 use crate::api_fn::nft::{burn_nft, get_nft, get_nfts_by_owner, mint_nft, prepare_nft_transfer};
 use crate::api_fn::nodes::{connect_peer, list_nodes, list_peers, node_heartbeat, register_node};
 use crate::api_fn::stream_blocks::stream_blocks;
+use crate::api_fn::bridge::{admin_bridge_enable, admin_bridge_disable, admin_bridge_transfer, list_bridge_links, bridge_status};
+use crate::api_fn::compliance::{
+    admin_freeze, admin_unfreeze, admin_seize, admin_reverse,
+    admin_list_frozen, admin_compliance_log, admin_shadow_balance,
+};
+use crate::api_fn::cube::{cube_claim, cube_burn};
 use crate::api_fn::ledger::{admin_create_ledger, admin_get_ledger, admin_list_ledgers, list_ledgers};
 use crate::api_fn::supply::get_circulating_supply;
 use crate::api_fn::token::{admin_create_token, admin_mint_token, get_token, list_tokens};
 use crate::api_fn::transaction::{prepare_tx, wallet_send_tx};
 use crate::api_fn::wallet::{balance_by_address, wallet_balance};
+use crate::api_fn::wallet_factory::{faucet_mint, wallet_create, wallet_send_simple};
 use crate::helper::resolve_admin_token;
 use crate::stats::Stats;
 use crate::tls::load_tls;
@@ -78,6 +85,8 @@ pub struct AppState {
     /// Multi-ledger manager (Phase 2).
     /// Quand présent, les routes /l/{ledger_id}/* sont actives.
     pub ledger_mgr: Option<Arc<pms_ledger::LedgerManager>>,
+    /// Ledger ID for this request context ("main" by default).
+    pub ledger_id: String,
 }
 
 /// Middleware to check if request is allowed for admin routes.
@@ -137,7 +146,9 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
         .route("/wallet/balance", post(wallet_balance))
         .route("/wallet/history", post(get_wallet_history))
         .route("/v1/balance", post(balance_by_address))
-        .route("/v1/tx/prepare", post(prepare_tx));
+        .route("/v1/tx/prepare", post(prepare_tx))
+        .route("/v1/wallet/create", post(wallet_create))
+        .route("/v1/wallet/send-simple", post(wallet_send_simple));
 
     let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
 
@@ -181,6 +192,11 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
 
     let coordinator_routes = Router::new().route("/v1/coordinator/info", get(get_coordinator_info));
 
+    // Cube system: claim CUBE tokens + burn for PMS
+    let cube_routes = Router::new()
+        .route("/v1/cube/claim", post(cube_claim))
+        .route("/v1/cube/burn", post(cube_burn));
+
     Router::new()
         .merge(submit)
         .merge(wallet)
@@ -191,6 +207,7 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
         .merge(dag_routes)
         .merge(nft_routes)
         .merge(coordinator_routes)
+        .merge(cube_routes)
 }
 
 /// Dynamic handler for per-ledger routes: `/l/{ledger_id}/{*rest}`
@@ -230,6 +247,7 @@ async fn dynamic_ledger_handler(
         state.node_wallet.clone(),
     );
     ledger_state.store = instance.store.clone();
+    ledger_state.ledger_id = ledger_id.clone();
 
     // Build a router with ledger-scoped routes
     let router = build_ledger_scoped_routes().with_state(ledger_state);
@@ -299,9 +317,26 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         )
     };
 
-    // Endpoint: /metrics (Protected)
+    // Endpoint: /metrics (Protected, per-ledger for dashboard compatibility)
+    // /metrics        → default ledger metrics (label-free, dashboard-compatible)
+    // /metrics/all    → full Prometheus format with labels (ops/Grafana)
+    // /l/{id}/metrics → specific ledger metrics (label-free, dashboard-compatible)
     let metrics = Router::new()
-        .route("/metrics", get(|| async { crate::metrics::render() }))
+        .route(
+            "/metrics",
+            get(|State(st): State<AppState>| async move {
+                crate::metrics::render_for_ledger(&st.ledger_id)
+            }),
+        )
+        .route("/metrics/all", get(|| async { crate::metrics::render() }))
+        .route(
+            "/l/{ledger_id}/metrics",
+            get(
+                |axum::extract::Path(ledger_id): axum::extract::Path<String>| async move {
+                    crate::metrics::render_for_ledger(&ledger_id)
+                },
+            ),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_local_or_admin,
@@ -322,6 +357,20 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/admin/ledgers", get(admin_list_ledgers))
         .route("/admin/ledgers/create", post(admin_create_ledger))
         .route("/admin/ledgers/{ledger_id}", get(admin_get_ledger))
+        // Admin Bridge API - Cross-ledger bridge management
+        .route("/admin/bridge/enable", post(admin_bridge_enable))
+        .route("/admin/bridge/disable", post(admin_bridge_disable))
+        .route("/admin/bridge/transfer", post(admin_bridge_transfer))
+        // Admin Faucet - Mint native PMS (dev/testnet)
+        .route("/admin/faucet", post(faucet_mint))
+        // Admin Compliance API - Freeze, Seize, Reverse, Shadow Balance
+        .route("/admin/compliance/freeze", post(admin_freeze))
+        .route("/admin/compliance/unfreeze", post(admin_unfreeze))
+        .route("/admin/compliance/seize", post(admin_seize))
+        .route("/admin/compliance/reverse", post(admin_reverse))
+        .route("/admin/compliance/frozen", get(admin_list_frozen))
+        .route("/admin/compliance/log", get(admin_compliance_log))
+        .route("/admin/compliance/shadow_balance", get(admin_shadow_balance))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_local_or_admin,
@@ -337,6 +386,11 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
 
     // Multi-ledger endpoints (global)
     let ledger_routes = Router::new().route("/v1/ledgers", get(list_ledgers));
+
+    // Bridge endpoints (public, read-only)
+    let bridge_routes = Router::new()
+        .route("/v1/bridge/links", get(list_bridge_links))
+        .route("/v1/bridge/status/{lock_block_id}", get(bridge_status));
 
     let debug = Router::new().route("/debug/slow", get(debug_slow));
 
@@ -363,6 +417,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .merge(default_ledger_routes)
         .merge(node_routes)
         .merge(ledger_routes)
+        .merge(bridge_routes)
         .merge(per_ledger_router)
         .merge(debug)
         .merge(dashboard)
@@ -526,6 +581,7 @@ pub async fn serve_api(
         node_registry: crate::node_registry::create_registry(),
         fee_pool: crate::fee_pool::create_fee_pool(),
         ledger_mgr: None,
+        ledger_id: "main".into(),
     };
 
     // ═══════════════════════════════════════════════════════════════════════

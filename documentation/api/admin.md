@@ -274,7 +274,65 @@ curl -k -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics
 
 ---
 
-## 🔑 Rotation des clés Authority
+## POST `/admin/faucet`
+
+Mint du PMS natif vers une adresse. Disponible uniquement en mode dev/testnet. Bloque en production.
+
+### Request Body
+
+```json
+{
+  "to": "pms1recipient...",
+  "amount": "1000.0"
+}
+```
+
+| Champ | Type | Requis | Description |
+|-------|------|--------|-------------|
+| `to` | string | oui | Adresse Bech32 du destinataire |
+| `amount` | string | oui | Montant a minter (decimal positif) |
+
+### Response (Succes - 201)
+
+```json
+{
+  "block_id": "faucet_abc123...",
+  "amount": "1000.0"
+}
+```
+
+### Erreurs
+
+| HTTP | Description |
+|------|-------------|
+| 400 | Montant invalide |
+| 403 | Faucet desactive sur mainnet |
+
+### Exemple
+
+```bash
+curl -k -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"to": "pms1recipient...", "amount": "1000.0"}' \
+  https://localhost:8443/admin/faucet
+```
+
+---
+
+## Autres modules Admin
+
+Les endpoints admin sont organises en modules dedies avec leur propre documentation :
+
+| Module | Endpoints | Documentation |
+|--------|-----------|---------------|
+| **Tokens** | `/admin/tokens/create`, `/admin/tokens/mint` | [tokens.md](./tokens.md) |
+| **Ledgers** | `/admin/ledgers`, `/admin/ledgers/create`, `/admin/ledgers/{id}` | [ledgers.md](./ledgers.md) |
+| **Bridge** | `/admin/bridge/enable`, `/admin/bridge/disable`, `/admin/bridge/transfer` | [bridge.md](./bridge.md) |
+| **Compliance** | `/admin/compliance/freeze`, `unfreeze`, `seize`, `reverse`, `frozen`, `log`, `shadow_balance` | [compliance.md](./compliance.md) |
+
+---
+
+## Rotation des cles Authority
 
 Le serveur vérifie automatiquement l'âge des clés Authority au démarrage :
 

@@ -4,7 +4,7 @@ use crate::utxo::ShardedUtxoSet;
 use crate::{DagRef, ValidatePolicy};
 use pms_config::load_config;
 use pms_event::EventBus;
-use pms_storage::{DagStorage, NftStorage};
+use pms_storage::{ComplianceStorage, DagStorage, NftStorage};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 /// - `dag` : DAG concurrent (lock-free) pour haute performance (IOTA-like).
 /// - `store` : persistance (RocksDB, …).
 /// - `server` : lien **faible** vers le serveur réseau pour éviter un cycle Arc.
-pub struct CoreAdapter<S: DagStorage + NftStorage + Send + Sync + 'static> {
+pub struct CoreAdapter<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> {
     /// DAG concurrent lock-free (IOTA-like architecture)
     pub dag: Arc<ConcurrentDag>,
     /// Stockage persistant.
@@ -28,7 +28,7 @@ pub struct CoreAdapter<S: DagStorage + NftStorage + Send + Sync + 'static> {
     pub event_bus: EventBus,
 }
 
-impl<S: DagStorage + NftStorage + Send + Sync + 'static> CoreAdapter<S> {
+impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> CoreAdapter<S> {
     /// Étape 1/2 : construit l'adapter **sans** serveur attaché.
     ///
     /// On met `server` à `Weak::new()` ; il sera renseigné par `set_server` (étape 2/2).
@@ -115,6 +115,21 @@ impl<S: DagStorage + NftStorage + Send + Sync + 'static> CoreAdapter<S> {
                         spent.insert((inp.out.txid.clone(), inp.out.index));
                     }
                 }
+                if let pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::BridgeLock { inputs, .. }) = p {
+                    for inp in inputs {
+                        spent.insert((inp.out.txid.clone(), inp.out.index));
+                    }
+                }
+                if let pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Seize { inputs, .. }) = p {
+                    for inp in inputs {
+                        spent.insert((inp.out.txid.clone(), inp.out.index));
+                    }
+                }
+                if let pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Reverse { inputs, .. }) = p {
+                    for inp in inputs {
+                        spent.insert((inp.out.txid.clone(), inp.out.index));
+                    }
+                }
             }
         }
 
@@ -127,6 +142,15 @@ impl<S: DagStorage + NftStorage + Send + Sync + 'static> CoreAdapter<S> {
                 })) => Some((outputs.clone(), 0)),
                 Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::TxUtxo(tx))) => {
                     Some((tx.outputs.clone(), 0))
+                }
+                Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::BridgeMint { outputs, .. })) => {
+                    Some((outputs.clone(), 0))
+                }
+                Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Seize { outputs, .. })) => {
+                    Some((outputs.clone(), 0))
+                }
+                Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Reverse { outputs, .. })) => {
+                    Some((outputs.clone(), 0))
                 }
                 _ => None,
             };

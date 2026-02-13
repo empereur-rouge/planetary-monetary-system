@@ -104,6 +104,17 @@ pub fn involves_address(plain: &PlainPayload, addr: &str) -> bool {
             fee_outputs.iter().any(|o| o.address == addr)
                 || reward_outputs.iter().any(|o| o.address == addr)
         }
+        PlainPayload::BridgeLock { dest_address, .. } => dest_address == addr,
+        PlainPayload::BridgeMint { outputs, .. } => outputs.iter().any(|o| o.address == addr),
+        PlainPayload::Freeze { address, .. } | PlainPayload::Unfreeze { address, .. } => {
+            address == addr
+        }
+        PlainPayload::Seize {
+            from_address,
+            outputs,
+            ..
+        } => from_address == addr || outputs.iter().any(|o| o.address == addr),
+        PlainPayload::Reverse { outputs, .. } => outputs.iter().any(|o| o.address == addr),
         _ => false,
     }
 }
@@ -129,6 +140,32 @@ pub fn involves_any_address(plain: &PlainPayload, candidates: &[String]) -> bool
                     .iter()
                     .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c)))
         }
+        PlainPayload::BridgeLock { dest_address, .. } => {
+            candidates.iter().any(|c| dest_address.eq_ignore_ascii_case(c))
+        }
+        PlainPayload::BridgeMint { outputs, .. } => outputs
+            .iter()
+            .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c))),
+        PlainPayload::Freeze { address, .. } | PlainPayload::Unfreeze { address, .. } => {
+            candidates
+                .iter()
+                .any(|c| address.eq_ignore_ascii_case(c))
+        }
+        PlainPayload::Seize {
+            from_address,
+            outputs,
+            ..
+        } => {
+            candidates
+                .iter()
+                .any(|c| from_address.eq_ignore_ascii_case(c))
+                || outputs
+                    .iter()
+                    .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c)))
+        }
+        PlainPayload::Reverse { outputs, .. } => outputs
+            .iter()
+            .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c))),
         _ => false,
     }
 }

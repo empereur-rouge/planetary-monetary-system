@@ -63,6 +63,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
         ledger_mgr: None,
+        ledger_id: "main".into(),
     };
 
     // 4) Insert Blocks manually into Store (to bypass validation/mining for speed)

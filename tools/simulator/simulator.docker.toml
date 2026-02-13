@@ -1,0 +1,46 @@
+# ===============================================================================
+# PMS Simulator — Docker Configuration
+# ===============================================================================
+# Uses Docker service names for networking (pms-gateway, not localhost)
+
+[server]
+url = "https://pms-gateway:8443"       # Docker internal DNS
+admin_token = "pms_admin_secret"
+accept_invalid_certs = true             # Self-signed TLS between containers
+
+# [gemini]
+# Decommenter pour agents "smart" (IA). Necessite OAuth token cache monte.
+# client_id = "..."
+# client_secret = "..."
+# model = "gemini-2.0-flash"
+
+[simulation]
+duration_secs = 0                       # 0 = run forever (stop via docker stop)
+base_tick_ms = 1000
+cubes_to_burn = "500.00"                # 500 CUBE burned -> 50 PMS (rate: 10 CUBE = 1 PMS)
+
+[tui]
+enabled = false                         # No terminal in Docker
+
+[web]
+enabled = true
+port = 9090                             # Exposed via docker-compose ports
+
+# === Agents ===
+
+[[agents]]
+count = 5
+interval_ms = 2000
+name_prefix = "rnd"
+[agents.behavior]
+type = "random"
+min_amount = 0.1
+max_amount = 5.0
+send_probability = 0.5
+
+[[agents]]
+count = 1
+interval_ms = 2000
+name_prefix = "observer"
+[agents.behavior]
+type = "observer"

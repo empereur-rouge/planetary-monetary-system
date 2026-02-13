@@ -35,11 +35,32 @@ pub fn apply_block_mem<W: WriteState>(dag: &mut W, b: &Block) {
         // NOTE :
         //  - Les outputs normaux sont inscrits dans le payload du bloc
         //    (TxOutput { address, amount }).
-        //  - L’output "fees" vers le SYSTEM_FEES_WALLET est un output
+        //  - L'output "fees" vers le SYSTEM_FEES_WALLET est un output
         //    comme les autres, ajouté au moment de la construction de
         //    la transaction.
-        //  - Leur existence en tant qu’UTXO exploitable est gérée
+        //  - Leur existence en tant qu'UTXO exploitable est gérée
         //    dans RocksDB via apply_tx_utxo_atomic() / équivalent.
+    }
+
+    // BridgeLock: mark inputs as spent (funds leave this ledger)
+    if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock { inputs, .. })) = &b.payload {
+        for inp in inputs {
+            dag.mark_spent_ram((&inp.out.txid, inp.out.index));
+        }
+    }
+
+    // Seize: mark seized UTXOs as spent (transferred to treasury)
+    if let Some(PayloadEnvelope::Plain(PlainPayload::Seize { inputs, .. })) = &b.payload {
+        for inp in inputs {
+            dag.mark_spent_ram((&inp.out.txid, inp.out.index));
+        }
+    }
+
+    // Reverse: mark reversed outputs as spent (refunded to original senders)
+    if let Some(PayloadEnvelope::Plain(PlainPayload::Reverse { inputs, .. })) = &b.payload {
+        for inp in inputs {
+            dag.mark_spent_ram((&inp.out.txid, inp.out.index));
+        }
     }
 
     // ------------------------------------------------------------

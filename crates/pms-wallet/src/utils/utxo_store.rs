@@ -82,6 +82,41 @@ pub async fn gather_wallet_utxos_dec(
                     }
                 }
             }
+            PlainPayload::BridgeLock { inputs, .. } => {
+                // Track spent inputs (funds leaving this ledger)
+                for inp in inputs {
+                    spent.insert((inp.out.txid.clone(), inp.out.index));
+                }
+            }
+            PlainPayload::BridgeMint { outputs, .. } => {
+                // Track earned outputs (funds arriving on this ledger)
+                for (i, o) in outputs.iter().enumerate() {
+                    if candidates
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(&o.address))
+                    {
+                        if let Ok(d) = Decimal::from_str_exact(&o.amount) {
+                            earned.insert((b.id.clone(), i as u32), d);
+                        }
+                    }
+                }
+            }
+            PlainPayload::Seize { inputs, outputs, .. }
+            | PlainPayload::Reverse { inputs, outputs, .. } => {
+                for inp in inputs {
+                    spent.insert((inp.out.txid.clone(), inp.out.index));
+                }
+                for (i, o) in outputs.iter().enumerate() {
+                    if candidates
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(&o.address))
+                    {
+                        if let Ok(d) = Decimal::from_str_exact(&o.amount) {
+                            earned.insert((b.id.clone(), i as u32), d);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -170,6 +205,41 @@ pub async fn gather_address_utxos_dec(
                     spent.insert((inp.out.txid.clone(), inp.out.index));
                 }
                 for (i, o) in tx.outputs.iter().enumerate() {
+                    if candidates
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(&o.address))
+                    {
+                        if let Ok(d) = Decimal::from_str_exact(&o.amount) {
+                            earned.insert((b.id.clone(), i as u32), d);
+                        }
+                    }
+                }
+            }
+            PlainPayload::BridgeLock { inputs, .. } => {
+                // Track spent inputs (funds leaving this ledger)
+                for inp in inputs {
+                    spent.insert((inp.out.txid.clone(), inp.out.index));
+                }
+            }
+            PlainPayload::BridgeMint { outputs, .. } => {
+                // Track earned outputs (funds arriving on this ledger)
+                for (i, o) in outputs.iter().enumerate() {
+                    if candidates
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(&o.address))
+                    {
+                        if let Ok(d) = Decimal::from_str_exact(&o.amount) {
+                            earned.insert((b.id.clone(), i as u32), d);
+                        }
+                    }
+                }
+            }
+            PlainPayload::Seize { inputs, outputs, .. }
+            | PlainPayload::Reverse { inputs, outputs, .. } => {
+                for inp in &inputs {
+                    spent.insert((inp.out.txid.clone(), inp.out.index));
+                }
+                for (i, o) in outputs.iter().enumerate() {
                     if candidates
                         .iter()
                         .any(|c| c.eq_ignore_ascii_case(&o.address))

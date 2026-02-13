@@ -271,7 +271,122 @@ curl -k -X POST https://localhost:8443/wallet/history \
 
 ---
 
-## 📊 Précision des montants
+## POST `/v1/wallet/create`
+
+Genere un nouveau wallet (paire de cles) et retourne les informations de connexion. Peut aussi importer un wallet existant a partir d'une cle privee hex.
+
+### Request Body (optionnel)
+
+```json
+{
+  "import_hex": "a1b2c3d4..."
+}
+```
+
+| Champ | Type | Requis | Description |
+|-------|------|--------|-------------|
+| `import_hex` | string | non | Cle privee ECDSA en hex a importer. Si absent, genere un nouveau wallet. |
+
+> Si aucun body n'est envoye, un nouveau wallet est genere automatiquement.
+
+### Response
+
+```json
+{
+  "address": "pms1qw508d6qejxtdg4y5r3zarvary0c5xw7k...",
+  "private_key_b64": "MHQCAQEEIFm0...",
+  "public_key_hex": "04abc123...",
+  "x25519_pub_hex": "def456..."
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `address` | string | Adresse Bech32 du wallet |
+| `private_key_b64` | string | Cle privee en base64 (a conserver secretement) |
+| `public_key_hex` | string | Cle publique ECDSA (hex) |
+| `x25519_pub_hex` | string | Cle publique X25519 pour le chiffrement (hex) |
+
+### Exemple
+
+```bash
+# Generer un nouveau wallet
+curl -k -X POST https://localhost:8443/v1/wallet/create
+
+# Importer une cle existante
+curl -k -X POST https://localhost:8443/v1/wallet/create \
+  -H "Content-Type: application/json" \
+  -d '{"import_hex": "a1b2c3d4..."}'
+```
+
+---
+
+## POST `/v1/wallet/send-simple`
+
+Envoi custodial one-shot : prepare, signe et envoie la transaction en une seule requete. Le serveur gere la selection d'UTXOs, le calcul des frais, la signature et le chiffrement.
+
+Supporte les tokens custom via le champ `asset_id` (les frais sont toujours payes en PMS natif).
+
+### Request Body
+
+```json
+{
+  "private_key_b64": "MHQCAQEEIFm0...",
+  "to": "pms1recipient...",
+  "amount": "100.0",
+  "asset_id": null
+}
+```
+
+| Champ | Type | Requis | Description |
+|-------|------|--------|-------------|
+| `private_key_b64` | string | oui | Cle privee base64 de l'expediteur |
+| `to` | string | oui | Adresse Bech32 du destinataire |
+| `amount` | string | oui | Montant a envoyer (decimal positif) |
+| `asset_id` | string | non | ID du token custom (null = PMS natif) |
+
+### Response (Succes - 201)
+
+```json
+{
+  "block_id": "tx_abc123...",
+  "fee": "0.03000000"
+}
+```
+
+### Erreurs
+
+| HTTP | Description |
+|------|-------------|
+| 400 | Cle invalide, montant <= 0 |
+| 422 | Solde insuffisant (token ou PMS pour les frais) |
+
+### Exemple
+
+```bash
+# Envoyer du PMS natif
+curl -k -X POST https://localhost:8443/v1/wallet/send-simple \
+  -H "Content-Type: application/json" \
+  -d '{
+    "private_key_b64": "MHQCAQEEIFm0...",
+    "to": "pms1recipient...",
+    "amount": "100.0"
+  }'
+
+# Envoyer un token custom
+curl -k -X POST https://localhost:8443/v1/wallet/send-simple \
+  -H "Content-Type: application/json" \
+  -d '{
+    "private_key_b64": "MHQCAQEEIFm0...",
+    "to": "pms1recipient...",
+    "amount": "50.0",
+    "asset_id": "edenite"
+  }'
+```
+
+---
+
+## Precision des montants
 
 Tous les montants sont en **chaînes de caractères** avec jusqu'à **8 décimales**.
 

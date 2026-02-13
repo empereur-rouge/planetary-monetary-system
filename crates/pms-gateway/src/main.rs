@@ -170,6 +170,12 @@ async fn main() -> Result<()> {
         // Supply & Coordinator (proxy)
         .route("/v1/supply", get(routes::proxy_get))
         .route("/v1/coordinator/info", get(routes::proxy_get))
+        // Custodial wallet API (proxy)
+        .route("/v1/wallet/create", post(routes::proxy_post))
+        .route("/v1/wallet/send-simple", post(routes::proxy_post))
+        // Cube system (proxy) - claim CUBEs + burn for PMS
+        .route("/v1/cube/claim", post(routes::proxy_post))
+        .route("/v1/cube/burn", post(routes::proxy_post))
         // History (proxy)
         .route("/wallet/history", post(routes::proxy_post))
         // Wallet TX send (proxy) - Submit signed transaction
@@ -182,6 +188,8 @@ async fn main() -> Result<()> {
         // Admin Config API - RuntimeConfig Hot-Swap
         .route("/admin/config", get(routes::proxy_get))
         .route("/admin/config", post(routes::proxy_post))
+        // Faucet (admin, proxy to engine)
+        .route("/admin/faucet", post(routes::proxy_post))
         // Metrics (proxy to engine)
         .route("/metrics", get(routes::proxy_get))
         // Multi-ledger public/admin routes (proxy to engine)

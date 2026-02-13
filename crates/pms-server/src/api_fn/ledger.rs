@@ -202,6 +202,7 @@ pub async fn admin_create_ledger(
         tip_limit: req.tip_limit,
         fees: None,
         validation: None,
+        owner_pubkey: None,
     };
 
     match mgr.add_ledger(def).await {

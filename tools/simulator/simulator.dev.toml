@@ -1,0 +1,43 @@
+[server]
+url = "https://127.0.0.1:8443"    # Gateway URL (pas l'engine direct)
+admin_token = "dev-token"
+# ledger_id = "main"              # Decommenter pour multi-ledger
+accept_invalid_certs = true        # Dev avec TLS self-signed
+
+# [gemini]
+# Decommenter et configurer pour utiliser des agents "smart" (IA)
+# client_id = "..."
+# client_secret = "..."
+# model = "gemini-2.0-flash"
+
+[simulation]
+duration_secs = 300                # 5 min, 0 = infini
+base_tick_ms = 1000
+cubes_to_burn = "500.00"           # 500 CUBE burned -> 50 PMS (rate: 10 CUBE = 1 PMS)
+
+[tui]
+refresh_ms = 250
+enabled = true
+
+[web]
+enabled = true
+port = 9090                            # http://localhost:9090
+
+# === Agents ===
+
+[[agents]]
+count = 5
+interval_ms = 2000
+name_prefix = "rnd"
+[agents.behavior]
+type = "random"
+min_amount = 0.1
+max_amount = 5.0
+send_probability = 0.5                 # 50% chance d'envoyer par tick
+
+[[agents]]
+count = 1
+interval_ms = 2000
+name_prefix = "observer"
+[agents.behavior]
+type = "observer"

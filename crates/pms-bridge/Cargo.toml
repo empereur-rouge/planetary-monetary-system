@@ -1,0 +1,26 @@
+[package]
+name = "pms-bridge"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pms-config = { path = "../pms-config" }
+pms-storage = { path = "../pms-storage" }
+pms-ledger = { path = "../pms-ledger" }
+pms-interface = { path = "../pms-interface" }
+pms-types-payload = { path = "../pms-types-payload" }
+pms-types-transaction = { path = "../pms-types-transaction" }
+pms-wallet = { path = "../pms-wallet" }
+pms-wire = { path = "../pms-wire" }
+pms-utils = { path = "../pms-utils" }
+anyhow = "1.0.100"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = "1"
+tracing = "0.1"
+rocksdb = "0.24.0"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+pms-types = { path = "../pms-types" }

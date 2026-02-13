@@ -121,6 +121,8 @@ pub async fn internal_submit_block(
     let adapter = app.srv.adapter_arc();
     match adapter.persist_block(&req.block).await {
         Ok(PutResult::Inserted) => {
+            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&app.ledger_id]).inc();
+            crate::metrics::PMS_BLOCKS_TOTAL.with_label_values(&[&app.ledger_id]).inc();
             app.srv.enqueue_broadcast(req.block.id.clone()).await;
             (
                 StatusCode::CREATED,

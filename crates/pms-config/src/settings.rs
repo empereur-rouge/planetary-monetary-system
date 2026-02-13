@@ -45,6 +45,7 @@ impl Settings {
                 tip_limit: Some(self.rocks.tip_limit),
                 fees: None,
                 validation: None,
+                owner_pubkey: None,
             }]
         } else {
             self.ledgers.clone()

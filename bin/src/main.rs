@@ -4,6 +4,7 @@ use clap::Parser;
 use pms_config::{ServerConfig, load_config};
 use pms_ledger::LedgerManager;
 use pms_server::Server;
+use pms_storage::DagStorage;
 use pms_wallet::Wallet;
 use rustls::crypto::ring;
 use std::env;
@@ -92,8 +93,15 @@ async fn main() -> Result<()> {
     );
     let ledger_mgr = Arc::new(LedgerManager::bootstrap(&settings).await?);
 
-    for lid in ledger_mgr.list_ids() {
-        eprintln!("  ✅ Ledger '{}' ready", lid);
+    for instance in ledger_mgr.list_all() {
+        if let Ok(count) = instance.store.block_count().await {
+            pms_server::metrics::PMS_BLOCKS_TOTAL
+                .with_label_values(&[&instance.id])
+                .set(count as i64);
+            eprintln!("  ✅ Ledger '{}' ready (blocks: {})", instance.id, count);
+        } else {
+            eprintln!("  ✅ Ledger '{}' ready", instance.id);
+        }
     }
 
     // Use default ledger ("main") for P2P Server & backward-compat store
@@ -224,6 +232,7 @@ async fn main() -> Result<()> {
             node_registry: pms_server::node_registry::create_registry(),
             fee_pool: pms_server::fee_pool::create_fee_pool(),
             ledger_mgr: Some(ledger_mgr.clone()),
+            ledger_id: "main".into(),
         };
 
         eprintln!("🔧 Launching Internal API at {}", addr);

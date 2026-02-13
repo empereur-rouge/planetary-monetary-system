@@ -1,0 +1,49 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Dockerfile.simulator - PMS AI Agent Simulator
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Standalone build — no dependency on dag-pms workspace.
+# Connects to Gateway via HTTPS, exposes web dashboard on port 9090.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1: Build Simulator Binary
+# ─────────────────────────────────────────────────────────────────────────────
+FROM rust:1-slim AS builder
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY tools/simulator/ .
+
+RUN cargo build --release
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2: Runtime Image
+# ─────────────────────────────────────────────────────────────────────────────
+FROM debian:trixie-slim AS runtime
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the simulator binary
+COPY --from=builder /app/target/release/pms-simulator /usr/local/bin/pms-simulator
+
+# Config directory (mounted as volume)
+RUN mkdir -p /app/config
+
+# Web dashboard port
+EXPOSE 9090
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -sf http://127.0.0.1:9090/ || exit 1
+
+CMD ["pms-simulator", "--config", "/app/config/simulator.toml"]

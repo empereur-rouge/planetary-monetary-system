@@ -46,6 +46,12 @@ pub fn compute_block_id(
                 PlainPayload::Reward { .. } => "Reward",
                 PlainPayload::EncryptedReward { .. } => "EncryptedReward",
                 PlainPayload::TokenCreate(_) => "TokenCreate",
+                PlainPayload::BridgeLock { .. } => "BridgeLock",
+                PlainPayload::BridgeMint { .. } => "BridgeMint",
+                PlainPayload::Freeze { .. } => "Freeze",
+                PlainPayload::Unfreeze { .. } => "Unfreeze",
+                PlainPayload::Seize { .. } => "Seize",
+                PlainPayload::Reverse { .. } => "Reverse",
             }
             .to_string();
 

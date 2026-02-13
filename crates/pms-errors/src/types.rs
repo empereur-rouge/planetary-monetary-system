@@ -85,4 +85,10 @@ pub enum ValidationError {
     MaxSupplyExceeded(String),
     #[error("token already exists: {0}")]
     TokenAlreadyExists(String),
+
+    // Compliance
+    #[error("address is frozen: {0}")]
+    AddressFrozen(String),
+    #[error("reverse failed: output already spent: {txid}#{index}")]
+    OutputAlreadySpent { txid: String, index: u32 },
 }

@@ -8,6 +8,7 @@
 extern crate core;
 
 mod checkpoint_rocks;
+pub mod compliance_store;
 pub mod config_store;
 pub mod helpers;
 pub mod migrations;
@@ -19,6 +20,7 @@ pub mod rocks_store;
 pub mod store;
 pub mod traits;
 
+pub use compliance_store::*;
 pub use config_store::*;
 pub use migrations::*;
 pub use models::*;

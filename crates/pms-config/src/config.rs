@@ -335,6 +335,10 @@ pub struct LedgerDef {
     /// Validation settings override pour ce ledger
     #[serde(default)]
     pub validation: Option<LedgerValidationOverride>,
+    /// Clé publique du propriétaire du ledger.
+    /// None = admin-owned (ex: "main"), Some = custom ledger avec owner.
+    #[serde(default)]
+    pub owner_pubkey: Option<String>,
 }
 
 /// Overrides de fees pour un ledger spécifique.

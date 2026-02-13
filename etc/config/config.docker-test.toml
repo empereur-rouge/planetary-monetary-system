@@ -41,7 +41,7 @@ rate_limit_rps = 5000
 burst = 5000
 
 [fees]
-treasury_addresses = ["pms1622lzmxyzup3s0a9zk93qczucx6reczg2sswqp382zst9h7g5tsc2xc8madxf0984lpgjpxu0drhaals3gysv4zm88"]
+treasury_addresses = ["pms1vk6sgyudd2l5pgxqjrq6wj9x4p3grt34zfq8nnefhqc2r7s98spz8mvzwnnrd8tl3a05lqdxxnx720r5j5nqa64jej"]
 epsilon = "0.001"
 scan_limit = 2000
 mode = "uniform"
@@ -58,7 +58,7 @@ burn_percent = 10
 # Each key represents a different application backend allowed to generate Cubes.
 # Format: SEC1 compressed hex (e.g., "03..." for secp256k1)
 authority_public_keys = [
-    "02f251bc56b8916b0ae3fc950fbc10a12f5e8fb96feaa76728142b60351d7642d0",
+    "03e40d6555aa0de54d9d9718577c9ae5d820294d13005ffbe423358a323d75b849",
 ]
 authority_keys_last_rotation = "2026-01-15"
 
@@ -86,5 +86,5 @@ enforce_fee_recipient = false    # Désactivé pour les tests
 
 # COORDINATOR PUBLIC KEY - Dérivée de node1.key
 # Seul Node 1 peut minter car il a la clé privée correspondante
-coordinator_public_key = "04f251bc56b8916b0ae3fc950fbc10a12f5e8fb96feaa76728142b60351d7642d0239e440792757e6b064d25e7647639e6e5652feb8010fccb09ab026b818103fc"
-coordinator_x25519_public_key = "a080765ffca10c779d84a2f7f18726413b204bd4449d20cbbe21c87cfc6b4f2a"
+coordinator_public_key = "04e40d6555aa0de54d9d9718577c9ae5d820294d13005ffbe423358a323d75b84905ef456525c422ac0a60d92e7644e3e49f8da0d1faccb76be96a5b958d1cbd4d"
+coordinator_x25519_public_key = "2a9e3c8468a149435ae028366ae44bd59d232ddb36598eaad0c44a8a8f82c74f"

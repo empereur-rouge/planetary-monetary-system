@@ -109,7 +109,57 @@ Envoyez un heartbeat toutes les **30 secondes** pour maintenir le status `active
 
 ---
 
-## 🔄 Architecture distribuée
+## GET `/v1/peers`
+
+Retourne la liste des peers P2P connectes (adresses socket).
+
+### Response
+
+```json
+["192.168.1.10:8080", "10.0.0.5:8080"]
+```
+
+### Exemple
+
+```bash
+curl -k https://localhost:8443/v1/peers
+```
+
+---
+
+## POST `/v1/peers/connect`
+
+Connecte manuellement a un peer P2P. La connexion est initiee en arriere-plan.
+
+### Request Body
+
+```json
+{
+  "addr": "192.168.1.10:8080"
+}
+```
+
+| Champ | Type | Requis | Description |
+|-------|------|--------|-------------|
+| `addr` | string | oui | Adresse du peer (host:port) |
+
+### Response
+
+```
+Connection initiated
+```
+
+### Exemple
+
+```bash
+curl -k -X POST https://localhost:8443/v1/peers/connect \
+  -H "Content-Type: application/json" \
+  -d '{"addr": "192.168.1.10:8080"}'
+```
+
+---
+
+## Architecture distribuee
 
 ```
                     ┌─────────────┐

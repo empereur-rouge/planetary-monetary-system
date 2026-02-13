@@ -1,6 +1,6 @@
 use aes_gcm::aead::OsRng;
-use pms_types_payload::{EncryptedPayload, PlainPayload};
-use pms_types_transaction::TxOutput;
+use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
+use pms_types_transaction::{TxInput, TxOutput};
 use x25519_dalek::{PublicKey as XPublic, StaticSecret as XSecret};
 
 #[test]
@@ -38,8 +38,91 @@ fn mvp_encrypt_decrypt_confidential_type_only() {
         PlainPayload::Reward { .. } => println!("Type = Reward"),
         PlainPayload::EncryptedReward { .. } => println!("Type = EncryptedReward"),
         PlainPayload::TokenCreate(_) => println!("Type = TokenCreate"),
+        PlainPayload::BridgeLock { .. } => println!("Type = BridgeLock"),
+        PlainPayload::BridgeMint { .. } => println!("Type = BridgeMint"),
+        PlainPayload::Freeze { .. } => println!("Type = Freeze"),
+        PlainPayload::Unfreeze { .. } => println!("Type = Unfreeze"),
+        PlainPayload::Seize { .. } => println!("Type = Seize"),
+        PlainPayload::Reverse { .. } => println!("Type = Reverse"),
     }
 
     // Vérif : bien du bon type
     assert!(matches!(back, PlainPayload::Mint { .. }));
+}
+
+// ── Roundtrip serde tests for compliance variants ─────────────────────────
+
+#[test]
+fn serde_roundtrip_freeze() {
+    let payload = PlainPayload::Freeze {
+        address: "8e1addr_test".into(),
+        reason: "suspicious activity".into(),
+    };
+    let envelope = PayloadEnvelope::Plain(payload.clone());
+    let json = serde_json::to_string(&envelope).unwrap();
+    let back: PayloadEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, envelope);
+    assert!(matches!(
+        back,
+        PayloadEnvelope::Plain(PlainPayload::Freeze { .. })
+    ));
+}
+
+#[test]
+fn serde_roundtrip_unfreeze() {
+    let payload = PlainPayload::Unfreeze {
+        address: "8e1addr_test".into(),
+        reason: "investigation complete".into(),
+        freeze_block_id: "abc123def456".into(),
+    };
+    let envelope = PayloadEnvelope::Plain(payload);
+    let json = serde_json::to_string(&envelope).unwrap();
+    let back: PayloadEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, envelope);
+}
+
+#[test]
+fn serde_roundtrip_seize() {
+    let payload = PlainPayload::Seize {
+        from_address: "8e1target_addr".into(),
+        inputs: vec![TxInput {
+            out: pms_types_transaction::OutputId {
+                txid: "tx123".into(),
+                index: 0,
+            },
+        }],
+        outputs: vec![TxOutput {
+            address: "8e1treasury".into(),
+            amount: "500.0".into(),
+            asset_id: None,
+        }],
+        reason: "court order".into(),
+    };
+    let envelope = PayloadEnvelope::Plain(payload);
+    let json = serde_json::to_string(&envelope).unwrap();
+    let back: PayloadEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, envelope);
+}
+
+#[test]
+fn serde_roundtrip_reverse() {
+    let payload = PlainPayload::Reverse {
+        original_block_id: "block_abc123".into(),
+        inputs: vec![TxInput {
+            out: pms_types_transaction::OutputId {
+                txid: "block_abc123".into(),
+                index: 0,
+            },
+        }],
+        outputs: vec![TxOutput {
+            address: "8e1original_sender".into(),
+            amount: "100.0".into(),
+            asset_id: None,
+        }],
+        reason: "fraud detected".into(),
+    };
+    let envelope = PayloadEnvelope::Plain(payload);
+    let json = serde_json::to_string(&envelope).unwrap();
+    let back: PayloadEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, envelope);
 }

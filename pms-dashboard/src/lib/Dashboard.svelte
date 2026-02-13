@@ -55,7 +55,7 @@
         try {
             const [metricsText, registryRes, p2pRes, supplyRes, nodeRes] =
                 await Promise.all([
-                    apiCall("/metrics").catch((err) => {
+                    ledgerApiCall("/metrics").catch((err) => {
                         console.error("Metrics failed", err);
                         return "";
                     }),

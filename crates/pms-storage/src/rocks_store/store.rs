@@ -92,6 +92,8 @@ impl RocksStore {
             "node_fee_pool", // Fee pool: single key "pool" -> amount (u64)
             "node_reward_addresses", // Reward addresses: node_pk -> address
             "token_registry",        // Token registry: asset_id -> TokenMetadata (JSON)
+            "compliance_frozen",     // Frozen addresses: address -> FrozenEntry (JSON)
+            "compliance_log",        // Compliance audit trail: block_id -> ComplianceLogEntry (JSON)
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -202,6 +204,10 @@ impl RocksStore {
         "node_fee_pool",
         "node_reward_addresses",
         "token_registry",
+        "bridge_consumed",
+        "bridge_links",
+        "compliance_frozen",
+        "compliance_log",
     ];
 
     /// Ouvre un RocksDB avec les column families de **plusieurs prefixes** à la fois.
@@ -583,6 +589,8 @@ impl RocksStore {
             "nft_ownership",
             "nfts_by_owner",
             "nft_block_ids",
+            "compliance_frozen",
+            "compliance_log",
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))

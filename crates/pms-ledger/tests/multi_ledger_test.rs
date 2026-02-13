@@ -98,6 +98,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
                 tip_limit: Some(100),
                 fees: None,
                 validation: None,
+                owner_pubkey: None,
             },
             LedgerDef {
                 id: "nft".into(),
@@ -107,6 +108,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
                 tip_limit: Some(50),
                 fees: None,
                 validation: None,
+                owner_pubkey: None,
             },
         ],
     }
@@ -209,6 +211,7 @@ async fn add_ledger_dynamically() -> Result<()> {
         tip_limit: Some(32),
         fees: None,
         validation: None,
+        owner_pubkey: None,
     };
 
     let instance = mgr.add_ledger(new_def).await?;
@@ -230,6 +233,7 @@ async fn add_ledger_dynamically() -> Result<()> {
             tip_limit: None,
             fees: None,
             validation: None,
+            owner_pubkey: None,
         })
         .await;
     assert!(dup.is_err(), "duplicate ledger id should be rejected");

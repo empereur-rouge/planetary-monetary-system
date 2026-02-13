@@ -1,6 +1,9 @@
 pub mod blocks;
+pub mod bridge;
+pub mod compliance;
 pub mod config;
 pub mod coordinator;
+pub mod cube;
 pub mod dag;
 pub mod history;
 pub mod ledger;
@@ -12,3 +15,5 @@ pub mod supply;
 pub mod token;
 pub mod transaction;
 pub mod wallet;
+pub mod tx_helpers;
+pub mod wallet_factory;

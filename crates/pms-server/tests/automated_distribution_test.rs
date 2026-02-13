@@ -299,6 +299,7 @@ async fn test_automated_fee_distribution() {
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
         ledger_mgr: None,
+        ledger_id: "main".into(),
     };
 
     // 8. Spawn Distributor

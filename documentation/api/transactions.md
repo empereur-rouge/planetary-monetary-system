@@ -162,15 +162,19 @@ Prépare une transaction non-signée pour transfert wallet-à-wallet. Le serveur
 {
   "from": "pms1sender_address...",
   "to": "pms1recipient_address...",
-  "amount": "100.50"
+  "amount": "100.50",
+  "asset_id": null
 }
 ```
 
 | Champ | Type | Requis | Description |
 |-------|------|--------|-------------|
-| `from` | string | ✅ | Adresse Bech32 de l'expéditeur |
-| `to` | string | ✅ | Adresse Bech32 du destinataire |
-| `amount` | string | ✅ | Montant à envoyer (décimal, ex: "100.5") |
+| `from` | string | oui | Adresse Bech32 de l'expediteur |
+| `to` | string | oui | Adresse Bech32 du destinataire |
+| `amount` | string | oui | Montant a envoyer (decimal, ex: "100.5") |
+| `asset_id` | string | non | ID du token custom (null = PMS natif) |
+
+> **Multi-token** : Pour les tokens custom, les frais sont toujours payes en PMS natif. Le serveur selectionne des UTXOs PMS supplementaires pour couvrir les frais.
 
 ### Response (Succès)
 
@@ -242,8 +246,10 @@ await fetch('/wallet/tx/send', {
 | HTTP | Code | Description |
 |------|------|-------------|
 | 400 | `INVALID_AMOUNT` | Montant invalide ou <= 0 |
-| 422 | `NO_UTXOS` | Aucun UTXO disponible pour l'expéditeur |
+| 403 | `FROZEN` | Adresse expediteur ou destinataire gelee (compliance) |
+| 422 | `NO_UTXOS` | Aucun UTXO disponible pour l'expediteur |
 | 422 | `INSUFFICIENT_BALANCE` | Solde insuffisant (amount + fee) |
+| 422 | `INSUFFICIENT_PMS_FEE` | Solde PMS insuffisant pour les frais (tokens custom) |
 
 ### Exemple
 

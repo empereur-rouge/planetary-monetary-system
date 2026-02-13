@@ -26,6 +26,7 @@ members = [
     "crates/pms-event",
     "crates/pms-types-nft",
     "crates/pms-gateway",
+    "crates/pms-bridge",
 ]
 
 resolver = "2"

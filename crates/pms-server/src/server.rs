@@ -396,8 +396,8 @@ impl Server {
 
         // 0) Initialize Metrics from Store
         if let Ok(count) = store.block_count().await {
-            crate::metrics::PMS_BLOCKS_TOTAL.set(count as i64);
-            tracing::info!("📊 Metrics initialized: PMS_BLOCKS_TOTAL = {}", count);
+            crate::metrics::PMS_BLOCKS_TOTAL.with_label_values(&["main"]).set(count as i64);
+            tracing::info!("📊 Metrics initialized: PMS_BLOCKS_TOTAL[main] = {}", count);
         } else {
             tracing::warn!("⚠️ Failed to initialize PMS_BLOCKS_TOTAL from store");
         }
@@ -1243,6 +1243,8 @@ impl Server {
 
             match result {
                 Ok(PutResult::Inserted) => {
+                    crate::metrics::BLOCKS_PERSISTED.with_label_values(&["main"]).inc();
+                    crate::metrics::PMS_BLOCKS_TOTAL.with_label_values(&["main"]).inc();
                     // ====== BENCHMARK: Log bloc validé ======
                     let persist_ms = persist_start.elapsed().as_millis();
                     tracing::info!(
@@ -1333,7 +1335,7 @@ impl Server {
                                 .await;
                         }
                     } else {
-                        crate::metrics::BLOCKS_REJECTED.inc();
+                        crate::metrics::BLOCKS_REJECTED.with_label_values(&["main"]).inc();
                     }
                 }
                 Err(e) => {

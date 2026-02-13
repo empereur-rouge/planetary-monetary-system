@@ -81,7 +81,7 @@ async fn create_refund_utxo_block(
     match state.srv.adapter_arc().persist_block(&wire_block).await {
         Ok(PutResult::Inserted) => {
             let _ = state.srv.enqueue_broadcast(wire_block.id.clone()).await;
-            crate::metrics::BLOCKS_PERSISTED.inc();
+            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
             Ok(block_id)
         }
         Ok(PutResult::AlreadyExists) => {
@@ -490,7 +490,7 @@ pub async fn mint_nft(
         Ok(pms_storage::PutResult::Inserted) => {
             let _ = state.srv.enqueue_broadcast(wire_block.id.clone()).await;
 
-            crate::metrics::BLOCKS_PERSISTED.inc();
+            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
 
             {
                 use pms_storage::NftStorage;
@@ -765,7 +765,7 @@ pub async fn burn_nft(
         Ok(pms_storage::PutResult::Inserted) => {
             // Broadcast
             let _ = state.srv.enqueue_broadcast(block_id.clone()).await;
-            crate::metrics::BLOCKS_PERSISTED.inc();
+            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
 
             // ─────────────────────────────────────────────────────────────
             // 4. UPDATE STORE : Marquer comme brûlés

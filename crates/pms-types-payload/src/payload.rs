@@ -1,7 +1,7 @@
 use crate::EncryptedPayload;
 use pms_config::ConfigUpdate;
 use pms_types_nft::NftAction;
-use pms_types_transaction::{Transaction, TxOutput};
+use pms_types_transaction::{Transaction, TxInput, TxOutput};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,6 +62,58 @@ pub enum PlainPayload {
     },
     /// Enregistrement d'un nouveau token (Coordinator seulement)
     TokenCreate(TokenMetadata),
+    /// Verrouille des UTXOs sur ce ledger pour un transfert cross-ledger.
+    /// Les fonds sont détruits sur le ledger source. Coordinator seulement.
+    BridgeLock {
+        /// UTXOs consommés (même format que TxUtxo inputs)
+        inputs: Vec<TxInput>,
+        /// Montant total verrouillé
+        amount: String,
+        /// Asset transféré (None = PMS natif)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asset_id: Option<String>,
+        /// ID du ledger destination
+        dest_ledger_id: String,
+        /// Adresse du destinataire sur le ledger destination
+        dest_address: String,
+    },
+    /// Crée des UTXOs sur ce ledger en référençant un BridgeLock source.
+    /// Coordinator seulement.
+    BridgeMint {
+        /// Outputs créés sur ce ledger
+        outputs: Vec<TxOutput>,
+        /// ID du bloc BridgeLock sur le ledger source (preuve)
+        lock_block_id: String,
+        /// ID du ledger source
+        source_ledger_id: String,
+    },
+    /// Gèle un compte : bloque toutes les transactions entrantes et sortantes.
+    /// Coordinator seulement. Réversible via Unfreeze.
+    Freeze {
+        address: String,
+        reason: String,
+    },
+    /// Dégèle un compte précédemment gelé. Coordinator seulement.
+    Unfreeze {
+        address: String,
+        reason: String,
+        freeze_block_id: String,
+    },
+    /// Saisit des UTXOs et les transfère au treasury. Coordinator seulement.
+    Seize {
+        from_address: String,
+        inputs: Vec<TxInput>,
+        outputs: Vec<TxOutput>,
+        reason: String,
+    },
+    /// Inverse une transaction si ses outputs n'ont pas été dépensés.
+    /// Coordinator seulement.
+    Reverse {
+        original_block_id: String,
+        inputs: Vec<TxInput>,
+        outputs: Vec<TxOutput>,
+        reason: String,
+    },
 }
 
 /// Métadonnées d'un token enregistré dans le DAG.

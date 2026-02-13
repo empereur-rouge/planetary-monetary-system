@@ -13,7 +13,8 @@ use pms_event::PmsEvent;
 use pms_interface::NetDagAdapter;
 use pms_storage::store::PutResult;
 use pms_storage::{
-    ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage, StoredBlock, UtxoDelta,
+    ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage, StoredBlock,
+    UtxoDelta,
 };
 use pms_types::{Block, PayloadEnvelope, PlainPayload};
 use pms_wire::WireBlock;
@@ -21,7 +22,7 @@ use pms_wire::WireBlock;
 #[async_trait]
 impl<S> NetDagAdapter for CoreAdapter<S>
 where
-    S: DagStorage + NftStorage + ConfigStorage + NodeRewardsStorage + Send + Sync + 'static,
+    S: DagStorage + NftStorage + ConfigStorage + NodeRewardsStorage + ComplianceStorage + Send + Sync + 'static,
 {
     /// Est‑ce que j’ai déjà ce bloc en RAM ?
     ///
@@ -308,7 +309,72 @@ where
             }
         }
 
-        // 2.d) Parents uniques + pas d’auto-parentage (protection de base)
+        // 1.compliance) Apply compliance registry operations (Freeze / Unfreeze / Seize / Reverse)
+        if let Some(PayloadEnvelope::Plain(PlainPayload::Freeze { ref address, ref reason })) =
+            payload
+        {
+            if let Err(e) = self.store.freeze_address(address, &wb.id, reason) {
+                return Ok(PutResult::Rejected(format!("Freeze failed: {e}")));
+            }
+            tracing::info!("🔒 Account frozen: {} (block {})", address, wb.id);
+        }
+        if let Some(PayloadEnvelope::Plain(PlainPayload::Unfreeze {
+            ref address,
+            ref reason,
+            ..
+        })) = payload
+        {
+            if let Err(e) = self.store.unfreeze_address(address) {
+                return Ok(PutResult::Rejected(format!("Unfreeze failed: {e}")));
+            }
+            if let Err(e) = self.store.log_compliance_action(
+                "unfreeze",
+                &wb.id,
+                Some(address),
+                &serde_json::json!({ "reason": reason }),
+            ) {
+                tracing::warn!("Compliance log failed: {e}");
+            }
+            tracing::info!("🔓 Account unfrozen: {} (block {})", address, wb.id);
+        }
+        if let Some(PayloadEnvelope::Plain(PlainPayload::Seize {
+            ref from_address,
+            ref reason,
+            ..
+        })) = payload
+        {
+            if let Err(e) = self.store.log_compliance_action(
+                "seize",
+                &wb.id,
+                Some(from_address),
+                &serde_json::json!({ "reason": reason }),
+            ) {
+                tracing::warn!("Compliance log failed: {e}");
+            }
+            tracing::info!("⚖️ Assets seized from: {} (block {})", from_address, wb.id);
+        }
+        if let Some(PayloadEnvelope::Plain(PlainPayload::Reverse {
+            ref original_block_id,
+            ref reason,
+            ..
+        })) = payload
+        {
+            if let Err(e) = self.store.log_compliance_action(
+                "reverse",
+                &wb.id,
+                None,
+                &serde_json::json!({ "reason": reason, "original_block_id": original_block_id }),
+            ) {
+                tracing::warn!("Compliance log failed: {e}");
+            }
+            tracing::info!(
+                "↩️ Transaction reversed: {} (block {})",
+                original_block_id,
+                wb.id
+            );
+        }
+
+        // 2.d) Parents uniques + pas d'auto-parentage (protection de base)
         {
             use std::collections::HashSet;
             let mut seen = HashSet::new();
@@ -448,7 +514,59 @@ where
                     return Ok(PutResult::Rejected(format!("utxo validation failed: {e}")));
                 }
             }
+            if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock {
+                inputs, amount, asset_id, ..
+            })) = &block.payload
+            {
+                use crate::validations::transactions::validate_bridge_lock_async;
+                if let Err(e) =
+                    validate_bridge_lock_async(&self.utxos, inputs, amount, asset_id).await
+                {
+                    return Ok(PutResult::Rejected(format!(
+                        "bridge lock utxo validation failed: {e}"
+                    )));
+                }
+            }
         }
+
+        // 4.compliance) Freeze check: reject transactions involving frozen addresses
+        if let Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) = &block.payload {
+            // Check sender addresses (input owners)
+            for inp in &tx.inputs {
+                if let Some(out) = self.utxos.get(&inp.out).await {
+                    if self.store.is_frozen(&out.address).unwrap_or(false) {
+                        return Ok(PutResult::Rejected(format!(
+                            "compliance: sender address is frozen: {}",
+                            out.address
+                        )));
+                    }
+                }
+            }
+            // Check recipient addresses
+            for out in &tx.outputs {
+                if self.store.is_frozen(&out.address).unwrap_or(false) {
+                    return Ok(PutResult::Rejected(format!(
+                        "compliance: recipient address is frozen: {}",
+                        out.address
+                    )));
+                }
+            }
+        }
+        if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock { inputs, .. })) =
+            &block.payload
+        {
+            for inp in inputs {
+                if let Some(out) = self.utxos.get(&inp.out).await {
+                    if self.store.is_frozen(&out.address).unwrap_or(false) {
+                        return Ok(PutResult::Rejected(format!(
+                            "compliance: sender address is frozen: {}",
+                            out.address
+                        )));
+                    }
+                }
+            }
+        }
+
         let t_utxo_val = t_utxo_val_start.elapsed();
 
         // 4.b) DAG validation is handled by the lock-free pipeline:
@@ -596,6 +714,85 @@ where
                 }
             }
 
+            Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock { inputs, .. })) => {
+                // BridgeLock = spend inputs, create nothing (funds leave this ledger)
+                let spend = inputs
+                    .iter()
+                    .map(|inp| (inp.out.txid.clone(), inp.out.index))
+                    .collect();
+                Some(UtxoDelta {
+                    spend,
+                    create: vec![],
+                })
+            }
+
+            Some(PayloadEnvelope::Plain(PlainPayload::BridgeMint { outputs, .. })) => {
+                // BridgeMint = create outputs, spend nothing (funds arrive on this ledger)
+                let create = outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, out)| {
+                        (
+                            sb.id.clone(),
+                            i as u32,
+                            out.address.clone(),
+                            out.amount.clone(),
+                            out.asset_id.clone(),
+                        )
+                    })
+                    .collect();
+                Some(UtxoDelta {
+                    spend: vec![],
+                    create,
+                })
+            }
+
+            // Compliance: Seize and Reverse have UTXO deltas (spend + create)
+            Some(PayloadEnvelope::Plain(PlainPayload::Seize {
+                inputs, outputs, ..
+            })) => {
+                let spend = inputs
+                    .iter()
+                    .map(|inp| (inp.out.txid.clone(), inp.out.index))
+                    .collect();
+                let create = outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, out)| {
+                        (
+                            sb.id.clone(),
+                            i as u32,
+                            out.address.clone(),
+                            out.amount.clone(),
+                            out.asset_id.clone(),
+                        )
+                    })
+                    .collect();
+                Some(UtxoDelta { spend, create })
+            }
+            Some(PayloadEnvelope::Plain(PlainPayload::Reverse {
+                inputs, outputs, ..
+            })) => {
+                let spend = inputs
+                    .iter()
+                    .map(|inp| (inp.out.txid.clone(), inp.out.index))
+                    .collect();
+                let create = outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, out)| {
+                        (
+                            sb.id.clone(),
+                            i as u32,
+                            out.address.clone(),
+                            out.amount.clone(),
+                            out.asset_id.clone(),
+                        )
+                    })
+                    .collect();
+                Some(UtxoDelta { spend, create })
+            }
+            // Freeze/Unfreeze: no UTXO changes (registry-only)
             _ => None,
         };
 

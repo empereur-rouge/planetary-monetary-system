@@ -1,0 +1,41 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Docker Compose - PMS AI Simulator (standalone)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Prérequis:
+#   1. Engine + gateway déjà actifs via docker-compose.test.yml (ou .yml)
+#   2. S'authentifier une fois en local pour obtenir le token OAuth Google:
+#        cd tools/simulator && cargo run -- --config simulator.dev.toml
+#      Le token est ensuite cache et monte automatiquement dans le container.
+#
+# Usage:
+#   docker compose -f docker-compose.simulator.yml up --build -d
+#
+# Web dashboard: http://<IP>:9090
+#
+# Si le nom du réseau Docker diffère (ex: projet nommé "pms"):
+#   PMS_NETWORK=pms_pms-public docker compose -f docker-compose.simulator.yml up --build
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+services:
+  pms-simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.simulator
+    image: pms-simulator:latest
+    container_name: pms-simulator
+    volumes:
+      - ./tools/simulator/simulator.docker.toml:/app/config/simulator.toml:ro
+      # macOS: ~/Library/Caches/pms-simulator, Linux: ~/.cache/pms-simulator
+      - ${GEMINI_TOKEN_CACHE:-~/Library/Caches/pms-simulator}:/root/.cache/pms-simulator:rw
+    ports:
+      - "${SIMULATOR_PORT:-9090}:9090"
+    networks:
+      - pms-net
+    restart: unless-stopped
+
+networks:
+  pms-net:
+    external: true
+    name: ${PMS_NETWORK:-dag-pms_pms-public}

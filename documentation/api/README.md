@@ -1,45 +1,50 @@
-# 📡 API Reference - DAG PMS
+# API Reference - DAG PMS
 
-> Documentation complète de l'API REST du serveur PMS (Planetary Monetary System)
+> Documentation complete de l'API REST du serveur PMS (Planetary Monetary System)
 
 ## Vue d'ensemble
 
-L'API PMS expose des endpoints REST pour interagir avec le **DAG centralisé privé**. 
+L'API PMS expose des endpoints REST pour interagir avec le **DAG centralise prive**.
 
 > [!IMPORTANT]
-> PMS est une infrastructure **custodiale** : le serveur est l'autorité finale de validation.
-> Cette API est destinée à des usages internes (gaming, core banking, wallets custodial).
+> PMS est une infrastructure **custodiale** : le serveur est l'autorite finale de validation.
+> Cette API est destinee a des usages internes (gaming, core banking, wallets custodial).
 
 **Base URL**: `https://localhost:8443` (Gateway Public Port)
 
 ---
 
-## 📋 Table des matières
+## Table des matieres
 
 | Section | Description |
 |---------|-------------|
-| [Health & Status](./health.md) | Vérification de l'état du serveur |
-| [Wallet](./wallet.md) | Gestion des portefeuilles et balances |
-| [Transactions](./transactions.md) | Envoi de tokens et soumission de blocs |
+| [Health & Status](./health.md) | Verification de l'etat du serveur |
+| [Wallet](./wallet.md) | Gestion des portefeuilles, balances, creation et envoi simplifie |
+| [Transactions](./transactions.md) | Envoi de tokens (multi-asset) et soumission de blocs |
+| [Tokens](./tokens.md) | Registre des tokens custom (creation, mint, listing) |
 | [NFT](./nft.md) | Mint, burn et query des NFTs |
+| [Cube](./cube.md) | Systeme CUBE (claim et burn vers PMS) |
 | [History](./history.md) | Historique des transactions |
 | [Supply](./supply.md) | Statistiques de l'offre en circulation |
-| [DAG](./dag.md) | Opérations sur le graphe |
-| [Nodes](./nodes.md) | Registre des nœuds distribués |
-| [Admin](./admin.md) | Endpoints protégés d'administration |
+| [DAG](./dag.md) | Operations sur le graphe |
+| [Nodes](./nodes.md) | Registre des noeuds distribues et peers P2P |
+| [Ledgers](./ledgers.md) | Gestion multi-ledger (creation, listing, routage dynamique) |
+| [Bridge](./bridge.md) | Pont cross-ledger (transferts entre ledgers) |
+| [Compliance](./compliance.md) | Conformite reglementaire (gel, saisie, inversion) |
+| [Admin](./admin.md) | Endpoints proteges d'administration (config, fees, faucet, metrics) |
 
 ---
 
-## 🔐 Authentification
+## Authentification
 
 ### Endpoints publics
-La plupart des endpoints sont publics et ne nécessitent pas d'authentification.
+La plupart des endpoints sont publics et ne necessitent pas d'authentification.
 
 ### Endpoints Admin
-Les endpoints `/admin/*` et `/metrics` sont protégés par :
+Les endpoints `/admin/*` et `/metrics` sont proteges par :
 
-1. **IP Localhost** : Toujours autorisé
-2. **IP Allowlist** : Si configuré, l'IP doit être dans la whitelist
+1. **IP Localhost** : Toujours autorise
+2. **IP Allowlist** : Si configure, l'IP doit etre dans la whitelist
 3. **Bearer Token** : Header `Authorization: Bearer <token>`
 
 ```http
@@ -48,7 +53,7 @@ Authorization: Bearer votre_token_admin
 
 ---
 
-## ⚡ Rate Limiting (Gateway)
+## Rate Limiting (Gateway)
 
 | Type | Limite |
 |------|--------|
@@ -57,11 +62,11 @@ Authorization: Bearer votre_token_admin
 
 ---
 
-## 📦 Format des réponses
+## Format des reponses
 
-Toutes les réponses sont en **JSON**.
+Toutes les reponses sont en **JSON**.
 
-### Succès
+### Succes
 ```json
 {
   "data": { ... }
@@ -77,12 +82,17 @@ Toutes les réponses sont en **JSON**.
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
-### Vérifier que le serveur est actif
+### Verifier que le serveur est actif
 ```bash
 curl -k https://localhost:8443/livez
-# Réponse: ok
+# Reponse: ok
+```
+
+### Creer un wallet
+```bash
+curl -k -X POST https://localhost:8443/v1/wallet/create
 ```
 
 ### Obtenir le solde d'une adresse
@@ -92,6 +102,17 @@ curl -k -X POST https://localhost:8443/v1/balance \
   -d '{"address": "pms1..."}'
 ```
 
+### Envoyer des tokens (custodial)
+```bash
+curl -k -X POST https://localhost:8443/v1/wallet/send-simple \
+  -H "Content-Type: application/json" \
+  -d '{
+    "private_key_b64": "MHQCAQEEIFm0...",
+    "to": "pms1recipient...",
+    "amount": "100.0"
+  }'
+```
+
 ### Lister les NFTs d'un wallet
 ```bash
 curl -k https://localhost:8443/v1/wallet/{address}/nfts
@@ -99,10 +120,10 @@ curl -k https://localhost:8443/v1/wallet/{address}/nfts
 
 ---
 
-## 📑 Endpoints par catégorie
+## Endpoints par categorie
 
 ### Health & Status
-| Méthode | Endpoint | Description |
+| Methode | Endpoint | Description |
 |---------|----------|-------------|
 | GET | `/livez` | Check process UP |
 | GET | `/healthz` | Check DB + Ready |
@@ -110,65 +131,133 @@ curl -k https://localhost:8443/v1/wallet/{address}/nfts
 | GET | `/ready` | Alias de /healthz |
 
 ### Wallet
-| Méthode | Endpoint | Description |
+| Methode | Endpoint | Description |
 |---------|----------|-------------|
-| POST | `/wallet/balance` | Solde avec UTXOs décryptés |
-| POST | `/wallet/tx/send` | Envoyer des tokens |
+| POST | `/v1/wallet/create` | Generer un nouveau wallet |
+| POST | `/v1/wallet/send-simple` | Envoi custodial one-shot |
+| POST | `/wallet/balance` | Solde avec UTXOs decryptes |
+| POST | `/wallet/tx/send` | Envoyer une TX pre-signee |
 | POST | `/wallet/history` | Historique du wallet |
 | POST | `/v1/balance` | Solde simple par adresse |
 | GET | `/v1/wallet/{address}/utxos` | UTXOs d'une adresse |
 
+### Transactions
+| Methode | Endpoint | Description |
+|---------|----------|-------------|
+| POST | `/v1/tx/prepare` | Preparer une TX non-signee (multi-asset) |
+| POST | `/submit/block` | Soumettre un bloc signe |
+| GET | `/blocks/stream` | Stream SSE des blocs |
+
+### Tokens
+| Methode | Endpoint | Description |
+|---------|----------|-------------|
+| GET | `/v1/tokens` | Lister tous les tokens |
+| GET | `/v1/tokens/{asset_id}` | Info d'un token |
+| POST | `/admin/tokens/create` | Creer un token (admin) |
+| POST | `/admin/tokens/mint` | Minter des tokens (admin) |
+
 ### NFT
-| Méthode | Endpoint | Description |
+| Methode | Endpoint | Description |
 |---------|----------|-------------|
 | GET | `/v1/nft/{token_id}` | Info d'un NFT |
 | GET | `/v1/wallet/{address}/nfts` | NFTs d'un wallet |
 | POST | `/v1/nft/mint` | Minter un NFT |
-| POST | `/v1/nft/burn` | Brûler un/des NFT(s) |
+| POST | `/v1/nft/burn` | Bruler un/des NFT(s) |
+| POST | `/v1/nft/transfer/prepare` | Preparer un transfert NFT |
+
+### Cube
+| Methode | Endpoint | Description |
+|---------|----------|-------------|
+| POST | `/v1/cube/claim` | Claim 1000 CUBE |
+| POST | `/v1/cube/burn` | Burn CUBE -> PMS (10:1) |
 
 ### History
-| Méthode | Endpoint | Description |
+| Methode | Endpoint | Description |
 |---------|----------|-------------|
-| GET | `/v1/history/encrypted` | Blocs chiffrés paginés |
-| GET | `/v1/history/plain` | Blocs plain paginés |
+| GET | `/v1/history/encrypted` | Blocs chiffres pagines |
+| GET | `/v1/history/plain` | Blocs plain pagines |
 
 ### Supply
-| Méthode | Endpoint | Description |
+| Methode | Endpoint | Description |
 |---------|----------|-------------|
 | GET | `/v1/supply` | Offre en circulation |
 | GET | `/v1/fee_pool` | Status du pool de frais |
 
 ### DAG
-| Méthode | Endpoint | Description |
+| Methode | Endpoint | Description |
 |---------|----------|-------------|
 | POST | `/v1/dag/tips` | Tips actuels du DAG |
-| GET | `/v1/config` | Configuration réseau |
-| POST | `/submit/block` | Soumettre un bloc |
-| GET | `/blocks/stream` | Stream SSE des blocs |
+| GET | `/v1/config` | Configuration reseau |
+| GET | `/v1/blocks/{id}` | Recuperer un bloc par ID |
+| GET | `/v1/coordinator/info` | Cles publiques du coordinateur |
 
-### Coordinator
-| Méthode | Endpoint | Description |
+### Nodes & Peers
+| Methode | Endpoint | Description |
 |---------|----------|-------------|
-| GET | `/v1/coordinator/info` | Clés publiques du coordinateur |
+| POST | `/v1/register` | Enregistrer un noeud |
+| GET | `/v1/nodes` | Liste des noeuds |
+| POST | `/v1/heartbeat` | Heartbeat d'un noeud |
+| GET | `/v1/peers` | Liste des peers P2P |
+| POST | `/v1/peers/connect` | Connecter a un peer |
 
-### Nodes (Distributed TX)
-| Méthode | Endpoint | Description |
+### Ledgers (Multi-Ledger)
+| Methode | Endpoint | Description |
 |---------|----------|-------------|
-| POST | `/v1/register` | Enregistrer un nœud |
-| GET | `/v1/nodes` | Liste des nœuds |
-| POST | `/v1/heartbeat` | Heartbeat d'un nœud |
+| GET | `/v1/ledgers` | Lister les ledgers actifs |
+| GET | `/admin/ledgers` | Liste detaillee (admin) |
+| GET | `/admin/ledgers/{id}` | Detail d'un ledger (admin) |
+| POST | `/admin/ledgers/create` | Creer un ledger (admin) |
 
-### Admin (Protégé)
-| Méthode | Endpoint | Description |
+### Bridge (Cross-Ledger)
+| Methode | Endpoint | Description |
 |---------|----------|-------------|
-| GET | `/admin/ping` | Test de connectivité |
+| GET | `/v1/bridge/links` | Lister les ponts |
+| GET | `/v1/bridge/status/{id}` | Statut d'un transfert |
+| POST | `/admin/bridge/enable` | Activer un pont (admin) |
+| POST | `/admin/bridge/disable` | Desactiver un pont (admin) |
+| POST | `/admin/bridge/transfer` | Transfert cross-ledger (admin) |
+
+### Compliance (Admin)
+| Methode | Endpoint | Description |
+|---------|----------|-------------|
+| POST | `/admin/compliance/freeze` | Geler une adresse |
+| POST | `/admin/compliance/unfreeze` | Degeler une adresse |
+| POST | `/admin/compliance/seize` | Saisir des UTXOs |
+| POST | `/admin/compliance/reverse` | Inverser une transaction |
+| GET | `/admin/compliance/frozen` | Liste des adresses gelees |
+| GET | `/admin/compliance/log` | Journal de compliance |
+| GET | `/admin/compliance/shadow_balance` | Balances des comptes geles |
+
+### Admin (Protege)
+| Methode | Endpoint | Description |
+|---------|----------|-------------|
+| GET | `/admin/ping` | Test de connectivite |
 | POST | `/admin/compact` | Compacter RocksDB |
 | POST | `/admin/distribute_fees` | Distribuer les frais manuellement |
-| GET | `/metrics` | Métriques Prometheus |
+| POST | `/admin/faucet` | Faucet (dev/testnet) |
+| GET/POST | `/admin/config` | Lire/modifier la config runtime |
+| GET | `/metrics` | Metriques Prometheus |
+| GET | `/metrics/all` | Metriques Prometheus (tous les ledgers) |
+| GET | `/l/{id}/metrics` | Metriques d'un ledger specifique |
 
 ---
 
-## 📚 Voir aussi
+## Multi-Ledger Routing
+
+Quand le multi-ledger est actif, toutes les routes ledger-scoped sont disponibles sous `/l/{ledger_id}/` :
+
+```bash
+# Balance sur le ledger "gaming"
+curl -k -X POST https://localhost:8443/l/gaming/v1/balance \
+  -H "Content-Type: application/json" \
+  -d '{"address": "pms1..."}'
+```
+
+Les routes sans prefixe `/l/` pointent vers le ledger par defaut ("main").
+
+---
+
+## Voir aussi
 
 - [README principal](../../README.md)
 - [CHANGELOG](../../CHANGELOG.md)
