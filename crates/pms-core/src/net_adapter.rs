@@ -207,18 +207,12 @@ where
         // - Valide l'action NFT (ownership, existence, autorisation)
         // - Applique au store si valide (Mint → apply_mint, Transfer/Burn → apply_action)
         if let Some(PayloadEnvelope::Plain(PlainPayload::Nft(action))) = &payload {
-            // Récupère la clé publique du signataire
             let signer_pk = &wb.signer_pk_hex;
 
-            // Récupère les clés Authority pour la validation Cube
-            let authority_pks = &settings.fees.authority_public_keys;
-
-            // Valide l'action
             if let Err(e) = validate_nft_action(
                 action,
                 signer_pk,
                 policy.coordinator_public_key.as_deref(),
-                authority_pks,
                 self.store.as_ref(),
             ) {
                 tracing::warn!(

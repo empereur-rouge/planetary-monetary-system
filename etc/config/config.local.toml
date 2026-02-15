@@ -58,14 +58,6 @@ creator_reward_percent = 70
 burn_percent = 10
 treasury_addresses = ["pms1z053s5nyhpsewdn5cv9wl3kse3h8wt0zv2vpkv7kt798jdy3vctvj7fqns5huaupn03ejw4tffgg26m9yq4s6f8wtr"]
 
-# AUTHORITY PUBLIC KEYS - For local testing
-# Note: The e2e_local test generates its own Authority keypair
-# This is just a placeholder that should match the format
-authority_public_keys = [
-    "02b73a3c1192d15d906f675c5a9653886d1de6a1ded2cf8c0fc7b8aba1e31bb54a"
-]
-authority_keys_last_rotation = "2026-02-03"
-
 [auth]
 require_signed_submit = true
 admin_api_token = "env:PMS_ADMIN_TOKEN"

@@ -1,7 +1,7 @@
 <script lang="ts">
     import { onMount, onDestroy } from "svelte";
     import { apiCall, ledgerApiCall } from "./api";
-    import { nodeStatus, networkPeers, adminToken, ledgerList, selectedLedgerId, type LedgerSummary } from "./stores";
+    import { nodeStatus, networkPeers, adminToken, ledgerList, selectedLedgerId, tokenList, type LedgerSummary, type TokenInfo } from "./stores";
     import PerformanceChart from "./PerformanceChart.svelte";
     import { fade, fly } from "svelte/transition";
 
@@ -23,6 +23,7 @@
     // Data States
     let supplyInfo: any = null;
     let nodeInfo: any = null;
+    let tokens: TokenInfo[] = [];
 
     // Ledger management
     let ledgers: LedgerSummary[] = [];
@@ -53,7 +54,7 @@
 
     async function fetchData() {
         try {
-            const [metricsText, registryRes, p2pRes, supplyRes, nodeRes] =
+            const [metricsText, registryRes, p2pRes, supplyRes, nodeRes, tokensRes] =
                 await Promise.all([
                     ledgerApiCall("/metrics").catch((err) => {
                         console.error("Metrics failed", err);
@@ -75,12 +76,20 @@
                         console.error("Ping failed", err);
                         return null;
                     }),
+                    ledgerApiCall("/v1/tokens").catch((err) => {
+                        console.error("Tokens failed", err);
+                        return { tokens: [] };
+                    }),
                 ]);
 
             if (metricsText) parseMetrics(metricsText);
 
             if (supplyRes) supplyInfo = supplyRes;
             if (nodeRes) nodeInfo = nodeRes;
+
+            const tokenData: TokenInfo[] = tokensRes?.tokens || [];
+            tokenList.set(tokenData);
+            tokens = tokenData;
 
             const registryNodes = (registryRes.nodes || []).map((n: any) => ({
                 ...n,
@@ -140,8 +149,10 @@
         lastTime = Date.now();
         supplyInfo = null;
         nodeInfo = null;
+        tokens = [];
         networkPeers.set([]);
         nodeStatus.set(null);
+        tokenList.set([]);
     }
 
     function onLedgerChange(event: Event) {
@@ -341,7 +352,7 @@
                     ? safeFormat(supplyInfo.circulating_supply, 8)
                     : "-"}
             </div>
-            <div class="label">PMS</div>
+            <div class="label">{supplyInfo?.symbol || "PMS"}</div>
         </div>
 
         <div
@@ -353,23 +364,57 @@
                 <div class="wallet-row">
                     <span class="wallet-label">Node Identity</span>
                     <span class="wallet-value">
-                        {supplyInfo ? safeFormat(supplyInfo.node_balance, 4) : "-"} PMS
+                        {supplyInfo ? safeFormat(supplyInfo.node_balance, 4) : "-"} {supplyInfo?.symbol || "PMS"}
                     </span>
                 </div>
                 <div class="wallet-row">
                     <span class="wallet-label">Coordinator</span>
                     <span class="wallet-value">
-                        {supplyInfo ? safeFormat(supplyInfo.admin_balance, 4) : "-"} PMS
+                        {supplyInfo ? safeFormat(supplyInfo.admin_balance, 4) : "-"} {supplyInfo?.symbol || "PMS"}
                     </span>
                 </div>
                 <div class="wallet-row">
                     <span class="wallet-label">Treasury</span>
                     <span class="wallet-value">
-                        {supplyInfo ? safeFormat(supplyInfo.treasury_balance, 4) : "-"} PMS
+                        {supplyInfo ? safeFormat(supplyInfo.treasury_balance, 4) : "-"} {supplyInfo?.symbol || "PMS"}
                     </span>
                 </div>
             </div>
         </div>
+
+        <!-- Token Registry -->
+        {#if tokens.length > 0}
+            <div
+                class="glass-panel card token-card"
+                in:fly={{ y: 20, duration: 500, delay: 275 }}
+            >
+                <h3>Tokens</h3>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Name</th>
+                                <th>Asset ID</th>
+                                <th style="text-align: right;">Decimals</th>
+                                <th style="text-align: right;">Max Supply</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {#each tokens as token}
+                                <tr>
+                                    <td class="mono token-symbol">{token.symbol}</td>
+                                    <td>{token.name}</td>
+                                    <td class="mono">{token.asset_id}</td>
+                                    <td class="mono number">{token.decimals}</td>
+                                    <td class="mono number">{token.max_supply ? safeFormat(token.max_supply) : "Unlimited"}</td>
+                                </tr>
+                            {/each}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        {/if}
 
         <!-- Real-time Chart -->
         <div
@@ -408,7 +453,7 @@
                                     <tr>
                                         <td class="mono">{wallet.address}</td>
                                         <td class="mono number">
-                                            {safeFormat(wallet.balance, 4)} PMS
+                                            {safeFormat(wallet.balance, 4)} {supplyInfo?.symbol || "PMS"}
                                         </td>
                                     </tr>
                                 {/each}
@@ -558,6 +603,16 @@
 
     .wallet-card {
         min-height: 180px;
+    }
+
+    .token-card {
+        grid-column: 1 / -1;
+        min-height: auto;
+    }
+
+    .token-symbol {
+        font-weight: 700;
+        color: #10b981;
     }
 
     .wallet-rows {

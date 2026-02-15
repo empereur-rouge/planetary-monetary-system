@@ -61,35 +61,126 @@ pub struct FaucetResponse {
     pub error: Option<String>,
 }
 
-/// Request for POST /v1/cube/claim
+// ════════════════════════════════════════════════════════════════════════════
+// Ledger Admin API
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Request for POST /admin/ledgers/create
 #[derive(Debug, Serialize)]
-pub struct CubeClaimRequest {
-    pub to: String,
+pub struct CreateLedgerRequest {
+    pub id: String,
+    pub network_id: String,
+    pub prefix: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
 }
 
-/// Response from POST /v1/cube/claim
+/// Response from POST /admin/ledgers/create
 #[derive(Debug, Deserialize)]
-pub struct CubeClaimResponse {
-    pub block_id: Option<String>,
-    pub amount: Option<String>,
-    pub asset_id: Option<String>,
-    pub error: Option<String>,
+pub struct CreateLedgerResponse {
+    pub status: Option<String>,
+    pub message: Option<String>,
 }
 
-/// Request for POST /v1/cube/burn
+// ════════════════════════════════════════════════════════════════════════════
+// Token Admin API
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Request for POST /admin/tokens/create
 #[derive(Debug, Serialize)]
-pub struct CubeBurnRequest {
-    pub private_key_b64: String,
+pub struct CreateTokenRequest {
+    pub asset_id: String,
+    pub symbol: String,
+    pub name: String,
+    pub decimals: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_supply: Option<String>,
+}
+
+/// Response from POST /admin/tokens/create
+#[derive(Debug, Deserialize)]
+pub struct CreateTokenResponse {
+    pub status: Option<String>,
+}
+
+/// Request for POST /admin/tokens/mint
+#[derive(Debug, Serialize)]
+pub struct MintTokenRequest {
+    pub asset_id: String,
+    pub to: String,
     pub amount: String,
 }
 
-/// Response from POST /v1/cube/burn
+/// Response from POST /admin/tokens/mint
 #[derive(Debug, Deserialize)]
-pub struct CubeBurnResponse {
+pub struct MintTokenResponse {
+    pub status: Option<String>,
     pub block_id: Option<String>,
-    pub cubes_burned: Option<String>,
-    pub pms_received: Option<String>,
-    pub error: Option<String>,
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// NFT API
+// ════════════════════════════════════════════════════════════════════════════
+
+/// NFT metadata (simulator-side, mirrors pms-types-nft::NftMetadata)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftMetadataSim {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nft_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<String>,
+}
+
+/// Request for POST /v1/nft/mint
+#[derive(Debug, Serialize)]
+pub struct MintNftRequest {
+    pub token_id: String,
+    pub owner_address: String,
+    pub owner_x25519_pubkey: String,
+    pub metadata: NftMetadataSim,
+}
+
+/// Response from POST /v1/nft/mint
+#[derive(Debug, Deserialize)]
+pub struct MintNftResponse {
+    pub status: Option<String>,
+    pub block_id: Option<String>,
+}
+
+/// Request for POST /v1/nft/burn-simple
+#[derive(Debug, Serialize)]
+pub struct BurnNftSimpleRequest {
+    pub private_key_b64: String,
+    pub token_id: String,
+}
+
+/// Response from POST /v1/nft/burn-simple
+#[derive(Debug, Deserialize)]
+pub struct BurnNftSimpleResponse {
+    pub status: Option<String>,
+    pub block_id: Option<String>,
+    pub token_id: Option<String>,
+}
+
+/// Request for POST /v1/nft/burn-batch-simple
+#[derive(Debug, Serialize)]
+pub struct BurnNftBatchSimpleRequest {
+    pub private_key_b64: String,
+    pub token_ids: Vec<String>,
+}
+
+/// Response from POST /v1/nft/burn-batch-simple
+#[derive(Debug, Deserialize)]
+pub struct BurnNftBatchSimpleResponse {
+    pub status: Option<String>,
+    pub block_id: Option<String>,
+    pub token_ids: Option<Vec<String>>,
 }
 
 /// Request for POST /v1/dag/tips

@@ -52,7 +52,7 @@ impl AgentMessage {
                 } else {
                     block_id
                 };
-                format!("[{from} → {to}]: {amount} PMS (block {short_id}...)")
+                format!("[{from} → {to}] {amount} (block {short_id}...)")
             }
             AgentMessage::Info { from, data } => {
                 format!("[{from}]: info {data}")

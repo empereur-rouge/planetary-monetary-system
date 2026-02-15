@@ -207,6 +207,10 @@ impl Server {
         self.adapter.clone()
     }
 
+    pub fn ledger_manager(&self) -> Option<Arc<pms_ledger::LedgerManager>> {
+        self.ledger_mgr.clone()
+    }
+
     // ── Multi-ledger P2P helpers ────────────────────────────────────
 
     /// Returns the adapter for a specific `network_id` (from ledger manager),

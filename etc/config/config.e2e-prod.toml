@@ -57,13 +57,6 @@ treasury_reward_percent = 20   # 20% of block reward to treasury
 creator_reward_percent = 70    # 70% of block reward to creator
 burn_percent = 10              # 10% burned (deflationary pressure)
 
-# AUTHORITY PUBLIC KEYS - To be replaced with test-generated key
-# This will be dynamically updated by the test setup
-authority_public_keys = [
-    "028c98360918cb2aa9bf46ac4a7d18afae90fa5cac1312833b37f78ec5f71df1ac"
-]
-authority_keys_last_rotation = "2026-02-03"
-
 [auth]
 require_signed_submit = true
 admin_api_token = "env:PMS_ADMIN_TOKEN"

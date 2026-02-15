@@ -6,6 +6,7 @@ pub mod smart;
 use crate::client::DagClient;
 use crate::comms::CommsRouter;
 use crate::error::SimResult;
+use crate::game::GameEngine;
 use crate::gemini::GeminiClient;
 use crate::metrics::MetricEvent;
 use crate::types::WalletInfo;
@@ -22,6 +23,8 @@ pub struct AgentContext {
     /// All agent names + addresses for peer discovery
     pub peer_registry: Arc<RwLock<Vec<PeerInfo>>>,
     pub cancel: CancellationToken,
+    /// Optional game engine for Edenite cube NFTs
+    pub game_engine: Option<Arc<RwLock<GameEngine>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +51,7 @@ pub struct AgentHandle {
     pub join: tokio::task::JoinHandle<()>,
 }
 
-/// Spawn an agent as a tokio task
+/// Spawn an agent as a tokio task with random initial jitter to avoid thundering herd
 pub fn spawn_agent(
     mut agent: Box<dyn Agent>,
     ctx: Arc<AgentContext>,
@@ -57,7 +60,17 @@ pub fn spawn_agent(
     let name = agent.name().to_string();
     let address = agent.wallet().address.clone();
 
+    // Random jitter: 0..interval_ms to stagger agent starts
+    let jitter_ms = {
+        use rand::Rng;
+        let mut rng = rand::rng();
+        rng.random_range(0..interval_ms)
+    };
+
     let join = tokio::spawn(async move {
+        // Stagger start to avoid all agents hitting the gateway simultaneously
+        tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
+
         let mut interval =
             tokio::time::interval(std::time::Duration::from_millis(interval_ms));
 

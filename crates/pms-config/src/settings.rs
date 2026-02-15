@@ -46,6 +46,7 @@ impl Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: None,
+                symbol: self.network.symbol.clone(),
             }]
         } else {
             self.ledgers.clone()

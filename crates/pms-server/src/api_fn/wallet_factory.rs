@@ -214,7 +214,7 @@ pub async fn faucet_mint(
 }
 
 /// Reconstruit un Wallet depuis private_key_b64
-fn wallet_from_b64(priv_b64: &str) -> Result<Wallet, String> {
+pub fn wallet_from_b64(priv_b64: &str) -> Result<Wallet, String> {
     let priv_bytes = STANDARD
         .decode(priv_b64)
         .map_err(|e| format!("invalid base64: {e}"))?;

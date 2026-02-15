@@ -3,6 +3,7 @@ mod client;
 mod comms;
 mod config;
 mod error;
+mod game;
 mod gemini;
 mod metrics;
 mod tui;
@@ -31,17 +32,27 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli: Cli = clap::Parser::parse();
 
-    // 1. Load config
+    // 1. Load config + external agent files
     let config_str = std::fs::read_to_string(&cli.config)
         .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", cli.config, e))?;
     let mut config: SimConfig = toml::from_str(&config_str)?;
     config.resolve_secrets();
+    config
+        .load_all_agents(&cli.config)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // 2. Init tracing (stderr to not interfere with TUI)
     tracing_subscriber::fmt()
         .with_env_filter("pms_simulator=info")
         .with_writer(std::io::stderr)
         .init();
+
+    tracing::info!(
+        "Loaded {} agent definitions ({} from inline, {} from agent_files)",
+        config.agents.len(),
+        config.agents.len(), // total after merge
+        config.agent_files.len()
+    );
 
     // 3. Create HTTP client & health check
     let client = DagClient::new(&config.server);
@@ -99,11 +110,11 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(web::run_web_server(config.web.port, web_state));
     }
 
-    // 7. Create agent wallets via API
+    // 7. Create agent wallets via API (parallel, up to 50 concurrent)
     let cancel = CancellationToken::new();
     let peer_registry = Arc::new(RwLock::new(Vec::<PeerInfo>::new()));
-    let mut all_agents: Vec<(String, types::WalletInfo, usize)> = Vec::new(); // (name, wallet, agent_def_idx)
 
+    let mut agent_specs: Vec<(String, usize)> = Vec::new(); // (name, def_idx)
     let mut agent_idx = 0u32;
     for (def_idx, agent_def) in config.agents.iter().enumerate() {
         let prefix = agent_def
@@ -111,22 +122,32 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .unwrap_or("agent");
         for _ in 0..agent_def.count {
-            let name = format!("{}-{}", prefix, agent_idx);
-            tracing::info!("Creating wallet for {}...", name);
-
-            let wallet_resp = client.create_wallet().await?;
-            let wallet = wallet_resp.data;
-
-            tracing::info!(
-                "  {} -> {}...",
-                name,
-                &wallet.address[..24.min(wallet.address.len())]
-            );
-
-            all_agents.push((name, wallet, def_idx));
+            agent_specs.push((format!("{}-{}", prefix, agent_idx), def_idx));
             agent_idx += 1;
         }
     }
+
+    tracing::info!("Creating {} wallets (parallel)...", agent_specs.len());
+    let wallet_sem = Arc::new(tokio::sync::Semaphore::new(50));
+    let mut wallet_tasks = Vec::new();
+    for (name, def_idx) in &agent_specs {
+        let client = client.clone();
+        let name = name.clone();
+        let def_idx = *def_idx;
+        let sem = wallet_sem.clone();
+        wallet_tasks.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            let wallet_resp = client.create_wallet().await?;
+            Ok::<_, anyhow::Error>((name, wallet_resp.data, def_idx))
+        }));
+    }
+
+    let mut all_agents: Vec<(String, types::WalletInfo, usize)> = Vec::new();
+    for task in wallet_tasks {
+        let (name, wallet, def_idx) = task.await??;
+        all_agents.push((name, wallet, def_idx));
+    }
+    tracing::info!("All {} wallets created", all_agents.len());
 
     // Register peers
     {
@@ -139,30 +160,51 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 8. Fund all agents: claim CUBEs → burn for PMS (production-like flow)
+    // 8. Optional game engine setup (Edenite cube NFTs)
+    let game_engine = if let Some(ref game_config) = config.simulation.game {
+        tracing::info!("Setting up game engine (ledger: {})...", game_config.ledger_id);
+        let engine = game::GameEngine::setup(&client, game_config).await?;
+        tracing::info!("Game engine ready (edenite on ledger '{}')", engine.ledger_id);
+        Some(Arc::new(RwLock::new(engine)))
+    } else {
+        None
+    };
+
+    // 9. Fund all agents via faucet + optional cube NFT minting
+    // cubes_per_agent is now per-agent-def from AgentGameConfig
     tracing::info!(
-        "Funding {} agents via cube claim+burn (rate: 10 CUBE = 1 PMS)...",
-        all_agents.len()
+        "Funding {} agents via faucet ({} PMS each)...",
+        all_agents.len(),
+        config.simulation.faucet_amount
     );
     let funder = agent::funder::Funder::new();
 
-    let fund_list: Vec<(String, types::WalletInfo)> = all_agents
+    // Build fund list with per-agent cubes_per_agent
+    let fund_list: Vec<(String, types::WalletInfo, usize)> = all_agents
         .iter()
-        .map(|(name, wallet, _)| (name.clone(), wallet.clone()))
+        .map(|(name, wallet, def_idx)| {
+            let cubes = config.agents[*def_idx]
+                .game
+                .as_ref()
+                .map(|gc| gc.cubes_per_agent)
+                .unwrap_or(0);
+            (name.clone(), wallet.clone(), cubes)
+        })
         .collect();
 
-    funder
-        .fund_all(
+    let cube_map = funder
+        .fund_all_with_cubes(
             &client,
             &fund_list,
-            &config.simulation.cubes_to_burn,
+            &config.simulation.faucet_amount,
             &metrics_tx,
+            game_engine.as_ref(),
         )
         .await?;
 
-    tracing::info!("All agents funded successfully");
+    tracing::info!("All agents funded successfully (cubes minted: {})", cube_map.values().map(|v| v.len()).sum::<usize>());
 
-    // 9. Create shared context
+    // 10. Create shared context
     let ctx = Arc::new(AgentContext {
         client: client.clone(),
         gemini,
@@ -170,9 +212,10 @@ async fn main() -> anyhow::Result<()> {
         metrics_tx,
         peer_registry,
         cancel: cancel.clone(),
+        game_engine,
     });
 
-    // 10. Spawn agents
+    // 11. Spawn agents
     let mut handles: Vec<AgentHandle> = Vec::new();
 
     for (name, wallet, def_idx) in all_agents {
@@ -195,14 +238,19 @@ async fn main() -> anyhow::Result<()> {
                 send_probability,
             } => {
                 let inbox = comms.register(&name).await;
-                Box::new(agent::random::RandomAgent::new(
+                let mut agent = agent::random::RandomAgent::new(
                     name.clone(),
                     wallet,
                     inbox,
                     *min_amount,
                     *max_amount,
                     *send_probability,
-                ))
+                    agent_def.game.clone(),
+                );
+                if let Some(cubes) = cube_map.get(&name) {
+                    agent.set_cube_ids(cubes.clone());
+                }
+                Box::new(agent)
             }
             AgentBehavior::Observer => {
                 let _inbox = comms.register(&name).await;
@@ -218,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
         handles.len()
     );
 
-    // 11. Duration timer
+    // 12. Duration timer
     if config.simulation.duration_secs > 0 {
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
@@ -230,7 +278,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // 12. Forward chat messages to WebSocket broadcast
+    // 13. Forward chat messages to WebSocket broadcast
     let ws_tx_clone = ws_tx.clone();
     let (tui_chat_tx, tui_chat_rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -245,7 +293,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 13. TUI or headless
+    // 14. TUI or headless
     if config.tui.enabled {
         let mut tui_app = tui::TuiApp::new(shared_metrics, tui_chat_rx);
         tui_app.run(config.tui.refresh_ms)?;
@@ -261,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 14. Graceful shutdown
+    // 15. Graceful shutdown
     tracing::info!("Shutting down...");
     for handle in handles {
         let _ = handle.join.await;

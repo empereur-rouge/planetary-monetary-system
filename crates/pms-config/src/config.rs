@@ -32,6 +32,9 @@ pub struct Network {
     pub mode: NetworkMode,     // "dev" | "testnet" | "mainnet"
     pub network_id: String,    // "pms-dev" | "pms-main"
     pub protocol_version: u32, // 1
+    /// Native token symbol (default: "PMS")
+    #[serde(default)]
+    pub symbol: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -219,16 +222,6 @@ pub struct FeesSettings {
     pub burn_percent: u8,
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Authority (Cube Signature Verification)
-    // ═══════════════════════════════════════════════════════════════════════
-    /// List of public keys (hex, SEC1) of Authorities that can sign cube attributes.
-    /// Each key represents a different application (game backend) allowed to generate Cubes.
-    /// NFTs with valid signatures from ANY of these keys are eligible for burn refunds.
-    /// If empty, Cube minting bypasses Authority validation (dev mode warning).
-    #[serde(default)]
-    pub authority_public_keys: Vec<String>,
-
-    // ═══════════════════════════════════════════════════════════════════════
     // Automated Distribution
     // ═══════════════════════════════════════════════════════════════════════
     /// Interval in seconds for automated fee distribution. Default: 600 (10 minutes).
@@ -245,14 +238,6 @@ pub struct FeesSettings {
     #[serde(default = "default_daily_inflation_interval_sec")]
     pub daily_inflation_interval_sec: u64,
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // TÂCHE 6: Audit des clés Authority - rotation recommandée
-    // ═══════════════════════════════════════════════════════════════════════
-    /// Date de dernière rotation des clés Authority (format ISO 8601: "2025-01-15")
-    /// Utilisé pour logger un warning si la rotation n'a pas été faite depuis > 90 jours.
-    /// Bonne pratique sécurité: rotation tous les 90 jours minimum.
-    #[serde(default)]
-    pub authority_keys_last_rotation: Option<String>,
 }
 
 fn default_fee_ratio() -> String {
@@ -339,6 +324,9 @@ pub struct LedgerDef {
     /// None = admin-owned (ex: "main"), Some = custom ledger avec owner.
     #[serde(default)]
     pub owner_pubkey: Option<String>,
+    /// Native token symbol for this ledger (default: "PMS")
+    #[serde(default)]
+    pub symbol: Option<String>,
 }
 
 /// Overrides de fees pour un ledger spécifique.

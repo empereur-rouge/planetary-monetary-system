@@ -38,3 +38,17 @@ selectedLedgerId.subscribe(value => {
         sessionStorage.removeItem('pms_selected_ledger');
     }
 });
+
+// --- Token stores ---
+
+export interface TokenInfo {
+    asset_id: string;
+    symbol: string;
+    name: string;
+    decimals: number;
+    max_supply?: string;
+    creator: string;
+    mint_authority: string;
+}
+
+export const tokenList = writable<TokenInfo[]>([]);

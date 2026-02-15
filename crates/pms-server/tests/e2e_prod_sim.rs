@@ -132,37 +132,8 @@ fn sign_cube_attributes(
 }
 
 /// Update config.e2e-prod.toml with the generated Authority public key
-fn update_config_with_authority_key(authority_pk_hex: &str) -> Result<()> {
-    // Find workspace root by looking for Cargo.toml
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .context("CARGO_MANIFEST_DIR not set")?;
-
-    // Go up two levels from crates/pms-server to workspace root
-    let workspace_root = std::path::Path::new(&manifest_dir)
-        .parent()
-        .and_then(|p| p.parent())
-        .context("Failed to find workspace root")?;
-
-    let config_path = workspace_root.join("etc/config/config.e2e-prod.toml");
-
-    let content = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read config at {:?}", config_path))?;
-
-    // Replace the entire authority_public_keys array with the new key
-    // Use regex to match the array even if it already has a key from a previous run
-    let re = regex::Regex::new(r#"authority_public_keys\s*=\s*\[[^\]]*\]"#)
-        .context("Failed to compile regex")?;
-
-    let replacement = format!(r#"authority_public_keys = [
-    "{}"
-]"#, authority_pk_hex);
-
-    let updated = re.replace(&content, replacement.as_str()).to_string();
-
-    std::fs::write(&config_path, updated)
-        .with_context(|| format!("Failed to write config at {:?}", config_path))?;
-
-    println!("✅ Updated config with Authority key: {}", &authority_pk_hex[..16]);
+/// (authority_public_keys field has been removed from FeesSettings; this is now a no-op)
+fn update_config_with_authority_key(_authority_pk_hex: &str) -> Result<()> {
     Ok(())
 }
 

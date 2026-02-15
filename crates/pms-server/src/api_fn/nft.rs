@@ -9,92 +9,13 @@ use axum::{
     response::IntoResponse,
 };
 use pms_types_nft::NftMetadata; // Used for MintNftRequest
-use pms_types::TxOutput;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
-use pms_storage::{DagStorage, NftStorage, PutResult};
+use pms_storage::{DagStorage, NftStorage};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use pms_wallet::SignerBackend;
 use pms_wire::WireBlock;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Helper: Create Refund UTXO Block
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Creates a transaction block that mints refund tokens to a recipient.
-/// This is used to immediately create UTXOs for burn refunds.
-///
-/// # Arguments
-/// * `state` - AppState containing the node wallet and server
-/// * `recipient` - Address to receive the refund
-/// * `amount` - Refund amount in PMS
-/// * `parent_block_id` - Parent block (usually the burn block)
-///
-/// # Returns
-/// * `Ok(block_id)` - The ID of the created refund block
-/// * `Err(e)` - Error if block creation or submission failed
-async fn create_refund_utxo_block(
-    state: &AppState,
-    recipient: &str,
-    amount: Decimal,
-    parent_block_id: &str,
-) -> anyhow::Result<String> {
-    // 1. Create a Mint payload with a single output (refund to recipient)
-    //    This mints new tokens to compensate for the burned NFT
-    let outputs = vec![TxOutput {
-        address: recipient.to_string(),
-        amount: amount.to_string(),
-        asset_id: None,
-    }];
-
-    let payload = PayloadEnvelope::Plain(PlainPayload::Mint { outputs });
-    let payload_json = serde_json::to_string(&payload)?;
-
-    // 2. Get parent blocks (use the burn block as parent)
-    let parents = vec![parent_block_id.to_string()];
-
-    // 3. Compute block ID
-    let nonce = 0;
-    let block_id = pms_utils::compute_block_id(&parents, &Some(payload), nonce);
-
-    // 4. Create WireBlock
-    let mut wire_block = WireBlock {
-        id: block_id.clone(),
-        parents,
-        payload_json: Some(payload_json),
-        nonce,
-        network_id: state._cfg.network.network_id.clone(),
-        protocol_version: state._cfg.network.protocol_version as u16,
-        signer_pk_hex: state.node_wallet.encoded_public_key(),
-        signature_hex: String::new(),
-        metadata: None,
-    };
-
-    // 5. Sign the block with Coordinator wallet
-    let msg_to_sign = pms_wallet::signing_wire::canonical_wireblock_message(&wire_block);
-    let signature_hex = state.node_wallet.sign(&msg_to_sign)?;
-    wire_block.signature_hex = signature_hex;
-
-    // 6. Submit the block
-    match state.srv.adapter_arc().persist_block(&wire_block).await {
-        Ok(PutResult::Inserted) => {
-            let _ = state.srv.enqueue_broadcast(wire_block.id.clone()).await;
-            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
-            Ok(block_id)
-        }
-        Ok(PutResult::AlreadyExists) => {
-            Ok(block_id) // Block already exists, that's fine
-        }
-        Ok(PutResult::Rejected(reason)) => {
-            anyhow::bail!("Refund block rejected: {}", reason)
-        }
-        Err(e) => {
-            anyhow::bail!("Failed to persist refund block: {}", e)
-        }
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helper: Coordinator-side Decryption of NFT Metadata
@@ -321,80 +242,6 @@ pub async fn mint_nft(
             .into_response();
     }
 
-    // 1b. Validation Cube: Si c'est un cube et que des Authority keys sont configurées,
-    //     vérifier la signature des attributs AVANT de chiffrer et persister.
-    if req.metadata.nft_type.as_deref() == Some("cube") {
-        let authority_keys = &state.settings.fees.authority_public_keys;
-
-        if !authority_keys.is_empty() {
-            // Import inline pour éviter les problèmes de dépendance
-            use crate::burn_refund::{
-                CubeExtra, attributes_to_signed_message, verify_authority_signature,
-            };
-
-            // Extraire et valider le champ extra
-            let extra_str = match &req.metadata.extra {
-                Some(s) => s,
-                None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        "Cube NFT missing 'extra' field with signature",
-                    )
-                        .into_response();
-                }
-            };
-
-            let cube_extra: CubeExtra = match serde_json::from_str(extra_str) {
-                Ok(ce) => ce,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        format!("Invalid Cube 'extra' JSON: {e}"),
-                    )
-                        .into_response();
-                }
-            };
-
-            let signature = match &cube_extra.signature {
-                Some(s) => s,
-                None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        "Cube NFT missing Authority signature in 'extra'",
-                    )
-                        .into_response();
-                }
-            };
-
-            // Vérifier la signature contre TOUTES les clés Authority (match ANY)
-            let message = attributes_to_signed_message(&cube_extra.attributes);
-            let is_valid = authority_keys
-                .iter()
-                .any(|pk| verify_authority_signature(&message, signature, pk));
-
-            if !is_valid {
-                tracing::warn!(
-                    "🚫 Cube {} rejected: signature doesn't match any of {} Authority keys",
-                    req.token_id,
-                    authority_keys.len()
-                );
-                return (
-                    StatusCode::FORBIDDEN,
-                    "Invalid Authority signature for Cube attributes",
-                )
-                    .into_response();
-            }
-
-            tracing::info!("✅ Cube {} Authority signature verified", req.token_id);
-        } else {
-            // Pas d'Authority configurée - warning en mode Dev
-            tracing::warn!(
-                "⚠️ Cube {} minted without Authority validation (no authority_public_keys configured)",
-                req.token_id
-            );
-        }
-    }
-
     // 2. Chiffrer les métadonnées (Privacy)
     let coord_x25519 = state.node_wallet.x25519_pub_hex();
     let recipients = vec![req.owner_x25519_pubkey.clone(), coord_x25519.to_string()];
@@ -541,60 +388,27 @@ pub async fn mint_nft(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Réponse pour POST /v1/nft/burn
-///
-/// Contient le statut du burn et optionnellement les informations de remboursement
-/// si le NFT brûlé est un Cube authentique (signature Authority valide).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BurnNftResponse {
-    /// Statut de l'opération ("burned", "rejected", etc.)
     pub status: String,
-    /// ID du bloc créé dans le DAG
     pub block_id: String,
-    /// Token ID du NFT brûlé (si single burn) ou "batch" (si batch burn)
     pub token_id: String,
-    /// Liste des token IDs brûlés (pour batch burn)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_ids: Option<Vec<String>>,
-    /// Remboursement (si cube authentique avec signature Authority valide)
-    /// Calculé via la formule: (weight * size * density) / 10000
-    pub refund: Option<RefundPreview>,
-}
-
-/// Preview du remboursement pour un cube brûlé
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RefundPreview {
-    /// Montant du remboursement en PMS
-    pub amount: String,
-    /// Adresse destinataire du remboursement
-    pub recipient: String,
 }
 
 /// POST /v1/nft/burn
 ///
-/// Endpoint helper pour burn un NFT. Le client doit fournir un `WireBlock`
+/// Endpoint pour burn un NFT. Le client doit fournir un `WireBlock`
 /// pré-signé contenant un payload `NftAction::Burn` ou `NftAction::BatchBurn`.
 ///
-/// ## Flow
-/// 1. Parse le WireBlock depuis le body JSON
-/// 2. Vérifie que le payload contient bien un `NftAction::Burn` ou `BatchBurn`
-/// 3. Soumet le bloc au DAG via `persist_block`
-/// 4. Si le cube est authentique (signature Authority), calcule le refund preview global
-///
-/// ## Pourquoi le client doit-il signer ?
-/// La validation NFT (voir `pms-core/src/validations/nft.rs`)
-/// exige que le `signer` du bloc soit égal au `burner`. Le serveur ne peut
-/// donc pas signer à la place du client.
+/// Le client doit signer car la validation NFT exige que le `signer`
+/// du bloc soit égal au `burner`.
 pub async fn burn_nft(
     State(state): State<AppState>,
     Json(wb): Json<WireBlock>,
 ) -> impl IntoResponse {
-    // ─────────────────────────────────────────────────────────────────────
-    // 1. EXTRACTION : Parser le payload pour vérifier que c'est un Burn
-    // ─────────────────────────────────────────────────────────────────────
-    // On récupère le payload JSON du bloc et on le désérialise
-    // pour s'assurer qu'il contient bien une action NftAction::Burn.
     use pms_storage::NftStorage;
-    use rust_decimal::Decimal;
 
     let payload_json = match &wb.payload_json {
         Some(p) => p,
@@ -609,8 +423,6 @@ pub async fn burn_nft(
         }
     };
 
-    // Désérialiser le PayloadEnvelope
-    // Note: On utilise `serde_json::from_str` car payload_json est une String
     let envelope: PayloadEnvelope = match serde_json::from_str(payload_json) {
         Ok(e) => e,
         Err(e) => {
@@ -624,13 +436,9 @@ pub async fn burn_nft(
         }
     };
 
-    // Extraire l'action NFT du payload (doit être Plain::Nft pour le burn)
-    // PlainPayload est un enum défini dans pms-types-payload/src/payload.rs
-    // On matche sur le variant Nft qui contient directement une NftAction
     let nft_action = match envelope {
         PayloadEnvelope::Plain(pms_types_payload::PlainPayload::Nft(action)) => action,
         PayloadEnvelope::Plain(_) => {
-            // Le payload est Plain mais pas une action NFT
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -640,7 +448,6 @@ pub async fn burn_nft(
                 .into_response();
         }
         PayloadEnvelope::Encrypted(_) => {
-            // Le burn ne devrait pas être chiffré (pas de métadonnées à protéger)
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -651,7 +458,6 @@ pub async fn burn_nft(
         }
     };
 
-    // Vérifier que c'est bien un Burn ou BatchBurn
     let (token_ids_to_process, burner) = match &nft_action {
         pms_types_nft::NftAction::Burn { token_id, burner } => {
             (vec![token_id.clone()], burner.clone())
@@ -670,20 +476,14 @@ pub async fn burn_nft(
         }
     };
 
-    // ─────────────────────────────────────────────────────────────────────
-    // 1.5. ANTI DOUBLE-REFUND : Vérifier que TOUS les NFTs existent encore
-    // ─────────────────────────────────────────────────────────────────────
-    // Si un seul NFT n'existe plus, on rejette tout le bloc.
+    // Vérifier que TOUS les NFTs existent encore
     {
         for tid in &token_ids_to_process {
             match state.store.get_owner(tid) {
-                Ok(Some(_)) => {
-                    // exists
-                }
+                Ok(Some(_)) => {}
                 Ok(None) => {
-                    // n'existe plus
                     tracing::warn!(
-                        "🚫 Batch burn failure: Token {} already burned or missing",
+                        "Batch burn failure: Token {} already burned or missing",
                         &tid[..16.min(tid.len())]
                     );
                     return (
@@ -709,114 +509,23 @@ pub async fn burn_nft(
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // 2. PRE-CALCUL DU REFUND (AVANT persist_block !)
-    // ─────────────────────────────────────────────────────────────────────
-    // On doit calculer le refund pour chaque token et sommer les montants.
-    // Le coordinateur déchiffre les métadonnées depuis le bloc DAG.
-
-    let mut total_refund: Decimal = Decimal::ZERO;
-    let mut refund_recipient: Option<String> = None;
-
-    for tid in &token_ids_to_process {
-        // Déchiffrer les métadonnées depuis le bloc DAG
-        // Le coordinateur peut déchiffrer car il est dans la liste des recipients
-        let metadata = decrypt_nft_metadata_from_dag(&state, tid).await;
-
-        let result = crate::burn_refund::calculate_burn_refund(
-            tid,
-            &burner,
-            metadata.as_ref(),
-            &state.settings.fees.authority_public_keys,
-        );
-
-        match result {
-            Ok(Some(r)) => {
-                total_refund += r.amount;
-                // Le recipient doit être le burner (vérifié par calculate_burn_refund)
-                if refund_recipient.is_none() {
-                    refund_recipient = Some(r.recipient);
-                }
-                tracing::info!(
-                    "🔥 Cube refund calculated: {} -> {} PMS",
-                    &tid[..16.min(tid.len())],
-                    r.amount
-                );
-            }
-            Ok(None) => {
-                // Pas de refund pour ce token (pas un cube ou pas authentique)
-                tracing::debug!("No refund for token {}", tid);
-            }
-            Err(e) => {
-                tracing::warn!("Refund calculation error for {}: {}", tid, e);
-                // On continue mais sans refund pour ce token
-            }
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // 3. SOUMISSION : Persister le bloc dans le DAG
-    // ─────────────────────────────────────────────────────────────────────
-    // On délègue la validation globale au DAG.
-
+    // Persister le bloc dans le DAG
     let block_id = wb.id.clone();
 
     match state.srv.adapter_arc().persist_block(&wb).await {
         Ok(pms_storage::PutResult::Inserted) => {
-            // Broadcast
             let _ = state.srv.enqueue_broadcast(block_id.clone()).await;
             crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
 
-            // ─────────────────────────────────────────────────────────────
-            // 4. UPDATE STORE : Marquer comme brûlés
-            // ─────────────────────────────────────────────────────────────
             if let Err(e) = state.store.apply_action(&nft_action) {
-                tracing::error!("❌ Failed to apply BURN action to NFT store: {}", e);
+                tracing::error!("Failed to apply BURN action to NFT store: {}", e);
             } else {
                 tracing::info!(
-                    "✅ {} NFTs marked as burned by {}",
+                    "{} NFTs marked as burned by {}",
                     token_ids_to_process.len(),
                     burner
                 );
             }
-
-            // ─────────────────────────────────────────────────────────────
-            // 5. REFUND ALLOCATION - Create immediate UTXO for refund
-            // ─────────────────────────────────────────────────────────────
-            let refund_preview = if !total_refund.is_zero() && refund_recipient.is_some() {
-                let recipient = refund_recipient.clone().unwrap();
-
-                // Create a refund transaction block immediately
-                // This creates a UTXO for the burner with the refund amount
-                match create_refund_utxo_block(
-                    &state,
-                    &recipient,
-                    total_refund,
-                    &block_id,
-                ).await {
-                    Ok(refund_block_id) => {
-                        tracing::info!(
-                            "🔥 Refund UTXO created: {} PMS -> {} (block: {})",
-                            total_refund,
-                            &recipient[..20.min(recipient.len())],
-                            &refund_block_id[..16]
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("❌ Failed to create refund UTXO: {}", e);
-                        // Fallback: add to fee pool for later distribution
-                        let mut pool = state.fee_pool.write().await;
-                        pool.add_burn_refund(&recipient, total_refund);
-                    }
-                }
-
-                Some(RefundPreview {
-                    amount: total_refund.to_string(),
-                    recipient,
-                })
-            } else {
-                None
-            };
 
             let response_token_id = if token_ids_to_process.len() == 1 {
                 token_ids_to_process[0].clone()
@@ -829,7 +538,6 @@ pub async fn burn_nft(
                 block_id,
                 token_id: response_token_id,
                 token_ids: Some(token_ids_to_process),
-                refund: refund_preview,
             };
 
             (StatusCode::OK, Json(response)).into_response()
@@ -953,4 +661,336 @@ pub async fn prepare_nft_transfer(
     };
 
     (StatusCode::OK, Json(PrepareTransferResponse { action })).into_response()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BURN NFT SIMPLE (like send-simple: takes private_key + token_id)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Request pour POST /v1/nft/burn-simple
+#[derive(Debug, Deserialize)]
+pub struct BurnNftSimpleRequest {
+    /// Clé privée base64 du propriétaire
+    pub private_key_b64: String,
+    /// ID du token à brûler
+    pub token_id: String,
+}
+
+/// Request pour POST /v1/nft/burn-batch-simple
+#[derive(Debug, Deserialize)]
+pub struct BurnNftBatchSimpleRequest {
+    /// Clé privée base64 du propriétaire
+    pub private_key_b64: String,
+    /// IDs des tokens à brûler
+    pub token_ids: Vec<String>,
+}
+
+/// POST /v1/nft/burn-simple
+///
+/// Endpoint simplifié pour burn un NFT. Le serveur construit et signe
+/// le WireBlock à partir de la clé privée fournie (comme send-simple).
+pub async fn burn_nft_simple(
+    State(state): State<AppState>,
+    Json(req): Json<BurnNftSimpleRequest>,
+) -> impl IntoResponse {
+    use crate::api_fn::wallet_factory::wallet_from_b64;
+    use crate::api_fn::tx_helpers;
+    use pms_types_nft::NftAction;
+
+    // 1. Reconstruire le wallet depuis la clé privée
+    let sender_wallet = match wallet_from_b64(&req.private_key_b64) {
+        Ok(w) => w,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid wallet key: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let burner_pk = sender_wallet.encoded_public_key();
+    let burner_addr = sender_wallet.get_address(&state.settings.address.hrp);
+
+    // 2. Vérifier ownership (owner stored as bech32 address)
+    {
+        match state.store.get_owner(&req.token_id) {
+            Ok(Some(owner)) if owner == burner_addr || owner == burner_pk => {} // OK
+            Ok(Some(owner)) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": format!("Not the owner: owner={}, burner={}", owner, burner_addr)
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": "NFT not found or already burned"
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Failed to check ownership: {e}")
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // 3. Construire le payload NftAction::Burn
+    // burner must be bech32 address (same format as stored owner)
+    let nft_action = NftAction::Burn {
+        token_id: req.token_id.clone(),
+        burner: burner_addr.clone(),
+    };
+    let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(nft_action.clone())));
+
+    // 4. Get parents
+    let settings = &*state.settings;
+    let parents = match tx_helpers::get_block_parents(&state.store, settings).await {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
+
+    // 5. Forge block + sign avec le node_wallet (coordinator, single-writer mode)
+    let adapter = state.srv.adapter_arc();
+    let wb = match tx_helpers::forge_and_sign_block(
+        payload,
+        parents,
+        &adapter,
+        &state.node_wallet,
+        settings,
+        Some("NFT burn-simple"),
+    )
+    .await
+    {
+        Ok(wb) => wb,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
+
+    // 6. Persist + broadcast
+    let block_id = wb.id.clone();
+    match tx_helpers::persist_and_broadcast(&state, &wb).await {
+        Ok(pms_storage::PutResult::Inserted) => {
+            // Apply NFT action to store
+            if let Err(e) = state.store.apply_action(&nft_action) {
+                tracing::error!("Failed to apply burn action to NFT store: {}", e);
+            } else {
+                tracing::info!(
+                    "NFT {} burned by {} via burn-simple (block {})",
+                    &req.token_id[..16.min(req.token_id.len())],
+                    &burner_pk[..20.min(burner_pk.len())],
+                    &block_id[..16.min(block_id.len())]
+                );
+            }
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!(BurnNftResponse {
+                    status: "burned".to_string(),
+                    block_id,
+                    token_id: req.token_id,
+                    token_ids: None,
+                })),
+            )
+                .into_response()
+        }
+        Ok(pms_storage::PutResult::AlreadyExists) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "block already exists" })),
+        )
+            .into_response(),
+        Ok(pms_storage::PutResult::Rejected(reason)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("rejected: {reason}") })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BURN NFT BATCH SIMPLE (burn multiple NFTs in one block)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// POST /v1/nft/burn-batch-simple
+///
+/// Burn multiple NFTs in a single block. The server constructs and signs
+/// the block on behalf of the owner (coordinator mode, like burn-simple).
+pub async fn burn_nft_batch_simple(
+    State(state): State<AppState>,
+    Json(req): Json<BurnNftBatchSimpleRequest>,
+) -> impl IntoResponse {
+    use crate::api_fn::wallet_factory::wallet_from_b64;
+    use crate::api_fn::tx_helpers;
+    use pms_types_nft::NftAction;
+
+    if req.token_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "token_ids must not be empty" })),
+        )
+            .into_response();
+    }
+
+    // 1. Reconstruct wallet from private key
+    let sender_wallet = match wallet_from_b64(&req.private_key_b64) {
+        Ok(w) => w,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid wallet key: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let burner_pk = sender_wallet.encoded_public_key();
+    let burner_addr = sender_wallet.get_address(&state.settings.address.hrp);
+
+    // 2. Verify ownership of ALL tokens
+    for token_id in &req.token_ids {
+        match state.store.get_owner(token_id) {
+            Ok(Some(owner)) if owner == burner_addr || owner == burner_pk => {} // OK
+            Ok(Some(owner)) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": format!("Not the owner of {}: owner={}, burner={}", token_id, owner, burner_addr)
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": format!("NFT {} not found or already burned", token_id)
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Failed to check ownership of {}: {e}", token_id)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // 3. Build NftAction::BatchBurn payload
+    let nft_action = NftAction::BatchBurn {
+        token_ids: req.token_ids.clone(),
+        burner: burner_addr.clone(),
+    };
+    let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(nft_action.clone())));
+
+    // 4. Get parents
+    let settings = &*state.settings;
+    let parents = match tx_helpers::get_block_parents(&state.store, settings).await {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
+
+    // 5. Forge block + sign with node_wallet (coordinator, single-writer mode)
+    let adapter = state.srv.adapter_arc();
+    let wb = match tx_helpers::forge_and_sign_block(
+        payload,
+        parents,
+        &adapter,
+        &state.node_wallet,
+        settings,
+        Some("NFT burn-batch-simple"),
+    )
+    .await
+    {
+        Ok(wb) => wb,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
+
+    // 6. Persist + broadcast
+    let block_id = wb.id.clone();
+    let count = req.token_ids.len();
+    match tx_helpers::persist_and_broadcast(&state, &wb).await {
+        Ok(pms_storage::PutResult::Inserted) => {
+            // Apply NFT action to store
+            if let Err(e) = state.store.apply_action(&nft_action) {
+                tracing::error!("Failed to apply batch burn action to NFT store: {}", e);
+            } else {
+                tracing::info!(
+                    "Batch burned {} NFTs by {} via burn-batch-simple (block {})",
+                    count,
+                    &burner_addr[..20.min(burner_addr.len())],
+                    &block_id[..16.min(block_id.len())]
+                );
+            }
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!(BurnNftResponse {
+                    status: "burned".to_string(),
+                    block_id,
+                    token_id: req.token_ids.first().cloned().unwrap_or_default(),
+                    token_ids: Some(req.token_ids),
+                })),
+            )
+                .into_response()
+        }
+        Ok(pms_storage::PutResult::AlreadyExists) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "block already exists" })),
+        )
+            .into_response(),
+        Ok(pms_storage::PutResult::Rejected(reason)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("rejected: {reason}") })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
 }

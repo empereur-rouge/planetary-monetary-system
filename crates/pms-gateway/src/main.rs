@@ -129,9 +129,12 @@ async fn main() -> Result<()> {
         settings: Arc::new(settings.clone()),
     };
 
+    // NOTE: per_second(N) in tower-governor 0.8 means "period of N seconds"
+    // (NOT "N requests per second"). Use per_nanosecond for correct rps conversion.
+    let period_ns = 1_000_000_000u64 / settings.rate_limit_rps.max(1);
     let governor_conf = Box::new(
         GovernorConfigBuilder::default()
-            .per_second(settings.rate_limit_rps)
+            .per_nanosecond(period_ns)
             .burst_size(settings.burst_size)
             .key_extractor(PeerIpKeyExtractor)
             .finish()
@@ -160,6 +163,8 @@ async fn main() -> Result<()> {
         // NFT routes (proxy)
         .route("/v1/nft/mint", post(routes::proxy_post))
         .route("/v1/nft/burn", post(routes::proxy_post))
+        .route("/v1/nft/burn-simple", post(routes::proxy_post))
+        .route("/v1/nft/burn-batch-simple", post(routes::proxy_post))
         .route("/v1/nft/{token_id}", get(routes::proxy_get))
         .route("/v1/wallet/{address}/nfts", get(routes::proxy_get))
         .route("/v1/wallet/{address}/utxos", get(routes::proxy_get))
@@ -173,9 +178,6 @@ async fn main() -> Result<()> {
         // Custodial wallet API (proxy)
         .route("/v1/wallet/create", post(routes::proxy_post))
         .route("/v1/wallet/send-simple", post(routes::proxy_post))
-        // Cube system (proxy) - claim CUBEs + burn for PMS
-        .route("/v1/cube/claim", post(routes::proxy_post))
-        .route("/v1/cube/burn", post(routes::proxy_post))
         // History (proxy)
         .route("/wallet/history", post(routes::proxy_post))
         // Wallet TX send (proxy) - Submit signed transaction
@@ -190,6 +192,12 @@ async fn main() -> Result<()> {
         .route("/admin/config", post(routes::proxy_post))
         // Faucet (admin, proxy to engine)
         .route("/admin/faucet", post(routes::proxy_post))
+        // Token routes (proxy to engine)
+        .route("/v1/tokens", get(routes::proxy_get))
+        .route("/v1/tokens/{asset_id}", get(routes::proxy_get))
+        // Admin token management (proxy to engine)
+        .route("/admin/tokens/create", post(routes::proxy_post))
+        .route("/admin/tokens/mint", post(routes::proxy_post))
         // Metrics (proxy to engine)
         .route("/metrics", get(routes::proxy_get))
         // Multi-ledger public/admin routes (proxy to engine)

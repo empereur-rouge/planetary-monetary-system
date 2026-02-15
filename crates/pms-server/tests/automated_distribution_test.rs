@@ -209,8 +209,6 @@ async fn test_automated_fee_distribution() {
             treasury_reward_percent: 0,
             creator_reward_percent: 0,
             burn_percent: 0,
-            authority_public_keys: vec![],
-            authority_keys_last_rotation: None,
             treasury_addresses: vec![],
             distribution_interval_sec: 1, // 1 second interval for test
             daily_inflation_enabled: false,

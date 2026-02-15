@@ -37,11 +37,11 @@ whitelist_fp256 = []
 [limits]
 max_body_bytes = 262144
 request_timeout_ms = 4000
-rate_limit_rps = 5000
-burst = 5000
+rate_limit_rps = 100000
+burst = 200000
 
 [fees]
-treasury_addresses = ["pms1vk6sgyudd2l5pgxqjrq6wj9x4p3grt34zfq8nnefhqc2r7s98spz8mvzwnnrd8tl3a05lqdxxnx720r5j5nqa64jej"]
+treasury_addresses = ["pms1nqgc9xfc3hwcngkaah6999y9lmvrnfwx9g983rwkg89vaxhfqprvatapz4mzxg9yyl4w89kmswqpaczzcdrs56rtkj"]
 epsilon = "0.001"
 scan_limit = 2000
 mode = "uniform"
@@ -54,14 +54,6 @@ annual_inflation_percent = 3.0
 treasury_reward_percent = 20
 creator_reward_percent = 70
 burn_percent = 10
-# AUTHORITY PUBLIC KEYS - List of Authorities that can sign Cube attributes
-# Each key represents a different application backend allowed to generate Cubes.
-# Format: SEC1 compressed hex (e.g., "03..." for secp256k1)
-authority_public_keys = [
-    "03e40d6555aa0de54d9d9718577c9ae5d820294d13005ffbe423358a323d75b849",
-]
-authority_keys_last_rotation = "2026-01-15"
-
 [auth]
 require_signed_submit = true
 admin_api_token = "env:PMS_ADMIN_TOKEN"
@@ -86,5 +78,5 @@ enforce_fee_recipient = false    # Désactivé pour les tests
 
 # COORDINATOR PUBLIC KEY - Dérivée de node1.key
 # Seul Node 1 peut minter car il a la clé privée correspondante
-coordinator_public_key = "04e40d6555aa0de54d9d9718577c9ae5d820294d13005ffbe423358a323d75b84905ef456525c422ac0a60d92e7644e3e49f8da0d1faccb76be96a5b958d1cbd4d"
-coordinator_x25519_public_key = "2a9e3c8468a149435ae028366ae44bd59d232ddb36598eaad0c44a8a8f82c74f"
+coordinator_public_key = "04de88bf6ec4d2c38151df56efbf48ea7f5bc2dc19ef26cd8614fe1a065a0e2545bac3d76d8fd0fcedecf539f2c927ce2547ce9951822e08c12ca45b0790dacdff"
+coordinator_x25519_public_key = "f3212c42ca04cb32c1e19e6d246e8556bd19023a208ca72461db5e11320d3a29"

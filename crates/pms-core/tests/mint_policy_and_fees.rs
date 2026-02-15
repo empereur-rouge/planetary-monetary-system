@@ -301,8 +301,6 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             creator_reward_percent: 70,
             treasury_reward_percent: 20,
             burn_percent: 10,
-            authority_public_keys: vec![],
-            authority_keys_last_rotation: None,
             daily_inflation_enabled: false,
             daily_inflation_interval_sec: 86400,
         },

@@ -79,8 +79,6 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             treasury_reward_percent: 0,
             creator_reward_percent: 0,
             burn_percent: 0,
-            authority_public_keys: vec![],
-            authority_keys_last_rotation: None,
             treasury_addresses: vec![],
             distribution_interval_sec: 600,
             daily_inflation_enabled: false,
@@ -102,6 +100,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: None, // admin-owned
+                symbol: None,
             },
             LedgerDef {
                 id: "nft".into(),
@@ -112,6 +111,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: Some("owner_pk_nft".into()),
+                symbol: None,
             },
         ],
     }
@@ -221,6 +221,7 @@ fn auth_admin_can_always_manage() {
         fees: None,
         validation: None,
         owner_pubkey: None, // admin-owned
+        symbol: None,
     };
     let nft_def = LedgerDef {
         id: "nft".into(),
@@ -231,6 +232,7 @@ fn auth_admin_can_always_manage() {
         fees: None,
         validation: None,
         owner_pubkey: Some("owner_pk".into()),
+        symbol: None,
     };
 
     // Admin can enable/disable/transfer anything
@@ -250,6 +252,7 @@ fn auth_non_admin_cannot_manage_main_bridge() {
         fees: None,
         validation: None,
         owner_pubkey: None,
+        symbol: None,
     };
     let nft_def = LedgerDef {
         id: "nft".into(),
@@ -260,6 +263,7 @@ fn auth_non_admin_cannot_manage_main_bridge() {
         fees: None,
         validation: None,
         owner_pubkey: Some("owner_pk".into()),
+        symbol: None,
     };
 
     // Non-admin cannot manage bridges involving main
@@ -279,6 +283,7 @@ fn auth_owner_can_manage_custom_bridges() {
         fees: None,
         validation: None,
         owner_pubkey: Some("owner_a".into()),
+        symbol: None,
     };
     let custom_b = LedgerDef {
         id: "market".into(),
@@ -289,6 +294,7 @@ fn auth_owner_can_manage_custom_bridges() {
         fees: None,
         validation: None,
         owner_pubkey: Some("owner_b".into()),
+        symbol: None,
     };
 
     // Owner A can enable bridge between custom ledgers

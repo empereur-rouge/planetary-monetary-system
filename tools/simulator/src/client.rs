@@ -1,8 +1,15 @@
 use crate::config::ServerTarget;
 use crate::error::{SimError, SimResult};
 use crate::types::*;
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder, Response};
 use std::time::{Duration, Instant};
+
+/// Max retries on 429 Too Many Requests
+const MAX_RETRIES: u32 = 5;
+/// Base delay between retries (doubles each attempt: 500ms, 1s, 2s, 4s, 8s)
+const BASE_RETRY_DELAY_MS: u64 = 500;
+/// Max delay per retry (cap)
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 /// Wrapper with timing info
 pub struct TimedResponse<T> {
@@ -40,6 +47,16 @@ impl DagClient {
         }
     }
 
+    /// Create a new client pointing to a specific ledger (prefix /l/{ledger_id})
+    pub fn with_ledger(&self, ledger_id: &str) -> Self {
+        Self {
+            http: self.http.clone(),
+            base_url: self.base_url.clone(),
+            prefix: format!("/l/{}", ledger_id),
+            admin_token: self.admin_token.clone(),
+        }
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}{}", self.base_url, self.prefix, path)
     }
@@ -52,6 +69,39 @@ impl DagClient {
         self.admin_token
             .as_ref()
             .map(|t| format!("Bearer {}", t))
+    }
+
+    /// Send a request with automatic retry on 429 (Too Many Requests).
+    /// Uses exponential backoff: 500ms, 1s, 2s, 4s, 8s (capped at 10s).
+    async fn send_with_retry(&self, builder: RequestBuilder) -> Result<Response, reqwest::Error> {
+        let mut attempt = 0u32;
+        let mut current = builder;
+
+        loop {
+            let cloned = current.try_clone();
+            let resp = current.send().await?;
+
+            if resp.status() == 429 && attempt < MAX_RETRIES {
+                let delay = Duration::from_millis(BASE_RETRY_DELAY_MS * 2u64.pow(attempt))
+                    .min(MAX_RETRY_DELAY);
+
+                tracing::warn!(
+                    "Rate limited (429), retrying in {:?} (attempt {}/{})",
+                    delay,
+                    attempt + 1,
+                    MAX_RETRIES
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+
+                match cloned {
+                    Some(b) => current = b,
+                    None => return Ok(resp), // can't retry streaming body
+                }
+            } else {
+                return Ok(resp);
+            }
+        }
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -69,12 +119,12 @@ impl DagClient {
 
     pub async fn create_wallet(&self) -> SimResult<TimedResponse<WalletInfo>> {
         let start = Instant::now();
-        let resp = self
+        let builder = self
             .http
             .post(self.url("/v1/wallet/create"))
-            .json(&serde_json::json!({}))
-            .send()
-            .await?;
+            .json(&serde_json::json!({}));
+
+        let resp = self.send_with_retry(builder).await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -97,7 +147,8 @@ impl DagClient {
         req: &SendSimpleRequest,
     ) -> SimResult<TimedResponse<SendResponse>> {
         let start = Instant::now();
-        let resp = self.http.post(self.url("/v1/wallet/send-simple")).json(req).send().await?;
+        let builder = self.http.post(self.url("/v1/wallet/send-simple")).json(req);
+        let resp = self.send_with_retry(builder).await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -121,7 +172,7 @@ impl DagClient {
         amount: &str,
     ) -> SimResult<TimedResponse<FaucetResponse>> {
         let start = Instant::now();
-        let mut req_builder = self
+        let mut builder = self
             .http
             .post(self.admin_url("/admin/faucet"))
             .json(&FaucetRequest {
@@ -130,10 +181,10 @@ impl DagClient {
             });
 
         if let Some(auth) = self.auth_header() {
-            req_builder = req_builder.header("Authorization", auth);
+            builder = builder.header("Authorization", auth);
         }
 
-        let resp = req_builder.send().await?;
+        let resp = self.send_with_retry(builder).await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -151,77 +202,15 @@ impl DagClient {
         })
     }
 
-    pub async fn cube_claim(
-        &self,
-        to: &str,
-    ) -> SimResult<TimedResponse<CubeClaimResponse>> {
-        let start = Instant::now();
-        let resp = self
-            .http
-            .post(self.url("/v1/cube/claim"))
-            .json(&CubeClaimRequest {
-                to: to.to_string(),
-            })
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(SimError::ServerError {
-                status,
-                message: body,
-            });
-        }
-
-        let data: CubeClaimResponse = resp.json().await?;
-        Ok(TimedResponse {
-            data,
-            latency: start.elapsed(),
-        })
-    }
-
-    pub async fn cube_burn(
-        &self,
-        private_key_b64: &str,
-        amount: &str,
-    ) -> SimResult<TimedResponse<CubeBurnResponse>> {
-        let start = Instant::now();
-        let resp = self
-            .http
-            .post(self.url("/v1/cube/burn"))
-            .json(&CubeBurnRequest {
-                private_key_b64: private_key_b64.to_string(),
-                amount: amount.to_string(),
-            })
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(SimError::ServerError {
-                status,
-                message: body,
-            });
-        }
-
-        let data: CubeBurnResponse = resp.json().await?;
-        Ok(TimedResponse {
-            data,
-            latency: start.elapsed(),
-        })
-    }
-
     pub async fn balance(&self, address: &str) -> SimResult<String> {
-        let resp = self
+        let builder = self
             .http
             .post(self.url("/v1/balance"))
             .json(&BalanceRequest {
                 address: address.to_string(),
-            })
-            .send()
-            .await?;
+            });
+
+        let resp = self.send_with_retry(builder).await?;
 
         if !resp.status().is_success() {
             return Ok("0".to_string());
@@ -232,12 +221,12 @@ impl DagClient {
     }
 
     pub async fn get_tips(&self, limit: usize) -> SimResult<Vec<String>> {
-        let resp = self
+        let builder = self
             .http
             .post(self.url("/v1/dag/tips"))
-            .json(&TipsRequest { limit })
-            .send()
-            .await?;
+            .json(&TipsRequest { limit });
+
+        let resp = self.send_with_retry(builder).await?;
 
         if !resp.status().is_success() {
             return Ok(vec![]);
@@ -248,14 +237,186 @@ impl DagClient {
     }
 
     pub async fn get_supply(&self) -> SimResult<SupplyResponse> {
-        let resp = self.http.get(self.url("/v1/supply")).send().await?;
+        let builder = self.http.get(self.url("/v1/supply"));
+        let resp = self.send_with_retry(builder).await?;
         let data: SupplyResponse = resp.json().await?;
         Ok(data)
     }
 
     pub async fn list_tokens(&self) -> SimResult<serde_json::Value> {
-        let resp = self.http.get(self.url("/v1/tokens")).send().await?;
+        let builder = self.http.get(self.url("/v1/tokens"));
+        let resp = self.send_with_retry(builder).await?;
         let data: serde_json::Value = resp.json().await?;
+        Ok(data)
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Admin API — Ledger & Token
+    // ════════════════════════════════════════════════════════════════
+
+    /// POST /admin/ledgers/create (global admin, no ledger prefix)
+    pub async fn create_ledger(
+        &self,
+        req: &CreateLedgerRequest,
+    ) -> SimResult<CreateLedgerResponse> {
+        let mut builder = self
+            .http
+            .post(self.admin_url("/admin/ledgers/create"))
+            .json(req);
+
+        if let Some(auth) = self.auth_header() {
+            builder = builder.header("Authorization", auth);
+        }
+
+        let resp = self.send_with_retry(builder).await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SimError::ServerError {
+                status,
+                message: body,
+            });
+        }
+
+        let data: CreateLedgerResponse = resp.json().await?;
+        Ok(data)
+    }
+
+    /// POST /admin/tokens/create (uses ledger prefix)
+    pub async fn create_token(
+        &self,
+        req: &CreateTokenRequest,
+    ) -> SimResult<CreateTokenResponse> {
+        let mut builder = self
+            .http
+            .post(self.url("/admin/tokens/create"))
+            .json(req);
+
+        if let Some(auth) = self.auth_header() {
+            builder = builder.header("Authorization", auth);
+        }
+
+        let resp = self.send_with_retry(builder).await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SimError::ServerError {
+                status,
+                message: body,
+            });
+        }
+
+        let data: CreateTokenResponse = resp.json().await?;
+        Ok(data)
+    }
+
+    /// POST /admin/tokens/mint (uses ledger prefix)
+    pub async fn mint_token(
+        &self,
+        req: &MintTokenRequest,
+    ) -> SimResult<MintTokenResponse> {
+        let mut builder = self
+            .http
+            .post(self.url("/admin/tokens/mint"))
+            .json(req);
+
+        if let Some(auth) = self.auth_header() {
+            builder = builder.header("Authorization", auth);
+        }
+
+        let resp = self.send_with_retry(builder).await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SimError::ServerError {
+                status,
+                message: body,
+            });
+        }
+
+        let data: MintTokenResponse = resp.json().await?;
+        Ok(data)
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // NFT API
+    // ════════════════════════════════════════════════════════════════
+
+    /// POST /v1/nft/mint — Mint an NFT (coordinator signs)
+    pub async fn mint_nft(
+        &self,
+        req: &MintNftRequest,
+    ) -> SimResult<MintNftResponse> {
+        let builder = self
+            .http
+            .post(self.url("/v1/nft/mint"))
+            .json(req);
+
+        let resp = self.send_with_retry(builder).await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SimError::ServerError {
+                status,
+                message: body,
+            });
+        }
+
+        let data: MintNftResponse = resp.json().await?;
+        Ok(data)
+    }
+
+    /// POST /v1/nft/burn-batch-simple — Burn multiple NFTs in one block
+    pub async fn burn_nft_batch_simple(
+        &self,
+        req: &BurnNftBatchSimpleRequest,
+    ) -> SimResult<BurnNftBatchSimpleResponse> {
+        let builder = self
+            .http
+            .post(self.url("/v1/nft/burn-batch-simple"))
+            .json(req);
+
+        let resp = self.send_with_retry(builder).await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SimError::ServerError {
+                status,
+                message: body,
+            });
+        }
+
+        let data: BurnNftBatchSimpleResponse = resp.json().await?;
+        Ok(data)
+    }
+
+    /// POST /v1/nft/burn-simple — Burn an NFT (server builds + signs block)
+    pub async fn burn_nft_simple(
+        &self,
+        req: &BurnNftSimpleRequest,
+    ) -> SimResult<BurnNftSimpleResponse> {
+        let builder = self
+            .http
+            .post(self.url("/v1/nft/burn-simple"))
+            .json(req);
+
+        let resp = self.send_with_retry(builder).await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SimError::ServerError {
+                status,
+                message: body,
+            });
+        }
+
+        let data: BurnNftSimpleResponse = resp.json().await?;
         Ok(data)
     }
 }

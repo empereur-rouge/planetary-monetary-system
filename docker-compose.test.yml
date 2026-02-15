@@ -29,8 +29,7 @@ services:
       RUST_LOG: info,pms_server=debug,pms_core=debug
       PMS_CONFIG: /home/pms/config/config.docker-test.toml
       PMS_ADMIN_TOKEN: pms_admin_secret
-      PMS__LIMITS__RATE_LIMIT_RPS: 10000
-      PMS__LIMITS__BURST: 20000
+      # Rate limits from config.docker-test.toml [limits] (100000/200000)
     volumes:
       - ./etc/config/config.docker-test.toml:/home/pms/config/config.docker-test.toml:ro
       - ./etc/pms/node.key:/home/pms/config/node-identity.key:ro
@@ -73,6 +72,8 @@ services:
       LISTEN_ADDR: 0.0.0.0:8443
       TLS_CERT: /app/tls/cert.pem
       TLS_KEY: /app/tls/key.pem
+      RATE_LIMIT_RPS: "100000"
+      BURST_SIZE: "200000"
       ADMIN_TOKEN: pms_admin_secret
       DASHBOARD_PATH: /app/dashboard
     volumes:

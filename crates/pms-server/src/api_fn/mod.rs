@@ -3,7 +3,6 @@ pub mod bridge;
 pub mod compliance;
 pub mod config;
 pub mod coordinator;
-pub mod cube;
 pub mod dag;
 pub mod history;
 pub mod ledger;

@@ -39,6 +39,9 @@ pub struct CirculatingSupplyResponse {
     /// Asset ID queried (None = PMS natif)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_id: Option<String>,
+
+    /// Native token symbol for this ledger
+    pub symbol: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,11 +65,32 @@ pub async fn get_circulating_supply(
     // Accède au ShardedUtxoSet via l'adapter du serveur
     let adapter = state.srv.adapter_arc();
 
-    // Calcule le supply via la méthode du trait
-    let (total, count) = if let Some(ref asset_id) = query.asset_id {
-        adapter.circulating_supply_by_asset(Some(asset_id)).await
+    // Calcule le supply via la méthode du trait.
+    // Si pas d'asset_id explicite : essaie le natif PMS, et si 0 + tokens enregistrés,
+    // fallback automatique sur le premier token (ex: edenite sur le ledger eden).
+    let explicit_asset = query.asset_id.clone();
+    let (total, count, resolved_asset) = if let Some(ref asset_id) = explicit_asset {
+        let (t, c) = adapter.circulating_supply_by_asset(Some(asset_id)).await;
+        (t, c, Some(asset_id.clone()))
     } else {
-        adapter.circulating_supply().await
+        let (t, c) = adapter.circulating_supply().await;
+        if t == Decimal::ZERO {
+            // Native supply is 0 — check if there's a registered custom token
+            if let Ok(tokens) = state.store.list_tokens() {
+                if let Some(first) = tokens.first() {
+                    let (t2, c2) = adapter
+                        .circulating_supply_by_asset(Some(&first.asset_id))
+                        .await;
+                    (t2, c2, Some(first.asset_id.clone()))
+                } else {
+                    (t, c, None)
+                }
+            } else {
+                (t, c, None)
+            }
+        } else {
+            (t, c, None)
+        }
     };
 
     let settings = &state.settings;
@@ -107,6 +131,15 @@ pub async fn get_circulating_supply(
         }
     }
 
+    // Resolve native symbol: per-ledger def > network config > default "PMS"
+    let symbol = state
+        .ledger_mgr
+        .as_ref()
+        .and_then(|mgr| mgr.get(&state.ledger_id))
+        .and_then(|inst| inst.def.symbol.clone())
+        .or_else(|| settings.network.symbol.clone())
+        .unwrap_or_else(|| "PMS".to_string());
+
     Json(CirculatingSupplyResponse {
         circulating_supply: total.to_string(),
         utxo_count: count as u64,
@@ -114,6 +147,7 @@ pub async fn get_circulating_supply(
         node_balance: node_bal.to_string(),
         treasury_balance: treasury_bal.to_string(),
         treasury_details,
-        asset_id: query.asset_id,
+        asset_id: resolved_asset,
+        symbol,
     })
 }

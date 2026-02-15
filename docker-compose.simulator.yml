@@ -27,6 +27,7 @@ services:
     container_name: pms-simulator
     volumes:
       - ./tools/simulator/simulator.docker.toml:/app/config/simulator.toml:ro
+      - ./tools/simulator/agents_docker.toml:/app/config/agents_docker.toml:ro
       # macOS: ~/Library/Caches/pms-simulator, Linux: ~/.cache/pms-simulator
       - ${GEMINI_TOKEN_CACHE:-~/Library/Caches/pms-simulator}:/root/.cache/pms-simulator:rw
     ports:

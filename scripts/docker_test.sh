@@ -212,8 +212,7 @@ services:
       RUST_LOG: info,pms_server=debug,pms_core=debug
       PMS_CONFIG: /home/pms/config/config.docker-test.toml
       PMS_ADMIN_TOKEN: pms_admin_secret
-      PMS__LIMITS__RATE_LIMIT_RPS: 10000
-      PMS__LIMITS__BURST: 20000
+      # Rate limits from config.docker-test.toml [limits] (100000/200000)
     volumes:
       - ./etc/config/config.docker-test.toml:/home/pms/config/config.docker-test.toml:ro
       - ./etc/pms/node.key:/home/pms/config/node-identity.key:ro
@@ -256,6 +255,8 @@ services:
       LISTEN_ADDR: 0.0.0.0:8443
       TLS_CERT: /app/tls/cert.pem
       TLS_KEY: /app/tls/key.pem
+      RATE_LIMIT_RPS: "100000"
+      BURST_SIZE: "200000"
       ADMIN_TOKEN: pms_admin_secret
       DASHBOARD_PATH: /app/dashboard
     volumes:
@@ -314,14 +315,14 @@ COMPOSE_EOF
 }
 
 build_and_start() {
-    echo -e "${YELLOW}🏗️  Building Docker images...${NC}"
-    
-    # Build Engine image
-    docker compose -f docker-compose.test.yml build pms-engine
-    
-    # Build Gateway image (uses existing Dockerfile.gateway with dashboard)
+    echo -e "${YELLOW}🏗️  Building Docker images (--no-cache for fresh binaries)...${NC}"
+
+    # Build Engine image (no cache to ensure latest code)
+    docker compose -f docker-compose.test.yml build --no-cache pms-engine
+
+    # Build Gateway image (no cache to ensure latest code)
     echo -e "${YELLOW}🔧 Building Gateway image (with dashboard)...${NC}"
-    docker compose -f docker-compose.test.yml build pms-gateway
+    docker compose -f docker-compose.test.yml build --no-cache pms-gateway
     
     echo -e "${YELLOW}🚀 Starting 4-Service Stack...${NC}"
     docker compose -f docker-compose.test.yml up -d --remove-orphans

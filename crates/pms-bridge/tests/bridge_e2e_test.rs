@@ -148,8 +148,6 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
             treasury_reward_percent: 0,
             creator_reward_percent: 0,
             burn_percent: 0,
-            authority_public_keys: vec![],
-            authority_keys_last_rotation: None,
             treasury_addresses: vec![],
             distribution_interval_sec: 600,
             daily_inflation_enabled: false,
@@ -174,6 +172,7 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: None,
+                symbol: None,
             },
             LedgerDef {
                 id: "nft".into(),
@@ -184,6 +183,7 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: Some("owner_nft_pk".into()),
+                symbol: None,
             },
         ],
     }

@@ -6,7 +6,7 @@ use crate::api_fn::coordinator::get_coordinator_info;
 use crate::api_fn::dag::get_tips;
 use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
 use crate::api_fn::milestone::{distribute_fees, get_fee_pool_status};
-use crate::api_fn::nft::{burn_nft, get_nft, get_nfts_by_owner, mint_nft, prepare_nft_transfer};
+use crate::api_fn::nft::{burn_nft, burn_nft_batch_simple, burn_nft_simple, get_nft, get_nfts_by_owner, mint_nft, prepare_nft_transfer};
 use crate::api_fn::nodes::{connect_peer, list_nodes, list_peers, node_heartbeat, register_node};
 use crate::api_fn::stream_blocks::stream_blocks;
 use crate::api_fn::bridge::{admin_bridge_enable, admin_bridge_disable, admin_bridge_transfer, list_bridge_links, bridge_status};
@@ -14,7 +14,6 @@ use crate::api_fn::compliance::{
     admin_freeze, admin_unfreeze, admin_seize, admin_reverse,
     admin_list_frozen, admin_compliance_log, admin_shadow_balance,
 };
-use crate::api_fn::cube::{cube_claim, cube_burn};
 use crate::api_fn::ledger::{admin_create_ledger, admin_get_ledger, admin_list_ledgers, list_ledgers};
 use crate::api_fn::supply::get_circulating_supply;
 use crate::api_fn::token::{admin_create_token, admin_mint_token, get_token, list_tokens};
@@ -135,6 +134,26 @@ async fn require_local_or_admin(
     (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
 }
 
+/// Admin-token-only middleware for per-ledger admin routes (used inside oneshot router
+/// where ConnectInfo may not be available).
+async fn require_admin_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> impl IntoResponse {
+    if let Some(token) = &state.admin_token {
+        if let Some(auth_header) = headers.get("Authorization") {
+            if let Ok(auth_str) = auth_header.to_str() {
+                if auth_str == format!("Bearer {}", token) {
+                    return next.run(request).await;
+                }
+            }
+        }
+    }
+    (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+}
+
 /// Construit les routes ledger-scoped (celles qui dépendent de l'adapter/store d'un ledger).
 /// Utilisé à la fois pour les routes par défaut et pour les routes `/l/{ledger_id}/`.
 fn build_ledger_scoped_routes() -> Router<AppState> {
@@ -169,33 +188,20 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
         .route("/v1/config", get(crate::api_fn::config::get_config))
         .route("/v1/blocks/{id}", get(get_block_by_id));
 
-    let nft_sensitive_governor = Box::new(
-        GovernorConfigBuilder::default()
-            .per_second(1000)
-            .burst_size(2000)
-            .key_extractor(SmartIpKeyExtractor)
-            .finish()
-            .unwrap(),
-    );
-
     let nft_routes = Router::new()
         .route("/v1/nft/{token_id}", get(get_nft))
         .route("/v1/wallet/{address}/nfts", get(get_nfts_by_owner))
         .route("/v1/nft/mint", post(mint_nft))
         .route("/v1/nft/burn", post(burn_nft))
+        .route("/v1/nft/burn-simple", post(burn_nft_simple))
+        .route("/v1/nft/burn-batch-simple", post(burn_nft_batch_simple))
         .route("/v1/nft/transfer/prepare", post(prepare_nft_transfer))
         .route(
             "/v1/wallet/{address}/utxos",
             get(crate::api_fn::wallet::get_utxos_by_address),
-        )
-        .layer(GovernorLayer::new(nft_sensitive_governor));
+        );
 
     let coordinator_routes = Router::new().route("/v1/coordinator/info", get(get_coordinator_info));
-
-    // Cube system: claim CUBE tokens + burn for PMS
-    let cube_routes = Router::new()
-        .route("/v1/cube/claim", post(cube_claim))
-        .route("/v1/cube/burn", post(cube_burn));
 
     Router::new()
         .merge(submit)
@@ -207,7 +213,20 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
         .merge(dag_routes)
         .merge(nft_routes)
         .merge(coordinator_routes)
-        .merge(cube_routes)
+}
+
+/// Builds per-ledger admin routes (token management, faucet).
+/// Uses admin-token-only middleware (no ConnectInfo needed inside oneshot).
+fn build_ledger_admin_routes(state: AppState) -> Router {
+    Router::new()
+        .route("/admin/tokens/create", post(admin_create_token))
+        .route("/admin/tokens/mint", post(admin_mint_token))
+        .route("/admin/faucet", post(faucet_mint))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_admin_token,
+        ))
+        .with_state(state)
 }
 
 /// Dynamic handler for per-ledger routes: `/l/{ledger_id}/{*rest}`
@@ -249,8 +268,10 @@ async fn dynamic_ledger_handler(
     ledger_state.store = instance.store.clone();
     ledger_state.ledger_id = ledger_id.clone();
 
-    // Build a router with ledger-scoped routes
-    let router = build_ledger_scoped_routes().with_state(ledger_state);
+    // Build a router with ledger-scoped routes + per-ledger admin routes
+    let router = build_ledger_scoped_routes()
+        .with_state(ledger_state.clone())
+        .merge(build_ledger_admin_routes(ledger_state));
 
     // Reconstruct request with stripped path (remove /l/{ledger_id} prefix)
     let (mut parts, body) = req.into_parts();
@@ -272,10 +293,18 @@ async fn dynamic_ledger_handler(
 /// Construit le Router HTTP complet (public + admin + debug) avec les layers de sécurité.
 /// Utilisable depuis le serveur **et** depuis les tests.
 pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
-    // Rate limiter HTTP par IP (SmartIpKeyExtractor gère X-Forwarded-For)
+    tracing::info!(
+        "🔒 Engine Rate Limit: {} rps, Burst: {}",
+        settings.limits.rate_limit_rps,
+        settings.limits.burst
+    );
+
+    // NOTE: per_second(N) in tower-governor 0.8 means "period of N seconds"
+    // (NOT "N requests per second"). Use per_nanosecond for correct rps conversion.
+    let period_ns = 1_000_000_000u64 / (settings.limits.rate_limit_rps as u64).max(1);
     let governor_conf = Box::new(
         GovernorConfigBuilder::default()
-            .per_second(settings.limits.rate_limit_rps as u64)
+            .per_nanosecond(period_ns)
             .burst_size(settings.limits.burst as u32)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
@@ -457,53 +486,6 @@ pub async fn serve_api(
     // 🔹 Charge la config applicative complète
     let settings = load_config()?;
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // TÂCHE 6: Audit des clés Authority - vérification de rotation
-    // ═══════════════════════════════════════════════════════════════════════
-    // Bonne pratique sécurité: les clés Authority doivent être rotées
-    // régulièrement (tous les 90 jours minimum) pour limiter les risques
-    // en cas de compromission.
-    if !settings.fees.authority_public_keys.is_empty() {
-        match &settings.fees.authority_keys_last_rotation {
-            Some(date_str) => {
-                // Parser la date ISO 8601 et vérifier si > 90 jours
-                if let Ok(last_rotation) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                    let today = chrono::Utc::now().date_naive();
-                    let days_since_rotation = (today - last_rotation).num_days();
-
-                    if days_since_rotation > 90 {
-                        tracing::warn!(
-                            "🔑 SECURITY: Authority keys haven't been rotated in {} days! \
-                             Last rotation: {}. Recommended: rotate every 90 days.",
-                            days_since_rotation,
-                            date_str
-                        );
-                    } else {
-                        tracing::info!(
-                            "🔑 Authority keys rotation OK: {} days since last rotation ({})",
-                            days_since_rotation,
-                            date_str
-                        );
-                    }
-                } else {
-                    tracing::warn!(
-                        "🔑 SECURITY: Invalid authority_keys_last_rotation format: '{}'. \
-                         Expected ISO 8601 (YYYY-MM-DD).",
-                        date_str
-                    );
-                }
-            }
-            None => {
-                tracing::warn!(
-                    "🔑 SECURITY: authority_keys_last_rotation not configured! \
-                     {} Authority keys are active but rotation date is unknown. \
-                     Add 'authority_keys_last_rotation' to config for security audit.",
-                    settings.fees.authority_public_keys.len()
-                );
-            }
-        }
-    }
-
     let node_wallet = srv.node_identity_wallet();
 
     // 🔹 Résout le token admin
@@ -567,6 +549,8 @@ pub async fn serve_api(
         TreasuryWallets::empty()
     };
 
+    let ledger_mgr = srv.ledger_manager();
+
     let state = AppState {
         srv,
         _cfg: cfg.clone(),
@@ -580,7 +564,7 @@ pub async fn serve_api(
         treasury_wallets,
         node_registry: crate::node_registry::create_registry(),
         fee_pool: crate::fee_pool::create_fee_pool(),
-        ledger_mgr: None,
+        ledger_mgr,
         ledger_id: "main".into(),
     };
 

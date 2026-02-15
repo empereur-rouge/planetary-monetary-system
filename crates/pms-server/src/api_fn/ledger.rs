@@ -59,6 +59,9 @@ pub struct CreateLedgerRequest {
     pub protocol_version: u32,
     #[serde(default)]
     pub tip_limit: Option<usize>,
+    /// Native token symbol for this ledger (default: "PMS")
+    #[serde(default)]
+    pub symbol: Option<String>,
 }
 
 fn default_protocol_version() -> u32 {
@@ -203,6 +206,7 @@ pub async fn admin_create_ledger(
         fees: None,
         validation: None,
         owner_pubkey: None,
+        symbol: req.symbol.clone(),
     };
 
     match mgr.add_ledger(def).await {

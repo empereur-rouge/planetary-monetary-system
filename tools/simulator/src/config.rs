@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SimConfig {
@@ -10,8 +11,12 @@ pub struct SimConfig {
     pub tui: TuiConfig,
     #[serde(default)]
     pub web: WebConfig,
+    /// Inline agent definitions (backward compat)
     #[serde(default)]
     pub agents: Vec<AgentDef>,
+    /// External agent definition files (relative to config dir)
+    #[serde(default)]
+    pub agent_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,14 +55,30 @@ pub struct SimulationParams {
     pub duration_secs: u64,
     #[serde(default = "default_tick_ms")]
     pub base_tick_ms: u64,
-    /// Amount of CUBEs to burn per agent for initial PMS (default: 500.00)
-    /// Rate: 10 CUBE = 1 PMS, so 500 CUBE → 50 PMS
-    #[serde(default = "default_cubes_to_burn")]
-    pub cubes_to_burn: String,
+    /// Amount to faucet per agent for initial PMS (default: "50.00")
+    #[serde(default = "default_faucet_amount")]
+    pub faucet_amount: String,
+    /// Optional game configuration (Edenite cube NFTs)
+    #[serde(default)]
+    pub game: Option<GameConfig>,
 }
 
-fn default_cubes_to_burn() -> String {
-    "500.00".to_string()
+#[derive(Debug, Clone, Deserialize)]
+pub struct GameConfig {
+    /// Ledger ID for the game ledger (e.g. "eden")
+    pub ledger_id: String,
+    /// Network ID for the game ledger
+    pub network_id: String,
+    /// Native token symbol for the game ledger (e.g. "EDN")
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Divisor for the edenite reward formula (default: 19_300_000_000)
+    #[serde(default)]
+    pub divisor: Option<f64>,
+}
+
+fn default_faucet_amount() -> String {
+    "50.00".to_string()
 }
 fn default_tick_ms() -> u64 {
     1000
@@ -65,6 +86,10 @@ fn default_tick_ms() -> u64 {
 fn default_true() -> bool {
     true
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Agent definition
+// ════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentDef {
@@ -76,6 +101,54 @@ pub struct AgentDef {
     #[serde(default = "default_ai_interval")]
     pub ai_interval: u32,
     pub behavior: AgentBehavior,
+    /// Per-agent-group game settings (overrides global defaults)
+    #[serde(default)]
+    pub game: Option<AgentGameConfig>,
+}
+
+/// Per-agent game configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentGameConfig {
+    /// Whether game loop is enabled for this agent group (default: true)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Number of cubes to mint per agent at startup (default: 5)
+    #[serde(default = "default_cubes_per_agent")]
+    pub cubes_per_agent: usize,
+    /// Number of cubes to re-mint when depleted (default: 3)
+    #[serde(default = "default_cubes_per_remint")]
+    pub cubes_per_remint: usize,
+    /// Min % of EDN balance to send (default: 10.0)
+    #[serde(default = "default_edn_send_min_pct")]
+    pub edn_send_min_pct: f64,
+    /// Max % of EDN balance to send (default: 50.0)
+    #[serde(default = "default_edn_send_max_pct")]
+    pub edn_send_max_pct: f64,
+}
+
+impl Default for AgentGameConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cubes_per_agent: 5,
+            cubes_per_remint: 3,
+            edn_send_min_pct: 10.0,
+            edn_send_max_pct: 50.0,
+        }
+    }
+}
+
+fn default_cubes_per_agent() -> usize {
+    5
+}
+fn default_cubes_per_remint() -> usize {
+    3
+}
+fn default_edn_send_min_pct() -> f64 {
+    10.0
+}
+fn default_edn_send_max_pct() -> f64 {
+    50.0
 }
 
 fn default_agent_interval() -> u64 {
@@ -158,6 +231,17 @@ fn default_web_port() -> u16 {
     9090
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Agent file loading
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Container for agent definitions loaded from external files
+#[derive(Debug, Deserialize)]
+struct AgentFileContent {
+    #[serde(default)]
+    agents: Vec<AgentDef>,
+}
+
 impl SimConfig {
     /// Resolve env: prefixed values from environment variables
     pub fn resolve_secrets(&mut self) {
@@ -177,6 +261,31 @@ impl SimConfig {
                 self.server.admin_token = std::env::var(stripped).ok();
             }
         }
+    }
+
+    /// Load all agent definitions: inline `[[agents]]` + external `agent_files`.
+    /// `config_path` is the path to the main config file (used to resolve relative paths).
+    pub fn load_all_agents(&mut self, config_path: &str) -> Result<(), String> {
+        if self.agent_files.is_empty() {
+            return Ok(());
+        }
+
+        let config_dir = Path::new(config_path)
+            .parent()
+            .unwrap_or(Path::new("."));
+
+        for file_path in &self.agent_files {
+            let full_path = config_dir.join(file_path);
+            let content = std::fs::read_to_string(&full_path).map_err(|e| {
+                format!("Cannot read agent file {}: {}", full_path.display(), e)
+            })?;
+            let file: AgentFileContent = toml::from_str(&content).map_err(|e| {
+                format!("Cannot parse agent file {}: {}", full_path.display(), e)
+            })?;
+            self.agents.extend(file.agents);
+        }
+
+        Ok(())
     }
 
     /// Check if any agent needs Gemini AI

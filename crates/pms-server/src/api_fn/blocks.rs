@@ -97,12 +97,6 @@ pub async fn submit_block(
             // This removes the Coordinator bottleneck for horizontal scaling.
             accumulate_fee_if_tx(&st, &wb).await;
 
-            // ============================================================
-            // BURN REFUND PROCESSING (Cube NFT -> Token Conversion)
-            // ============================================================
-            // Check if this block contains a valid cube burn and process refund
-            process_burn_refund_if_applicable(&st, &wb).await;
-
             StatusCode::ACCEPTED.into_response()
         }
         Ok(PutResult::AlreadyExists) => {
@@ -163,75 +157,6 @@ async fn accumulate_fee_if_tx(st: &AppState, wb: &WireBlock) {
     {
         let mut registry = st.node_registry.write().await;
         registry.increment_block_count(&signer_pk);
-    }
-}
-
-/// Processes burn refunds for cube NFTs if applicable
-/// Adds validated refunds to the fee pool for later distribution
-async fn process_burn_refund_if_applicable(st: &AppState, wb: &WireBlock) {
-    use super::nft::decrypt_nft_metadata_from_dag;
-
-    // 1. Parse payload for NFT Burn action
-    let burn_action = match extract_nft_burn_action(wb) {
-        Some(action) => action,
-        None => return, // Not an NFT burn, nothing to do
-    };
-
-    // 2. Get authority public keys from config
-    let authority_pks = &st.settings.fees.authority_public_keys;
-
-    // 3. Déchiffrer les métadonnées depuis le bloc DAG
-    // Le coordinateur peut déchiffrer car il est dans la liste des recipients
-    let metadata = decrypt_nft_metadata_from_dag(st, &burn_action.token_id).await;
-
-    // 4. Calculate refund (if valid cube with valid signature)
-    let refund = match crate::burn_refund::calculate_burn_refund(
-        &burn_action.token_id,
-        &burn_action.burner,
-        metadata.as_ref(),
-        authority_pks,
-    ) {
-        Ok(Some(r)) => r,
-        Ok(None) => return, // No refund (not a cube, invalid sig, no metadata, etc.)
-        Err(e) => {
-            tracing::warn!("Burn refund calculation failed: {}", e);
-            return;
-        }
-    };
-
-    // 5. Add refund to fee pool (will be distributed via Milestone)
-    {
-        let mut pool = st.fee_pool.write().await;
-        pool.add_fee(refund.amount, &refund.recipient);
-        tracing::info!(
-            "🔥 Cube burn refund queued: {} -> {} PMS (token: {})",
-            &refund.recipient[..20.min(refund.recipient.len())],
-            refund.amount,
-            &refund.token_id[..16.min(refund.token_id.len())]
-        );
-    }
-}
-
-/// Simple struct to hold extracted burn action data
-struct NftBurnAction {
-    token_id: String,
-    burner: String,
-}
-
-/// Extract NFT Burn action from WireBlock payload if present
-fn extract_nft_burn_action(wb: &WireBlock) -> Option<NftBurnAction> {
-    let payload_json = wb.payload_json.as_ref()?;
-    let envelope: PayloadEnvelope = serde_json::from_str(payload_json).ok()?;
-
-    // Pattern matching direct pour éviter les matchs imbriqués
-    if let PayloadEnvelope::Plain(PlainPayload::Nft(pms_types_nft::NftAction::Burn {
-        token_id,
-        burner,
-    })) = envelope
-    {
-        Some(NftBurnAction { token_id, burner })
-    } else {
-        None
     }
 }
 
