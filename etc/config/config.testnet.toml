@@ -20,7 +20,7 @@ hrp = "8e"
 
 [admin]
 wallet_addresses = []
-treasury_wallets_file = "/home/pms/config/treasury-wallets.json"
+treasury_wallets_file = "/home/pms/config/pms/treasury-wallets.json"
 
 [client]
 bind_addr = "0.0.0.0:8443"
@@ -64,8 +64,8 @@ admin_api_token = "env:PMS_ADMIN_TOKEN"
 allowed_ips = []
 
 [secrets]
-node_identity_key_path = "/home/pms/config/node-identity.key"
-admin_wallet_file = "/home/pms/config/admin-wallet.json"
+node_identity_key_path = "/home/pms/config/pms/node.key"
+admin_wallet_file = "/home/pms/config/pms/coordinator.json"
 
 [validation]
 min_pow_leading_zero_bits = 0
