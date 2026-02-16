@@ -344,6 +344,12 @@ if [ "\$DO_BUILD" = "true" ]; then
             /home/pms/config/pms/coordinator.key \
             /home/pms/config/pms/treasury-wallets.json"
 
+        # 4. Copy coordinator.key as node.key (node must sign with coordinator key)
+        echo -e "\${YELLOW}   Setting node identity = coordinator key...\${NC}"
+        cp etc/pms/coordinator.key etc/pms/node.key
+        chmod 600 etc/pms/node.key
+        echo -e "\${GREEN}   node.key = coordinator.key\${NC}"
+
         # Restore permissions
         chmod 755 etc/pms
         chmod 755 etc/config
