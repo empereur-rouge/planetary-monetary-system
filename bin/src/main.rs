@@ -233,6 +233,12 @@ async fn main() -> Result<()> {
             fee_pool: pms_server::fee_pool::create_fee_pool(),
             ledger_mgr: Some(ledger_mgr.clone()),
             ledger_id: "main".into(),
+            effective_fees: std::sync::Arc::new(
+                pms_server::api_fn::tx_helpers::resolve_effective_fees(
+                    &settings_for_internal.fees,
+                    None,
+                ),
+            ),
         };
 
         eprintln!("🔧 Launching Internal API at {}", addr);

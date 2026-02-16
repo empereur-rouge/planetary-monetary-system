@@ -86,6 +86,8 @@ pub struct AppState {
     pub ledger_mgr: Option<Arc<pms_ledger::LedgerManager>>,
     /// Ledger ID for this request context ("main" by default).
     pub ledger_id: String,
+    /// Resolved fee configuration for this ledger context.
+    pub effective_fees: Arc<crate::api_fn::tx_helpers::EffectiveFees>,
 }
 
 /// Middleware to check if request is allowed for admin routes.
@@ -267,6 +269,10 @@ async fn dynamic_ledger_handler(
     );
     ledger_state.store = instance.store.clone();
     ledger_state.ledger_id = ledger_id.clone();
+    ledger_state.effective_fees = Arc::new(crate::api_fn::tx_helpers::resolve_effective_fees(
+        &state.settings.fees,
+        instance.def.fees.as_ref(),
+    ));
 
     // Build a router with ledger-scoped routes + per-ledger admin routes
     let router = build_ledger_scoped_routes()
@@ -566,6 +572,10 @@ pub async fn serve_api(
         fee_pool: crate::fee_pool::create_fee_pool(),
         ledger_mgr,
         ledger_id: "main".into(),
+        effective_fees: Arc::new(crate::api_fn::tx_helpers::resolve_effective_fees(
+            &settings.fees,
+            None,
+        )),
     };
 
     // ═══════════════════════════════════════════════════════════════════════

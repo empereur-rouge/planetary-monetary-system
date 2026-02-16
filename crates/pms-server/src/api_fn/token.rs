@@ -128,13 +128,141 @@ pub async fn admin_create_token(
         );
     }
 
-    tracing::info!("[ADMIN] Token created: {} ({})", metadata.asset_id, metadata.symbol);
+    // Create TokenCreate block on-chain
+    use pms_types_block::Block;
+    use pms_types_payload::{PayloadEnvelope, PlainPayload};
+    use pms_utils::check_pow::check_pow_leading_zero_bits;
+    use pms_utils::compute_block_id;
+    use pms_wallet::SignerBackend;
+    use pms_wallet::signing_wire::canonical_wireblock_message;
+    use pms_wire::WireBlock;
+    use pms_storage::PutResult;
+    use rust_decimal::Decimal;
+
+    let node_wallet = &state.node_wallet;
+
+    let parent_id = match state.srv.adapter_arc().top_tips(1).await {
+        Ok(tips) if !tips.is_empty() => tips[0].clone(),
+        _ => {
+            // Token registered in RocksDB but no DAG tip - return success with warning
+            tracing::warn!("[ADMIN] Token created but no DAG tip for on-chain block");
+            return (
+                StatusCode::CREATED,
+                Json(json!({
+                    "status": "ok",
+                    "token": metadata,
+                    "warning": "no DAG tip available for on-chain TokenCreate block"
+                })),
+            );
+        }
+    };
+
+    let tc_payload = PlainPayload::TokenCreate(metadata.clone());
+    let mut block = Block {
+        id: String::new(),
+        parents: vec![parent_id],
+        payload: Some(PayloadEnvelope::Plain(tc_payload)),
+        nonce: 0,
+        metadata: Some(pms_types_block::BlockMetadata {
+            description: Some(format!("TokenCreate: {} ({})", metadata.asset_id, metadata.symbol)),
+            ..Default::default()
+        }),
+        signer_pk: None,
+        signature: None,
+    };
+    block.id = compute_block_id(&block.parents, &block.payload, block.nonce);
+
+    let min_bits = state.srv.adapter_arc().min_pow_leading_zero_bits();
+    if min_bits > 0 {
+        while !check_pow_leading_zero_bits(&block.id, min_bits) {
+            block.nonce += 1;
+            block.id = compute_block_id(&block.parents, &block.payload, block.nonce);
+        }
+    }
+
+    let payload_json = match serde_json::to_string(&block.payload) {
+        Ok(j) => j,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("failed to serialize TokenCreate payload: {}", e) })),
+            );
+        }
+    };
+
+    let mut wb = WireBlock {
+        id: block.id.clone(),
+        parents: block.parents.clone(),
+        payload_json: Some(payload_json),
+        nonce: block.nonce,
+        network_id: state._cfg.network.network_id.clone(),
+        protocol_version: state._cfg.network.protocol_version as u16,
+        signer_pk_hex: node_wallet.encoded_public_key(),
+        signature_hex: String::new(),
+        metadata: block.metadata.clone(),
+    };
+
+    let msg = canonical_wireblock_message(&wb);
+    match node_wallet.sign(&msg) {
+        Ok(sig) => wb.signature_hex = sig,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("failed to sign TokenCreate block: {}", e) })),
+            );
+        }
+    }
+
+    let block_id = wb.id.clone();
+    match state.srv.adapter_arc().persist_block(&wb).await {
+        Ok(PutResult::Inserted) => {
+            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
+            let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
+        }
+        Ok(_) => {} // AlreadyExists or Rejected - token is still registered in RocksDB
+        Err(e) => {
+            tracing::warn!("[ADMIN] TokenCreate block persist failed: {}", e);
+        }
+    }
+
+    // Charge creation fee (if configured)
+    let creation_fee_dec =
+        crate::api_fn::tx_helpers::load_token_creation_fee(&state.store, Some(&state.effective_fees))
+            .unwrap_or(Decimal::ZERO);
+
+    if creation_fee_dec > Decimal::ZERO {
+        if let Some(reward_id) = crate::api_fn::tx_helpers::create_reward_block(
+            &state,
+            creation_fee_dec,
+            &block_id,
+        ).await {
+            tracing::info!(
+                "[ADMIN] Token creation fee {} PMS distributed via block {}",
+                creation_fee_dec,
+                &reward_id[..16.min(reward_id.len())]
+            );
+        } else {
+            // Fallback: accumulate in pool if reward block creation fails
+            let mut pool = state.fee_pool.write().await;
+            pool.add_fee(creation_fee_dec, &node_wallet.encoded_public_key());
+            tracing::warn!(
+                "[ADMIN] Token creation fee {} PMS fallback to pool for {}",
+                creation_fee_dec,
+                metadata.asset_id
+            );
+        }
+    }
+
+    tracing::info!("[ADMIN] Token created on-chain: {} ({}) block={}",
+        metadata.asset_id, metadata.symbol, &block_id[..16.min(block_id.len())]);
 
     (
         StatusCode::CREATED,
         Json(json!({
             "status": "ok",
-            "token": metadata
+            "token": metadata,
+            "block_id": block_id,
+            "creation_fee": creation_fee_dec.to_string()
         })),
     )
 }
@@ -222,12 +350,35 @@ pub async fn admin_mint_token(
         }
     }
 
+    // Compute mint fee (if configured)
+    let mint_fee_dec = if let Some(mint_fee_policy) = crate::api_fn::tx_helpers::load_mint_fee_policy(&state.store, Some(&state.effective_fees)) {
+        mint_fee_policy
+            .compute_fee(&amount_dec.to_string())
+            .map(|a| a.inner())
+            .unwrap_or(Decimal::ZERO)
+    } else {
+        Decimal::ZERO
+    };
+
     // Build Mint block
-    let outputs = vec![TxOutput {
+    let mut outputs = vec![TxOutput {
         address: req.to.clone(),
         amount: amount_dec.to_string(),
         asset_id: Some(req.asset_id.clone()),
     }];
+
+    // Add fee output if configured (fee always in PMS native token)
+    if mint_fee_dec > Decimal::ZERO {
+        let fee_addr = state.settings.fees.treasury_addresses.first()
+            .or(state.settings.admin.wallet_addresses.first());
+        if let Some(addr) = fee_addr {
+            outputs.push(TxOutput {
+                address: addr.clone(),
+                amount: mint_fee_dec.to_string(),
+                asset_id: None, // Fee in PMS native
+            });
+        }
+    }
 
     let mint_payload = PlainPayload::Mint { outputs: outputs.clone() };
 
@@ -311,23 +462,32 @@ pub async fn admin_mint_token(
             crate::metrics::PMS_BLOCKS_TOTAL.with_label_values(&[&state.ledger_id]).inc();
             let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
 
-            // Update UTXO set
+            // Update UTXO set for all outputs
             let adapter = state.srv.adapter_arc();
-            adapter
-                .add_utxo(
-                    wb.id.clone(),
-                    0,
-                    req.to.clone(),
-                    amount_dec.to_string(),
-                    Some(req.asset_id.clone()),
-                )
-                .await;
+            for (idx, output) in outputs.iter().enumerate() {
+                adapter
+                    .add_utxo(
+                        wb.id.clone(),
+                        idx as u32,
+                        output.address.clone(),
+                        output.amount.clone(),
+                        output.asset_id.clone(),
+                    )
+                    .await;
+            }
+
+            // Accumulate mint fee in pool
+            if mint_fee_dec > Decimal::ZERO {
+                let mut pool = state.fee_pool.write().await;
+                pool.add_fee(mint_fee_dec, &state.node_wallet.encoded_public_key());
+            }
 
             tracing::info!(
-                "[ADMIN] Token mint: {} {} to {}",
+                "[ADMIN] Token mint: {} {} to {} (fee: {} PMS)",
                 amount_dec,
                 req.asset_id,
-                req.to
+                req.to,
+                mint_fee_dec
             );
 
             (
@@ -337,7 +497,8 @@ pub async fn admin_mint_token(
                     "block_id": wb.id,
                     "asset_id": req.asset_id,
                     "amount": amount_dec.to_string(),
-                    "to": req.to
+                    "to": req.to,
+                    "mint_fee": mint_fee_dec.to_string()
                 })),
             )
         }

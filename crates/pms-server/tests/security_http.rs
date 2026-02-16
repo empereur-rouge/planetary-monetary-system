@@ -10,6 +10,10 @@ use tower::ServiceExt; // for `oneshot`
 #[tokio::test]
 async fn admin_ping_requires_token() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
+    // Ensure the env var matches what config.dev.toml expects ("env:PMS_ADMIN_TOKEN_DEV")
+    unsafe {
+        std::env::set_var("PMS_ADMIN_TOKEN_DEV", "super-token-dev-123");
+    }
     // Arrange
     let app = make_test_app().await?;
 

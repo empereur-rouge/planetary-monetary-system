@@ -150,6 +150,7 @@ async fn test_automated_fee_distribution() {
             mode: NetworkMode::Dev,
             network_id: "test".into(),
             protocol_version: 1,
+            symbol: None,
         },
         address: Address { hrp: "8e".into() },
         admin: Admin {
@@ -202,8 +203,15 @@ async fn test_automated_fee_distribution() {
             platform_address: None,
             platform_address_signature: None,
             platform_fee_ratio: "0.0".into(),
+            fee_tiers: vec![],
             treasury_fee_percent: 35,
             coordinator_fee_percent: 65,
+            fee_distribution: None,
+            mint_fee_base: None,
+            mint_fee_ratio: None,
+            token_creation_fee: None,
+            nft_mint_fee: None,
+            nft_fee_exempt_types: vec![],
             block_reward: "0.0".into(),
             annual_inflation_percent: 0.0,
             treasury_reward_percent: 0,
@@ -291,13 +299,17 @@ async fn test_automated_fee_distribution() {
         store: rocks_store_arc.clone(), // Concrete type
         admin_token: None,
         node_wallet: node_wallet.clone(),
-        settings: Arc::new(settings),
+        settings: Arc::new(settings.clone()),
         allowed_networks: vec![],
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
         ledger_mgr: None,
         ledger_id: "main".into(),
+        effective_fees: Arc::new(pms_server::api_fn::tx_helpers::resolve_effective_fees(
+            &settings.fees,
+            None,
+        )),
     };
 
     // 8. Spawn Distributor

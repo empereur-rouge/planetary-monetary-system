@@ -188,10 +188,14 @@ async fn test_runtime_config_treasury_fee() -> Result<()> {
     // Modifier via ConfigUpdate
     use pms_config::{ConfigUpdate, RuntimeConfig};
 
-    let update = ConfigUpdate::SetTreasuryFee { bps: 4000 };
-    let new_config = config.apply_update(&update, "test-block", 12345);
+    let update = ConfigUpdate::BatchUpdate(vec![
+        ConfigUpdate::SetTreasuryFee { bps: 4000 },
+        ConfigUpdate::SetCoordinatorFee { bps: 6000 },
+    ]);
+    let new_config = config.apply_update(&update, "test-block", 12345).unwrap();
 
     assert_eq!(new_config.treasury_fee_bps, 4000);
+    assert_eq!(new_config.coordinator_fee_bps, 6000);
     assert_eq!(new_config.updated_at_block, "test-block");
 
     Ok(())

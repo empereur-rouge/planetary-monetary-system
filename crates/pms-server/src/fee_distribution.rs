@@ -13,6 +13,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 use crate::api::AppState;
 use anyhow::Result;
+use pms_config::FeeDistributionConfig;
 use pms_storage::PutResult;
 use pms_types::TxOutput;
 use pms_types_block::Block;
@@ -31,49 +32,47 @@ pub struct FeeOutput {
     pub amount: String,
 }
 
-/// Configuration pour la distribution des fees (Coordinator + Treasury)
-#[derive(Debug, Clone)]
-pub struct FeeDistributionConfig {
-    /// Pourcentage vers le coordinator
-    pub coordinator_percent: u8,
-    /// Pourcentage vers le treasury (admin wallets)
-    pub treasury_percent: u8,
-}
-
-impl Default for FeeDistributionConfig {
-    fn default() -> Self {
-        Self {
-            coordinator_percent: 65,
-            treasury_percent: 35,
+/// Résout l'adresse d'un bénéficiaire selon son rôle.
+fn resolve_beneficiary_address(
+    beneficiary: &pms_config::FeeBeneficiary,
+    coordinator_address: &str,
+    treasury_addresses: &[String],
+) -> Option<String> {
+    // Si une adresse explicite est définie, l'utiliser
+    if let Some(addr) = &beneficiary.address {
+        return Some(addr.clone());
+    }
+    // Résolution par rôle
+    match beneficiary.role.as_str() {
+        "coordinator" => Some(coordinator_address.to_string()),
+        "treasury" => {
+            if treasury_addresses.is_empty() {
+                eprintln!("[FEE] Warning: No treasury wallet configured. Fallback to coordinator.");
+                Some(coordinator_address.to_string())
+            } else {
+                use rand::Rng;
+                let idx = rand::rng().random_range(0..treasury_addresses.len());
+                Some(treasury_addresses[idx].clone())
+            }
+        }
+        _ => {
+            // Rôles custom (client, partner...) : adresse obligatoire
+            eprintln!(
+                "[FEE] Warning: Beneficiary role '{}' has no address, skipping.",
+                beneficiary.role
+            );
+            None
         }
     }
 }
 
-impl FeeDistributionConfig {
-    pub fn new(coordinator: u8, treasury: u8) -> Self {
-        Self {
-            coordinator_percent: coordinator,
-            treasury_percent: treasury,
-        }
-    }
-
-    /// Valide que les pourcentages totalisent 100%
-    pub fn validate(&self) -> Result<(), String> {
-        let total = self.coordinator_percent + self.treasury_percent;
-        if total != 100 {
-            return Err(format!("Fee percentages must sum to 100, got {}", total));
-        }
-        Ok(())
-    }
-}
-
-/// Calcule les outputs de fee pour une transaction (Coordinator + Treasury)
+/// Calcule les outputs de fee pour une transaction (N-way split).
 ///
 /// # Arguments
 /// * `total_fee` - Le montant total des fees
-/// * `treasury_addresses` - Liste des adresses treasury (choisie pseudo-aléatoirement)
+/// * `treasury_addresses` - Liste des adresses treasury
 /// * `coordinator_address` - Adresse du coordinator
-/// * `config` - Configuration de distribution
+/// * `config` - Configuration N-way de distribution
 ///
 /// # Returns
 /// Liste des FeeOutput à inclure dans le payload
@@ -83,44 +82,26 @@ pub fn compute_fee_outputs(
     coordinator_address: &str,
     config: &FeeDistributionConfig,
 ) -> Vec<FeeOutput> {
-    let mut outputs = Vec::new();
-
     if let Err(e) = config.validate() {
         eprintln!("[FEE] Config validation error: {}, using defaults", e);
     }
 
-    let coordinator_amount =
-        total_fee * Decimal::from_u8(config.coordinator_percent).unwrap() / Decimal::from(100);
-    let treasury_amount =
-        total_fee * Decimal::from_u8(config.treasury_percent).unwrap() / Decimal::from(100);
-
-    // 1) Coordinator
-    if coordinator_amount > Decimal::ZERO {
-        outputs.push(FeeOutput {
-            address: coordinator_address.to_string(),
-            amount: coordinator_amount.normalize().to_string(),
-        });
-    }
-
-    // 2) Treasury
-    if treasury_amount > Decimal::ZERO {
-        if !treasury_addresses.is_empty() {
-            use rand::Rng;
-            let idx = rand::rng().random_range(0..treasury_addresses.len());
+    let mut outputs = Vec::new();
+    for beneficiary in &config.beneficiaries {
+        let amount = (total_fee * Decimal::from(beneficiary.percent_bps) / Decimal::from(10000))
+            .round_dp(8);
+        if amount <= Decimal::ZERO {
+            continue;
+        }
+        if let Some(addr) =
+            resolve_beneficiary_address(beneficiary, coordinator_address, treasury_addresses)
+        {
             outputs.push(FeeOutput {
-                address: treasury_addresses[idx].clone(),
-                amount: treasury_amount.normalize().to_string(),
-            });
-        } else {
-            // Fallback: pas de treasury wallet -> tout au coordinator
-            eprintln!("[FEE] Warning: No treasury wallet configured. Fallback to coordinator.");
-            outputs.push(FeeOutput {
-                address: coordinator_address.to_string(),
-                amount: treasury_amount.normalize().to_string(),
+                address: addr,
+                amount: amount.normalize().to_string(),
             });
         }
     }
-
     outputs
 }
 
@@ -769,29 +750,60 @@ mod tests {
     use super::*;
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Tests pour FeeDistributionConfig
+    // Tests pour FeeDistributionConfig (N-way, depuis pms_config)
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
     fn fee_distribution_config_default_sums_to_100() {
         let config = FeeDistributionConfig::default();
-        assert_eq!(config.coordinator_percent, 65);
-        assert_eq!(config.treasury_percent, 35);
+        assert_eq!(config.beneficiaries.len(), 2);
+        assert_eq!(config.beneficiaries[0].role, "coordinator");
+        assert_eq!(config.beneficiaries[0].percent_bps, 6500);
+        assert_eq!(config.beneficiaries[1].role, "treasury");
+        assert_eq!(config.beneficiaries[1].percent_bps, 3500);
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn fee_distribution_config_validation_rejects_invalid_sum() {
-        let config = FeeDistributionConfig::new(60, 50); // = 110
+        let config = FeeDistributionConfig::new(6000, 5000); // = 11000
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must sum to 100"));
+        assert!(result.unwrap_err().contains("must sum to 10000"));
     }
 
     #[test]
     fn fee_distribution_config_accepts_valid_custom() {
-        let config = FeeDistributionConfig::new(70, 30);
+        let config = FeeDistributionConfig::new(7000, 3000);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn fee_distribution_n_way_split() {
+        use pms_config::FeeBeneficiary;
+        let config = FeeDistributionConfig {
+            beneficiaries: vec![
+                FeeBeneficiary { role: "coordinator".into(), percent_bps: 5000, address: None },
+                FeeBeneficiary { role: "client".into(), percent_bps: 3000, address: Some("client_addr".into()) },
+                FeeBeneficiary { role: "treasury".into(), percent_bps: 2000, address: None },
+            ],
+        };
+        assert!(config.validate().is_ok());
+
+        let outputs = compute_fee_outputs(
+            "100".parse().unwrap(),
+            &["treasury_addr".into()],
+            "coordinator_addr",
+            &config,
+        );
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[0].address, "coordinator_addr");
+        assert_eq!(outputs[0].amount, "50");
+        assert_eq!(outputs[1].address, "client_addr");
+        assert_eq!(outputs[1].amount, "30");
+        assert_eq!(outputs[2].address, "treasury_addr");
+        assert_eq!(outputs[2].amount, "20");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

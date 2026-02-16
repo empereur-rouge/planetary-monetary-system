@@ -209,20 +209,24 @@ async fn wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo() -> anyhow::
             .expect("manual persist");
     }
 
-    // Body: on n’inclut PAS admin.xpk volontairement.
-    // Ton code doit l’ajouter automatiquement quand fee>0.
-    // Fee calculation: 3.5% of taxable_amount + 0.001 base = ~0.141 for 4.00
+    // Body: on n'inclut PAS admin.xpk volontairement.
+    // Ton code doit l'ajouter automatiquement quand fee>0.
     let taxable_amount = "4.00";
     let fee_policy = FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio);
-    let fee = fee_policy
+    let fee_dec = fee_policy
         .compute_fee(taxable_amount)
-        .expect("fee computation")
-        .to_string();
+        .expect("fee computation");
+    let fee = fee_dec.to_string();
     let hrp = ctx.settings.address.hrp.as_str();
+    // Compute change dynamically: input - taxable - fee
+    let input_dec: Decimal = u.amount.parse().unwrap();
+    let taxable_dec: Decimal = taxable_amount.parse().unwrap();
+    let change_dec = input_dec - taxable_dec - fee_dec.inner();
+    let change = change_dec.normalize().to_string();
     // u defined above
     eprintln!(
-        "[TEST] Using UTXO: {}:{} amount={}",
-        u.id.txid, u.id.index, u.amount
+        "[TEST] Using UTXO: {}:{} amount={} fee={} change={}",
+        u.id.txid, u.id.index, u.amount, fee, change
     );
 
     let body = serde_json::json!({
@@ -231,7 +235,7 @@ async fn wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo() -> anyhow::
             "outputs": [
                 { "address": to_addr, "amount": taxable_amount },
                 { "address": admin_addr, "amount": &fee },
-                { "address": w_from.get_address(&hrp), "amount": "0.859" }
+                { "address": w_from.get_address(&hrp), "amount": &change }
             ],
             "fee": fee,
             "unlocks": []

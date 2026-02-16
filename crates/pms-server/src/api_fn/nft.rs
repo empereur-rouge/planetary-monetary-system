@@ -242,6 +242,17 @@ pub async fn mint_nft(
             .into_response();
     }
 
+    // 1b. Compute NFT mint fee (if configured and not exempt)
+    let nft_fee = {
+        let nft_type = req.metadata.nft_type.as_deref();
+        if crate::api_fn::tx_helpers::is_nft_type_fee_exempt(&state.store, nft_type, Some(&state.effective_fees)) {
+            rust_decimal::Decimal::ZERO
+        } else {
+            crate::api_fn::tx_helpers::load_nft_mint_fee(&state.store, Some(&state.effective_fees))
+                .unwrap_or(rust_decimal::Decimal::ZERO)
+        }
+    };
+
     // 2. Chiffrer les métadonnées (Privacy)
     let coord_x25519 = state.node_wallet.x25519_pub_hex();
     let recipients = vec![req.owner_x25519_pubkey.clone(), coord_x25519.to_string()];
@@ -363,9 +374,37 @@ pub async fn mint_nft(
                 }
             }
 
+            // Distribute NFT mint fee via reward block
+            let mut reward_block_id = None;
+            if nft_fee > rust_decimal::Decimal::ZERO {
+                if let Some(rid) = crate::api_fn::tx_helpers::create_reward_block(
+                    &state,
+                    nft_fee,
+                    &block_id,
+                ).await {
+                    tracing::info!(
+                        "NFT mint fee {} PMS distributed via block {}",
+                        nft_fee,
+                        &rid[..16.min(rid.len())]
+                    );
+                    reward_block_id = Some(rid);
+                } else {
+                    // Fallback: accumulate in pool if reward block fails
+                    let mut pool = state.fee_pool.write().await;
+                    pool.add_fee(nft_fee, &state.node_wallet.encoded_public_key());
+                    tracing::warn!(
+                        "NFT mint fee {} PMS fallback to pool for token {}",
+                        nft_fee,
+                        &req.token_id[..16.min(req.token_id.len())]
+                    );
+                }
+            }
+
             let response = serde_json::json!({
                 "status": "inserted",
-                "block_id": block_id
+                "block_id": block_id,
+                "nft_mint_fee": nft_fee.to_string(),
+                "reward_block_id": reward_block_id
             });
             (StatusCode::OK, Json(response)).into_response()
         }

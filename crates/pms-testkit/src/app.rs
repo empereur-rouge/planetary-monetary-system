@@ -95,6 +95,10 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         fee_pool: pms_server::fee_pool::create_fee_pool(),
         ledger_mgr: None,
         ledger_id: "main".into(),
+        effective_fees: Arc::new(pms_server::api_fn::tx_helpers::resolve_effective_fees(
+            &settings.fees,
+            None,
+        )),
     };
 
     // 10) Router axum
@@ -190,6 +194,10 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         fee_pool: pms_server::fee_pool::create_fee_pool(),
         ledger_mgr: None,
         ledger_id: "main".into(),
+        effective_fees: Arc::new(pms_server::api_fn::tx_helpers::resolve_effective_fees(
+            &settings.fees,
+            None,
+        )),
     };
 
     // 10) Router
@@ -294,6 +302,10 @@ pub async fn make_test_ctx_with_admin(
         fee_pool: pms_server::fee_pool::create_fee_pool(),
         ledger_mgr: None,
         ledger_id: "main".into(),
+        effective_fees: Arc::new(pms_server::api_fn::tx_helpers::resolve_effective_fees(
+            &settings.fees,
+            None,
+        )),
     };
 
     // 10) Router

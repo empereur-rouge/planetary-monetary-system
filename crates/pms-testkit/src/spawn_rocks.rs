@@ -135,6 +135,7 @@ pub async fn spawn_node_generic_rocks_with_seed(
             mode: pms_config::NetworkMode::Dev,
             network_id: net_id,
             protocol_version: proto,
+            symbol: None,
         },
         auth: pms_config::Auth {
             require_signed_submit: false,

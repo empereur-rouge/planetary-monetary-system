@@ -1,5 +1,6 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+use crate::runtime::FeeTier;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -174,6 +175,63 @@ pub struct ValidationSettings {
     pub enforce_single_writer: bool,
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Fee Distribution N-Way
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Un bénéficiaire dans le split N-way des fees.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FeeBeneficiary {
+    /// Rôle du bénéficiaire (ex: "coordinator", "treasury", "client", "partner")
+    pub role: String,
+    /// Part en basis points (0-10000 = 0-100%). Ex: 5000 = 50%, 3333 = 33.33%
+    pub percent_bps: u16,
+    /// Adresse pour recevoir la part. None = résolu au runtime
+    /// ("coordinator" → node_wallet, "treasury" → random parmi treasury_addresses)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
+
+/// Configuration N-way pour la distribution des fees.
+/// Les basis points doivent totaliser 10000 (100%).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FeeDistributionConfig {
+    pub beneficiaries: Vec<FeeBeneficiary>,
+}
+
+impl Default for FeeDistributionConfig {
+    fn default() -> Self {
+        Self {
+            beneficiaries: vec![
+                FeeBeneficiary { role: "coordinator".into(), percent_bps: 6500, address: None },
+                FeeBeneficiary { role: "treasury".into(), percent_bps: 3500, address: None },
+            ],
+        }
+    }
+}
+
+impl FeeDistributionConfig {
+    /// Constructeur pour un split 2-way coordinator/treasury.
+    /// Les valeurs sont en basis points (ex: 6500 = 65%, 3500 = 35%).
+    pub fn new(coordinator_bps: u16, treasury_bps: u16) -> Self {
+        Self {
+            beneficiaries: vec![
+                FeeBeneficiary { role: "coordinator".into(), percent_bps: coordinator_bps, address: None },
+                FeeBeneficiary { role: "treasury".into(), percent_bps: treasury_bps, address: None },
+            ],
+        }
+    }
+
+    /// Valide que les basis points totalisent 10000 (100%).
+    pub fn validate(&self) -> Result<(), String> {
+        let total: u32 = self.beneficiaries.iter().map(|b| b.percent_bps as u32).sum();
+        if total != 10000 {
+            return Err(format!("Fee basis points must sum to 10000 (100%), got {}", total));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeesSettings {
     pub epsilon: String, // "0.001"
@@ -188,6 +246,10 @@ pub struct FeesSettings {
     #[serde(default = "default_platform_fee_ratio")]
     pub platform_fee_ratio: String, // ex: "0.02" pour 2%
 
+    /// Barème de fees par paliers. Si non vide, remplace ratio pour le calcul.
+    #[serde(default)]
+    pub fee_tiers: Vec<crate::FeeTier>,
+
     /// Adresses des wallets de la trésorerie pour recevoir les frais (taxe).
     #[serde(default)]
     pub treasury_addresses: Vec<String>,
@@ -201,6 +263,29 @@ pub struct FeesSettings {
     /// Percentage of fees going to coordinator. Default: 65%
     #[serde(default = "default_coordinator_fee_percent")]
     pub coordinator_fee_percent: u8,
+
+    /// Distribution N-way des fees. Si None, utilise coordinator_fee_percent + treasury_fee_percent.
+    #[serde(default)]
+    pub fee_distribution: Option<FeeDistributionConfig>,
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Mint / Token / NFT Fees
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Frais fixe sur le minting de tokens custom. Default: None (pas de mint fee)
+    #[serde(default)]
+    pub mint_fee_base: Option<String>,
+    /// Ratio sur le montant minté. Default: None
+    #[serde(default)]
+    pub mint_fee_ratio: Option<String>,
+    /// Fee one-time pour la création de token. Default: None
+    #[serde(default)]
+    pub token_creation_fee: Option<String>,
+    /// Fee sur le mint de NFT. Default: None
+    #[serde(default)]
+    pub nft_mint_fee: Option<String>,
+    /// Types de NFT exemptés de fee (ex: ["cube", "reward"])
+    #[serde(default)]
+    pub nft_fee_exempt_types: Vec<String>,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Block Rewards (Inflation)
@@ -330,12 +415,31 @@ pub struct LedgerDef {
 }
 
 /// Overrides de fees pour un ledger spécifique.
+/// Chaque champ à `None` hérite de la config globale `FeesSettings`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct LedgerFeesOverride {
     pub ratio: Option<String>,
     pub base_fee: Option<String>,
     pub platform_fee_ratio: Option<String>,
     pub block_reward: Option<String>,
+    #[serde(default)]
+    pub fee_tiers: Vec<FeeTier>,
+    #[serde(default)]
+    pub mint_fee_base: Option<String>,
+    #[serde(default)]
+    pub mint_fee_ratio: Option<String>,
+    #[serde(default)]
+    pub token_creation_fee: Option<String>,
+    #[serde(default)]
+    pub nft_mint_fee: Option<String>,
+    #[serde(default)]
+    pub nft_fee_exempt_types: Vec<String>,
+    #[serde(default)]
+    pub fee_distribution: Option<FeeDistributionConfig>,
+    #[serde(default)]
+    pub treasury_fee_percent: Option<u8>,
+    #[serde(default)]
+    pub coordinator_fee_percent: Option<u8>,
 }
 
 /// Overrides de validation pour un ledger spécifique.
@@ -349,4 +453,74 @@ pub struct LedgerValidationOverride {
 
 fn default_protocol_version() -> u32 {
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ledger_fees_override_deserializes_with_all_new_fields() {
+        let json = serde_json::json!({
+            "ratio": "0.01",
+            "base_fee": "0.5",
+            "platform_fee_ratio": "0.10",
+            "block_reward": "0.2",
+            "mint_fee_base": "2.0",
+            "mint_fee_ratio": "0.03",
+            "token_creation_fee": "200",
+            "nft_mint_fee": "1.0",
+            "nft_fee_exempt_types": ["cube", "reward"],
+            "treasury_fee_percent": 20,
+            "coordinator_fee_percent": 80,
+            "fee_tiers": [
+                { "up_to": "100", "ratio": "0.03" },
+                { "ratio": "0.01" }
+            ]
+        });
+
+        let ov: LedgerFeesOverride = serde_json::from_value(json).expect("should parse");
+        assert_eq!(ov.ratio, Some("0.01".into()));
+        assert_eq!(ov.mint_fee_base, Some("2.0".into()));
+        assert_eq!(ov.token_creation_fee, Some("200".into()));
+        assert_eq!(ov.nft_mint_fee, Some("1.0".into()));
+        assert_eq!(ov.nft_fee_exempt_types, vec!["cube", "reward"]);
+        assert_eq!(ov.fee_tiers.len(), 2);
+        assert_eq!(ov.treasury_fee_percent, Some(20));
+        assert_eq!(ov.coordinator_fee_percent, Some(80));
+    }
+
+    #[test]
+    fn ledger_fees_override_backward_compat_minimal() {
+        // Old JSON with only original fields → new fields default
+        let json = serde_json::json!({
+            "ratio": "0.01",
+            "base_fee": "0.5"
+        });
+
+        let ov: LedgerFeesOverride = serde_json::from_value(json).expect("should parse");
+        assert_eq!(ov.ratio, Some("0.01".into()));
+        assert_eq!(ov.base_fee, Some("0.5".into()));
+        // New fields should all be default/None/empty
+        assert!(ov.mint_fee_base.is_none());
+        assert!(ov.mint_fee_ratio.is_none());
+        assert!(ov.token_creation_fee.is_none());
+        assert!(ov.nft_mint_fee.is_none());
+        assert!(ov.nft_fee_exempt_types.is_empty());
+        assert!(ov.fee_tiers.is_empty());
+        assert!(ov.fee_distribution.is_none());
+        assert!(ov.treasury_fee_percent.is_none());
+        assert!(ov.coordinator_fee_percent.is_none());
+    }
+
+    #[test]
+    fn fee_distribution_config_roundtrip() {
+        let config = FeeDistributionConfig::new(7000, 3000);
+        assert!(config.validate().is_ok());
+        assert_eq!(config.beneficiaries.len(), 2);
+        assert_eq!(config.beneficiaries[0].role, "coordinator");
+        assert_eq!(config.beneficiaries[0].percent_bps, 7000);
+        assert_eq!(config.beneficiaries[1].role, "treasury");
+        assert_eq!(config.beneficiaries[1].percent_bps, 3000);
+    }
 }
