@@ -1,0 +1,177 @@
+# =============================================================================
+# Testnet Docker Compose — Engine + Gateway + Caddy + Prometheus + Simulator
+# =============================================================================
+#
+# Architecture:
+#   Internet -> Caddy (80/443, Let's Encrypt on testnet.pms-network.com)
+#                -> Gateway (8443, self-signed TLS interne)
+#                    -> Engine (8080, internal only)
+#              Prometheus (9091, localhost only)
+#              Simulator -> Gateway (8443, Docker internal DNS)
+#                Web Dashboard (9090, public)
+#
+# Usage:
+#   PMS_ADMIN_TOKEN=xxx docker compose -f docker-compose.testnet.yml up -d
+#
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PMS Engine (Coordinator) — INTERNAL ONLY
+  # ---------------------------------------------------------------------------
+  pms-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: pms-node:testnet
+    container_name: pms-engine-testnet
+    hostname: pms-engine
+    user: "pms"
+    environment:
+      RUST_LOG: info,pms_server=info,pms_core=debug
+      PMS_CONFIG: /home/pms/config/config.testnet.toml
+      PMS_ADMIN_TOKEN: "${PMS_ADMIN_TOKEN}"
+    volumes:
+      - ./etc/config/config.testnet.toml:/home/pms/config/config.testnet.toml:rw
+      - ./etc/pms/node.key:/home/pms/config/node-identity.key:ro
+      - ./etc/pms/coordinator.json:/home/pms/config/admin-wallet.json:ro
+      - ./etc/pms/treasury-wallets.json:/home/pms/config/treasury-wallets.json:ro
+      - ./secrets/tls:/home/pms/tls:ro
+      - rocksdb_testnet_data:/home/pms/data
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+    networks:
+      - pms-testnet-internal
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # PMS Gateway — Auth/RateLimit/Public Routes
+  # ---------------------------------------------------------------------------
+  pms-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    image: pms-gateway:testnet
+    container_name: pms-gateway-testnet
+    hostname: pms-gateway
+    depends_on:
+      pms-engine:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info,pms_gateway=info
+      UPSTREAM_URL: https://pms-engine:8080
+      LISTEN_ADDR: 0.0.0.0:8443
+      TLS_CERT: /app/tls/cert.pem
+      TLS_KEY: /app/tls/key.pem
+      ADMIN_TOKEN: "${PMS_ADMIN_TOKEN}"
+      DASHBOARD_PATH: /app/dashboard
+      RATE_LIMIT_RPS: 50000
+      BURST_SIZE: 100000
+    volumes:
+      - ./secrets/tls:/app/tls:ro
+    expose:
+      - "8443"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8443' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    networks:
+      - pms-testnet-internal
+      - pms-testnet-public
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Caddy — TLS termination + Let's Encrypt
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    container_name: pms-caddy-testnet
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.testnet:/etc/caddy/Caddyfile:ro
+      - caddy_testnet_data:/data
+      - caddy_testnet_config:/config
+    depends_on:
+      pms-gateway:
+        condition: service_healthy
+    networks:
+      - pms-testnet-public
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Prometheus — Metrics (localhost only)
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: pms-prometheus-testnet
+    volumes:
+      - ./etc/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_testnet_data:/prometheus
+    ports:
+      - "127.0.0.1:9091:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    networks:
+      - pms-testnet-internal
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # PMS Simulator — Stress-test with ~97 agents
+  # ---------------------------------------------------------------------------
+  pms-simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.simulator
+    image: pms-simulator:testnet
+    container_name: pms-simulator-testnet
+    depends_on:
+      pms-gateway:
+        condition: service_healthy
+    environment:
+      PMS_ADMIN_TOKEN: "${PMS_ADMIN_TOKEN}"
+      RUST_LOG: info,pms_simulator=info
+    volumes:
+      - ./tools/simulator/simulator.testnet.toml:/app/config/simulator.toml:ro
+      - ./tools/simulator/agents_testnet.toml:/app/config/agents_testnet.toml:ro
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9090/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 5
+    networks:
+      - pms-testnet-public
+    restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  pms-testnet-internal:
+    driver: bridge
+    internal: true
+  pms-testnet-public:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  rocksdb_testnet_data:
+  caddy_testnet_data:
+  caddy_testnet_config:
+  prometheus_testnet_data:

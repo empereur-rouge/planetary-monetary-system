@@ -1,0 +1,84 @@
+# =============================================================================
+# Configuration Testnet PMS (VPS)
+# =============================================================================
+# Mode TESTNET strict : coordinator requis, signatures obligatoires.
+# Faucet actif (non-mainnet). Rate limits eleves pour stress-test simulateur.
+
+[rocks]
+path = "/home/pms/data/rocks"
+prefix = "pms:test"
+tip_limit = 256
+checkpoint_interval_secs = 3600
+
+[network]
+mode = "testnet"
+network_id = "pms-testnet-v1"
+protocol_version = 1
+
+[address]
+hrp = "8e"
+
+[admin]
+wallet_addresses = []
+treasury_wallets_file = "/home/pms/config/treasury-wallets.json"
+
+[client]
+bind_addr = "0.0.0.0:8443"
+api_addr = "0.0.0.0:8080"
+allow_insecure_tls = true
+
+[p2p]
+known_peers = ""
+allowed_peer_ips = []
+strict_whitelist = false
+
+[tls]
+cert_pem = "/home/pms/tls/cert.pem"
+key_pem = "/home/pms/tls/key.pem"
+whitelist_fp256 = []
+
+[limits]
+max_body_bytes = 1048576
+request_timeout_ms = 30000
+rate_limit_rps = 50000
+burst = 100000
+
+[fees]
+epsilon = "0.001"
+mode = "uniform"
+enforce_fee_recipient = false
+coordinator_fee_percent = 65
+treasury_fee_percent = 35
+distribution_interval_sec = 30
+# Inflation acceleree pour testnet
+daily_inflation_enabled = true
+daily_inflation_interval_sec = 120
+annual_inflation_percent = 3.0
+treasury_reward_percent = 20
+creator_reward_percent = 70
+burn_percent = 10
+
+[auth]
+require_signed_submit = true
+admin_api_token = "env:PMS_ADMIN_TOKEN"
+allowed_ips = []
+
+[secrets]
+node_identity_key_path = "/home/pms/config/node-identity.key"
+admin_wallet_file = "/home/pms/config/admin-wallet.json"
+
+[validation]
+min_pow_leading_zero_bits = 0
+max_payload_bytes = 65536
+min_parents_after_boot = 1
+max_parents = 8
+require_unique_parents = true
+forbid_self_parent = true
+max_inputs = 64
+max_outputs = 64
+max_tx_bytes = 65536
+max_fee_per_tx = 1000
+enforce_parent_existence = false
+enforce_fee_recipient = false
+coordinator_public_key = ""
+coordinator_x25519_public_key = ""

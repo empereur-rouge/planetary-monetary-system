@@ -1,0 +1,30 @@
+# =============================================================================
+# PMS Simulator — Testnet VPS Configuration
+# =============================================================================
+# Connects to Gateway via Docker internal DNS.
+# Admin token resolved from PMS_ADMIN_TOKEN env var.
+
+agent_files = ["agents_testnet.toml"]
+
+[server]
+url = "https://pms-gateway:8443"
+admin_token = "env:PMS_ADMIN_TOKEN"
+accept_invalid_certs = true
+
+[simulation]
+duration_secs = 0
+base_tick_ms = 1000
+faucet_amount = "100.00"
+
+[simulation.game]
+ledger_id = "eden"
+network_id = "eden-net"
+symbol = "EDN"
+divisor = 19300000000
+
+[tui]
+enabled = false
+
+[web]
+enabled = true
+port = 9090
