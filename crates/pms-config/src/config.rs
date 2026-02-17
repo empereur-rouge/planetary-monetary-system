@@ -15,6 +15,10 @@ fn default_tip_limit() -> usize {
     200
 }
 
+fn default_max_dag_blocks() -> usize {
+    50_000
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Rocks {
     pub path: String,
@@ -22,6 +26,11 @@ pub struct Rocks {
     pub prefix: String, // ex: "testnet" | "mainnet"
     #[serde(default = "default_tip_limit")]
     pub tip_limit: usize,
+    /// Maximum number of blocks kept in the in-memory DAG (ConcurrentDag).
+    /// Older blocks are pruned to bound RAM usage. 0 = unlimited.
+    /// Default: 50 000 (~50 MB RAM).
+    #[serde(default = "default_max_dag_blocks")]
+    pub max_dag_blocks: usize,
     /// Intervalle entre chaque backup (checkpoint) en secondes.
     /// Défaut: 21600 (6 heures).
     #[serde(default)]

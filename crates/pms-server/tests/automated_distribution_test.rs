@@ -144,6 +144,7 @@ async fn test_automated_fee_distribution() {
             path: temp_dir.path().to_str().unwrap().to_string(),
             prefix: "test".into(),
             tip_limit: 100,
+            max_dag_blocks: 0,
             checkpoint_interval_secs: None,
         },
         network: Network {

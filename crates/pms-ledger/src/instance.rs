@@ -36,6 +36,7 @@ impl LedgerInstance {
         shared_db: Arc<PmsDb>,
         def: LedgerDef,
         global_tip_limit: usize,
+        max_dag_blocks: usize,
     ) -> Result<Self> {
         let tip_limit = def.tip_limit.unwrap_or(global_tip_limit);
 
@@ -70,13 +71,13 @@ impl LedgerInstance {
             tracing::info!(ledger = %def.id, "Genesis block created");
         }
 
-        // Bootstrap DAG from store
+        // Bootstrap DAG from store (with capacity limit for RAM pruning)
         let dag = Arc::new(
-            ConcurrentDag::bootstrap_from_store(&*store)
+            ConcurrentDag::bootstrap_from_store_with_capacity(&*store, max_dag_blocks)
                 .await
                 .with_context(|| format!("bootstrap DAG for ledger '{}'", def.id))?,
         );
-        tracing::info!(ledger = %def.id, blocks = dag.len(), "DAG loaded");
+        tracing::info!(ledger = %def.id, blocks = dag.len(), max_dag_blocks, "DAG loaded");
 
         // Adapter + UTXO bootstrap
         let core_adapter = CoreAdapter::new(dag.clone(), store.clone());

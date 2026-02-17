@@ -13,6 +13,7 @@ pub struct LedgerManager {
     ledgers: DashMap<String, Arc<LedgerInstance>>,
     shared_db: Arc<PmsDb>,
     global_tip_limit: usize,
+    global_max_dag_blocks: usize,
 }
 
 impl LedgerManager {
@@ -41,6 +42,7 @@ impl LedgerManager {
             ledgers: DashMap::new(),
             shared_db: shared_db.clone(),
             global_tip_limit: settings.rocks.tip_limit,
+            global_max_dag_blocks: settings.rocks.max_dag_blocks,
         };
 
         // Bootstrap each ledger
@@ -49,6 +51,7 @@ impl LedgerManager {
                 shared_db.clone(),
                 def.clone(),
                 settings.rocks.tip_limit,
+                settings.rocks.max_dag_blocks,
             )
             .await
             .with_context(|| format!("bootstrapping ledger '{}'", def.id))?;
@@ -135,6 +138,7 @@ impl LedgerManager {
             self.shared_db.clone(),
             def.clone(),
             self.global_tip_limit,
+            self.global_max_dag_blocks,
         )
         .await
         .with_context(|| format!("bootstrapping ledger '{}'", def.id))?;

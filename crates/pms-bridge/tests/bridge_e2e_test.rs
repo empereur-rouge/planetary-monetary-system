@@ -83,6 +83,7 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
             path: db_path.to_string(),
             prefix: "test".into(),
             tip_limit: 100,
+            max_dag_blocks: 0,
             checkpoint_interval_secs: None,
         },
         network: pms_config::Network {
