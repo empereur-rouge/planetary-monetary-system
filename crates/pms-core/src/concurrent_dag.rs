@@ -147,9 +147,12 @@ impl ConcurrentDag {
                 .push(block_id.clone());
         }
 
-        // Initialize children count for new block
+        // Initialize children count for new block (only if not already tracked).
+        // During bootstrap, children may be loaded before their parent, so the
+        // parent's count is already >0 — we must NOT overwrite it.
         self.children_count
-            .insert(block_id.clone(), AtomicU64::new(0));
+            .entry(block_id.clone())
+            .or_insert_with(|| AtomicU64::new(0));
 
         // Insert the block itself
         self.blocks.insert(block_id.clone(), block);
@@ -197,12 +200,19 @@ impl ConcurrentDag {
                 break;
             };
 
+            // Skip ghost entries: blocks already removed by a previous prune cycle.
+            // Without this, ghosts accumulate and count toward the skipped-tips limit,
+            // causing pruning to abort before doing meaningful work.
+            if !self.blocks.contains_key(&old_id) {
+                continue;
+            }
+
             // Don't prune tips - they're needed for parent selection
             let is_tip = self
                 .children_count
                 .get(&old_id)
                 .map(|c| c.load(Ordering::Relaxed) == 0)
-                .unwrap_or(true);
+                .unwrap_or(false); // false: if no entry, block was partially cleaned → safe to prune
 
             if is_tip {
                 skipped_tips.push(old_id);
@@ -593,6 +603,84 @@ mod tests {
     }
 
     #[test]
+    fn test_children_count_preserved_on_out_of_order_insert() {
+        // Verifies the fix for the bootstrap bug: children loaded before parents.
+        // all_block_ids() returns lexicographic order (hash-based = random),
+        // so a child can be loaded before its parent. insert_block must NOT
+        // overwrite the parent's children_count.
+        let dag = ConcurrentDag::new(); // unlimited, just checking counts
+
+        // Load child FIRST, then parent
+        dag.insert_block(make_block("child", vec!["parent"]));
+        // At this point, parent's children_count == 1 (set by child)
+        assert_eq!(
+            dag.children_count
+                .get("parent")
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(0),
+            1,
+            "parent children_count should be 1 after child loaded"
+        );
+
+        // Now load parent - must NOT overwrite children_count to 0
+        dag.insert_block(make_block("parent", vec!["genesis"]));
+        assert_eq!(
+            dag.children_count
+                .get("parent")
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(0),
+            1,
+            "parent children_count must be preserved (not overwritten to 0)"
+        );
+    }
+
+    #[test]
+    fn test_pruning_with_out_of_order_bootstrap() {
+        // Simulates a real bootstrap: 20 blocks in a chain, loaded in shuffled
+        // order (children before parents), then pruned to max_blocks=8.
+        let dag = ConcurrentDag::with_capacity(8);
+
+        // Chain: g -> b1 -> b2 -> ... -> b19
+        // Load in "random" order to simulate lexicographic hash order
+        let shuffled_order: Vec<usize> = vec![
+            12, 5, 18, 1, 9, 15, 3, 7, 0, 11, 16, 6, 19, 2, 13, 8, 4, 17, 10, 14,
+        ];
+
+        for &i in &shuffled_order {
+            let id = format!("b{}", i);
+            let parents = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("b{}", i - 1)]
+            };
+            dag.insert_block(Block {
+                id,
+                parents,
+                payload: None,
+                nonce: 0,
+                metadata: None,
+                signer_pk: None,
+                signature: None,
+            });
+        }
+
+        assert_eq!(dag.len(), 20);
+
+        // Force post-bootstrap prune
+        dag.prune_oldest();
+
+        // Must prune to ~8 blocks
+        assert!(
+            dag.len() <= 10,
+            "DAG should be pruned to around 8, got {}",
+            dag.len()
+        );
+
+        // Tip (b19) must survive
+        assert!(dag.contains_block("b19"), "tip b19 should survive");
+    }
+
+    #[test]
     fn test_unlimited_capacity_no_pruning() {
         let dag = ConcurrentDag::new(); // unlimited
 
@@ -615,5 +703,485 @@ mod tests {
         dag.prune_oldest();
 
         assert_eq!(dag.len(), 100, "Unlimited DAG should keep all blocks");
+    }
+
+    // ─── Ghost entries ─────────────────────────────────────────────
+
+    #[test]
+    fn test_ghost_entries_do_not_block_pruning() {
+        // After a first prune, removed block IDs become "ghosts" in
+        // insertion_order. The next prune must skip them without counting
+        // them as tips, so subsequent prune cycles keep working.
+        let dag = ConcurrentDag::with_capacity(50);
+
+        // Build a chain of 100 blocks
+        for i in 0..100 {
+            let parents = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("b{}", i - 1)]
+            };
+            dag.insert_block(make_block(&format!("b{}", i), parents.iter().map(|s| s.as_str()).collect()));
+        }
+        assert_eq!(dag.len(), 100);
+
+        // First prune: removes ~50 oldest
+        dag.prune_oldest();
+        let after_first = dag.len();
+        assert!(
+            after_first <= 52,
+            "first prune should reduce to ~50, got {}",
+            after_first
+        );
+
+        // Insert 30 more blocks (continuing the chain)
+        for i in 100..130 {
+            dag.insert_block(make_block(
+                &format!("b{}", i),
+                vec![&format!("b{}", i - 1)],
+            ));
+        }
+
+        // Second prune: must still work despite ghost entries from first prune
+        dag.prune_oldest();
+        let after_second = dag.len();
+        assert!(
+            after_second <= 55,
+            "second prune should keep ~50, got {} (ghost entries blocking?)",
+            after_second
+        );
+
+        // Tip must survive
+        assert!(dag.contains_block("b129"), "tip b129 must survive");
+    }
+
+    // ─── Continuous operation (simulates a running node) ───────────
+
+    #[test]
+    fn test_continuous_insert_and_prune_cycles() {
+        // Simulates a node continuously receiving blocks: capacity 30,
+        // insert 200 blocks with a prune every 20 inserts.
+        let dag = ConcurrentDag::with_capacity(30);
+
+        for i in 0..200 {
+            let parents = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("b{}", i - 1)]
+            };
+            dag.insert_block(make_block(
+                &format!("b{}", i),
+                parents.iter().map(|s| s.as_str()).collect(),
+            ));
+
+            // Prune every 20 inserts (simulating amortized pruning)
+            if i > 0 && i % 20 == 0 {
+                dag.prune_oldest();
+            }
+        }
+        dag.prune_oldest();
+
+        assert!(
+            dag.len() <= 35,
+            "after 200 inserts with periodic prunes, should be ~30, got {}",
+            dag.len()
+        );
+        assert!(dag.contains_block("b199"), "latest tip must survive");
+        assert!(
+            !dag.contains_block("b0"),
+            "genesis should be long pruned"
+        );
+    }
+
+    // ─── Diamond / multi-parent topology ───────────────────────────
+
+    #[test]
+    fn test_pruning_diamond_dag() {
+        //   g
+        //  / \
+        // a   b
+        //  \ /
+        //   c
+        //   |
+        //   d
+        //   |
+        //   e   (tip)
+        let dag = ConcurrentDag::with_capacity(3);
+
+        dag.insert_block(make_block("g", vec![]));
+        dag.insert_block(make_block("a", vec!["g"]));
+        dag.insert_block(make_block("b", vec!["g"]));
+        dag.insert_block(make_block("c", vec!["a", "b"])); // diamond merge
+        dag.insert_block(make_block("d", vec!["c"]));
+        dag.insert_block(make_block("e", vec!["d"]));
+        dag.prune_oldest();
+
+        // e is the only tip, g/a/b should be prunable
+        assert!(dag.contains_block("e"), "tip e must survive");
+        assert!(
+            dag.len() <= 4,
+            "should prune to ~3, got {}",
+            dag.len()
+        );
+
+        // Verify children_count consistency: for surviving blocks with parents
+        // still in DAG, the parent's children_count should be > 0
+        if dag.contains_block("d") {
+            assert!(
+                dag.get_children_count("d") > 0,
+                "d has child e, count must be > 0"
+            );
+        }
+    }
+
+    // ─── Wide DAG with many concurrent tips ────────────────────────
+
+    #[test]
+    fn test_pruning_wide_dag_many_tips() {
+        // Simulates ~20 concurrent agents, each creating a long branch.
+        // Capacity 500 vs 20 tips → skip limit 50, plenty of headroom.
+        // This mirrors the testnet topology (many agents, long histories).
+        let dag = ConcurrentDag::with_capacity(500);
+
+        // Shared backbone: g -> b1 -> b2
+        dag.insert_block(make_block("g", vec![]));
+        dag.insert_block(make_block("b1", vec!["g"]));
+        dag.insert_block(make_block("b2", vec!["b1"]));
+
+        // 20 agents each create 50 blocks branching off b2
+        for agent in 0..20 {
+            let first = format!("a{}_0", agent);
+            dag.insert_block(make_block(&first, vec!["b2"]));
+            for step in 1..50 {
+                let id = format!("a{}_{}", agent, step);
+                let parent = format!("a{}_{}", agent, step - 1);
+                dag.insert_block(make_block(&id, vec![&parent]));
+            }
+        }
+        // Total: 3 backbone + 1000 agent blocks = 1003
+
+        dag.prune_oldest();
+
+        assert!(
+            dag.len() <= 530,
+            "wide DAG should prune to ~500, got {}",
+            dag.len()
+        );
+
+        // All 20 branch tips (a*_49) must survive
+        for agent in 0..20 {
+            let tip = format!("a{}_49", agent);
+            assert!(
+                dag.contains_block(&tip),
+                "agent {} tip should survive",
+                agent
+            );
+        }
+    }
+
+    // ─── Spent outpoints preserved after pruning ───────────────────
+
+    #[test]
+    fn test_spent_outpoints_preserved_after_pruning() {
+        let dag = ConcurrentDag::with_capacity(5);
+
+        dag.insert_block(make_block("g", vec![]));
+        dag.mark_spent("tx_old", 0);
+        dag.mark_spent("tx_old", 1);
+
+        // Build a chain past capacity
+        for i in 1..=10 {
+            let parent = if i == 1 {
+                "g".to_string()
+            } else {
+                format!("b{}", i - 1)
+            };
+            dag.insert_block(make_block(
+                &format!("b{}", i),
+                vec![&parent],
+            ));
+        }
+        dag.prune_oldest();
+
+        // g is pruned, but spent_outpoints must survive for double-spend detection
+        assert!(!dag.contains_block("g"), "g should be pruned");
+        assert!(
+            dag.is_spent("tx_old", 0),
+            "spent outpoint must survive pruning"
+        );
+        assert!(
+            dag.is_spent("tx_old", 1),
+            "spent outpoint must survive pruning"
+        );
+    }
+
+    // ─── Amortized pruning via PRUNE_CHECK_INTERVAL ────────────────
+
+    #[test]
+    fn test_amortized_pruning_triggers_automatically() {
+        // With PRUNE_CHECK_INTERVAL = 1000, after inserting 1050 blocks
+        // into a DAG with capacity 100, pruning should have triggered
+        // automatically at least once (at insert #1000).
+        let dag = ConcurrentDag::with_capacity(100);
+
+        for i in 0..1050 {
+            let parents = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("b{}", i - 1)]
+            };
+            dag.insert_block(make_block(
+                &format!("b{}", i),
+                parents.iter().map(|s| s.as_str()).collect(),
+            ));
+        }
+
+        // Amortized prune should have triggered at insert #1000.
+        // At that point len was 1001, it should have pruned ~901 blocks.
+        // Then 50 more inserts bring it to ~150.
+        // We don't call prune_oldest() manually here — relying on amortized.
+        assert!(
+            dag.len() < 200,
+            "amortized pruning should have kicked in, but len = {}",
+            dag.len()
+        );
+
+        assert!(dag.contains_block("b1049"), "latest tip must survive");
+    }
+
+    // ─── Memory cleanup: children_count/children_idx ───────────────
+
+    #[test]
+    fn test_pruning_cleans_children_count_and_idx() {
+        let dag = ConcurrentDag::with_capacity(5);
+
+        // Chain: g -> b1 -> b2 -> b3 -> b4 -> b5 -> b6 -> b7
+        dag.insert_block(make_block("g", vec![]));
+        for i in 1..=7 {
+            let parent = if i == 1 {
+                "g".to_string()
+            } else {
+                format!("b{}", i - 1)
+            };
+            dag.insert_block(make_block(
+                &format!("b{}", i),
+                vec![&parent],
+            ));
+        }
+        dag.prune_oldest();
+
+        // Pruned blocks should have their children_count/children_idx removed
+        for pruned_id in &["g", "b1"] {
+            if !dag.contains_block(pruned_id) {
+                assert!(
+                    dag.children_count.get(*pruned_id).is_none(),
+                    "{} pruned but children_count entry leaked",
+                    pruned_id
+                );
+                assert!(
+                    dag.children_idx.get(*pruned_id).is_none(),
+                    "{} pruned but children_idx entry leaked",
+                    pruned_id
+                );
+            }
+        }
+    }
+
+    // ─── Large bootstrap with intermediate prune cycles ────────────
+
+    #[test]
+    fn test_large_bootstrap_with_intermediate_prunes() {
+        // Simulates loading 2500 blocks from store (PRUNE_CHECK_INTERVAL=1000
+        // triggers 2 intermediate prune cycles during load) with capacity 500.
+        let dag = ConcurrentDag::with_capacity(500);
+
+        // Load in chronological order (simplest case) — 2500 block chain
+        for i in 0..2500 {
+            let parents = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("b{}", i - 1)]
+            };
+            dag.insert_block(make_block(
+                &format!("b{}", i),
+                parents.iter().map(|s| s.as_str()).collect(),
+            ));
+        }
+
+        // After the loop, amortized prune ran at inserts 0, 1000, 2000.
+        // Final forced prune:
+        dag.prune_oldest();
+
+        assert!(
+            dag.len() <= 510,
+            "should prune to ~500 after bootstrap, got {}",
+            dag.len()
+        );
+        assert!(dag.contains_block("b2499"), "tip must survive");
+        assert!(!dag.contains_block("b0"), "old genesis should be gone");
+    }
+
+    // ─── Concurrent multi-threaded insert + prune ──────────────────
+
+    #[test]
+    fn test_concurrent_inserts_with_pruning() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dag = Arc::new(ConcurrentDag::with_capacity(200));
+
+        // Create a shared backbone
+        dag.insert_block(make_block("g", vec![]));
+
+        // 4 threads, each inserting 100 blocks
+        let mut handles = vec![];
+        for t in 0..4 {
+            let dag = dag.clone();
+            handles.push(thread::spawn(move || {
+                let first = format!("t{}_0", t);
+                dag.insert_block(make_block(&first, vec!["g"]));
+                for i in 1..100 {
+                    let id = format!("t{}_{}", t, i);
+                    let parent = format!("t{}_{}", t, i - 1);
+                    dag.insert_block(make_block(&id, vec![&parent]));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Total: 1 + 400 = 401 blocks
+
+        dag.prune_oldest();
+
+        assert!(
+            dag.len() <= 210,
+            "concurrent DAG should prune to ~200, got {}",
+            dag.len()
+        );
+
+        // All 4 branch tips must survive
+        for t in 0..4 {
+            assert!(
+                dag.contains_block(&format!("t{}_99", t)),
+                "thread {} tip must survive",
+                t
+            );
+        }
+    }
+
+    // ─── Edge: prune on empty / single-block DAG ───────────────────
+
+    #[test]
+    fn test_prune_empty_dag() {
+        let dag = ConcurrentDag::with_capacity(10);
+        dag.prune_oldest(); // must not panic
+        assert_eq!(dag.len(), 0);
+    }
+
+    #[test]
+    fn test_prune_single_block_dag() {
+        let dag = ConcurrentDag::with_capacity(1);
+        dag.insert_block(make_block("g", vec![]));
+        dag.prune_oldest();
+        // g is a tip (0 children) — should be preserved
+        assert_eq!(dag.len(), 1, "single block (tip) must be preserved");
+    }
+
+    // ─── Edge: capacity exactly at block count ─────────────────────
+
+    #[test]
+    fn test_prune_at_exact_capacity() {
+        let dag = ConcurrentDag::with_capacity(5);
+        for i in 0..5 {
+            let parents = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("b{}", i - 1)]
+            };
+            dag.insert_block(make_block(
+                &format!("b{}", i),
+                parents.iter().map(|s| s.as_str()).collect(),
+            ));
+        }
+        dag.prune_oldest();
+        // Exactly at capacity — nothing to prune
+        assert_eq!(dag.len(), 5, "at exact capacity, nothing should be pruned");
+    }
+
+    // ─── find_tips consistency after pruning ────────────────────────
+
+    #[test]
+    fn test_find_tips_consistent_after_pruning() {
+        let dag = ConcurrentDag::with_capacity(10);
+
+        // Build: g -> b1 -> b2 -> ... -> b19
+        for i in 0..20 {
+            let parents = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("b{}", i - 1)]
+            };
+            dag.insert_block(make_block(
+                &format!("b{}", i),
+                parents.iter().map(|s| s.as_str()).collect(),
+            ));
+        }
+        dag.prune_oldest();
+
+        let tips = dag.find_tips();
+
+        // Every tip returned must actually exist in the DAG
+        for tip in &tips {
+            assert!(
+                dag.contains_block(tip),
+                "find_tips returned {} which is not in the DAG",
+                tip
+            );
+        }
+
+        // The real tip (b19) must be in the list
+        assert!(
+            tips.contains(&"b19".to_string()),
+            "b19 should be a tip, tips = {:?}",
+            tips
+        );
+    }
+
+    // ─── Repeated prune on already-pruned DAG (idempotent) ─────────
+
+    #[test]
+    fn test_repeated_prune_is_idempotent() {
+        let dag = ConcurrentDag::with_capacity(10);
+
+        for i in 0..30 {
+            let parents = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("b{}", i - 1)]
+            };
+            dag.insert_block(make_block(
+                &format!("b{}", i),
+                parents.iter().map(|s| s.as_str()).collect(),
+            ));
+        }
+        dag.prune_oldest();
+        let len_after_first = dag.len();
+
+        // Pruning again without inserting anything should be a no-op
+        dag.prune_oldest();
+        assert_eq!(
+            dag.len(),
+            len_after_first,
+            "second prune without new inserts must be a no-op"
+        );
+
+        dag.prune_oldest();
+        assert_eq!(
+            dag.len(),
+            len_after_first,
+            "third prune must still be a no-op"
+        );
     }
 }
