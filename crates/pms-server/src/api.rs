@@ -90,6 +90,33 @@ pub struct AppState {
     pub effective_fees: Arc<crate::api_fn::tx_helpers::EffectiveFees>,
 }
 
+/// Sync the PMS_BLOCKS_TOTAL gauge with the actual in-memory DAG size for the default ledger.
+fn sync_dag_size_metric(st: &AppState) {
+    sync_dag_size_metric_for(st, &st.ledger_id);
+}
+
+/// Sync PMS_BLOCKS_TOTAL for a specific ledger.
+fn sync_dag_size_metric_for(st: &AppState, ledger_id: &str) {
+    if let Some(ref mgr) = st.ledger_mgr {
+        if let Some(instance) = mgr.get(ledger_id) {
+            crate::metrics::PMS_BLOCKS_TOTAL
+                .with_label_values(&[ledger_id])
+                .set(instance.dag.len() as i64);
+        }
+    }
+}
+
+/// Sync PMS_BLOCKS_TOTAL for all ledgers.
+fn sync_all_dag_size_metrics(st: &AppState) {
+    if let Some(ref mgr) = st.ledger_mgr {
+        for instance in mgr.list_all() {
+            crate::metrics::PMS_BLOCKS_TOTAL
+                .with_label_values(&[&instance.id])
+                .set(instance.dag.len() as i64);
+        }
+    }
+}
+
 /// Middleware to check if request is allowed for admin routes.
 /// Logic:
 /// 1. Allow localhost always
@@ -360,14 +387,24 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route(
             "/metrics",
             get(|State(st): State<AppState>| async move {
+                // Sync DAG size gauge with actual in-memory count (reflects pruning)
+                sync_dag_size_metric(&st);
                 crate::metrics::render_for_ledger(&st.ledger_id)
             }),
         )
-        .route("/metrics/all", get(|| async { crate::metrics::render() }))
+        .route(
+            "/metrics/all",
+            get(|State(st): State<AppState>| async move {
+                sync_all_dag_size_metrics(&st);
+                crate::metrics::render()
+            }),
+        )
         .route(
             "/l/{ledger_id}/metrics",
             get(
-                |axum::extract::Path(ledger_id): axum::extract::Path<String>| async move {
+                |State(st): State<AppState>,
+                 axum::extract::Path(ledger_id): axum::extract::Path<String>| async move {
+                    sync_dag_size_metric_for(&st, &ledger_id);
                     crate::metrics::render_for_ledger(&ledger_id)
                 },
             ),
