@@ -120,6 +120,41 @@ impl ConcurrentDag {
         dag
     }
 
+    /// Insert a block during bootstrap (store replay).
+    ///
+    /// Builds the DAG structure (blocks, children_count, children_idx) without
+    /// tracking insertion order or triggering amortized pruning. This avoids
+    /// the false-tip pollution that occurs when intermediate prunes run during
+    /// out-of-order loading from RocksDB (lexicographic = random order).
+    ///
+    /// After all blocks are loaded, the caller must populate `insertion_order`
+    /// and call `prune_oldest()` exactly once.
+    fn bootstrap_insert(&self, block: Block) {
+        let block_id = block.id.clone();
+
+        if self.blocks.contains_key(&block_id) {
+            return;
+        }
+
+        for parent_id in &block.parents {
+            self.children_count
+                .entry(parent_id.clone())
+                .or_insert_with(|| AtomicU64::new(0))
+                .fetch_add(1, Ordering::Relaxed);
+
+            self.children_idx
+                .entry(parent_id.clone())
+                .or_insert_with(Vec::new)
+                .push(block_id.clone());
+        }
+
+        self.children_count
+            .entry(block_id.clone())
+            .or_insert_with(|| AtomicU64::new(0));
+
+        self.blocks.insert(block_id, block);
+    }
+
     /// Insert a block into the DAG (non-blocking)
     ///
     /// This is the core operation that must be fast for high TPS.
@@ -421,6 +456,12 @@ impl ConcurrentDag {
     }
 
     /// Load the DAG from storage (RAM replay), with optional capacity limit.
+    ///
+    /// Uses a two-phase approach to avoid the false-tip problem:
+    /// 1. Load ALL blocks without pruning (children_counts are built correctly
+    ///    regardless of load order).
+    /// 2. Populate `insertion_order` from the loaded blocks, then prune once
+    ///    with full knowledge of the DAG structure.
     pub async fn bootstrap_from_store_with_capacity<S>(
         store: &S,
         max_blocks: usize,
@@ -431,9 +472,10 @@ impl ConcurrentDag {
         let dag = Self::with_capacity(max_blocks);
         let ids = store.all_block_ids().await?;
 
+        // Phase 1: Load all blocks WITHOUT pruning or insertion-order tracking.
+        // This ensures children_counts are fully correct before any pruning.
         for id in ids {
             if let Some(sb) = store.get_block(&id).await? {
-                // Parse payload from JSON if present
                 let payload = if let Some(json) = &sb.payload_json {
                     match serde_json::from_str(json) {
                         Ok(p) => Some(p),
@@ -459,12 +501,28 @@ impl ConcurrentDag {
                     signer_pk: Some(sb.signer_pk_hex).filter(|s| !s.is_empty()),
                     signature: Some(sb.signature_hex).filter(|s| !s.is_empty()),
                 };
-                dag.insert_block(block);
+                dag.bootstrap_insert(block);
             }
         }
 
-        // Force a full prune after bootstrap (insert_block only prunes every N inserts)
+        // Phase 2: Build insertion_order from loaded blocks.
+        // Order doesn't matter for the initial prune (any non-tip block can go),
+        // but after pruning, new runtime blocks are appended chronologically.
+        {
+            let mut order = dag.insertion_order.lock().unwrap();
+            for entry in dag.blocks.iter() {
+                order.push_back(entry.key().clone());
+            }
+        }
+
+        // Phase 3: Single prune with fully-correct children_counts.
         dag.prune_oldest();
+
+        tracing::info!(
+            loaded = dag.blocks.len(),
+            max_blocks,
+            "DAG bootstrap complete (post-prune)"
+        );
 
         Ok(dag)
     }
