@@ -94,14 +94,15 @@ async fn main() -> Result<()> {
     let ledger_mgr = Arc::new(LedgerManager::bootstrap(&settings).await?);
 
     for instance in ledger_mgr.list_all() {
-        if let Ok(count) = instance.store.block_count().await {
-            pms_server::metrics::PMS_BLOCKS_TOTAL
-                .with_label_values(&[&instance.id])
-                .set(count as i64);
-            eprintln!("  ✅ Ledger '{}' ready (blocks: {})", instance.id, count);
-        } else {
-            eprintln!("  ✅ Ledger '{}' ready", instance.id);
-        }
+        let dag_size = instance.dag.len();
+        let persisted = instance.store.block_count().await.unwrap_or(0);
+        pms_server::metrics::PMS_BLOCKS_TOTAL
+            .with_label_values(&[&instance.id])
+            .set(dag_size as i64);
+        eprintln!(
+            "  ✅ Ledger '{}' ready (DAG: {}, persisted: {})",
+            instance.id, dag_size, persisted
+        );
     }
 
     // Use default ledger ("main") for P2P Server & backward-compat store

@@ -87,7 +87,6 @@ pub async fn submit_block(
             let _ = st.srv.enqueue_broadcast(wb.id.clone()).await;
 
             crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&st.ledger_id]).inc();
-            crate::metrics::PMS_BLOCKS_TOTAL.with_label_values(&[&st.ledger_id]).inc();
 
             // ============================================================
             // FEE POOL ACCUMULATION (Distributed TX Processing)

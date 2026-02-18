@@ -123,7 +123,7 @@
 
         nodeStatus.set(data);
 
-        const currentBlocks = parseInt(data["pms_blocks_total"] || "0");
+        const currentBlocks = parseInt(data["pms_blocks_persisted_total"] || "0");
         const now = Date.now();
 
         if (lastBlockCount > 0) {

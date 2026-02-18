@@ -18,7 +18,6 @@ use lru::LruCache;
 use pms_config::{ServerConfig, TlsConfig};
 use pms_interface::NetDagAdapter;
 use pms_network::messages::NetMsg;
-use pms_storage::DagStorage;
 use pms_storage::rocks_store::store::RocksStore;
 use pms_storage::store::PutResult;
 use pms_wallet::{SignerBackend, Wallet};
@@ -398,13 +397,8 @@ impl Server {
         tracing::info!(target="pms_stats", ptr=?Arc::as_ptr(&stats), "stats_ptr run()");
         tracing::info!("🔑 Local Node Identity: {}", self.node_id);
 
-        // 0) Initialize Metrics from Store
-        if let Ok(count) = store.block_count().await {
-            crate::metrics::PMS_BLOCKS_TOTAL.with_label_values(&["main"]).set(count as i64);
-            tracing::info!("📊 Metrics initialized: PMS_BLOCKS_TOTAL[main] = {}", count);
-        } else {
-            tracing::warn!("⚠️ Failed to initialize PMS_BLOCKS_TOTAL from store");
-        }
+        // Note: PMS_BLOCKS_TOTAL gauge is synced from dag.len() on each /metrics fetch.
+        // No init needed here — the first metrics poll will set the correct value.
 
         // 1) Logger périodique des stats (persist / gossip)
         {
@@ -1248,7 +1242,6 @@ impl Server {
             match result {
                 Ok(PutResult::Inserted) => {
                     crate::metrics::BLOCKS_PERSISTED.with_label_values(&["main"]).inc();
-                    crate::metrics::PMS_BLOCKS_TOTAL.with_label_values(&["main"]).inc();
                     // ====== BENCHMARK: Log bloc validé ======
                     let persist_ms = persist_start.elapsed().as_millis();
                     tracing::info!(

@@ -459,7 +459,6 @@ pub async fn admin_mint_token(
     match state.srv.adapter_arc().persist_block(&wb).await {
         Ok(PutResult::Inserted) => {
             crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
-            crate::metrics::PMS_BLOCKS_TOTAL.with_label_values(&[&state.ledger_id]).inc();
             let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
 
             // Update UTXO set for all outputs
