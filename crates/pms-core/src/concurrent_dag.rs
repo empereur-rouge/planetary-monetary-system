@@ -193,8 +193,9 @@ impl ConcurrentDag {
         self.blocks.insert(block_id.clone(), block);
 
         // Track insertion order for pruning
-        if let Ok(mut order) = self.insertion_order.lock() {
-            order.push_back(block_id);
+        match self.insertion_order.lock() {
+            Ok(mut order) => order.push_back(block_id),
+            Err(poisoned) => poisoned.into_inner().push_back(block_id),
         }
 
         // Amortized pruning: check every PRUNE_CHECK_INTERVAL inserts
@@ -227,7 +228,13 @@ impl ConcurrentDag {
 
         let mut order = match self.insertion_order.lock() {
             Ok(o) => o,
-            Err(_) => return,
+            Err(poisoned) => {
+                tracing::error!(
+                    "insertion_order mutex POISONED — pruning disabled! \
+                     Recovering with into_inner()"
+                );
+                poisoned.into_inner()
+            }
         };
 
         while removed < to_remove {
@@ -270,13 +277,14 @@ impl ConcurrentDag {
             order.push_front(tip_id);
         }
 
-        if removed > 0 {
-            tracing::debug!(
-                removed,
-                remaining = self.blocks.len(),
-                "DAG pruned old blocks"
-            );
-        }
+        tracing::info!(
+            target = to_remove,
+            removed,
+            remaining = self.blocks.len(),
+            deque_remaining = order.len(),
+            max_blocks = self.max_blocks,
+            "DAG prune_oldest completed"
+        );
     }
 
     /// Check if a block exists
