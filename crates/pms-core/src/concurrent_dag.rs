@@ -207,10 +207,14 @@ impl ConcurrentDag {
         true
     }
 
-    /// Prune oldest non-tip blocks to keep the DAG within `max_blocks`.
+    /// Prune oldest blocks to keep the DAG within `max_blocks`.
     ///
-    /// Removes blocks from the front of the insertion order (oldest first),
-    /// skipping current tips (blocks with 0 children) to preserve tip selection.
+    /// Removes blocks from the front of the insertion order (oldest first).
+    /// ALL blocks are eligible for pruning, including tips — old orphaned tips
+    /// from concurrent agents are the primary source of unbounded growth.
+    /// Recent tips at the back of the deque survive naturally because pruning
+    /// stops once `blocks.len() <= max_blocks`.
+    ///
     /// Does NOT touch `spent_outpoints` (needed for double-spend detection).
     fn prune_oldest(&self) {
         if self.max_blocks == 0 {
@@ -224,7 +228,6 @@ impl ConcurrentDag {
 
         let to_remove = current_len - self.max_blocks;
         let mut removed = 0;
-        let mut skipped_tips: Vec<BlockId> = Vec::new();
 
         let mut order = match self.insertion_order.lock() {
             Ok(o) => o,
@@ -243,25 +246,7 @@ impl ConcurrentDag {
             };
 
             // Skip ghost entries: blocks already removed by a previous prune cycle.
-            // Without this, ghosts accumulate and count toward the skipped-tips limit,
-            // causing pruning to abort before doing meaningful work.
             if !self.blocks.contains_key(&old_id) {
-                continue;
-            }
-
-            // Don't prune tips - they're needed for parent selection
-            let is_tip = self
-                .children_count
-                .get(&old_id)
-                .map(|c| c.load(Ordering::Relaxed) == 0)
-                .unwrap_or(false); // false: if no entry, block was partially cleaned → safe to prune
-
-            if is_tip {
-                skipped_tips.push(old_id);
-                // Stop if we've skipped too many to avoid infinite churn
-                if skipped_tips.len() > self.max_blocks / 10 {
-                    break;
-                }
                 continue;
             }
 
@@ -270,11 +255,6 @@ impl ConcurrentDag {
             self.children_count.remove(&old_id);
             self.children_idx.remove(&old_id);
             removed += 1;
-        }
-
-        // Re-enqueue skipped tips at the front so they get checked again later
-        for tip_id in skipped_tips.into_iter().rev() {
-            order.push_front(tip_id);
         }
 
         tracing::info!(
@@ -513,14 +493,40 @@ impl ConcurrentDag {
             }
         }
 
-        // Phase 2: Build insertion_order from loaded blocks.
-        // Order doesn't matter for the initial prune (any non-tip block can go),
-        // but after pruning, new runtime blocks are appended chronologically.
+        // Phase 2: Build insertion_order from loaded blocks in sorted order.
+        // Sorted = deterministic pruning: lexicographically first IDs are at the
+        // front and get pruned first. For sequential IDs (b_00000000...) this
+        // approximates chronological order. For hash IDs it's arbitrary but stable.
         {
+            let mut keys: Vec<String> = dag.blocks.iter().map(|e| e.key().clone()).collect();
+            keys.sort();
             let mut order = dag.insertion_order.lock().unwrap();
-            for entry in dag.blocks.iter() {
-                order.push_back(entry.key().clone());
+            for key in keys {
+                order.push_back(key);
             }
+        }
+
+        // Diagnostic: count tips and parentless blocks before pruning
+        {
+            let total = dag.blocks.len();
+            let tips_count = dag.children_count.iter()
+                .filter(|e| dag.blocks.contains_key(e.key()) && e.value().load(Ordering::Relaxed) == 0)
+                .count();
+            let parentless = dag.blocks.iter()
+                .filter(|e| e.value().parents.is_empty())
+                .count();
+            let orphan_parents = dag.blocks.iter()
+                .filter(|e| {
+                    e.value().parents.iter().any(|p| !dag.blocks.contains_key(p))
+                })
+                .count();
+            tracing::warn!(
+                total,
+                tips_count,
+                parentless,
+                orphan_parents,
+                "DAG bootstrap PRE-PRUNE diagnostic"
+            );
         }
 
         // Phase 3: Single prune with fully-correct children_counts.
@@ -644,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pruning_preserves_tips() {
+    fn test_pruning_removes_oldest_tips_too() {
         // DAG with max 3 blocks
         let dag = ConcurrentDag::with_capacity(3);
 
@@ -656,16 +662,14 @@ mod tests {
         dag.insert_block(make_block("t4", vec!["genesis"]));
         dag.prune_oldest();
 
-        // genesis has 4 children -> not a tip -> can be pruned
-        // t1..t4 are all tips -> should be preserved
-        // After pruning genesis, we have 4 blocks which is > max_blocks(3),
-        // but all remaining are tips so pruning stops
-        assert!(!dag.contains_block("genesis"), "genesis should be pruned (has children)");
+        // 5 blocks, capacity 3 → remove 2 oldest (genesis, t1)
+        // Remaining: t2, t3, t4
+        assert_eq!(dag.len(), 3, "should prune to exactly capacity");
+        assert!(!dag.contains_block("genesis"), "genesis (oldest) should be pruned");
+        assert!(!dag.contains_block("t1"), "t1 (2nd oldest) should be pruned");
 
-        // All tips should be preserved
-        for tip in &["t1", "t2", "t3", "t4"] {
-            assert!(dag.contains_block(tip), "tip {} should be preserved", tip);
-        }
+        // Latest tips survive (they're at the back of insertion_order)
+        assert!(dag.contains_block("t4"), "t4 (latest) should survive");
     }
 
     #[test]
@@ -905,8 +909,8 @@ mod tests {
     #[test]
     fn test_pruning_wide_dag_many_tips() {
         // Simulates ~20 concurrent agents, each creating a long branch.
-        // Capacity 500 vs 20 tips → skip limit 50, plenty of headroom.
-        // This mirrors the testnet topology (many agents, long histories).
+        // Oldest branches (agents 0-9) get pruned entirely, including their tips.
+        // Recent branches (agents 10-19) survive because they're at the back.
         let dag = ConcurrentDag::with_capacity(500);
 
         // Shared backbone: g -> b1 -> b2
@@ -929,20 +933,23 @@ mod tests {
         dag.prune_oldest();
 
         assert!(
-            dag.len() <= 530,
+            dag.len() <= 510,
             "wide DAG should prune to ~500, got {}",
             dag.len()
         );
 
-        // All 20 branch tips (a*_49) must survive
-        for agent in 0..20 {
+        // Recent branch tips (agents 10-19) survive — they're at the back
+        for agent in 10..20 {
             let tip = format!("a{}_49", agent);
             assert!(
                 dag.contains_block(&tip),
-                "agent {} tip should survive",
+                "recent agent {} tip should survive",
                 agent
             );
         }
+
+        // Oldest backbone blocks are pruned
+        assert!(!dag.contains_block("g"), "oldest backbone should be pruned");
     }
 
     // ─── Spent outpoints preserved after pruning ───────────────────
@@ -1151,8 +1158,8 @@ mod tests {
         let dag = ConcurrentDag::with_capacity(1);
         dag.insert_block(make_block("g", vec![]));
         dag.prune_oldest();
-        // g is a tip (0 children) — should be preserved
-        assert_eq!(dag.len(), 1, "single block (tip) must be preserved");
+        // len == max_blocks → nothing to prune
+        assert_eq!(dag.len(), 1, "at capacity, nothing should be pruned");
     }
 
     // ─── Edge: capacity exactly at block count ─────────────────────
@@ -1248,6 +1255,93 @@ mod tests {
             dag.len(),
             len_after_first,
             "third prune must still be a no-op"
+        );
+    }
+
+    // ─── Production scenario: orphaned tips from concurrent agents ───
+
+    #[test]
+    fn test_pruning_with_massive_orphaned_tips() {
+        // Reproduces the production bug: 97 concurrent agents all pick the
+        // same tip as parent, creating 96 orphaned branches per tick.
+        // After N ticks, ~96*N orphaned tips accumulate. The old tip-skipping
+        // logic couldn't prune ANY of them (skip limit exceeded).
+        let dag = ConcurrentDag::with_capacity(500);
+
+        dag.insert_block(make_block("g", vec![]));
+
+        let mut latest_chain = "g".to_string();
+
+        // Simulate 20 ticks, each with 97 agents picking the same parent
+        for tick in 0..20 {
+            let parent = latest_chain.clone();
+
+            // 97 agents all create a block with the same parent
+            for agent in 0..97 {
+                let id = format!("t{}_a{}", tick, agent);
+                dag.insert_block(make_block(&id, vec![&parent]));
+            }
+
+            // Only agent 0's block becomes the next chain link
+            latest_chain = format!("t{}_a0", tick);
+        }
+
+        // Total inserted: 1 (genesis) + 20*97 (agent blocks) = 1941
+        // Of which: 20 chain blocks (have children) + 1920 orphaned tips + 1 genesis
+        // Note: amortized pruning already ran at insert #1000, so len < 1941.
+
+        dag.prune_oldest();
+
+        // Must prune to ~500 despite ~1920 orphaned tips
+        assert!(
+            dag.len() <= 510,
+            "must prune to ~500 even with massive orphaned tips, got {}",
+            dag.len()
+        );
+
+        // Latest chain tip must survive
+        assert!(
+            dag.contains_block("t19_a0"),
+            "latest chain tip must survive"
+        );
+    }
+
+    #[test]
+    fn test_pruning_continuous_with_orphaned_tips() {
+        // Continuous operation with orphaned tips: simulates a running node
+        // where pruning triggers periodically while orphaned tips accumulate.
+        let dag = ConcurrentDag::with_capacity(200);
+
+        dag.insert_block(make_block("g", vec![]));
+        let mut chain_tip = "g".to_string();
+        let mut _total_inserted = 1u64;
+
+        for tick in 0..50 {
+            let parent = chain_tip.clone();
+
+            // 10 agents, each creating a block off the same parent
+            for agent in 0..10 {
+                let id = format!("t{}_a{}", tick, agent);
+                dag.insert_block(make_block(&id, vec![&parent]));
+                _total_inserted += 1;
+            }
+            chain_tip = format!("t{}_a0", tick);
+
+            // Simulate amortized pruning every 10 ticks
+            if tick % 10 == 9 {
+                dag.prune_oldest();
+            }
+        }
+        dag.prune_oldest();
+
+        assert!(
+            dag.len() <= 210,
+            "continuous prune should keep ~200, got {}",
+            dag.len()
+        );
+        assert!(
+            dag.contains_block("t49_a0"),
+            "latest chain tip must survive"
         );
     }
 }
