@@ -5,7 +5,7 @@
 - **feat(server)**: Added admin CRUD endpoints for API key management (`POST /admin/api-keys`, `GET /admin/api-keys`, `DELETE /admin/api-keys/{id}`).
 - **feat(config)**: Added `api_keys_file` field to `[auth]` config section for specifying the JSON key store path. BREAKING: Auth struct has a new field (uses `#[serde(default)]`).
 - **feat(server)**: New `api_keys` module with `ApiKeyStore` (JSON file persistence, hot-reload support, atomic file writes).
-- **ops(deploy)**: Integrated `api_keys_file` into all deployment configs (`config.prod.template.toml`, `config.prod.toml`, `config.testnet.toml`, `config.docker-test.toml`) and scripts (`deploy.sh`, `deploy-testnet.sh`, `docker_test.sh`).
+- **ops(deploy)**: Integrated `api_keys_file` into all deployment configs (`config.prod.template.toml`, `config.prod.toml`, `config.testnet.toml`, `config.docker-test.toml`) and scripts (`deploy.sh`, `deploy-testnet.sh`, `docker_test.sh`). Deployment scripts now automatically create a default SDK API key (with wildcard scope) after the gateway is healthy and include it in the secure credentials backup JSON.
 - **feat(sdk)**: Extracted TypeScript SDK to standalone repo `pms-sdk/` and published as `@empereur-rouge/pms-sdk@0.1.0` on npm. Installable via `npm install @empereur-rouge/pms-sdk`.
 - **feat(sdk)**: Added mandatory API key authentication (`apiKey` field in `PmsClientConfig`). All HTTP requests now include `X-API-Key` header. BREAKING: `apiKey` is required — existing code must add it.
 - **fix(utxo)**: Fixed bug where encrypted transactions didn't update UTXO cache. Added `remove_utxo()` method to `NetDagAdapter` trait and implemented manual UTXO delta application in `wallet_send_tx` for encrypted payloads.

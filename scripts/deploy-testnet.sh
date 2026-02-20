@@ -431,6 +431,26 @@ if [ "\$DO_BUILD" = "true" ]; then
     echo -e "\${YELLOW}   Service Status:\${NC}"
     docker compose -f \$COMPOSE_FILE ps
 
+    # --- Create default SDK API Key ---
+    echo ""
+    echo -e "\${YELLOW}   🔑 Creating SDK API Key...\${NC}"
+    API_KEY_RESPONSE=\$(curl -s -X POST \
+        -H "Authorization: Bearer \$ADMIN_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"label": "SDK Default", "scopes": ["*"]}' \
+        http://127.0.0.1:8080/admin/api-keys 2>/dev/null || echo "")
+
+    if echo "\$API_KEY_RESPONSE" | grep -q '"key"'; then
+        SDK_API_KEY=\$(echo "\$API_KEY_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])" 2>/dev/null || echo "")
+        echo "\$API_KEY_RESPONSE" > etc/pms/sdk-api-key.json
+        chmod 600 etc/pms/sdk-api-key.json
+        echo -e "   \${GREEN}✅ SDK API Key created: \${SDK_API_KEY:0:20}...\${NC}"
+        echo -e "   \${YELLOW}⚠️  Save this key! It is shown only ONCE.\${NC}"
+    else
+        echo -e "   \${YELLOW}⚠️  Could not create API key (server may not support it yet).\${NC}"
+        echo "   Response: \$API_KEY_RESPONSE"
+    fi
+
 else
     echo "   Skipping Build & Restart."
 fi
@@ -465,6 +485,7 @@ if ask_yes_no "   Download Secure Backup (coordinator keys) locally?" "Y"; then
 
     mkdir -p "$TMP_DIR/treasury-keys"
     scp -q -r $VPS_USER@$VPS_IP:/opt/pms/etc/pms/treasury-keys/* "$TMP_DIR/treasury-keys/" 2>/dev/null || true
+    scp -q $VPS_USER@$VPS_IP:/opt/pms/etc/pms/sdk-api-key.json "$TMP_DIR/sdk-api-key.json" 2>/dev/null || echo "{}" > "$TMP_DIR/sdk-api-key.json"
 
     python3 -c "
 import json, os, glob
