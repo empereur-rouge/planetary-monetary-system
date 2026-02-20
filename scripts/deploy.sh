@@ -452,7 +452,7 @@ if [ "\$DO_BUILD" = "true" ]; then
         http://127.0.0.1:8080/admin/api-keys 2>/dev/null || echo "")
 
     if echo "\$API_KEY_RESPONSE" | grep -q '"key"'; then
-        SDK_API_KEY=\$(echo "\$API_KEY_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])" 2>/dev/null || echo "")
+        SDK_API_KEY=\$(echo "\$API_KEY_RESPONSE" | grep -o '"key"\s*:\s*"[^"]*"' | awk -F'"' '{print \$4}' 2>/dev/null || echo "")
         echo "\$API_KEY_RESPONSE" > etc/pms/sdk-api-key.json
         chmod 600 etc/pms/sdk-api-key.json
         echo -e "   \${GREEN}✅ SDK API Key created: \${SDK_API_KEY:0:20}...\${NC}"
