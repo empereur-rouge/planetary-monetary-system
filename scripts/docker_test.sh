@@ -108,6 +108,13 @@ generate_keys() {
     COORD_ADDR=$(echo "$COORDINATOR_WALLET_JSON" | jq -r '.address')
     echo -e "${GREEN}✅ Coordinator wallet generated:${NC}"
     echo "   Address: $COORD_ADDR"
+
+    # Create empty api-keys.json if not exist
+    if [ ! -f etc/pms/api-keys.json ]; then
+        echo '{"keys":[]}' > etc/pms/api-keys.json
+        chmod 600 etc/pms/api-keys.json
+        echo -e "${GREEN}✅ Created empty api-keys.json${NC}"
+    fi
 }
 
 generate_admin_wallet() {
@@ -218,6 +225,7 @@ services:
       - ./etc/pms/node.key:/home/pms/config/node-identity.key:ro
       - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
       - ./etc/pms/treasury-wallets.json:/home/pms/config/treasury-wallets.json:ro
+      - ./etc/pms/api-keys.json:/home/pms/config/api-keys.json:rw
       - ./secrets/tls:/home/pms/tls:ro
       - rocksdb_data:/home/pms/data  # VPS 3: Persistent RocksDB storage
     # NO PUBLIC PORTS - Internal network only!
@@ -481,6 +489,7 @@ cleanup() {
     rm -f etc/pms/coordinator-wallet.json
     rm -f etc/pms/treasury-wallet.json
     rm -f etc/pms/admin-wallet.json
+    rm -f etc/pms/api-keys.json
     rm -f pms-credentials.txt
     rm -rf docker_data/node
     rm -f docker-compose.test.yml

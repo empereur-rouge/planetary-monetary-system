@@ -106,7 +106,14 @@ impl NetDagAdapter for MockAdapter {
         Vec::new()
     }
 
-    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {
+    async fn add_utxo(
+        &self,
+        _txid: String,
+        _index: u32,
+        _address: String,
+        _amount: String,
+        _asset_id: Option<String>,
+    ) {
         // No-op for mock, unless we want to verify UTXOs
     }
 
@@ -171,6 +178,7 @@ async fn test_automated_fee_distribution() {
             require_signed_submit: false,
             admin_api_token: None,
             allowed_ips: vec![],
+            api_keys_file: None,
         },
         secrets: SecretSettings {
             node_identity_key_path: ".".into(),
@@ -305,6 +313,7 @@ async fn test_automated_fee_distribution() {
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
+        api_key_store: pms_server::api_keys::create_api_key_store(None).unwrap(),
         ledger_mgr: None,
         ledger_id: "main".into(),
         effective_fees: Arc::new(pms_server::api_fn::tx_helpers::resolve_effective_fees(

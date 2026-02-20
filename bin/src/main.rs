@@ -99,6 +99,11 @@ async fn main() -> Result<()> {
         pms_server::metrics::PMS_BLOCKS_TOTAL
             .with_label_values(&[&instance.id])
             .set(dag_size as i64);
+        // Initialize the persisted counter with the actual DB count so the
+        // dashboard shows the true total instead of "blocks since restart".
+        pms_server::metrics::BLOCKS_PERSISTED
+            .with_label_values(&[&instance.id])
+            .inc_by(persisted as u64);
         eprintln!(
             "  ✅ Ledger '{}' ready (DAG: {}, persisted: {})",
             instance.id, dag_size, persisted
@@ -232,6 +237,13 @@ async fn main() -> Result<()> {
             treasury_wallets: pms_config::TreasuryWallets::empty(),
             node_registry: pms_server::node_registry::create_registry(),
             fee_pool: pms_server::fee_pool::create_fee_pool(),
+            api_key_store: pms_server::api_keys::create_api_key_store(
+                settings_for_internal.auth.api_keys_file.as_deref(),
+            )
+            .unwrap_or_else(|e| {
+                tracing::error!("❌ Failed to load API keys: {}", e);
+                pms_server::api_keys::create_api_key_store(None).expect("empty store must work")
+            }),
             ledger_mgr: Some(ledger_mgr.clone()),
             ledger_id: "main".into(),
             effective_fees: std::sync::Arc::new(

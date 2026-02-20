@@ -41,6 +41,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             require_signed_submit: false,
             admin_api_token: None,
             allowed_ips: vec![],
+            api_keys_file: None,
         },
         secrets: pms_config::SecretSettings {
             node_identity_key_path: ".".into(),
@@ -276,9 +277,24 @@ fn auth_non_admin_cannot_manage_main_bridge() {
     };
 
     // Non-admin cannot manage bridges involving main
-    assert!(!BridgeAuth::can_enable(&main_def, &nft_def, false, Some("owner_pk")));
-    assert!(!BridgeAuth::can_disable(&main_def, &nft_def, false, Some("owner_pk")));
-    assert!(!BridgeAuth::can_transfer(&main_def, &nft_def, false, Some("owner_pk")));
+    assert!(!BridgeAuth::can_enable(
+        &main_def,
+        &nft_def,
+        false,
+        Some("owner_pk")
+    ));
+    assert!(!BridgeAuth::can_disable(
+        &main_def,
+        &nft_def,
+        false,
+        Some("owner_pk")
+    ));
+    assert!(!BridgeAuth::can_transfer(
+        &main_def,
+        &nft_def,
+        false,
+        Some("owner_pk")
+    ));
 }
 
 #[test]
@@ -307,21 +323,56 @@ fn auth_owner_can_manage_custom_bridges() {
     };
 
     // Owner A can enable bridge between custom ledgers
-    assert!(BridgeAuth::can_enable(&custom_a, &custom_b, false, Some("owner_a")));
+    assert!(BridgeAuth::can_enable(
+        &custom_a,
+        &custom_b,
+        false,
+        Some("owner_a")
+    ));
     // Owner B can too
-    assert!(BridgeAuth::can_enable(&custom_a, &custom_b, false, Some("owner_b")));
+    assert!(BridgeAuth::can_enable(
+        &custom_a,
+        &custom_b,
+        false,
+        Some("owner_b")
+    ));
     // Random signer cannot
-    assert!(!BridgeAuth::can_enable(&custom_a, &custom_b, false, Some("random_pk")));
+    assert!(!BridgeAuth::can_enable(
+        &custom_a,
+        &custom_b,
+        false,
+        Some("random_pk")
+    ));
     // No signer cannot
     assert!(!BridgeAuth::can_enable(&custom_a, &custom_b, false, None));
 
     // Either owner can disable
-    assert!(BridgeAuth::can_disable(&custom_a, &custom_b, false, Some("owner_a")));
-    assert!(BridgeAuth::can_disable(&custom_a, &custom_b, false, Some("owner_b")));
+    assert!(BridgeAuth::can_disable(
+        &custom_a,
+        &custom_b,
+        false,
+        Some("owner_a")
+    ));
+    assert!(BridgeAuth::can_disable(
+        &custom_a,
+        &custom_b,
+        false,
+        Some("owner_b")
+    ));
 
     // Only source owner can transfer
-    assert!(BridgeAuth::can_transfer(&custom_a, &custom_b, false, Some("owner_a")));
-    assert!(!BridgeAuth::can_transfer(&custom_a, &custom_b, false, Some("owner_b")));
+    assert!(BridgeAuth::can_transfer(
+        &custom_a,
+        &custom_b,
+        false,
+        Some("owner_a")
+    ));
+    assert!(!BridgeAuth::can_transfer(
+        &custom_a,
+        &custom_b,
+        false,
+        Some("owner_b")
+    ));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -417,10 +468,7 @@ async fn store_anti_replay() -> Result<()> {
 
     // Now consumed
     assert!(store.is_bridge_lock_consumed(lock_id)?);
-    assert_eq!(
-        store.get_bridge_mint_for_lock(lock_id)?.unwrap(),
-        mint_id
-    );
+    assert_eq!(store.get_bridge_mint_for_lock(lock_id)?.unwrap(), mint_id);
 
     // Double consume fails
     let result = store.mark_bridge_lock_consumed(lock_id, "another_mint");

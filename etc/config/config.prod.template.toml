@@ -48,16 +48,17 @@ coordinator_fee_percent = 65 # 65% to coordinator
 treasury_fee_percent = 35    # 35% to treasury wallets
 # Scheduled Inflation Mint
 daily_inflation_enabled = true
-daily_inflation_interval_sec = 86400  # 24h
+daily_inflation_interval_sec = 86400 # 24h
 annual_inflation_percent = 3.0
-treasury_reward_percent = 20   # 20% to treasury
-creator_reward_percent = 70    # 70% to coordinator
-burn_percent = 10              # 10% burned (not minted)
+treasury_reward_percent = 20         # 20% to treasury
+creator_reward_percent = 70          # 70% to coordinator
+burn_percent = 10                    # 10% burned (not minted)
 
 [auth]
 require_signed_submit = true
 admin_api_token = "REPLACE_WITH_YOUR_SECRET_TOKEN"
 allowed_ips = []
+api_keys_file = "/home/pms/config/pms/api-keys.json"
 
 [secrets]
 node_identity_key_path = "/home/pms/config/pms/node.key"

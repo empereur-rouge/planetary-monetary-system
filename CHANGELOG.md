@@ -1,6 +1,13 @@
 # Changelog
 
 ## [Unreleased]
+- **feat(server)**: Added API key authentication middleware for public routes. Keys are SHA-256 hashed, validated with constant-time comparison, and support granular per-group/per-endpoint scopes (`wallet`, `nft`, `dag`, `supply`, `tokens`, `history`, `coordinator`, `*`).
+- **feat(server)**: Added admin CRUD endpoints for API key management (`POST /admin/api-keys`, `GET /admin/api-keys`, `DELETE /admin/api-keys/{id}`).
+- **feat(config)**: Added `api_keys_file` field to `[auth]` config section for specifying the JSON key store path. BREAKING: Auth struct has a new field (uses `#[serde(default)]`).
+- **feat(server)**: New `api_keys` module with `ApiKeyStore` (JSON file persistence, hot-reload support, atomic file writes).
+- **ops(deploy)**: Integrated `api_keys_file` into all deployment configs (`config.prod.template.toml`, `config.prod.toml`, `config.testnet.toml`, `config.docker-test.toml`) and scripts (`deploy.sh`, `deploy-testnet.sh`, `docker_test.sh`).
+- **feat(sdk)**: Extracted TypeScript SDK to standalone repo `pms-sdk/` and published as `@empereur-rouge/pms-sdk@0.1.0` on npm. Installable via `npm install @empereur-rouge/pms-sdk`.
+- **feat(sdk)**: Added mandatory API key authentication (`apiKey` field in `PmsClientConfig`). All HTTP requests now include `X-API-Key` header. BREAKING: `apiKey` is required — existing code must add it.
 - **fix(utxo)**: Fixed bug where encrypted transactions didn't update UTXO cache. Added `remove_utxo()` method to `NetDagAdapter` trait and implemented manual UTXO delta application in `wallet_send_tx` for encrypted payloads.
 - **feat(interface)**: Added `remove_utxo()` and `get_utxo()` methods to `NetDagAdapter` trait for complete UTXO cache management.
 - **test(server)**: Added `encrypted_utxo_delta_test.rs` with 2 regression tests verifying encrypted transactions correctly consume inputs and create outputs in UTXO cache.

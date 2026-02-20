@@ -41,15 +41,17 @@ rate_limit_rps = 100000
 burst = 200000
 
 [fees]
-treasury_addresses = ["pms1nqgc9xfc3hwcngkaah6999y9lmvrnfwx9g983rwkg89vaxhfqprvatapz4mzxg9yyl4w89kmswqpaczzcdrs56rtkj"]
+treasury_addresses = [
+    "pms1nqgc9xfc3hwcngkaah6999y9lmvrnfwx9g983rwkg89vaxhfqprvatapz4mzxg9yyl4w89kmswqpaczzcdrs56rtkj",
+]
 epsilon = "0.001"
 scan_limit = 2000
 mode = "uniform"
-enforce_fee_recipient = false  # Désactivé pour les tests
+enforce_fee_recipient = false # Désactivé pour les tests
 distribution_interval_sec = 10 # Distribution rapide pour les tests (10s)
 # Scheduled Inflation Mint
 daily_inflation_enabled = true
-daily_inflation_interval_sec = 60  # 60s pour tester (86400 = 24h en prod)
+daily_inflation_interval_sec = 60 # 60s pour tester (86400 = 24h en prod)
 annual_inflation_percent = 3.0
 treasury_reward_percent = 20
 creator_reward_percent = 70
@@ -57,6 +59,7 @@ burn_percent = 10
 [auth]
 require_signed_submit = true
 admin_api_token = "env:PMS_ADMIN_TOKEN"
+api_keys_file = "/home/pms/config/api-keys.json"
 
 [secrets]
 node_identity_key_path = "/home/pms/config/node-identity.key"

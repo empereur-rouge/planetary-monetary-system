@@ -63,6 +63,7 @@ burn_percent = 10
 require_signed_submit = true
 admin_api_token = "env:PMS_ADMIN_TOKEN"
 allowed_ips = []
+api_keys_file = "/home/pms/config/pms/api-keys.json"
 
 [secrets]
 node_identity_key_path = "/home/pms/config/pms/node.key"

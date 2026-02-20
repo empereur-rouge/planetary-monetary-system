@@ -2,28 +2,38 @@
 use crate::Server;
 use crate::admin::{admin_compact, admin_get_config, admin_ping, admin_update_config};
 use crate::api_fn::blocks::{get_block_by_id, submit_block};
+use crate::api_fn::bridge::{
+    admin_bridge_disable, admin_bridge_enable, admin_bridge_transfer, bridge_status,
+    list_bridge_links,
+};
+use crate::api_fn::compliance::{
+    admin_compliance_log, admin_freeze, admin_list_frozen, admin_reverse, admin_seize,
+    admin_shadow_balance, admin_unfreeze,
+};
 use crate::api_fn::coordinator::get_coordinator_info;
 use crate::api_fn::dag::get_tips;
 use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
+use crate::api_fn::ledger::{
+    admin_create_ledger, admin_get_ledger, admin_list_ledgers, list_ledgers,
+};
 use crate::api_fn::milestone::{distribute_fees, get_fee_pool_status};
-use crate::api_fn::nft::{burn_nft, burn_nft_batch_simple, burn_nft_simple, get_nft, get_nfts_by_owner, mint_nft, prepare_nft_transfer};
+use crate::api_fn::nft::{
+    burn_nft, burn_nft_batch_simple, burn_nft_simple, get_nft, get_nfts_by_owner, mint_nft,
+    prepare_nft_transfer,
+};
 use crate::api_fn::nodes::{connect_peer, list_nodes, list_peers, node_heartbeat, register_node};
 use crate::api_fn::stream_blocks::stream_blocks;
-use crate::api_fn::bridge::{admin_bridge_enable, admin_bridge_disable, admin_bridge_transfer, list_bridge_links, bridge_status};
-use crate::api_fn::compliance::{
-    admin_freeze, admin_unfreeze, admin_seize, admin_reverse,
-    admin_list_frozen, admin_compliance_log, admin_shadow_balance,
-};
-use crate::api_fn::ledger::{admin_create_ledger, admin_get_ledger, admin_list_ledgers, list_ledgers};
 use crate::api_fn::supply::get_circulating_supply;
 use crate::api_fn::token::{admin_create_token, admin_mint_token, get_token, list_tokens};
 use crate::api_fn::transaction::{prepare_tx, wallet_send_tx};
 use crate::api_fn::wallet::{balance_by_address, wallet_balance};
 use crate::api_fn::wallet_factory::{faucet_mint, wallet_create, wallet_send_simple};
+use crate::api_keys::{self, ApiKeyCreateRequest, SharedApiKeyStore};
 use crate::helper::resolve_admin_token;
 use crate::stats::Stats;
 use crate::tls::load_tls;
 use anyhow::Result;
+use axum::Json;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -32,14 +42,12 @@ use axum::{
     middleware::{self, Next},
     routing::{any, get, post},
 };
-use axum::Json;
 use axum_server::bind_rustls;
 use axum_server::tls_rustls::RustlsConfig;
 use pms_config::{ServerConfig, Settings, TreasuryWallets, load_config, load_treasury_wallets};
-use serde_json::json;
-use tower::ServiceExt as _;
 use pms_storage::rocks_store::store::RocksStore;
 use pms_wallet::Wallet;
+use serde_json::json;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{
@@ -48,6 +56,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use tokio::time::sleep;
+use tower::ServiceExt as _;
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
@@ -88,6 +97,10 @@ pub struct AppState {
     pub ledger_id: String,
     /// Resolved fee configuration for this ledger context.
     pub effective_fees: Arc<crate::api_fn::tx_helpers::EffectiveFees>,
+    /// Store des clés API pour l'authentification des clients SDK.
+    /// Protégé par un RwLock pour lectures concurrentes (middleware)
+    /// et écritures exclusives (CRUD admin).
+    pub api_key_store: SharedApiKeyStore,
 }
 
 /// Sync the PMS_BLOCKS_TOTAL gauge with the actual in-memory DAG size for the default ledger.
@@ -183,6 +196,94 @@ async fn require_admin_token(
     (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
 }
 
+/// Middleware pour vérifier la clé API (header `X-API-Key`) sur les routes publiques.
+///
+/// Comportement :
+/// - Si le store est vide → passe tout (mode dev, backward-compatible)
+/// - Si X-API-Key absent → 401 "Missing API Key"
+/// - Si clé invalide → 403 "Invalid API Key"
+/// - Si clé révoquée → 403 "API Key revoked"
+/// - Si scope insuffisant → 403 "Insufficient permissions"
+///
+/// Voir chapitre 12 du Rust Book pour comprendre les closures et les traits
+/// qui permettent à ce middleware de fonctionner avec Axum.
+async fn require_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> impl IntoResponse {
+    // Lire le store (read lock — non-bloquant pour les autres lecteurs)
+    let store = state.api_key_store.read().await;
+
+    // Mode dev : si aucune clé n'est configurée, on laisse tout passer
+    if store.is_empty() {
+        drop(store); // Libérer le lock avant de continuer
+        return next.run(request).await;
+    }
+
+    // Extraire le header X-API-Key
+    let api_key = match headers.get("X-API-Key") {
+        Some(value) => match value.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "Invalid X-API-Key header encoding"})),
+                )
+                    .into_response();
+            }
+        },
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "error": "Missing API Key",
+                    "hint": "Add header X-API-Key: pk_live_... to your request"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Vérifier la clé (constant-time comparison du hash)
+    let entry = match store.verify_key(api_key) {
+        Some(entry) => entry.clone(),
+        None => {
+            tracing::warn!("🔑 Invalid API key attempt");
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "Invalid API Key"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Vérifier les permissions (scope vs path)
+    let path = request.uri().path().to_string();
+    if !api_keys::has_permission(&entry, &path) {
+        tracing::warn!(
+            "🔑 API key '{}' denied access to {} (scopes: {:?})",
+            entry.id,
+            path,
+            entry.scopes
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "Insufficient permissions",
+                "scope_required": api_keys::resolve_scope(&path),
+                "your_scopes": entry.scopes
+            })),
+        )
+            .into_response();
+    }
+
+    // Libérer le lock avant de continuer
+    drop(store);
+    next.run(request).await
+}
+
 /// Construit les routes ledger-scoped (celles qui dépendent de l'adapter/store d'un ledger).
 /// Utilisé à la fois pour les routes par défaut et pour les routes `/l/{ledger_id}/`.
 fn build_ledger_scoped_routes() -> Router<AppState> {
@@ -244,6 +345,41 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
         .merge(coordinator_routes)
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Admin API Key CRUD Endpoints
+// ═══════════════════════════════════════════════════════════════════════
+
+/// POST /admin/api-keys — Crée une nouvelle clé API.
+/// Retourne la clé en clair UNE SEULE FOIS.
+async fn admin_create_api_key(
+    State(state): State<AppState>,
+    Json(req): Json<ApiKeyCreateRequest>,
+) -> impl IntoResponse {
+    let mut store = state.api_key_store.write().await;
+    match store.create_key(req.label, req.scopes) {
+        Ok(resp) => (StatusCode::CREATED, Json(json!(resp))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+/// GET /admin/api-keys — Liste toutes les clés (sans les hashes).
+async fn admin_list_api_keys(State(state): State<AppState>) -> impl IntoResponse {
+    let store = state.api_key_store.read().await;
+    Json(json!({ "keys": store.list_keys() }))
+}
+
+/// DELETE /admin/api-keys/{id} — Révoque (soft-delete) une clé.
+async fn admin_revoke_api_key(
+    State(state): State<AppState>,
+    axum::extract::Path(key_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let mut store = state.api_key_store.write().await;
+    match store.revoke_key(&key_id) {
+        Ok(()) => Json(json!({ "status": "revoked", "id": key_id })).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))).into_response(),
+    }
+}
+
 /// Builds per-ledger admin routes (token management, faucet).
 /// Uses admin-token-only middleware (no ConnectInfo needed inside oneshot).
 fn build_ledger_admin_routes(state: AppState) -> Router {
@@ -271,8 +407,11 @@ async fn dynamic_ledger_handler(
     let mgr = match &state.ledger_mgr {
         Some(m) => m,
         None => {
-            return (StatusCode::NOT_FOUND, Json(json!({"error": "multi-ledger not enabled"})))
-                .into_response()
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "multi-ledger not enabled"})),
+            )
+                .into_response();
         }
     };
     let instance = match mgr.get(&ledger_id) {
@@ -282,7 +421,7 @@ async fn dynamic_ledger_handler(
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": format!("ledger '{}' not found", ledger_id)})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -442,7 +581,17 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/admin/compliance/reverse", post(admin_reverse))
         .route("/admin/compliance/frozen", get(admin_list_frozen))
         .route("/admin/compliance/log", get(admin_compliance_log))
-        .route("/admin/compliance/shadow_balance", get(admin_shadow_balance))
+        .route(
+            "/admin/compliance/shadow_balance",
+            get(admin_shadow_balance),
+        )
+        // Admin API Key CRUD endpoints
+        .route("/admin/api-keys", post(admin_create_api_key))
+        .route("/admin/api-keys", get(admin_list_api_keys))
+        .route(
+            "/admin/api-keys/{key_id}",
+            axum::routing::delete(admin_revoke_api_key),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_local_or_admin,
@@ -469,8 +618,10 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     // Endpoint: /dashboard (Static Files)
     let dashboard = Router::new().nest_service("/dashboard", ServeDir::new("pms-dashboard/dist"));
 
-    // Ledger-scoped routes (default ledger)
-    let default_ledger_routes = build_ledger_scoped_routes();
+    // Ledger-scoped routes (default ledger) — protégées par API key
+    let default_ledger_routes = build_ledger_scoped_routes().route_layer(
+        middleware::from_fn_with_state(state.clone(), require_api_key),
+    );
 
     // Dynamic per-ledger routing: /l/{ledger_id}/{*rest}
     // Resolves the ledger at request time from LedgerManager, so newly created
@@ -607,6 +758,11 @@ pub async fn serve_api(
         treasury_wallets,
         node_registry: crate::node_registry::create_registry(),
         fee_pool: crate::fee_pool::create_fee_pool(),
+        api_key_store: api_keys::create_api_key_store(settings.auth.api_keys_file.as_deref())
+            .unwrap_or_else(|e| {
+                tracing::error!("❌ Failed to load API keys: {}", e);
+                api_keys::create_api_key_store(None).expect("empty store must work")
+            }),
         ledger_mgr,
         ledger_id: "main".into(),
         effective_fees: Arc::new(crate::api_fn::tx_helpers::resolve_effective_fees(

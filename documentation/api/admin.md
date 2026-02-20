@@ -319,12 +319,162 @@ curl -k -X POST -H "Authorization: Bearer $TOKEN" \
 
 ---
 
+## POST `/admin/api-keys`
+
+Crée une nouvelle clé API pour un client SDK. La clé secrète est retournée **une seule fois** — elle ne peut pas être récupérée ensuite.
+
+### Request Body
+
+```json
+{
+  "label": "Clicker Game Prod",
+  "scopes": ["wallet", "nft"]
+}
+```
+
+| Champ | Type | Requis | Description |
+|-------|------|--------|-------------|
+| `label` | string | oui | Nom descriptif de la clé |
+| `scopes` | string[] | non | Permissions (défaut: `["*"]`). Voir scopes ci-dessous |
+
+**Scopes disponibles :**
+
+| Scope | Endpoints couverts |
+|-------|--------------------|
+| `*` | Accès total à tous les endpoints publics |
+| `wallet` | `/wallet/*`, `/v1/balance`, `/v1/tx/*`, `/v1/wallet/*` |
+| `nft` | `/v1/nft/*`, `/v1/wallet/{addr}/nfts`, `/v1/wallet/{addr}/utxos` |
+| `dag` | `/v1/dag/*`, `/v1/blocks/*`, `/v1/config`, `/submit/*`, `/blocks/*` |
+| `supply` | `/v1/supply`, `/v1/fee_pool` |
+| `tokens` | `/v1/tokens`, `/v1/tokens/{id}` |
+| `history` | `/v1/history/*`, `/wallet/history` |
+| `coordinator` | `/v1/coordinator/*` |
+
+> 💡 On peut aussi passer un **path exact** comme scope (ex: `"/v1/nft/mint"`).
+
+### Response (201)
+
+```json
+{
+  "id": "key_01",
+  "key": "pk_a1b2c3d4e5f6...",
+  "label": "Clicker Game Prod",
+  "scopes": ["wallet", "nft"],
+  "created_at": "2026-02-20T19:00:00Z"
+}
+```
+
+> ⚠️ **IMPORTANT** : Le champ `key` n'est retourné qu'à la création. Notez-le immédiatement.
+
+### Exemple
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"label": "Clicker Game", "scopes": ["wallet", "nft"]}' \
+  http://localhost:7400/admin/api-keys
+```
+
+---
+
+## GET `/admin/api-keys`
+
+Liste toutes les clés API enregistrées (sans les hashes ni les secrets).
+
+### Response
+
+```json
+{
+  "keys": [
+    {
+      "id": "key_01",
+      "label": "Clicker Game Prod",
+      "scopes": ["wallet", "nft"],
+      "active": true,
+      "created_at": "2026-02-20T19:00:00Z"
+    },
+    {
+      "id": "key_02",
+      "label": "Dashboard",
+      "scopes": ["*"],
+      "active": false,
+      "created_at": "2026-02-19T10:00:00Z"
+    }
+  ]
+}
+```
+
+### Exemple
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://localhost:7400/admin/api-keys
+```
+
+---
+
+## DELETE `/admin/api-keys/{key_id}`
+
+Révoque une clé API (soft-delete). La clé reste dans le fichier mais retournera 403 au middleware.
+
+### Paramètres
+
+| Paramètre | Type | Description |
+|-----------|------|-------------|
+| `key_id` | string (path) | ID de la clé (ex: `key_01`) |
+
+### Response (200)
+
+```json
+{
+  "status": "revoked",
+  "id": "key_01"
+}
+```
+
+### Erreurs
+
+| HTTP | Description |
+|------|-------------|
+| 404 | Clé non trouvée |
+| 404 | Clé déjà révoquée |
+
+### Exemple
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  http://localhost:7400/admin/api-keys/key_01
+```
+
+---
+
+## 🔑 Configuration des clés API
+
+Les clés API protègent les routes publiques (`/v1/*`, `/wallet/*`, `/submit/*`, etc.).
+
+```toml
+[auth]
+# Chemin vers le fichier JSON des clés API SDK.
+# Si absent → pas de vérification (mode dev, backward-compatible).
+api_keys_file = "etc/pms/api-keys.json"
+```
+
+Côté client SDK, la clé se passe via le header `X-API-Key` :
+
+```http
+X-API-Key: pk_a1b2c3d4e5f6...
+```
+
+> 💡 Si aucune clé n'est configurée (`api_keys_file` absent ou fichier vide), le middleware laisse tout passer (mode dev).
+
+---
+
 ## Autres modules Admin
 
 Les endpoints admin sont organises en modules dedies avec leur propre documentation :
 
 | Module | Endpoints | Documentation |
 |--------|-----------|---------------|
+| **API Keys** | `/admin/api-keys` (POST, GET, DELETE) | ↑ voir ci-dessus |
 | **Tokens** | `/admin/tokens/create`, `/admin/tokens/mint` | [tokens.md](./tokens.md) |
 | **Ledgers** | `/admin/ledgers`, `/admin/ledgers/create`, `/admin/ledgers/{id}` | [ledgers.md](./ledgers.md) |
 | **Bridge** | `/admin/bridge/enable`, `/admin/bridge/disable`, `/admin/bridge/transfer` | [bridge.md](./bridge.md) |

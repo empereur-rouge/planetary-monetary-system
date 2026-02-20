@@ -46,9 +46,7 @@ fn forge_signed_wire_block(
     nonce: u64,
     payload: Option<PayloadEnvelope>,
 ) -> WireBlock {
-    let payload_json = payload
-        .as_ref()
-        .and_then(|p| serde_json::to_string(p).ok());
+    let payload_json = payload.as_ref().and_then(|p| serde_json::to_string(p).ok());
 
     let mut wb = WireBlock {
         id: String::new(),
@@ -110,6 +108,7 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
             require_signed_submit: false,
             admin_api_token: None,
             allowed_ips: vec![],
+            api_keys_file: None,
         },
         secrets: pms_config::SecretSettings {
             node_identity_key_path: ".".into(),
@@ -199,7 +198,12 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
 }
 
 /// Bootstrap a LedgerManager + BridgeEngine with a coordinator wallet.
-async fn setup_e2e() -> Result<(Arc<LedgerManager>, BridgeEngine, Arc<Wallet>, tempfile::TempDir)> {
+async fn setup_e2e() -> Result<(
+    Arc<LedgerManager>,
+    BridgeEngine,
+    Arc<Wallet>,
+    tempfile::TempDir,
+)> {
     let coordinator = Arc::new(coordinator_wallet());
     let coordinator_pk = coordinator.encoded_public_key();
 
@@ -336,11 +340,7 @@ async fn bridge_full_lifecycle() -> Result<()> {
     // Receiver should have UTXO on nft ledger
     let nft_inst = mgr.get("nft").unwrap();
     let nft_utxos = nft_inst.adapter.utxos_by_address(&receiver_addr).await;
-    assert_eq!(
-        nft_utxos.len(),
-        1,
-        "receiver should have 1 UTXO on nft"
-    );
+    assert_eq!(nft_utxos.len(), 1, "receiver should have 1 UTXO on nft");
     assert_eq!(nft_utxos[0].1.amount, "100.00000000");
     assert_eq!(nft_utxos[0].1.address, receiver_addr);
 
@@ -383,7 +383,12 @@ async fn bridge_full_lifecycle() -> Result<()> {
         result3.is_err(),
         "transfer should fail when bridge is disabled"
     );
-    assert!(result3.unwrap_err().to_string().contains("no active bridge"));
+    assert!(
+        result3
+            .unwrap_err()
+            .to_string()
+            .contains("no active bridge")
+    );
 
     // ── Step 10: Re-enable bridge and transfer succeeds ──────────────
     let enable_req2 = BridgeEnableRequest {
@@ -399,7 +404,11 @@ async fn bridge_full_lifecycle() -> Result<()> {
 
     // Verify receiver now has 2 UTXOs on nft (100 + 50)
     let nft_utxos_final = nft_inst.adapter.utxos_by_address(&receiver_addr).await;
-    assert_eq!(nft_utxos_final.len(), 2, "receiver should have 2 UTXOs on nft");
+    assert_eq!(
+        nft_utxos_final.len(),
+        2,
+        "receiver should have 2 UTXOs on nft"
+    );
 
     let total: Decimal = nft_utxos_final
         .iter()
@@ -495,7 +504,12 @@ async fn bridge_insufficient_balance() -> Result<()> {
 
     let result = engine.execute_transfer(&req).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("insufficient balance"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("insufficient balance")
+    );
 
     Ok(())
 }
@@ -522,14 +536,7 @@ async fn bridge_multiple_transfers() -> Result<()> {
 
     // Mint 3 separate UTXOs on main
     for _ in 0..3 {
-        mint_on_ledger(
-            &mgr,
-            &coordinator,
-            "main",
-            &sender_addr,
-            "100.00000000",
-        )
-        .await?;
+        mint_on_ledger(&mgr, &coordinator, "main", &sender_addr, "100.00000000").await?;
     }
 
     let main_inst = mgr.get("main").unwrap();

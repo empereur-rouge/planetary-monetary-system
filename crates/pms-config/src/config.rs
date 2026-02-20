@@ -131,6 +131,11 @@ pub struct Auth {
     /// Ex: ["192.168.1.0/24", "10.0.0.5/32"]
     #[serde(default)]
     pub allowed_ips: Vec<String>,
+    /// Chemin vers le fichier JSON des clés API SDK.
+    /// Si None → pas de vérification API key (mode dev, backward-compatible).
+    /// Ex: "etc/pms/api-keys.json"
+    #[serde(default)]
+    pub api_keys_file: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -212,8 +217,16 @@ impl Default for FeeDistributionConfig {
     fn default() -> Self {
         Self {
             beneficiaries: vec![
-                FeeBeneficiary { role: "coordinator".into(), percent_bps: 6500, address: None },
-                FeeBeneficiary { role: "treasury".into(), percent_bps: 3500, address: None },
+                FeeBeneficiary {
+                    role: "coordinator".into(),
+                    percent_bps: 6500,
+                    address: None,
+                },
+                FeeBeneficiary {
+                    role: "treasury".into(),
+                    percent_bps: 3500,
+                    address: None,
+                },
             ],
         }
     }
@@ -225,17 +238,32 @@ impl FeeDistributionConfig {
     pub fn new(coordinator_bps: u16, treasury_bps: u16) -> Self {
         Self {
             beneficiaries: vec![
-                FeeBeneficiary { role: "coordinator".into(), percent_bps: coordinator_bps, address: None },
-                FeeBeneficiary { role: "treasury".into(), percent_bps: treasury_bps, address: None },
+                FeeBeneficiary {
+                    role: "coordinator".into(),
+                    percent_bps: coordinator_bps,
+                    address: None,
+                },
+                FeeBeneficiary {
+                    role: "treasury".into(),
+                    percent_bps: treasury_bps,
+                    address: None,
+                },
             ],
         }
     }
 
     /// Valide que les basis points totalisent 10000 (100%).
     pub fn validate(&self) -> Result<(), String> {
-        let total: u32 = self.beneficiaries.iter().map(|b| b.percent_bps as u32).sum();
+        let total: u32 = self
+            .beneficiaries
+            .iter()
+            .map(|b| b.percent_bps as u32)
+            .sum();
         if total != 10000 {
-            return Err(format!("Fee basis points must sum to 10000 (100%), got {}", total));
+            return Err(format!(
+                "Fee basis points must sum to 10000 (100%), got {}",
+                total
+            ));
         }
         Ok(())
     }
@@ -331,7 +359,6 @@ pub struct FeesSettings {
     /// Interval in seconds for scheduled inflation mint. Default: 86400 (24h).
     #[serde(default = "default_daily_inflation_interval_sec")]
     pub daily_inflation_interval_sec: u64,
-
 }
 
 fn default_fee_ratio() -> String {

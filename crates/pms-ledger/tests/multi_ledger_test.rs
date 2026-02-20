@@ -38,6 +38,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             require_signed_submit: false,
             admin_api_token: None,
             allowed_ips: vec![],
+            api_keys_file: None,
         },
         secrets: pms_config::SecretSettings {
             node_identity_key_path: ".".into(),

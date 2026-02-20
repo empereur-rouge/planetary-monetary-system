@@ -46,6 +46,9 @@ treasury_addresses = ["pms1z053s5nyhpsewdn5cv9wl3kse3h8wt0zv2vpkv7kt798jdy3vctvj
 [auth]
 require_signed_submit = false
 admin_api_token = "env:PMS_ADMIN_TOKEN_DEV"
+# Chemin vers le fichier JSON des clés API SDK.
+# Si absent → pas de vérification API key (mode dev, backward-compatible).
+# api_keys_file = "etc/pms/api-keys.json"
 
 [secrets]
 node_identity_key_path = "etc/pms/node-identity.key"

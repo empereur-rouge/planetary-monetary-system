@@ -125,7 +125,14 @@ pub async fn spawn_node_generic_rocks_with_seed(
     let adapter_concrete = CoreAdapter::new_with_policy(dag.clone(), store.clone(), policy);
     let adapter: Arc<dyn NetDagAdapter> = adapter_concrete.clone();
 
-    let server = Server::new(adapter.clone(), &net_id, proto, node_wallet, &settings.p2p, None);
+    let server = Server::new(
+        adapter.clone(),
+        &net_id,
+        proto,
+        node_wallet,
+        &settings.p2p,
+        None,
+    );
 
     let cfg = Arc::new(ServerConfig {
         bind_addr: bind_addr.to_string(),
@@ -141,6 +148,7 @@ pub async fn spawn_node_generic_rocks_with_seed(
             require_signed_submit: false,
             admin_api_token: None,
             allowed_ips: vec![], // Tests: allow all IPs
+            api_keys_file: None,
         },
     });
 

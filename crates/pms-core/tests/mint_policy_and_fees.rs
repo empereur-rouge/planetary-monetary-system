@@ -260,6 +260,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             require_signed_submit: true,
             admin_api_token: None,
             allowed_ips: vec![],
+            api_keys_file: None,
         },
         secrets: SecretSettings {
             node_identity_key_path: "".to_string(),

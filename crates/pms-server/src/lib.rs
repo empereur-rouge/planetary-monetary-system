@@ -11,6 +11,7 @@ pub mod fee_distribution;
 pub mod fee_pool;
 pub mod node_registry;
 
+pub mod api_keys;
 mod helper;
 pub mod internal_api;
 pub mod limits;

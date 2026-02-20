@@ -62,6 +62,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
         treasury_wallets: pms_config::TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
+        api_key_store: pms_server::api_keys::create_api_key_store(None).unwrap(),
         ledger_mgr: None,
         ledger_id: "main".into(),
         effective_fees: std::sync::Arc::new(

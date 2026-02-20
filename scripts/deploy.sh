@@ -178,6 +178,13 @@ if [ ! -f etc/pms/node.key ]; then
     echo -e "   \${GREEN}✅ Generated node.key\${NC}"
 fi
 
+# api-keys.json (SDK API key store)
+if [ ! -f etc/pms/api-keys.json ]; then
+    echo '{"keys":[]}' > etc/pms/api-keys.json
+    chmod 600 etc/pms/api-keys.json
+    echo -e "   \${GREEN}✅ Created empty api-keys.json\${NC}"
+fi
+
 # TLS with SANs for Docker internal hostnames
 if [ ! -f secrets/tls/cert.pem ]; then
     echo -e "   \${YELLOW}🔐 Generating TLS certificates with Docker SANs...\${NC}"
