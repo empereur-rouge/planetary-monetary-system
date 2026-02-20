@@ -487,6 +487,9 @@ if ask_yes_no "   Download Secure Backup (coordinator keys) locally?" "Y"; then
     scp -q -r $VPS_USER@$VPS_IP:/opt/pms/etc/pms/treasury-keys/* "$TMP_DIR/treasury-keys/" 2>/dev/null || true
     scp -q $VPS_USER@$VPS_IP:/opt/pms/etc/pms/sdk-api-key.json "$TMP_DIR/sdk-api-key.json" 2>/dev/null || echo "{}" > "$TMP_DIR/sdk-api-key.json"
 
+    # Clean up the temporary API key file on the VPS for security
+    ssh -q $VPS_USER@$VPS_IP "rm -f /opt/pms/etc/pms/sdk-api-key.json" 2>/dev/null
+
     python3 -c "
 import json, os, glob
 
