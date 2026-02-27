@@ -82,6 +82,9 @@ pub struct ShardedUtxoSet {
     address_index: DashMap<String, DashSet<OutputId>>,
     /// Cache supply incrémental : asset_id -> (total_amount, utxo_count)
     supply_cache: Mutex<SupplyCache>,
+    /// Per-address native (PMS) balance cache — avoids shard read lock starvation
+    /// under continuous write load (e.g. heavy token minting).
+    native_balance_cache: DashMap<String, Decimal>,
     /// Interner pour dédupliquer addresses et asset_ids
     interner: Interner,
 }
@@ -93,6 +96,7 @@ impl ShardedUtxoSet {
             shards,
             address_index: DashMap::new(),
             supply_cache: Mutex::new(SupplyCache::new()),
+            native_balance_cache: DashMap::new(),
             interner: Interner::new(),
         }
     }
@@ -128,6 +132,15 @@ impl ShardedUtxoSet {
         let entry = cache.entry(key).or_insert((Decimal::ZERO, 0));
         entry.0 += output.amount;
         entry.1 += 1;
+        drop(cache);
+
+        // Maintain native balance cache (lock-free DashMap, no shard dependency)
+        if output.asset_id.is_none() {
+            self.native_balance_cache
+                .entry(output.address.to_string())
+                .and_modify(|b| *b += output.amount)
+                .or_insert(output.amount);
+        }
     }
 
     fn supply_sub_compact(&self, output: &CompactOutput) {
@@ -141,6 +154,14 @@ impl ShardedUtxoSet {
             entry.1 = entry.1.saturating_sub(1);
             if entry.1 == 0 {
                 cache.remove(&key);
+            }
+        }
+        drop(cache);
+
+        // Maintain native balance cache
+        if output.asset_id.is_none() {
+            if let Some(mut entry) = self.native_balance_cache.get_mut(&*output.address) {
+                *entry.value_mut() -= output.amount;
             }
         }
     }
@@ -324,26 +345,33 @@ impl ShardedUtxoSet {
 
     // ─── Balance queries (indexed) ───────────────────────────────────
 
-    /// Calcule la balance PMS d'une adresse (rétrocompatible).
+    /// Calcule la balance PMS native d'une adresse via le cache (O(1), pas de shard lock).
     pub async fn balance_by_address(&self, address: &str) -> Decimal {
-        self.balance_by_address_and_asset(address, None).await
+        self.native_balance_cache
+            .get(address)
+            .map(|r| *r.value())
+            .unwrap_or(Decimal::ZERO)
     }
 
     /// Calcule la balance d'une adresse pour un asset spécifique.
-    /// Utilise l'index secondaire : O(utxos_de_l'adresse) au lieu de O(total).
-    /// Lecture directe du Decimal (pas de parsing string).
+    /// Native (None): lecture directe du cache O(1), pas de shard lock.
+    /// Token (Some): utilise l'index secondaire + shard read locks.
     pub async fn balance_by_address_and_asset(
         &self,
         address: &str,
         asset_id: Option<&str>,
     ) -> Decimal {
+        // Native PMS: use the lock-free balance cache
+        if asset_id.is_none() {
+            return self.balance_by_address(address).await;
+        }
+
+        // Token balance: shard-based approach (not in hot path during heavy minting)
         // Collect OutputIds first, then DROP the DashMap guard before awaiting shard locks.
-        // This prevents deadlock with apply_diff() which holds shard write lock → DashMap.
         let out_points: Vec<OutputId> = match self.address_index.get(address) {
             Some(utxo_ids) => utxo_ids.iter().map(|r| r.key().clone()).collect(),
             None => return Decimal::ZERO,
         };
-        // DashMap Ref guard is dropped here
 
         let mut total = Decimal::ZERO;
         for out_point in &out_points {
@@ -351,7 +379,6 @@ impl ShardedUtxoSet {
             let shard = self.shards[idx].read().await;
             if let Some(compact) = shard.get(out_point) {
                 let matches = match (&compact.asset_id, asset_id) {
-                    (None, None) => true,
                     (Some(a), Some(b)) => a.as_ref() == b,
                     _ => false,
                 };
@@ -389,10 +416,11 @@ impl ShardedUtxoSet {
 
     // ─── Bootstrap rebuild ───────────────────────────────────────────
 
-    /// Reconstruit l'index adresse et le cache supply à partir du contenu actuel.
-    /// Appelé une seule fois au bootstrap après chargement des UTXOs.
+    /// Reconstruit l'index adresse, le cache supply et le cache balance
+    /// à partir du contenu actuel. Appelé une seule fois au bootstrap.
     pub async fn rebuild_indexes(&self) {
         self.address_index.clear();
+        self.native_balance_cache.clear();
         let mut new_supply = SupplyCache::new();
 
         for shard in &self.shards {
@@ -409,6 +437,14 @@ impl ShardedUtxoSet {
                 let entry = new_supply.entry(key).or_insert((Decimal::ZERO, 0));
                 entry.0 += compact.amount;
                 entry.1 += 1;
+
+                // Native balance cache
+                if compact.asset_id.is_none() {
+                    self.native_balance_cache
+                        .entry(compact.address.to_string())
+                        .and_modify(|b| *b += compact.amount)
+                        .or_insert(compact.amount);
+                }
             }
         }
 

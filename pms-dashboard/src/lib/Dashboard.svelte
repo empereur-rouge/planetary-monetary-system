@@ -60,11 +60,11 @@
                         console.error("Metrics failed", err);
                         return "";
                     }),
-                    ledgerApiCall("/v1/nodes").catch((err) => {
+                    apiCall("/v1/nodes").catch((err) => {
                         console.error("Nodes failed", err);
                         return { nodes: [] };
                     }),
-                    ledgerApiCall("/v1/peers").catch((err) => {
+                    apiCall("/v1/peers").catch((err) => {
                         console.error("Peers failed", err);
                         return [];
                     }),
