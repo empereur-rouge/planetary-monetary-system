@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- **fix(gateway)**: Fixed 404 error and memory buffering issue on `/blocks/stream` (SSE) endpoint by implementing a streaming proxy with `reqwest` and routing it properly in `pms-gateway`.
 - **feat(server)**: Added API key authentication middleware for public routes. Keys are SHA-256 hashed, validated with constant-time comparison, and support granular per-group/per-endpoint scopes (`wallet`, `nft`, `dag`, `supply`, `tokens`, `history`, `coordinator`, `*`).
 - **feat(server)**: Added admin CRUD endpoints for API key management (`POST /admin/api-keys`, `GET /admin/api-keys`, `DELETE /admin/api-keys/{id}`).
 - **feat(config)**: Added `api_keys_file` field to `[auth]` config section for specifying the JSON key store path. BREAKING: Auth struct has a new field (uses `#[serde(default)]`).

@@ -339,6 +339,7 @@ impl Agent for RandomAgent {
                     self.cached_balance = bal_str.parse::<f64>().unwrap_or(0.0);
                 }
                 Err(e) => {
+                    tracing::warn!("[{}] Refuel failed: {:#}", self.name, e);
                     let _ = ctx.metrics_tx.send(MetricEvent::AgentError {
                         agent_name: self.name.clone(),
                         error: format!("refuel failed: {:#}", e),

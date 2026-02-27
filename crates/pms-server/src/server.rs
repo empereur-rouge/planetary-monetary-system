@@ -135,7 +135,6 @@ impl Server {
                     msg = rx.recv() => {
                         match msg {
                             Some(id) => {
-                                eprintln!("[SRV-WORKER] Received ID to broadcast: {}", &id[..8.min(id.len())]);
                                 buffer.push(id);
                                 if buffer.len() >= max_batch {
                                     self.flush_broadcast_buffer(&mut buffer).await;
@@ -165,22 +164,29 @@ impl Server {
             return;
         }
         let ids = std::mem::take(buffer);
-        eprintln!("[SRV] Broadcasting Inv batch of {} ids", ids.len());
+        tracing::debug!("Broadcasting Inv batch of {} ids", ids.len());
         let _ = self.broadcast(&NetMsg::Inv { ids }).await;
     }
 
     /// Crée un Server "API-only" sans broadcast worker ni P2P.
     /// Utilisé pour les routes per-ledger dans le multi-ledger,
     /// où seul l'adapter est nécessaire (pas le réseau P2P).
+    ///
+    /// Si `shared_broadcast_tx` est fourni, les appels `enqueue_broadcast()`
+    /// seront routés vers le worker du serveur principal (P2P).
     pub fn api_only(
         adapter: Arc<dyn NetDagAdapter>,
         network_id: impl Into<String>,
         protocol_version: u32,
         node_wallet: Arc<Wallet>,
+        shared_broadcast_tx: Option<mpsc::Sender<String>>,
     ) -> Arc<Self> {
         let node_id = node_wallet.encoded_public_key();
-        // Canal dummy (jamais consommé — pas de broadcast worker)
-        let (broadcast_tx, _rx) = mpsc::channel(1);
+        let broadcast_tx = shared_broadcast_tx.unwrap_or_else(|| {
+            // Canal dummy (jamais consommé — pas de broadcast worker)
+            let (tx, _rx) = mpsc::channel(1);
+            tx
+        });
 
         Arc::new(Self {
             adapter,
@@ -200,6 +206,12 @@ impl Server {
             ledger_mgr: None,
         })
         // NOTE: pas de spawn_broadcast_worker ici — API-only
+    }
+
+    /// Returns a clone of the broadcast channel sender.
+    /// Used by per-ledger API-only servers to share the main server's broadcast worker.
+    pub fn broadcast_sender(&self) -> mpsc::Sender<String> {
+        self.broadcast_tx.clone()
     }
 
     pub fn adapter_arc(&self) -> Arc<dyn NetDagAdapter> {
@@ -291,13 +303,8 @@ impl Server {
     /// Ajoute un ID de bloc à la file de diffusion.
     /// Il sera groupé avec d'autres IDs pour optimiser le réseau.
     pub async fn enqueue_broadcast(&self, id: String) {
-        eprintln!(
-            "[SRV] enqueue_broadcast called for: {}",
-            &id[..8.min(id.len())]
-        );
-        match self.broadcast_tx.send(id).await {
-            Ok(_) => eprintln!("[SRV] enqueue_broadcast: sent to channel OK"),
-            Err(e) => eprintln!("[SRV] enqueue_broadcast: channel send FAILED: {}", e),
+        if let Err(e) = self.broadcast_tx.send(id).await {
+            tracing::warn!("enqueue_broadcast: channel send failed: {}", e);
         }
     }
 
@@ -479,7 +486,7 @@ impl Server {
             });
         }
 
-        // 2) Démarrage de l’API HTTP (TLS ou non, la logique est dans run_api)
+        // 2) Démarrage de l'API HTTP (TLS ou non, la logique est dans run_api)
         {
             let srv = self.clone();
             let addr = cfg.api_addr.clone();
@@ -488,20 +495,32 @@ impl Server {
             let ready_for_api = ready.clone();
             let store_for_api = store.clone();
 
+            let api_handle = tokio::spawn(async move {
+                srv.run_api(
+                    addr,
+                    cfg_for_api,
+                    ready_for_api,
+                    stats_for_api,
+                    store_for_api,
+                )
+                .await
+            });
+
+            // Watchdog: detect API task crash (panic or error) and exit process
             tokio::spawn(async move {
-                if let Err(e) = srv
-                    .run_api(
-                        addr,
-                        cfg_for_api,
-                        ready_for_api,
-                        stats_for_api,
-                        store_for_api,
-                    )
-                    .await
-                {
-                    eprintln!("[API] FATAL error: {e}");
-                    // CRITICAL: Exit process on API failure to conform to "fail fast" requirement
-                    std::process::exit(1);
+                match api_handle.await {
+                    Ok(Ok(())) => {
+                        eprintln!("[API] Server exited cleanly (unexpected)");
+                        std::process::exit(1);
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("[API] FATAL error: {e}");
+                        std::process::exit(1);
+                    }
+                    Err(join_err) => {
+                        eprintln!("[API] PANIC in API server task: {:?}", join_err);
+                        std::process::exit(1);
+                    }
                 }
             });
         }

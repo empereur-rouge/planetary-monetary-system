@@ -18,6 +18,8 @@ pub struct CoordinatorInfoResponse {
     pub secp256k1_pubkey: String,
     /// Clé publique X25519 (hex) - pour le chiffrement
     pub x25519_pubkey: String,
+    /// Préfixe d'adresse du ledger (ex: "pms")
+    pub address_prefix: String,
 }
 
 /// GET /v1/coordinator/info
@@ -57,6 +59,7 @@ pub async fn get_coordinator_info(
         is_coordinator,
         secp256k1_pubkey: secp256k1,
         x25519_pubkey: x25519,
+        address_prefix: settings.rocks.prefix.clone(),
     };
 
     (StatusCode::OK, Json(response))

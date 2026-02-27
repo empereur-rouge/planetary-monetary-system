@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod blocks;
 pub mod bridge;
 pub mod compliance;

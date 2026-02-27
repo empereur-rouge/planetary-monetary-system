@@ -48,9 +48,12 @@ impl EngineClient {
 
         let mut req = self.http.post(&url);
 
-        // Forward Authorization header if present
+        // Forward Authorization + API Key headers if present
         if let Some(auth) = headers.get("authorization") {
             req = req.header("Authorization", auth);
+        }
+        if let Some(api_key) = headers.get("x-api-key") {
+            req = req.header("X-API-Key", api_key);
         }
         req = req.header("Content-Type", "application/json");
 
@@ -75,9 +78,12 @@ impl EngineClient {
 
         let mut req = self.http.get(&url);
 
-        // Forward Authorization header if present
+        // Forward Authorization + API Key headers if present
         if let Some(auth) = headers.get("authorization") {
             req = req.header("Authorization", auth);
+        }
+        if let Some(api_key) = headers.get("x-api-key") {
+            req = req.header("X-API-Key", api_key);
         }
 
         let resp = req.send().await?;
@@ -88,6 +94,39 @@ impl EngineClient {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
         let body = resp.text().await?;
+        Ok((status, body, content_type))
+    }
+
+    /// Proxy GET request and stream the response body
+    pub async fn proxy_stream(
+        &self,
+        path: &str,
+        headers: http::HeaderMap,
+    ) -> Result<(StatusCode, axum::body::Body, Option<String>), anyhow::Error> {
+        let url = format!("{}{}", self.base_url, path);
+
+        let mut req = self.http.get(&url);
+
+        // Forward Authorization + API Key headers if present
+        if let Some(auth) = headers.get("authorization") {
+            req = req.header("Authorization", auth);
+        }
+        if let Some(api_key) = headers.get("x-api-key") {
+            req = req.header("X-API-Key", api_key);
+        }
+
+        let resp = req.send().await?;
+        let status = StatusCode::from_u16(resp.status().as_u16())?;
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        // Convert stream to axum::body::Body
+        let stream = resp.bytes_stream();
+        let body = axum::body::Body::from_stream(stream);
+
         Ok((status, body, content_type))
     }
 }

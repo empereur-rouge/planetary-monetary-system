@@ -39,6 +39,7 @@ tower-http = { version = "0.6.6", features = [
     "trace",
     "cors",
     "fs",
+    "catch-panic",
 ] }
 tower_governor = "0.8.0"
 base64 = "0.22.1"
@@ -54,7 +55,11 @@ ipnetwork = "0.20" # For CIDR parsing in IP allowlist
 axum-macros = "0.5.0"
 pms-types-nft = { path = "../pms-types-nft" }
 pms-bridge = { path = "../pms-bridge" }
+pms-event = { path = "../pms-event" }
 chrono = "0.4.42"
+async-stream = "0.3"
+tokio-stream = "0.1"
+futures-util = "0.3"
 
 
 [dev-dependencies]

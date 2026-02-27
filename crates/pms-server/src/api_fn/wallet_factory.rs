@@ -30,8 +30,11 @@ pub struct WalletCreateRequest {
 pub struct WalletCreateResponse {
     pub address: String,
     pub private_key_b64: String,
+    pub private_key_hex: String,
     pub public_key_hex: String,
     pub x25519_pub_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mnemonic_words: Option<Vec<String>>,
 }
 
 pub async fn wallet_create(
@@ -59,14 +62,117 @@ pub async fn wallet_create(
     };
 
     let address = wallet.get_address(hrp);
+    let priv_bytes = STANDARD.decode(&wallet.private_key_b64).unwrap_or_default();
+    let private_key_hex = hex::encode(&priv_bytes);
 
     (
         StatusCode::OK,
         Json(json!(WalletCreateResponse {
             address,
             private_key_b64: wallet.private_key_b64,
+            private_key_hex,
             public_key_hex: wallet.public_key_hex,
             x25519_pub_hex: wallet.x25519_pub_hex,
+            mnemonic_words: wallet.mnemonic_words,
+        })),
+    )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// POST /v1/wallet/restore/mnemonic — Restaure un wallet depuis 24 mots BIP39
+// ════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+pub struct RestoreMnemonicRequest {
+    /// 24 mots BIP39 séparés par des espaces
+    pub mnemonic: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RestoreMnemonicResponse {
+    pub address: String,
+    pub private_key_b64: String,
+    pub private_key_hex: String,
+    pub public_key_hex: String,
+    pub x25519_pub_hex: String,
+    pub mnemonic_words: Vec<String>,
+}
+
+pub async fn wallet_restore_mnemonic(
+    State(state): State<AppState>,
+    Json(req): Json<RestoreMnemonicRequest>,
+) -> impl IntoResponse {
+    let hrp = &state.settings.address.hrp;
+    let words: Vec<&str> = req.mnemonic.split_whitespace().collect();
+
+    let wallet = match Wallet::from_word_list(&words) {
+        Ok(w) => w,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid mnemonic: {e}") })),
+            );
+        }
+    };
+
+    let address = wallet.get_address(hrp);
+    let priv_bytes = STANDARD.decode(&wallet.private_key_b64).unwrap_or_default();
+    let private_key_hex = hex::encode(&priv_bytes);
+    let mnemonic_words = wallet
+        .mnemonic_words
+        .clone()
+        .unwrap_or_else(|| words.iter().map(|w| w.to_string()).collect());
+
+    (
+        StatusCode::OK,
+        Json(json!(RestoreMnemonicResponse {
+            address,
+            private_key_b64: wallet.private_key_b64,
+            private_key_hex,
+            public_key_hex: wallet.public_key_hex,
+            x25519_pub_hex: wallet.x25519_pub_hex,
+            mnemonic_words,
+        })),
+    )
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// POST /v1/wallet/restore/private-key — Restaure un wallet depuis une clé privée hex
+// ════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+pub struct RestorePrivateKeyRequest {
+    /// Clé privée hexadécimale (64 chars = 32 bytes)
+    pub private_key_hex: String,
+}
+
+pub async fn wallet_restore_private_key(
+    State(state): State<AppState>,
+    Json(req): Json<RestorePrivateKeyRequest>,
+) -> impl IntoResponse {
+    let hrp = &state.settings.address.hrp;
+
+    let wallet = match Wallet::from_hex(&req.private_key_hex) {
+        Ok(w) => w,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid private key: {e}") })),
+            );
+        }
+    };
+
+    let address = wallet.get_address(hrp);
+
+    (
+        StatusCode::OK,
+        Json(json!(WalletCreateResponse {
+            address,
+            private_key_b64: wallet.private_key_b64,
+            private_key_hex: req.private_key_hex,
+            public_key_hex: wallet.public_key_hex,
+            x25519_pub_hex: wallet.x25519_pub_hex,
+            mnemonic_words: None,
         })),
     )
 }

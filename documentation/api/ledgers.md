@@ -12,6 +12,12 @@ Chaque ledger dispose de ses propres routes via le prefixe `/l/{ledger_id}/...`.
 
 Liste tous les ledgers actifs. Endpoint public.
 
+### Query Parameters
+
+| Parametre | Type | Description |
+|-----------|------|-------------|
+| `search` | string | Filtre prefix (starts_with, case-insensitive) sur `id`, `network_id` ou `symbol` |
+
 ### Response
 
 ```json
@@ -22,23 +28,29 @@ Liste tous les ledgers actifs. Endpoint public.
       "network_id": "mainnet",
       "prefix": "",
       "protocol_version": 1,
-      "block_count": 12345
+      "block_count": 12345,
+      "symbol": "PMS"
     },
     {
       "id": "gaming",
       "network_id": "gaming-net",
       "prefix": "gam_",
       "protocol_version": 1,
-      "block_count": 678
+      "block_count": 678,
+      "symbol": "GAME"
     }
   ]
 }
 ```
 
-### Exemple
+### Exemples
 
 ```bash
+# Tous les ledgers
 curl -k https://localhost:8443/v1/ledgers
+
+# Filtrer par prefixe
+curl -k "https://localhost:8443/v1/ledgers?search=gam"
 ```
 
 ---
@@ -57,6 +69,7 @@ Liste detaillee des ledgers avec informations techniques. Necessite les droits a
       "network_id": "mainnet",
       "prefix": "",
       "protocol_version": 1,
+      "symbol": "PMS",
       "tip_limit": null,
       "block_count": 12345,
       "utxo_shards": 256
@@ -93,6 +106,7 @@ Detail d'un ledger specifique. Necessite les droits admin.
   "network_id": "gaming-net",
   "prefix": "gam_",
   "protocol_version": 1,
+  "symbol": "GAME",
   "tip_limit": 64,
   "block_count": 678,
   "utxo_shards": 256

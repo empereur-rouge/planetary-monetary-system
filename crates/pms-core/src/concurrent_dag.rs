@@ -84,6 +84,12 @@ pub struct ConcurrentDag {
 
     /// Insert counter for amortized pruning checks.
     insert_counter: AtomicU64,
+
+    /// FIFO order for bounded spent_outpoints pruning.
+    spent_order: Mutex<VecDeque<(String, u32)>>,
+
+    /// Maximum spent outpoints to keep in RAM. 0 = unlimited.
+    max_spent_outpoints: usize,
 }
 
 impl ConcurrentDag {
@@ -95,6 +101,12 @@ impl ConcurrentDag {
     /// Create a new ConcurrentDag with a maximum in-memory block count.
     /// `max_blocks = 0` means unlimited (no pruning).
     pub fn with_capacity(max_blocks: usize) -> Self {
+        Self::with_capacity_and_spent_limit(max_blocks, 0)
+    }
+
+    /// Create a new ConcurrentDag with bounded blocks and bounded spent outpoints.
+    /// `max_spent_outpoints = 0` means unlimited.
+    pub fn with_capacity_and_spent_limit(max_blocks: usize, max_spent_outpoints: usize) -> Self {
         Self {
             blocks: DashMap::new(),
             children_count: DashMap::new(),
@@ -104,6 +116,8 @@ impl ConcurrentDag {
             insertion_order: Mutex::new(VecDeque::new()),
             max_blocks,
             insert_counter: AtomicU64::new(0),
+            spent_order: Mutex::new(VecDeque::new()),
+            max_spent_outpoints,
         }
     }
 
@@ -288,9 +302,23 @@ impl ConcurrentDag {
         self.blocks.is_empty()
     }
 
-    /// Mark an outpoint as spent
+    /// Mark an outpoint as spent (bounded FIFO eviction when limit > 0)
     pub fn mark_spent(&self, txid: &str, index: u32) {
-        self.spent_outpoints.insert((txid.to_string(), index));
+        let key = (txid.to_string(), index);
+        if self.spent_outpoints.insert(key.clone()) {
+            if self.max_spent_outpoints > 0 {
+                let mut order = match self.spent_order.lock() {
+                    Ok(o) => o,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                order.push_back(key);
+                while order.len() > self.max_spent_outpoints {
+                    if let Some(oldest) = order.pop_front() {
+                        self.spent_outpoints.remove(&oldest);
+                    }
+                }
+            }
+        }
     }
 
     /// Check if an outpoint is already spent
@@ -453,11 +481,12 @@ impl ConcurrentDag {
     pub async fn bootstrap_from_store_with_capacity<S>(
         store: &S,
         max_blocks: usize,
+        max_spent_outpoints: usize,
     ) -> Result<Self>
     where
         S: pms_storage::DagStorage + Send + Sync,
     {
-        let dag = Self::with_capacity(max_blocks);
+        let dag = Self::with_capacity_and_spent_limit(max_blocks, max_spent_outpoints);
         let ids = store.all_block_ids().await?;
 
         // Phase 1: Load all blocks WITHOUT pruning or insertion-order tracking.
@@ -546,7 +575,7 @@ impl ConcurrentDag {
     where
         S: pms_storage::DagStorage + Send + Sync,
     {
-        Self::bootstrap_from_store_with_capacity(store, 0).await
+        Self::bootstrap_from_store_with_capacity(store, 0, 0).await
     }
 }
 

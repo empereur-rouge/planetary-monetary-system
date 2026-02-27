@@ -24,6 +24,7 @@ L'API PMS expose des endpoints REST pour interagir avec le **DAG centralise priv
 | [Tokens](./tokens.md) | Registre des tokens custom (creation, mint, listing) |
 | [NFT](./nft.md) | Mint, burn et query des NFTs |
 | [Cube](./cube.md) | Systeme CUBE (claim et burn vers PMS) |
+| [Activity](./activity.md) | Flux d'activite complet d'un wallet (fees, transfers, NFT, compliance, SSE) |
 | [History](./history.md) | Historique des transactions |
 | [Supply](./supply.md) | Statistiques de l'offre en circulation |
 | [DAG](./dag.md) | Operations sur le graphe |
@@ -95,6 +96,20 @@ curl -k https://localhost:8443/livez
 curl -k -X POST https://localhost:8443/v1/wallet/create
 ```
 
+### Restaurer un wallet depuis un mnemonic
+```bash
+curl -k -X POST https://localhost:8443/v1/wallet/restore/mnemonic \
+  -H "Content-Type: application/json" \
+  -d '{"mnemonic": "word1 word2 ... word24"}'
+```
+
+### Restaurer un wallet depuis une cle privee
+```bash
+curl -k -X POST https://localhost:8443/v1/wallet/restore/private-key \
+  -H "Content-Type: application/json" \
+  -d '{"private_key_hex": "a1b2c3d4..."}'
+```
+
 ### Obtenir le solde d'une adresse
 ```bash
 curl -k -X POST https://localhost:8443/v1/balance \
@@ -134,6 +149,8 @@ curl -k https://localhost:8443/v1/wallet/{address}/nfts
 | Methode | Endpoint | Description |
 |---------|----------|-------------|
 | POST | `/v1/wallet/create` | Generer un nouveau wallet |
+| POST | `/v1/wallet/restore/mnemonic` | Restaurer un wallet depuis 24 mots BIP39 |
+| POST | `/v1/wallet/restore/private-key` | Restaurer un wallet depuis une cle privee hex |
 | POST | `/v1/wallet/send-simple` | Envoi custodial one-shot |
 | POST | `/wallet/balance` | Solde avec UTXOs decryptes |
 | POST | `/wallet/tx/send` | Envoyer une TX pre-signee |
@@ -170,6 +187,12 @@ curl -k https://localhost:8443/v1/wallet/{address}/nfts
 |---------|----------|-------------|
 | POST | `/v1/cube/claim` | Claim 1000 CUBE |
 | POST | `/v1/cube/burn` | Burn CUBE -> PMS (10:1) |
+
+### Activity
+| Methode | Endpoint | Description |
+|---------|----------|-------------|
+| GET | `/v1/wallet/{address}/activity` | Activite complete d'un wallet (filtre, pagination) |
+| GET | `/v1/wallet/{address}/activity/stream` | Activite en temps reel (SSE) |
 
 ### History
 | Methode | Endpoint | Description |

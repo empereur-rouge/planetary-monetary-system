@@ -24,6 +24,7 @@ pub struct DagClient {
     base_url: String,
     prefix: String,
     admin_token: Option<String>,
+    api_key: Option<String>,
 }
 
 impl DagClient {
@@ -44,6 +45,7 @@ impl DagClient {
             base_url: target.url.trim_end_matches('/').to_string(),
             prefix,
             admin_token: target.admin_token.clone(),
+            api_key: target.api_key.clone(),
         }
     }
 
@@ -54,6 +56,7 @@ impl DagClient {
             base_url: self.base_url.clone(),
             prefix: format!("/l/{}", ledger_id),
             admin_token: self.admin_token.clone(),
+            api_key: self.api_key.clone(),
         }
     }
 
@@ -69,6 +72,14 @@ impl DagClient {
         self.admin_token
             .as_ref()
             .map(|t| format!("Bearer {}", t))
+    }
+
+    /// Apply X-API-Key header if configured
+    fn with_api_key(&self, builder: RequestBuilder) -> RequestBuilder {
+        match &self.api_key {
+            Some(key) => builder.header("X-API-Key", key),
+            None => builder,
+        }
     }
 
     /// Send a request with automatic retry on 429 (Too Many Requests).
@@ -123,6 +134,7 @@ impl DagClient {
             .http
             .post(self.url("/v1/wallet/create"))
             .json(&serde_json::json!({}));
+        let builder = self.with_api_key(builder);
 
         let resp = self.send_with_retry(builder).await?;
 
@@ -148,6 +160,7 @@ impl DagClient {
     ) -> SimResult<TimedResponse<SendResponse>> {
         let start = Instant::now();
         let builder = self.http.post(self.url("/v1/wallet/send-simple")).json(req);
+        let builder = self.with_api_key(builder);
         let resp = self.send_with_retry(builder).await?;
 
         if !resp.status().is_success() {
@@ -209,6 +222,7 @@ impl DagClient {
             .json(&BalanceRequest {
                 address: address.to_string(),
             });
+        let builder = self.with_api_key(builder);
 
         let resp = self.send_with_retry(builder).await?;
 
@@ -225,6 +239,7 @@ impl DagClient {
             .http
             .post(self.url("/v1/dag/tips"))
             .json(&TipsRequest { limit });
+        let builder = self.with_api_key(builder);
 
         let resp = self.send_with_retry(builder).await?;
 
@@ -237,14 +252,14 @@ impl DagClient {
     }
 
     pub async fn get_supply(&self) -> SimResult<SupplyResponse> {
-        let builder = self.http.get(self.url("/v1/supply"));
+        let builder = self.with_api_key(self.http.get(self.url("/v1/supply")));
         let resp = self.send_with_retry(builder).await?;
         let data: SupplyResponse = resp.json().await?;
         Ok(data)
     }
 
     pub async fn list_tokens(&self) -> SimResult<serde_json::Value> {
-        let builder = self.http.get(self.url("/v1/tokens"));
+        let builder = self.with_api_key(self.http.get(self.url("/v1/tokens")));
         let resp = self.send_with_retry(builder).await?;
         let data: serde_json::Value = resp.json().await?;
         Ok(data)
@@ -354,6 +369,7 @@ impl DagClient {
             .http
             .post(self.url("/v1/nft/mint"))
             .json(req);
+        let builder = self.with_api_key(builder);
 
         let resp = self.send_with_retry(builder).await?;
 
@@ -379,6 +395,7 @@ impl DagClient {
             .http
             .post(self.url("/v1/nft/burn-batch-simple"))
             .json(req);
+        let builder = self.with_api_key(builder);
 
         let resp = self.send_with_retry(builder).await?;
 
@@ -404,6 +421,7 @@ impl DagClient {
             .http
             .post(self.url("/v1/nft/burn-simple"))
             .json(req);
+        let builder = self.with_api_key(builder);
 
         let resp = self.send_with_retry(builder).await?;
 

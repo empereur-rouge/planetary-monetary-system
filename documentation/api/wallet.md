@@ -321,6 +321,110 @@ curl -k -X POST https://localhost:8443/v1/wallet/create \
 
 ---
 
+## POST `/v1/wallet/restore/mnemonic`
+
+Restaure un wallet a partir de 24 mots BIP39 (mnemonic phrase).
+
+### Request Body
+
+```json
+{
+  "mnemonic": "crumble lamp strong ask census imitate sister primary carpet topple govern heart prize relax parrot cigar increase universe pipe boss when yellow pill rescue"
+}
+```
+
+| Champ | Type | Requis | Description |
+|-------|------|--------|-------------|
+| `mnemonic` | string | oui | 24 mots BIP39 separes par des espaces |
+
+### Response
+
+```json
+{
+  "address": "pms1qw508d6qejxtdg4y5r3zarvary0c5xw7k...",
+  "private_key_b64": "MHQCAQEEIFm0...",
+  "public_key_hex": "04abc123...",
+  "x25519_pub_hex": "def456...",
+  "mnemonic_words": ["crumble", "lamp", "strong", "..."]
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `address` | string | Adresse Bech32 du wallet restaure |
+| `private_key_b64` | string | Cle privee en base64 |
+| `public_key_hex` | string | Cle publique ECDSA (hex) |
+| `x25519_pub_hex` | string | Cle publique X25519 (hex) |
+| `mnemonic_words` | string[] | Les 24 mots du mnemonic |
+
+### Erreurs
+
+| HTTP | Description |
+|------|-------------|
+| 400 | Nombre de mots != 24, mot invalide (hors dictionnaire BIP39) |
+
+### Exemple
+
+```bash
+curl -k -X POST https://localhost:8443/v1/wallet/restore/mnemonic \
+  -H "Content-Type: application/json" \
+  -d '{"mnemonic": "crumble lamp strong ask census imitate sister primary carpet topple govern heart prize relax parrot cigar increase universe pipe boss when yellow pill rescue"}'
+```
+
+---
+
+## POST `/v1/wallet/restore/private-key`
+
+Restaure un wallet a partir d'une cle privee ECDSA hexadecimale (32 bytes = 64 chars hex).
+
+### Request Body
+
+```json
+{
+  "private_key_hex": "a1b2c3d4e5f6..."
+}
+```
+
+| Champ | Type | Requis | Description |
+|-------|------|--------|-------------|
+| `private_key_hex` | string | oui | Cle privee ECDSA en hexadecimal (64 caracteres) |
+
+### Response
+
+```json
+{
+  "address": "pms1qw508d6qejxtdg4y5r3zarvary0c5xw7k...",
+  "private_key_b64": "MHQCAQEEIFm0...",
+  "public_key_hex": "04abc123...",
+  "x25519_pub_hex": "def456..."
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `address` | string | Adresse Bech32 du wallet restaure |
+| `private_key_b64` | string | Cle privee en base64 |
+| `public_key_hex` | string | Cle publique ECDSA (hex) |
+| `x25519_pub_hex` | string | Cle publique X25519 (hex) |
+
+> **Note** : La restauration par cle privee ne retourne pas de mnemonic (non derivable depuis une cle brute).
+
+### Erreurs
+
+| HTTP | Description |
+|------|-------------|
+| 400 | Hex invalide, taille != 32 bytes |
+
+### Exemple
+
+```bash
+curl -k -X POST https://localhost:8443/v1/wallet/restore/private-key \
+  -H "Content-Type: application/json" \
+  -d '{"private_key_hex": "a1b2c3d4e5f6..."}'
+```
+
+---
+
 ## POST `/v1/wallet/send-simple`
 
 Envoi custodial one-shot : prepare, signe et envoie la transaction en une seule requete. Le serveur gere la selection d'UTXOs, le calcul des frais, la signature et le chiffrement.

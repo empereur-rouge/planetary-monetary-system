@@ -9,6 +9,7 @@ agent_files = ["agents_testnet.toml"]
 [server]
 url = "https://pms-gateway:8443"
 admin_token = "env:PMS_ADMIN_TOKEN"
+api_key = "env:PMS_API_KEY"
 accept_invalid_certs = true
 
 [simulation]

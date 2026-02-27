@@ -244,41 +244,17 @@ pub fn generate_and_save(
 
 /// Dérive les clés publiques depuis une clé privée hex et met à jour le config.
 pub fn derive_and_update_config(priv_hex: &str, config_path: &str) -> Result<()> {
-    // 1. Décode et dérive
-    // Wallet::from_private_key n'existe pas, on reconstruit le wallet manuellement
-    // On utilise une logique similaire à load_from_node_key_file mais en mémoire
-    let priv_bytes = hex::decode(priv_hex).map_err(|e| anyhow::anyhow!("Invalid hex: {}", e))?;
+    let wallet = Wallet::from_hex(priv_hex)
+        .map_err(|e| anyhow::anyhow!("Failed to derive wallet from private key: {e}"))?;
 
-    // On utilise k256 pour dériver la pubkey
-    let signing_key = k256::ecdsa::SigningKey::from_slice(&priv_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid ECDSA private key: {}", e))?;
-    let verify_key = signing_key.verifying_key();
-    let pub_hex = hex::encode(verify_key.to_encoded_point(false).as_bytes());
-
-    // On crée une instance temporaire juste pour dériver x25519
-    // On doit encoder la clé privée en base64 pour le constructeur Wallet
-    let priv_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &priv_bytes);
-
-    let mut wallet = Wallet {
-        private_key_b64: priv_b64,
-        public_key_hex: pub_hex.clone(),
-        x25519_pub_hex: String::new(),
-        mnemonic_words: None,
-    };
-
-    // Dériver x25519
-    if let Some((_, pk)) = wallet.derive_x25519_pair_from_private_key_b64() {
-        wallet.x25519_pub_hex = pk;
-    }
-
+    let pub_hex = &wallet.public_key_hex;
     let x25519_hex = wallet.x25519_pub_hex();
 
     println!("🔑 Clés dérivées :");
     println!("   Secp256k1 : {}", pub_hex);
     println!("   X25519    : {}", x25519_hex);
 
-    // 2. Mise à jour config
-    update_config_coordinator_keys(config_path, &pub_hex, &x25519_hex)?;
+    update_config_coordinator_keys(config_path, pub_hex, x25519_hex)?;
     println!("✅ Fichier config mis à jour : {}", config_path);
 
     Ok(())

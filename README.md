@@ -132,8 +132,11 @@ Toute interaction se fait via le **Gateway (Port 8443)**.
 | :--- | :--- | :--- |
 | `GET` | `/v1/tips` | Récupérer les derniers blocs (Tips) |
 | `GET` | `/v1/utxos/{address}` | Récupérer les UTXOs d'une adresse |
+| `POST` | `/v1/wallet/restore/mnemonic` | Restaurer un wallet depuis 24 mots BIP39 |
+| `POST` | `/v1/wallet/restore/private-key` | Restaurer un wallet depuis une cle privee |
 | `POST` | `/submit/block` | Soumettre un nouveau bloc (Transaction) |
 | `GET` | `/v1/blocks/{id}` | Lire le contenu d'un bloc |
+| `GET` | `/blocks/stream` | Stream temps réel (SSE) des nouveaux blocs |
 
 ---
 

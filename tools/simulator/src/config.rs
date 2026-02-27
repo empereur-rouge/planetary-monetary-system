@@ -24,6 +24,9 @@ pub struct ServerTarget {
     pub url: String,
     #[serde(default)]
     pub admin_token: Option<String>,
+    /// PMS API key (X-API-Key header). Use "env:PMS_API_KEY" to read from env.
+    #[serde(default)]
+    pub api_key: Option<String>,
     #[serde(default)]
     pub ledger_id: Option<String>,
     #[serde(default = "default_true")]
@@ -259,6 +262,11 @@ impl SimConfig {
         if let Some(ref token) = self.server.admin_token {
             if let Some(stripped) = token.strip_prefix("env:") {
                 self.server.admin_token = std::env::var(stripped).ok();
+            }
+        }
+        if let Some(ref key) = self.server.api_key {
+            if let Some(stripped) = key.strip_prefix("env:") {
+                self.server.api_key = std::env::var(stripped).ok();
             }
         }
     }

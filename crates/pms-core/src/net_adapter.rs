@@ -1020,6 +1020,32 @@ where
             }
         }
 
+        // ============================================================
+        // 9) Émettre BlockPersisted sur l'EventBus (SSE activity stream)
+        // ============================================================
+        {
+            let (payload_type, involved) = match &payload {
+                Some(PayloadEnvelope::Plain(plain)) => {
+                    let ptype = plain_payload_type_str(plain);
+                    let addrs = pms_wallet::history::collect_involved_addresses(plain);
+                    (ptype, addrs)
+                }
+                Some(PayloadEnvelope::Encrypted(_)) => ("Encrypted", vec![]),
+                None => ("Empty", vec![]),
+            };
+            let ts_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            self.event_bus.emit(PmsEvent::BlockPersisted {
+                block_id: wb.id.clone(),
+                ts_ms,
+                payload_type: payload_type.to_string(),
+                involved_addresses: involved,
+                payload_json: wb.payload_json.clone().unwrap_or_default(),
+            });
+        }
+
         Ok(PutResult::Inserted)
     }
 
@@ -1147,5 +1173,30 @@ where
 
     async fn get_utxo(&self, output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
         self.utxos.get(output_id).await
+    }
+
+    fn event_bus(&self) -> Option<pms_event::EventBus> {
+        Some(self.event_bus.clone())
+    }
+}
+
+/// Retourne le nom du variant PlainPayload sous forme de &str.
+fn plain_payload_type_str(p: &PlainPayload) -> &'static str {
+    match p {
+        PlainPayload::Genesis => "Genesis",
+        PlainPayload::Mint { .. } => "Mint",
+        PlainPayload::TxUtxo(_) => "TxUtxo",
+        PlainPayload::Milestone { .. } => "Milestone",
+        PlainPayload::Nft(_) => "Nft",
+        PlainPayload::ConfigUpdate(_) => "ConfigUpdate",
+        PlainPayload::Reward { .. } => "Reward",
+        PlainPayload::EncryptedReward { .. } => "EncryptedReward",
+        PlainPayload::TokenCreate(_) => "TokenCreate",
+        PlainPayload::BridgeLock { .. } => "BridgeLock",
+        PlainPayload::BridgeMint { .. } => "BridgeMint",
+        PlainPayload::Freeze { .. } => "Freeze",
+        PlainPayload::Unfreeze { .. } => "Unfreeze",
+        PlainPayload::Seize { .. } => "Seize",
+        PlainPayload::Reverse { .. } => "Reverse",
     }
 }

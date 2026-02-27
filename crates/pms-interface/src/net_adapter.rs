@@ -45,4 +45,10 @@ pub trait NetDagAdapter: Send + Sync {
     /// Récupère un UTXO spécifique par son OutputId depuis le set UTXO en mémoire.
     /// Retourne None si l'UTXO n'existe pas (déjà dépensé ou inexistant).
     async fn get_utxo(&self, output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput>;
+
+    /// Retourne l'EventBus pour s'abonner aux événements (SSE streaming).
+    /// Default: None (mocks de test n'ont pas besoin d'event bus).
+    fn event_bus(&self) -> Option<pms_event::EventBus> {
+        None
+    }
 }

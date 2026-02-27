@@ -115,4 +115,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
 
 # Default Entrypoint
 ENTRYPOINT ["pms-node"]
-CMD ["--help"]
+CMD ["--config", "/home/pms/config/config.toml"]

@@ -26,6 +26,7 @@ treasury_wallets_file = "/home/pms/config/pms/treasury-wallets.json"
 [client]
 bind_addr = "0.0.0.0:8443"
 api_addr = "0.0.0.0:8080"
+internal_api_addr = "0.0.0.0:3000"
 allow_insecure_tls = true
 
 [p2p]

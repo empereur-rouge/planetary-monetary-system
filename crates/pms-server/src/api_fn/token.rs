@@ -369,8 +369,8 @@ pub async fn admin_mint_token(
 
     // Add fee output if configured (fee always in PMS native token)
     if mint_fee_dec > Decimal::ZERO {
-        let fee_addr = state.settings.fees.treasury_addresses.first()
-            .or(state.settings.admin.wallet_addresses.first());
+        let fee_addr = state.settings.admin.wallet_addresses.first()
+            .or(state.settings.fees.treasury_addresses.first());
         if let Some(addr) = fee_addr {
             outputs.push(TxOutput {
                 address: addr.clone(),

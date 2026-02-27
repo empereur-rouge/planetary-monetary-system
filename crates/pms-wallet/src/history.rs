@@ -20,7 +20,7 @@ pub struct HistoryEntry {
 
 // Helper pour tenter de déchiffrer un EncryptedReward
 // Si on trouve des outputs pour nous, on reconstruit un PlainPayload::Reward
-fn try_decrypt_encrypted_reward(
+pub fn try_decrypt_encrypted_reward(
     encrypted_outputs: &[EncryptedRewardOutput],
     burned: &str,
     tx_block_id: &str,
@@ -89,13 +89,65 @@ fn try_decrypt_plain(enc: &EncryptedPayload, sk_hex: &str) -> Result<PlainPayloa
     enc.decrypt_as_payload(sk_hex).map_err(|e| anyhow!(e))
 }
 
+/// Collecte toutes les adresses impliquées dans un PlainPayload.
+/// Utilisé par l'EventBus pour pré-calculer les adresses sans DB lookup côté SSE.
+pub fn collect_involved_addresses(plain: &PlainPayload) -> Vec<String> {
+    let mut addrs = Vec::new();
+    match plain {
+        PlainPayload::Mint { outputs } => {
+            addrs.extend(outputs.iter().map(|o| o.address.clone()));
+        }
+        PlainPayload::TxUtxo(tx) => {
+            addrs.extend(tx.outputs.iter().map(|o| o.address.clone()));
+        }
+        PlainPayload::Reward {
+            fee_outputs,
+            reward_outputs,
+            ..
+        } => {
+            addrs.extend(fee_outputs.iter().map(|o| o.address.clone()));
+            addrs.extend(reward_outputs.iter().map(|o| o.address.clone()));
+        }
+        PlainPayload::Nft(action) => match action {
+            pms_types_nft::NftAction::Mint { creator, .. } => addrs.push(creator.clone()),
+            pms_types_nft::NftAction::Transfer { from, to, .. } => {
+                addrs.push(from.clone());
+                addrs.push(to.clone());
+            }
+            pms_types_nft::NftAction::Use { user, .. } => addrs.push(user.clone()),
+            pms_types_nft::NftAction::Burn { burner, .. } => addrs.push(burner.clone()),
+            pms_types_nft::NftAction::BatchBurn { burner, .. } => addrs.push(burner.clone()),
+        },
+        PlainPayload::TokenCreate(meta) => addrs.push(meta.creator.clone()),
+        PlainPayload::EncryptedReward { .. } => {} // chiffré, pas d'adresses extractibles
+        PlainPayload::BridgeLock { dest_address, .. } => addrs.push(dest_address.clone()),
+        PlainPayload::BridgeMint { outputs, .. } => {
+            addrs.extend(outputs.iter().map(|o| o.address.clone()));
+        }
+        PlainPayload::Freeze { address, .. } | PlainPayload::Unfreeze { address, .. } => {
+            addrs.push(address.clone());
+        }
+        PlainPayload::Seize {
+            from_address,
+            outputs,
+            ..
+        } => {
+            addrs.push(from_address.clone());
+            addrs.extend(outputs.iter().map(|o| o.address.clone()));
+        }
+        PlainPayload::Reverse { outputs, .. } => {
+            addrs.extend(outputs.iter().map(|o| o.address.clone()));
+        }
+        _ => {} // Genesis, Milestone, ConfigUpdate
+    }
+    addrs.dedup();
+    addrs
+}
+
 pub fn involves_address(plain: &PlainPayload, addr: &str) -> bool {
     match plain {
         PlainPayload::Mint { outputs } => outputs.iter().any(|o| o.address == addr),
-        PlainPayload::TxUtxo(tx) => {
-            // MVP: filtre par outputs uniquement (les inputs nécessitent un index UTXO)
-            tx.outputs.iter().any(|o| o.address == addr)
-        }
+        PlainPayload::TxUtxo(tx) => tx.outputs.iter().any(|o| o.address == addr),
         PlainPayload::Reward {
             fee_outputs,
             reward_outputs,
@@ -104,6 +156,11 @@ pub fn involves_address(plain: &PlainPayload, addr: &str) -> bool {
             fee_outputs.iter().any(|o| o.address == addr)
                 || reward_outputs.iter().any(|o| o.address == addr)
         }
+        PlainPayload::Nft(action) => nft_involves_address(action, addr),
+        PlainPayload::TokenCreate(meta) => meta.creator == addr,
+        // EncryptedReward: outputs chiffrés, impossible de checker sans clé.
+        // Géré séparément dans history_page_for_address / scan_decrypt_recent_for_address.
+        PlainPayload::EncryptedReward { .. } => false,
         PlainPayload::BridgeLock { dest_address, .. } => dest_address == addr,
         PlainPayload::BridgeMint { outputs, .. } => outputs.iter().any(|o| o.address == addr),
         PlainPayload::Freeze { address, .. } | PlainPayload::Unfreeze { address, .. } => {
@@ -115,7 +172,29 @@ pub fn involves_address(plain: &PlainPayload, addr: &str) -> bool {
             ..
         } => from_address == addr || outputs.iter().any(|o| o.address == addr),
         PlainPayload::Reverse { outputs, .. } => outputs.iter().any(|o| o.address == addr),
+        // Genesis, Milestone, ConfigUpdate: pas liés à une adresse wallet
         _ => false,
+    }
+}
+
+fn nft_involves_address(action: &pms_types_nft::NftAction, addr: &str) -> bool {
+    match action {
+        pms_types_nft::NftAction::Mint { creator, .. } => creator == addr,
+        pms_types_nft::NftAction::Transfer { from, to, .. } => from == addr || to == addr,
+        pms_types_nft::NftAction::Use { user, .. } => user == addr,
+        pms_types_nft::NftAction::Burn { burner, .. } => burner == addr,
+        pms_types_nft::NftAction::BatchBurn { burner, .. } => burner == addr,
+    }
+}
+
+fn nft_involves_any(action: &pms_types_nft::NftAction, candidates: &[String]) -> bool {
+    let has = |a: &str| candidates.iter().any(|c| a.eq_ignore_ascii_case(c));
+    match action {
+        pms_types_nft::NftAction::Mint { creator, .. } => has(creator),
+        pms_types_nft::NftAction::Transfer { from, to, .. } => has(from) || has(to),
+        pms_types_nft::NftAction::Use { user, .. } => has(user),
+        pms_types_nft::NftAction::Burn { burner, .. } => has(burner),
+        pms_types_nft::NftAction::BatchBurn { burner, .. } => has(burner),
     }
 }
 
@@ -140,6 +219,13 @@ pub fn involves_any_address(plain: &PlainPayload, candidates: &[String]) -> bool
                     .iter()
                     .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c)))
         }
+        PlainPayload::Nft(action) => nft_involves_any(action, candidates),
+        PlainPayload::TokenCreate(meta) => {
+            candidates
+                .iter()
+                .any(|c| meta.creator.eq_ignore_ascii_case(c))
+        }
+        PlainPayload::EncryptedReward { .. } => false,
         PlainPayload::BridgeLock { dest_address, .. } => {
             candidates.iter().any(|c| dest_address.eq_ignore_ascii_case(c))
         }

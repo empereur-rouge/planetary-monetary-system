@@ -13,6 +13,8 @@
 # Usage:
 #   PMS_ADMIN_TOKEN=xxx docker compose -f docker-compose.testnet.yml up -d
 #
+# Images are built LOCALLY and transferred via docker load.
+# No build happens on the VPS. See scripts/deploy-testnet.sh.
 # =============================================================================
 
 services:
@@ -20,10 +22,6 @@ services:
   # PMS Engine (Coordinator) — INTERNAL ONLY
   # ---------------------------------------------------------------------------
   pms-engine:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime
     image: pms-node:testnet
     container_name: pms-engine-testnet
     hostname: pms-engine
@@ -32,6 +30,7 @@ services:
       RUST_LOG: info,pms_server=info,pms_core=debug
       PMS_CONFIG: /home/pms/config/config.testnet.toml
       PMS_ADMIN_TOKEN: "${PMS_ADMIN_TOKEN}"
+    command: ["--config", "/home/pms/config/config.testnet.toml"]
     volumes:
       - ./etc/config:/home/pms/config:rw
       - ./etc/pms:/home/pms/config/pms:rw
@@ -53,9 +52,6 @@ services:
   # PMS Gateway — Auth/RateLimit/Public Routes
   # ---------------------------------------------------------------------------
   pms-gateway:
-    build:
-      context: .
-      dockerfile: Dockerfile.gateway
     image: pms-gateway:testnet
     container_name: pms-gateway-testnet
     hostname: pms-gateway
@@ -129,9 +125,6 @@ services:
   # PMS Simulator — Stress-test with ~97 agents
   # ---------------------------------------------------------------------------
   pms-simulator:
-    build:
-      context: .
-      dockerfile: Dockerfile.simulator
     image: pms-simulator:testnet
     container_name: pms-simulator-testnet
     depends_on:
@@ -139,6 +132,7 @@ services:
         condition: service_healthy
     environment:
       PMS_ADMIN_TOKEN: "${PMS_ADMIN_TOKEN}"
+      PMS_API_KEY: "${PMS_API_KEY}"
       RUST_LOG: info,pms_simulator=info
     volumes:
       - ./tools/simulator/simulator.testnet.toml:/app/config/simulator.toml:ro

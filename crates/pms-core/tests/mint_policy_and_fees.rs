@@ -234,6 +234,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             prefix: "pms:main".to_string(),
             tip_limit: 100,
             max_dag_blocks: 0,
+            max_spent_outpoints: 0,
             checkpoint_interval_secs: None,
         },
         network: Network {

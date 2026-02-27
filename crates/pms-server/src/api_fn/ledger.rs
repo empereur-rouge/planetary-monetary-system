@@ -1,6 +1,6 @@
 use crate::api::AppState;
 use crate::helper::is_admin_authorized;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -15,20 +15,47 @@ pub struct LedgerInfo {
     pub prefix: String,
     pub protocol_version: u32,
     pub block_count: usize,
+    pub symbol: String,
+}
+
+#[derive(Deserialize)]
+pub struct LedgerQuery {
+    pub search: Option<String>,
 }
 
 /// GET /v1/ledgers — Liste tous les ledgers actifs.
-pub async fn list_ledgers(State(state): State<AppState>) -> impl IntoResponse {
+///
+/// Query params:
+/// - `search`: filtre prefix (starts_with, case-insensitive) sur id, network_id ou symbol
+pub async fn list_ledgers(
+    State(state): State<AppState>,
+    Query(q): Query<LedgerQuery>,
+) -> impl IntoResponse {
+    let search = q.search.map(|s| s.to_lowercase());
+
     let Some(mgr) = &state.ledger_mgr else {
-        return Json(json!({
-            "ledgers": [{
-                "id": "main",
-                "network_id": state._cfg.network.network_id,
-                "prefix": "",
-                "protocol_version": state._cfg.network.protocol_version,
-                "block_count": 0,
-            }]
-        }));
+        let symbol = state._cfg.network.symbol.clone().unwrap_or_else(|| "PMS".into());
+        let single = LedgerInfo {
+            id: "main".into(),
+            network_id: state._cfg.network.network_id.clone(),
+            prefix: String::new(),
+            protocol_version: state._cfg.network.protocol_version,
+            block_count: 0,
+            symbol,
+        };
+        let ledgers = if let Some(ref s) = search {
+            if single.id.to_lowercase().starts_with(s)
+                || single.network_id.to_lowercase().starts_with(s)
+                || single.symbol.to_lowercase().starts_with(s)
+            {
+                vec![single]
+            } else {
+                vec![]
+            }
+        } else {
+            vec![single]
+        };
+        return Json(json!({ "ledgers": ledgers }));
     };
 
     let ledgers: Vec<LedgerInfo> = mgr
@@ -40,6 +67,13 @@ pub async fn list_ledgers(State(state): State<AppState>) -> impl IntoResponse {
             prefix: l.def.prefix.clone(),
             protocol_version: l.def.protocol_version,
             block_count: l.dag.len(),
+            symbol: l.def.symbol.clone().unwrap_or_else(|| "PMS".into()),
+        })
+        .filter(|l| {
+            let Some(ref s) = search else { return true };
+            l.id.to_lowercase().starts_with(s)
+                || l.network_id.to_lowercase().starts_with(s)
+                || l.symbol.to_lowercase().starts_with(s)
         })
         .collect();
 
@@ -98,6 +132,7 @@ pub async fn admin_list_ledgers(
                 "network_id": l.def.network_id,
                 "prefix": l.def.prefix,
                 "protocol_version": l.def.protocol_version,
+                "symbol": l.def.symbol.clone().unwrap_or_else(|| "PMS".into()),
                 "tip_limit": l.def.tip_limit,
                 "block_count": l.dag.len(),
                 "utxo_shards": 256,
@@ -146,6 +181,7 @@ pub async fn admin_get_ledger(
             "network_id": instance.def.network_id,
             "prefix": instance.def.prefix,
             "protocol_version": instance.def.protocol_version,
+            "symbol": instance.def.symbol.clone().unwrap_or_else(|| "PMS".into()),
             "tip_limit": instance.def.tip_limit,
             "block_count": instance.dag.len(),
             "utxo_shards": 256,

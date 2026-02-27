@@ -173,6 +173,9 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
             }
         }
 
+        // Rebuild address index + supply cache in a single O(n) pass
+        self.utxos.rebuild_indexes().await;
+
         let total = self.utxos.total_len().await;
         println!(
             "[CoreAdapter] Bootstrapped UTXO set: {} unspent outputs",

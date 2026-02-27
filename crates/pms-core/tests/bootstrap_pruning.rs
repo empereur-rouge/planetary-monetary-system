@@ -187,7 +187,7 @@ async fn bootstrap_from_store_prunes_to_capacity() -> Result<()> {
     let store = MockStore::new();
     build_chain(&store, 5000);
 
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500).await?;
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
     assert!(
         dag.len() <= 510,
@@ -225,7 +225,7 @@ async fn bootstrap_from_store_hash_ids_prunes_correctly() -> Result<()> {
     let store = MockStore::new();
     let _tip_id = build_chain_with_hash_ids(&store, 5000);
 
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500).await?;
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
     assert!(
         dag.len() <= 510,
@@ -253,7 +253,7 @@ async fn bootstrap_from_store_large_scale_pruning() -> Result<()> {
     let store = MockStore::new();
     build_chain(&store, 100_000);
 
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 1000).await?;
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 1000, 0).await?;
 
     assert!(
         dag.len() <= 1010,
@@ -295,7 +295,7 @@ async fn bootstrap_from_store_multi_branch_prunes_to_capacity() -> Result<()> {
     }
     // Total: 3 + 4000 = 4003 blocks
 
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500).await?;
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
     assert!(
         dag.len() <= 510,
@@ -322,7 +322,7 @@ async fn bootstrap_from_store_unlimited_keeps_all() -> Result<()> {
     let store = MockStore::new();
     build_chain(&store, 1000);
 
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 0).await?;
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 0, 0).await?;
 
     assert_eq!(
         dag.len(),
@@ -340,7 +340,7 @@ async fn bootstrap_then_runtime_inserts_continue_pruning() -> Result<()> {
     let store = MockStore::new();
     build_chain(&store, 2000);
 
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500).await?;
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
     assert!(
         dag.len() <= 510,
@@ -395,7 +395,7 @@ async fn bootstrap_prune_children_count_consistent() -> Result<()> {
     let store = MockStore::new();
     build_chain(&store, 3000);
 
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500).await?;
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
     // For each surviving block, verify children_count matches actual children in DAG
     for entry in dag.blocks.iter() {
@@ -452,7 +452,7 @@ async fn bootstrap_prune_find_tips_consistent() -> Result<()> {
     let store = MockStore::new();
     build_chain(&store, 5000);
 
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500).await?;
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
     let tips = dag.find_tips();
     for tip in &tips {
@@ -481,7 +481,7 @@ async fn bootstrap_under_capacity_no_pruning() -> Result<()> {
     let store = MockStore::new();
     build_chain(&store, 100);
 
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500).await?;
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
     assert_eq!(
         dag.len(),
@@ -498,7 +498,7 @@ async fn bootstrap_at_exact_capacity() -> Result<()> {
     let store = MockStore::new();
     build_chain(&store, 500);
 
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500).await?;
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
     assert_eq!(
         dag.len(),
@@ -538,7 +538,7 @@ async fn bootstrap_prune_diamond_topology() -> Result<()> {
     }
     // Total: 5 + 500 = 505 blocks
 
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 100).await?;
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 100, 0).await?;
 
     assert!(
         dag.len() <= 110,

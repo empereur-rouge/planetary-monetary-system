@@ -10,3 +10,4 @@ pms-types = { path = "../pms-types" }
 pms-wire = { path = "../pms-wire" }
 pms-storage = { path = "../pms-storage" }
 rust_decimal = "1.39.0"
+pms-event = { path = "../pms-event" }

@@ -5,8 +5,12 @@ use serde::{Deserialize, Serialize};
 pub struct WalletInfo {
     pub address: String,
     pub private_key_b64: String,
+    #[serde(default)]
+    pub private_key_hex: String,
     pub public_key_hex: String,
     pub x25519_pub_hex: String,
+    #[serde(default)]
+    pub mnemonic_words: Option<Vec<String>>,
 }
 
 /// Request for POST /v1/wallet/send-simple

@@ -2,7 +2,6 @@ use crate::api::AppState;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use pms_config::load_config;
 use pms_wallet::decode_address;
 use pms_wallet::utxo_store::gather_wallet_utxos_dec;
 use axum::extract::Path;
@@ -49,8 +48,7 @@ pub async fn wallet_balance(
     State(app): State<AppState>,
     Json(req): Json<BalanceReq>,
 ) -> Result<Json<BalanceResp>, (StatusCode, String)> {
-    let settings = load_config().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let hrp = settings.address.hrp;
+    let hrp = &app.settings.address.hrp;
 
     // déduire x25519 pub depuis l’adresse pour sanity check (optionnel)
     let (_h20, xpk_hex) = decode_address(&req.bech32_addr)

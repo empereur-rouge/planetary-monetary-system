@@ -160,8 +160,11 @@ pub async fn proxy_post(
     headers: http::HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    // Forward to Engine (replace /v1 or /admin prefix for internal API)
-    let path = original_uri.path();
+    // Forward to Engine with query params preserved
+    let path = original_uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or(original_uri.path());
 
     match state.engine_client.proxy_post(path, headers, body).await {
         Ok((status, resp_body, content_type)) => {
@@ -185,7 +188,10 @@ pub async fn proxy_get(
     axum::extract::OriginalUri(original_uri): axum::extract::OriginalUri,
     headers: http::HeaderMap,
 ) -> impl IntoResponse {
-    let path = original_uri.path();
+    let path = original_uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or(original_uri.path());
 
     match state.engine_client.proxy_get(path, headers).await {
         Ok((status, resp_body, content_type)) => {
@@ -198,6 +204,35 @@ pub async fn proxy_get(
                 StatusCode::BAD_GATEWAY,
                 [(http::header::CONTENT_TYPE, "text/plain".to_string())],
                 format!("Gateway error: {}", e),
+            )
+        }
+    }
+}
+
+/// Generic proxy handler for streaming GET requests - forwards to Engine
+pub async fn proxy_stream(
+    State(state): State<GatewayState>,
+    axum::extract::OriginalUri(original_uri): axum::extract::OriginalUri,
+    headers: http::HeaderMap,
+) -> impl IntoResponse {
+    let path = original_uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or(original_uri.path());
+
+    match state.engine_client.proxy_stream(path, headers).await {
+        Ok((status, body, content_type)) => {
+            let ct = content_type.unwrap_or_else(|| "text/event-stream".to_string());
+            (status, [(http::header::CONTENT_TYPE, ct)], body)
+        }
+        Err(e) => {
+            tracing::warn!("Proxy STREAM {} failed: {}", path, e);
+            // Convert simple string to axum body for error response
+            let body = axum::body::Body::from(format!("Gateway error: {}", e));
+            (
+                StatusCode::BAD_GATEWAY,
+                [(http::header::CONTENT_TYPE, "text/plain".to_string())],
+                body,
             )
         }
     }

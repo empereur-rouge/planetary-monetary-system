@@ -5,7 +5,7 @@ use crate::helpers::{be_to_ts, le_to_u64, now_ms_i64, parse_time_index_key, ts_t
 use crate::{DagStorage, PutResult, StoredBlock};
 use anyhow::{Context, Result};
 use pms_wire::WireBlock;
-use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options};
+use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options};
 
 /// Thread-safe DB handle usable with `Arc<PmsDb>`.
 /// `MultiThreaded` mode allows `create_cf(&self, ...)` (no `&mut self` needed),
@@ -131,6 +131,10 @@ impl RocksStore {
             let mut table_opts = BlockBasedOptions::default();
             // ~10 bits / key → compromis entre mémoire et perf
             table_opts.set_bloom_filter(10.0, false);
+            // 256 MB LRU block cache — réduit les I/O disque pour les hot data
+            let cache = Cache::new_lru_cache(256 * 1024 * 1024);
+            table_opts.set_block_cache(&cache);
+            table_opts.set_cache_index_and_filter_blocks(true);
             opts.set_block_based_table_factory(&table_opts);
             opts
         }
@@ -235,6 +239,9 @@ impl RocksStore {
             opts.set_optimize_filters_for_hits(true);
             let mut table_opts = BlockBasedOptions::default();
             table_opts.set_bloom_filter(10.0, false);
+            let cache = Cache::new_lru_cache(256 * 1024 * 1024);
+            table_opts.set_block_cache(&cache);
+            table_opts.set_cache_index_and_filter_blocks(true);
             opts.set_block_based_table_factory(&table_opts);
             opts
         }
@@ -1053,8 +1060,7 @@ impl DagStorage for RocksStore {
         // 2) write atomique
         self.db.write(batch)?;
 
-        // 3) trims
-        self.trim_by_time()?;
+        // 3) trim tips only (by_time/id2ts grow unbounded for activity API)
         self.trim_tips()?;
 
         Ok(true)

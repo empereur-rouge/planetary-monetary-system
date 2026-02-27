@@ -48,39 +48,7 @@ pub struct OutputRef {
 /// Creates a Coordinator Wallet from the testnet private key
 /// This is the ONLY wallet authorized to mint on testnet
 pub fn make_coordinator_wallet() -> Wallet {
-    // Decode the hex private key to bytes
-    let priv_bytes =
-        hex::decode(COORDINATOR_PRIVATE_KEY_HEX).expect("Invalid Coordinator private key hex");
-
-    // Create SigningKey from bytes
-    use k256::ecdsa::SigningKey;
-    let signing_key = SigningKey::from_slice(&priv_bytes).expect("Invalid Coordinator private key");
-
-    // Derive public key
-    let pub_hex = hex::encode(signing_key.verifying_key().to_sec1_bytes());
-
-    // Encode private key as base64 (Wallet internal format)
-    use base64::Engine;
-    let priv_b64 = base64::engine::general_purpose::STANDARD.encode(&priv_bytes);
-
-    // Derive X25519 key from the secp256k1 private key bytes
-    // Using SHA-256 to derive a 32-byte X25519 secret from the secp256k1 private key
-    use sha2::{Digest, Sha256};
-    let x25519_seed = Sha256::digest(&priv_bytes);
-
-    // Create X25519 keypair from the derived seed
-    let x25519_secret =
-        x25519_dalek::StaticSecret::from(<[u8; 32]>::try_from(&x25519_seed[..]).unwrap());
-    let x25519_public = x25519_dalek::PublicKey::from(&x25519_secret);
-    let x25519_pub_hex = hex::encode(x25519_public.as_bytes());
-
-    // Build wallet with X25519 key for balance API
-    Wallet {
-        private_key_b64: priv_b64,
-        public_key_hex: pub_hex,
-        x25519_pub_hex,
-        mnemonic_words: None,
-    }
+    Wallet::from_hex(COORDINATOR_PRIVATE_KEY_HEX).expect("Invalid Coordinator private key")
 }
 
 /// Calculate fee based on production ratio (2.4%)

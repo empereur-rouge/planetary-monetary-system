@@ -73,10 +73,9 @@ impl RocksStore {
         // write atomiquement
         self.db.write(batch)?;
 
-        // ⚠ trim by_time / tip_limit :
-        //    on réutilise la logique de index_by_time() pour ne pas garder trop d'entrées.
-        //    (tu peux soit factoriser dans une fn privée, soit refaire le code ici)
-        self.trim_by_time()?;
+        // trim_tips: keep bounded tips for DAG parent selection (consensus-critical).
+        // NOTE: by_time/id2ts are NOT trimmed — they must grow unbounded
+        // for the activity/history API to scan full DAG history.
         self.trim_tips()?;
 
         Ok(true)

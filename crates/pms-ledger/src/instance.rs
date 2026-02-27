@@ -37,6 +37,7 @@ impl LedgerInstance {
         def: LedgerDef,
         global_tip_limit: usize,
         max_dag_blocks: usize,
+        max_spent_outpoints: usize,
     ) -> Result<Self> {
         let tip_limit = def.tip_limit.unwrap_or(global_tip_limit);
 
@@ -73,7 +74,7 @@ impl LedgerInstance {
 
         // Bootstrap DAG from store (with capacity limit for RAM pruning)
         let dag = Arc::new(
-            ConcurrentDag::bootstrap_from_store_with_capacity(&*store, max_dag_blocks)
+            ConcurrentDag::bootstrap_from_store_with_capacity(&*store, max_dag_blocks, max_spent_outpoints)
                 .await
                 .with_context(|| format!("bootstrap DAG for ledger '{}'", def.id))?,
         );

@@ -29,20 +29,7 @@ impl Wallet {
         let seed = mnemonic.to_seed_normalized("");
         let mnemonic_words = Some(mnemonic.words().map(|w| w.to_string()).collect());
 
-        let backend = Self::from_seed(&seed, mnemonic_words.clone()).unwrap();
-
-        let mut wallet = Self {
-            private_key_b64: backend.encoded_private_key(),
-            public_key_hex: backend.encoded_public_key(),
-            x25519_pub_hex: String::new(),
-            mnemonic_words,
-        };
-
-        if let Some((_sk, pk)) = wallet.derive_x25519_pair_from_private_key_b64() {
-            wallet.x25519_pub_hex = pk;
-        }
-
-        wallet
+        Self::from_seed(&seed, mnemonic_words).expect("wallet generation from valid mnemonic seed")
     }
 
     pub fn generate_with_entropy(entropy: [u8; 32]) -> Result<(Self, String), String> {
@@ -51,21 +38,7 @@ impl Wallet {
         let seed = mnemonic.to_seed_normalized("");
         let mnemonic_words = Some(mnemonic.words().map(|w| w.to_string()).collect());
 
-        let backend = Self::from_seed(&seed, mnemonic_words.clone())?;
-
-        let mut wallet = Self {
-            private_key_b64: backend.encoded_private_key(),
-            public_key_hex: backend.encoded_public_key(),
-            x25519_pub_hex: String::new(),
-            mnemonic_words,
-        };
-
-        let (_sk, pk) = wallet
-            .derive_x25519_pair_from_private_key_b64()
-            .expect("x25519 derivation must work");
-
-        wallet.x25519_pub_hex = pk;
-
+        let wallet = Self::from_seed(&seed, mnemonic_words)?;
         Ok((wallet, mnemonic.to_string()))
     }
 
@@ -80,21 +53,7 @@ impl Wallet {
         let seed = mnemonic.to_seed_normalized("");
         let mnemonic_words = Some(words.iter().map(|w| w.to_string()).collect());
 
-        let backend = Self::from_seed(&seed, mnemonic_words.clone())?;
-
-        let mut wallet = Self {
-            private_key_b64: backend.encoded_private_key(),
-            public_key_hex: backend.encoded_public_key(),
-            x25519_pub_hex: String::new(),
-            mnemonic_words,
-        };
-
-        let (_sk, pk) = wallet
-            .derive_x25519_pair_from_private_key_b64()
-            .expect("x25519 derivation must work");
-
-        wallet.x25519_pub_hex = pk;
-        Ok(wallet)
+        Self::from_seed(&seed, mnemonic_words)
     }
 
     pub fn save_to_file(&self, path: &str) -> Result<(), String> {
@@ -229,10 +188,10 @@ impl Wallet {
                     mnemonic_words: None,
                 };
 
-                // Dérive X25519 (toujours utile pour le chifrrement)
-                if let Some((_, pk)) = w.derive_x25519_pair_from_private_key_b64() {
-                    w.x25519_pub_hex = pk;
-                }
+                let (_sk, pk) = w
+                    .derive_x25519_pair_from_private_key_b64()
+                    .ok_or_else(|| anyhow::anyhow!("x25519 derivation failed from node key"))?;
+                w.x25519_pub_hex = pk;
 
                 return Ok(w);
             }
@@ -268,7 +227,6 @@ impl Wallet {
 
         let priv_b64 = STANDARD.encode(&priv_bytes);
 
-        // Dérive la PubKey ECDSA
         let signing_key = k256::ecdsa::SigningKey::from_slice(&priv_bytes)
             .map_err(|e| format!("Invalid ECDSA private key: {}", e))?;
         let verify_key = signing_key.verifying_key();
@@ -281,10 +239,10 @@ impl Wallet {
             mnemonic_words: None,
         };
 
-        // Dérive X25519
-        if let Some((_, pk)) = w.derive_x25519_pair_from_private_key_b64() {
-            w.x25519_pub_hex = pk;
-        }
+        let (_sk, pk) = w
+            .derive_x25519_pair_from_private_key_b64()
+            .ok_or_else(|| "x25519 derivation failed from private key".to_string())?;
+        w.x25519_pub_hex = pk;
 
         Ok(w)
     }

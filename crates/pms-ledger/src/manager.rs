@@ -14,6 +14,7 @@ pub struct LedgerManager {
     shared_db: Arc<PmsDb>,
     global_tip_limit: usize,
     global_max_dag_blocks: usize,
+    global_max_spent_outpoints: usize,
 }
 
 impl LedgerManager {
@@ -43,6 +44,7 @@ impl LedgerManager {
             shared_db: shared_db.clone(),
             global_tip_limit: settings.rocks.tip_limit,
             global_max_dag_blocks: settings.rocks.max_dag_blocks,
+            global_max_spent_outpoints: settings.rocks.max_spent_outpoints,
         };
 
         // Bootstrap each ledger
@@ -52,6 +54,7 @@ impl LedgerManager {
                 def.clone(),
                 settings.rocks.tip_limit,
                 settings.rocks.max_dag_blocks,
+                settings.rocks.max_spent_outpoints,
             )
             .await
             .with_context(|| format!("bootstrapping ledger '{}'", def.id))?;
@@ -139,6 +142,7 @@ impl LedgerManager {
             def.clone(),
             self.global_tip_limit,
             self.global_max_dag_blocks,
+            self.global_max_spent_outpoints,
         )
         .await
         .with_context(|| format!("bootstrapping ledger '{}'", def.id))?;

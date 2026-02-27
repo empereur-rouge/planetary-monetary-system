@@ -192,7 +192,8 @@ pub async fn internal_metrics() -> impl IntoResponse {
     (StatusCode::OK, output)
 }
 
-pub fn build_internal_router(state: AppState) -> Router {
+/// Internal routes without state applied (for merging into the main API router).
+pub fn internal_routes() -> Router<AppState> {
     Router::new()
         .route("/internal/health", get(internal_health))
         .route("/internal/tips", get(internal_tips))
@@ -201,7 +202,10 @@ pub fn build_internal_router(state: AppState) -> Router {
         .route("/internal/submit_block", post(internal_submit_block))
         .route("/internal/metrics", get(internal_metrics))
         .route("/internal/config", get(internal_config))
-        .with_state(state)
+}
+
+pub fn build_internal_router(state: AppState) -> Router {
+    internal_routes().with_state(state)
 }
 
 pub async fn serve_internal_api(addr: &str, state: AppState) -> anyhow::Result<()> {

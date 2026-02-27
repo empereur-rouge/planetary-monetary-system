@@ -1,6 +1,7 @@
 // pms-server/src/api
 use crate::Server;
 use crate::admin::{admin_compact, admin_get_config, admin_ping, admin_update_config};
+use crate::api_fn::activity::{get_wallet_activity, stream_wallet_activity};
 use crate::api_fn::blocks::{get_block_by_id, submit_block};
 use crate::api_fn::bridge::{
     admin_bridge_disable, admin_bridge_enable, admin_bridge_transfer, bridge_status,
@@ -27,7 +28,10 @@ use crate::api_fn::supply::get_circulating_supply;
 use crate::api_fn::token::{admin_create_token, admin_mint_token, get_token, list_tokens};
 use crate::api_fn::transaction::{prepare_tx, wallet_send_tx};
 use crate::api_fn::wallet::{balance_by_address, wallet_balance};
-use crate::api_fn::wallet_factory::{faucet_mint, wallet_create, wallet_send_simple};
+use crate::api_fn::wallet_factory::{
+    faucet_mint, wallet_create, wallet_restore_mnemonic, wallet_restore_private_key,
+    wallet_send_simple,
+};
 use crate::api_keys::{self, ApiKeyCreateRequest, SharedApiKeyStore};
 use crate::helper::resolve_admin_token;
 use crate::stats::Stats;
@@ -61,6 +65,7 @@ use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_http::{
+    catch_panic::CatchPanicLayer,
     cors::{Any, CorsLayer},
     limit::RequestBodyLimitLayer,
     services::ServeDir,
@@ -199,20 +204,23 @@ async fn require_admin_token(
 /// Middleware pour vérifier la clé API (header `X-API-Key`) sur les routes publiques.
 ///
 /// Comportement :
+/// - Si Bearer admin token valide → passe (admin bypass)
 /// - Si le store est vide → passe tout (mode dev, backward-compatible)
 /// - Si X-API-Key absent → 401 "Missing API Key"
 /// - Si clé invalide → 403 "Invalid API Key"
 /// - Si clé révoquée → 403 "API Key revoked"
 /// - Si scope insuffisant → 403 "Insufficient permissions"
-///
-/// Voir chapitre 12 du Rust Book pour comprendre les closures et les traits
-/// qui permettent à ce middleware de fonctionner avec Axum.
 async fn require_api_key(
     State(state): State<AppState>,
     headers: HeaderMap,
     request: axum::extract::Request,
     next: Next,
 ) -> impl IntoResponse {
+    // Admin bypass : un admin token valide donne accès à toutes les routes
+    if crate::helper::is_admin_authorized(&state, &headers) {
+        return next.run(request).await;
+    }
+
     // Lire le store (read lock — non-bloquant pour les autres lecteurs)
     let store = state.api_key_store.read().await;
 
@@ -297,6 +305,8 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
         .route("/v1/balance", post(balance_by_address))
         .route("/v1/tx/prepare", post(prepare_tx))
         .route("/v1/wallet/create", post(wallet_create))
+        .route("/v1/wallet/restore/mnemonic", post(wallet_restore_mnemonic))
+        .route("/v1/wallet/restore/private-key", post(wallet_restore_private_key))
         .route("/v1/wallet/send-simple", post(wallet_send_simple));
 
     let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
@@ -333,6 +343,13 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
 
     let coordinator_routes = Router::new().route("/v1/coordinator/info", get(get_coordinator_info));
 
+    let activity_routes = Router::new()
+        .route("/v1/wallet/{address}/activity", get(get_wallet_activity))
+        .route(
+            "/v1/wallet/{address}/activity/stream",
+            get(stream_wallet_activity),
+        );
+
     Router::new()
         .merge(submit)
         .merge(wallet)
@@ -343,6 +360,7 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
         .merge(dag_routes)
         .merge(nft_routes)
         .merge(coordinator_routes)
+        .merge(activity_routes)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -432,6 +450,7 @@ async fn dynamic_ledger_handler(
         &instance.def.network_id,
         instance.def.protocol_version,
         state.node_wallet.clone(),
+        Some(state.srv.broadcast_sender()),
     );
     ledger_state.store = instance.store.clone();
     ledger_state.ledger_id = ledger_id.clone();
@@ -453,7 +472,7 @@ async fn dynamic_ledger_handler(
         .map(|q| format!("?{}", q))
         .unwrap_or_default();
     let new_uri = format!("/{}{}", rest, query);
-    parts.uri = new_uri.parse().unwrap_or_else(|_| "/".parse().unwrap());
+    parts.uri = new_uri.parse().unwrap_or_else(|_| http::Uri::from_static("/"));
     let forwarded = Request::from_parts(parts, body);
 
     match router.oneshot(forwarded).await {
@@ -480,7 +499,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
             .burst_size(settings.limits.burst as u32)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
-            .unwrap(),
+            .expect("GovernorConfig: invalid rate_limit_rps or burst"),
     );
 
     // Endpoint: /livez (Check process UP)
@@ -629,6 +648,9 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     let per_ledger_router: Router<AppState> =
         Router::new().route("/l/{ledger_id}/{*rest}", any(dynamic_ledger_handler));
 
+    // Internal API routes (used by gateway)
+    let internal_routes = crate::internal_api::internal_routes();
+
     // Combine all
     Router::new()
         .merge(livez)
@@ -637,6 +659,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .merge(ready)
         .merge(metrics)
         .merge(admin)
+        .merge(internal_routes)
         .merge(default_ledger_routes)
         .merge(node_routes)
         .merge(ledger_routes)
@@ -667,6 +690,8 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         )
         // 1. Tracing (Top)
         .layer(TraceLayer::new_for_http())
+        // 0. Catch panics in handlers → 500 instead of killing the server
+        .layer(CatchPanicLayer::new())
 }
 
 pub async fn serve_api(
@@ -677,8 +702,11 @@ pub async fn serve_api(
     stats: Arc<Stats>,
     store: Arc<RocksStore>,
 ) -> Result<()> {
+    eprintln!("[API] serve_api starting on {}", addr);
+
     // 🔹 Charge la config applicative complète
     let settings = load_config()?;
+    eprintln!("[API] config loaded OK");
 
     let node_wallet = srv.node_identity_wallet();
 
@@ -782,9 +810,11 @@ pub async fn serve_api(
     spawn_inflation_mint_task(state.clone());
 
     // 🔹 Construit le Router complet
+    eprintln!("[API] building router...");
     let app = build_api_router(state, &settings);
 
     let addr: SocketAddr = addr.parse()?;
+    eprintln!("[API] binding to {} (TLS={})", addr, cfg.tls.is_some());
 
     // TLS / HTTP
     if let Some(tls) = cfg.tls.clone() {

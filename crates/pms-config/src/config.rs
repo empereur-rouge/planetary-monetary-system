@@ -19,6 +19,10 @@ fn default_max_dag_blocks() -> usize {
     50_000
 }
 
+fn default_max_spent_outpoints() -> usize {
+    500_000
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Rocks {
     pub path: String,
@@ -31,6 +35,10 @@ pub struct Rocks {
     /// Default: 50 000 (~50 MB RAM).
     #[serde(default = "default_max_dag_blocks")]
     pub max_dag_blocks: usize,
+    /// Maximum spent outpoints tracked in RAM for double-spend detection.
+    /// 0 = unlimited. Default: 500 000.
+    #[serde(default = "default_max_spent_outpoints")]
+    pub max_spent_outpoints: usize,
     /// Intervalle entre chaque backup (checkpoint) en secondes.
     /// Défaut: 21600 (6 heures).
     #[serde(default)]

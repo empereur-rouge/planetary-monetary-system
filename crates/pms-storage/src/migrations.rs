@@ -15,7 +15,7 @@ use thiserror::Error;
 
 /// Version logique du schéma attendu par ce binaire.
 /// Incrémentez lorsqu’une nouvelle migration est introduite.
-pub const CURRENT_VER: i64 = 2;
+pub const CURRENT_VER: i64 = 3;
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

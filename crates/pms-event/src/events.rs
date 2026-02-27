@@ -69,6 +69,23 @@ pub enum PmsEvent {
         /// ID du Milestone qui a déclenché la distribution
         milestone_id: String,
     },
+
+    // ═══════════════════════════════════════════════════════════════════
+    // ACTIVITY STREAM EVENTS
+    // ═══════════════════════════════════════════════════════════════════
+    /// Bloc persisté dans le DAG avec adresses pré-calculées.
+    /// Utilisé par le SSE `/v1/wallet/{address}/activity/stream` pour filtrer
+    /// en mémoire sans accès DB.
+    BlockPersisted {
+        block_id: String,
+        ts_ms: i64,
+        /// Type de payload : "Mint", "TxUtxo", "Reward", "Nft", etc.
+        payload_type: String,
+        /// Toutes les adresses impliquées (outputs, sender, fee recipients, etc.)
+        involved_addresses: Vec<String>,
+        /// Payload JSON sérialisé pour classification sans re-fetch DB
+        payload_json: String,
+    },
 }
 
 impl PmsEvent {
@@ -87,6 +104,7 @@ impl PmsEvent {
             PmsEvent::MilestoneConfirmed { .. } => "milestone_confirmed",
             PmsEvent::BlockAdded { .. } => "block_added",
             PmsEvent::NodeRewardDistributed { .. } => "node_reward_distributed",
+            PmsEvent::BlockPersisted { .. } => "block_persisted",
         }
     }
 
@@ -99,6 +117,7 @@ impl PmsEvent {
             PmsEvent::MilestoneConfirmed { block_id, .. } => block_id,
             PmsEvent::BlockAdded { block_id } => block_id,
             PmsEvent::NodeRewardDistributed { milestone_id, .. } => milestone_id,
+            PmsEvent::BlockPersisted { block_id, .. } => block_id,
         }
     }
 

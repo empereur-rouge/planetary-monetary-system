@@ -1,3 +1,4 @@
+use crate::helpers::{key_time_index, ts_to_be};
 use crate::rocks_store::store::RocksStore;
 use crate::{CURRENT_VER, DagStorage, MigError};
 use anyhow::anyhow;
@@ -37,6 +38,7 @@ impl RocksStore {
             match v {
                 0 => self.mig_0_to_1().await?,
                 1 => self.mig_1_to_2().await?,
+                2 => self.mig_2_to_3().await?,
                 _ => return Err(MigError::Unexpected(v)),
             }
             v += 1;
@@ -107,6 +109,74 @@ impl RocksStore {
         }
 
         tracing::info!("Migration 1→2: completed ({} blocks processed)", total);
+        Ok(())
+    }
+
+    // Migration 2 -> 3 :
+    //
+    // Rebuild `by_time` and `id2ts` entries that were lost due to `trim_by_time()`.
+    // Previous versions trimmed these CFs to `tip_limit` entries after every block insert,
+    // which prevented the Activity API from scanning full DAG history.
+    //
+    // For each block ID in `idx_blocks` that is missing from `id2ts`, we write a
+    // synthetic monotonically-increasing timestamp (starting at 1). These synthetic
+    // timestamps sort before any real wall-clock timestamps (~1.7e12), so migrated
+    // blocks will appear as "oldest" in reverse-chronological scans — which is correct
+    // since they are the blocks that were trimmed (i.e., older blocks).
+    //
+    // Idempotent: skips blocks that already have an `id2ts` entry.
+    async fn mig_2_to_3(&self) -> std::result::Result<(), MigError> {
+        let cf_idx = self.cf("idx_blocks");
+        let cf_i2t = self.cf("id2ts");
+        let cf_time = self.cf("by_time");
+
+        // Count total blocks for progress reporting
+        let mut total = 0usize;
+        let mut missing = 0usize;
+        let mut synthetic_ts: i64 = 1;
+
+        tracing::info!("Migration 2→3: scanning idx_blocks to rebuild by_time/id2ts...");
+
+        for kv in self.db.iterator_cf(&cf_idx, rocksdb::IteratorMode::Start) {
+            let (k, _) = kv.map_err(|e| MigError::Any(anyhow!(e)))?;
+            total += 1;
+
+            let id = String::from_utf8(k.to_vec())
+                .map_err(|e| MigError::Any(anyhow!(e)))?;
+
+            // Skip sentinel key from migration 0→1
+            if id == "__init__" {
+                continue;
+            }
+
+            // Check if id2ts already has this block
+            if self.db.get_cf(&cf_i2t, id.as_bytes())
+                .map_err(|e| MigError::Any(anyhow!(e)))?
+                .is_some()
+            {
+                continue;
+            }
+
+            // Write synthetic timestamp
+            let time_key = key_time_index(synthetic_ts, &id);
+            self.db.put_cf(&cf_time, &time_key, b"")
+                .map_err(|e| MigError::Any(anyhow!(e)))?;
+            self.db.put_cf(&cf_i2t, id.as_bytes(), ts_to_be(synthetic_ts))
+                .map_err(|e| MigError::Any(anyhow!(e)))?;
+
+            synthetic_ts += 1;
+            missing += 1;
+
+            if missing > 0 && missing % 10_000 == 0 {
+                tracing::info!(
+                    "Migration 2→3: rebuilt {missing} entries so far (scanned {total})..."
+                );
+            }
+        }
+
+        tracing::info!(
+            "Migration 2→3: completed — rebuilt {missing} missing entries out of {total} blocks"
+        );
         Ok(())
     }
 }
