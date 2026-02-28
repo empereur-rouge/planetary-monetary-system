@@ -399,7 +399,9 @@ pub async fn history_page_for_address(
     Ok(out)
 }
 
-/// Scans recent blocks for **Plain** payloads (Mint, TxUtxo) involving an address.
+/// Scans blocks for **Plain** payloads (Mint, TxUtxo, Reward, …) involving an address.
+/// Uses the per-address `addr_activity` index for O(wallet_blocks) lookup
+/// instead of scanning all blocks globally.
 /// This does NOT require decryption - it's for transparent/public transactions.
 pub async fn history_plain_for_address(
     store: &RocksStore,
@@ -410,8 +412,10 @@ pub async fn history_plain_for_address(
         return Ok(vec![]);
     }
 
-    // Get recent block IDs
-    let (ids, _cursor) = store.recent_ids_by_time(None, None, limit * 3).await?;
+    // Use per-address index to fetch only blocks involving this address
+    let (ids, _cursor) = store
+        .recent_ids_by_address(addr, None, None, limit)
+        .await?;
 
     if ids.is_empty() {
         return Ok(vec![]);
