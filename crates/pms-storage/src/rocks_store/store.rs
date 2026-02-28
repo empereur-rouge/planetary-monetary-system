@@ -94,6 +94,7 @@ impl RocksStore {
             "token_registry",        // Token registry: asset_id -> TokenMetadata (JSON)
             "compliance_frozen",     // Frozen addresses: address -> FrozenEntry (JSON)
             "compliance_log",        // Compliance audit trail: block_id -> ComplianceLogEntry (JSON)
+            "addr_activity",         // Per-address activity index: [addr][0x00][ts:8][block_id] -> ""
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -212,6 +213,7 @@ impl RocksStore {
         "bridge_links",
         "compliance_frozen",
         "compliance_log",
+        "addr_activity",
     ];
 
     /// Ouvre un RocksDB avec les column families de **plusieurs prefixes** à la fois.
@@ -431,6 +433,103 @@ impl RocksStore {
             }
         }
         Ok(out)
+    }
+
+    /// Paginated reverse-chronological scan of the `addr_activity` CF for a
+    /// single address.  Returns `(block_ids, next_cursor)`.
+    ///
+    /// The cursor is `(ts, block_id, has_more)` — same shape as
+    /// `recent_ids_by_time` so the activity endpoint can reuse pagination logic.
+    pub async fn recent_ids_by_address(
+        &self,
+        addr: &str,
+        after_ts: Option<i64>,
+        after_id: Option<String>,
+        limit: usize,
+    ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
+        use crate::helpers::{key_addr_activity, parse_addr_activity_key, prefix_addr_activity};
+
+        let cf_aa = self.cf("addr_activity");
+        let addr_len = addr.len();
+        let prefix = prefix_addr_activity(addr);
+
+        // Build the seek key (must outlive the iterator)
+        let seek_key = if let (Some(ts), Some(id)) = (after_ts, after_id.as_deref()) {
+            key_addr_activity(addr, ts, id)
+        } else {
+            // Seek just past the end of this address's prefix so that reverse
+            // iteration starts at the newest entry.  The prefix is
+            // [addr_bytes][0x00], so replacing 0x00 with 0x01 puts us one past.
+            let mut end_key = prefix.clone();
+            if let Some(last) = end_key.last_mut() {
+                *last = 0x01;
+            }
+            end_key
+        };
+
+        let mut ids = Vec::with_capacity(limit + 1);
+        let iter = self.db.iterator_cf(
+            &cf_aa,
+            IteratorMode::From(&seek_key, Direction::Reverse),
+        );
+        let mut skipped_cursor = false;
+
+        for item in iter {
+            let (k, _) = item?;
+
+            // Stop if we've left this address's prefix
+            if k.len() < prefix.len() || &k[..prefix.len()] != prefix.as_slice() {
+                break;
+            }
+
+            let Some((ts, block_id)) = parse_addr_activity_key(&k, addr_len) else {
+                continue;
+            };
+
+            // Skip the exact cursor entry
+            if !skipped_cursor && after_ts.is_some() && after_id.is_some() {
+                if Some(ts) == after_ts && Some(&block_id) == after_id.as_ref() {
+                    skipped_cursor = true;
+                    continue;
+                }
+                skipped_cursor = true;
+            }
+
+            ids.push(block_id);
+            if ids.len() > limit {
+                break;
+            }
+        }
+
+        let has_more = ids.len() > limit;
+        if has_more {
+            ids.pop();
+        }
+
+        let next_cursor = if has_more {
+            ids.last().and_then(|last_id| {
+                // Look up ts from id2ts
+                let cf_i2t = self.cf("id2ts");
+                self.db
+                    .get_cf(&cf_i2t, last_id.as_bytes())
+                    .ok()
+                    .flatten()
+                    .and_then(|v| {
+                        if v.len() == 8 {
+                            let mut b = [0u8; 8];
+                            b.copy_from_slice(&v);
+                            let ts = u64::from_be_bytes(b) as i64;
+                            Some((ts, last_id.clone(), true))
+                        } else {
+                            None
+                        }
+                    })
+            })
+        } else {
+            None
+        };
+
+        Ok((ids, next_cursor))
     }
 
     pub fn bootstrap_once_for_production(&self) -> anyhow::Result<()> {
@@ -1057,6 +1156,23 @@ impl DagStorage for RocksStore {
         // 1.b) Indices DAG
         self.apply_dag_indices(&mut batch, b)?;
 
+        // 1.c) Per-address activity index
+        if let Some(pjson) = &b.payload_json {
+            if let Ok(env) = serde_json::from_str::<pms_types_payload::PayloadEnvelope>(pjson) {
+                if let pms_types_payload::PayloadEnvelope::Plain(ref plain) = env {
+                    let addrs = crate::helpers::extract_involved_addresses(plain);
+                    if !addrs.is_empty() {
+                        let cf_aa = self.cf("addr_activity");
+                        let ts = crate::helpers::now_ms_i64();
+                        for addr in &addrs {
+                            let key = crate::helpers::key_addr_activity(addr, ts, &b.id);
+                            batch.put_cf(&cf_aa, &key, b"");
+                        }
+                    }
+                }
+            }
+        }
+
         // 2) write atomique
         self.db.write(batch)?;
 
@@ -1064,6 +1180,18 @@ impl DagStorage for RocksStore {
         self.trim_tips()?;
 
         Ok(true)
+    }
+
+    async fn recent_ids_by_address(
+        &self,
+        addr: &str,
+        after_ts: Option<i64>,
+        after_id: Option<String>,
+        limit: usize,
+    ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
+        // Delegate to the inherent method
+        self.recent_ids_by_address(addr, after_ts, after_id, limit)
+            .await
     }
 }
 

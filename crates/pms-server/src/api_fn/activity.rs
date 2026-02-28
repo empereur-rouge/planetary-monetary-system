@@ -77,24 +77,21 @@ pub async fn get_wallet_activity(
     let limit = q.limit.unwrap_or(50).min(500);
     let type_filters = parse_type_filter(&q.filter_type);
 
-    // Paginated scan: keep fetching batches until we have enough items
-    // or exhaust the DAG. This handles sparse wallets (e.g. coordinator
-    // only appears in ~1% of blocks).
+    // Per-address index scan: directly fetches blocks involving this address
+    // in reverse-chronological order.  No MAX_SCANNED needed.
     const BATCH_SIZE: usize = 500;
-    const MAX_SCANNED: usize = 50_000;
 
     let adapter = app.srv.adapter_arc();
     let ledger_tag = if app.ledger_id == "main" { None } else { Some(app.ledger_id.clone()) };
     let mut items = Vec::new();
     let mut cursor_ts = q.after_ts;
     let mut cursor_id = q.after_id.clone();
-    let mut scanned = 0usize;
-    let mut last_cursor: Option<(i64, String, bool)> = None;
+    let mut last_cursor: Option<(i64, String, bool)>;
 
     loop {
         let (ids, next_cursor) = app
             .store
-            .recent_ids_by_time(cursor_ts, cursor_id.clone(), BATCH_SIZE)
+            .recent_ids_by_address(&address, cursor_ts, cursor_id.clone(), BATCH_SIZE)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -102,8 +99,6 @@ pub async fn get_wallet_activity(
             last_cursor = None;
             break;
         }
-
-        scanned += ids.len();
 
         let blocks = app
             .store
@@ -181,8 +176,8 @@ pub async fn get_wallet_activity(
 
         last_cursor = next_cursor;
 
-        // Stop if we have enough items or exhausted the DAG
-        if items.len() > limit || scanned >= MAX_SCANNED {
+        // Stop if we have enough items
+        if items.len() > limit {
             break;
         }
 

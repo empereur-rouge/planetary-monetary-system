@@ -50,4 +50,17 @@ pub trait DagStorage: Send + Sync {
         b: &StoredBlock,
         delta: Option<&UtxoDelta>,
     ) -> Result<bool>;
+
+    /// Paginated reverse-chronological scan of block IDs involving a specific
+    /// address.  Returns `(block_ids, next_cursor)`.
+    /// Default no-op returns empty results (used by non-RocksDB backends).
+    async fn recent_ids_by_address(
+        &self,
+        _addr: &str,
+        _after_ts: Option<i64>,
+        _after_id: Option<String>,
+        _limit: usize,
+    ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
+        Ok((vec![], None))
+    }
 }

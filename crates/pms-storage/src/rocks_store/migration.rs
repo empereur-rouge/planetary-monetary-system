@@ -1,7 +1,8 @@
-use crate::helpers::{key_time_index, ts_to_be};
+use crate::helpers::{extract_involved_addresses, key_addr_activity, key_time_index, ts_to_be};
 use crate::rocks_store::store::RocksStore;
-use crate::{CURRENT_VER, DagStorage, MigError};
+use crate::{CURRENT_VER, DagStorage, MigError, StoredBlock};
 use anyhow::anyhow;
+use pms_types_payload::PayloadEnvelope;
 use std::sync::Arc;
 use rocksdb::BoundColumnFamily;
 
@@ -39,6 +40,7 @@ impl RocksStore {
                 0 => self.mig_0_to_1().await?,
                 1 => self.mig_1_to_2().await?,
                 2 => self.mig_2_to_3().await?,
+                3 => self.mig_3_to_4().await?,
                 _ => return Err(MigError::Unexpected(v)),
             }
             v += 1;
@@ -176,6 +178,88 @@ impl RocksStore {
 
         tracing::info!(
             "Migration 2→3: completed — rebuilt {missing} missing entries out of {total} blocks"
+        );
+        Ok(())
+    }
+
+    // Migration 3 -> 4 :
+    //
+    // Backfill the `addr_activity` column family for all existing blocks.
+    // For each block in `by_time` (which has all blocks thanks to migration 2→3),
+    // parse its payload, extract involved addresses, and write entries.
+    //
+    // Idempotent: addr_activity entries are keyed by (addr, ts, block_id),
+    // so re-writing is harmless (same key = same value).
+    async fn mig_3_to_4(&self) -> std::result::Result<(), MigError> {
+        let cf_time = self.cf("by_time");
+        let cf_blocks = self.cf("blocks");
+        let cf_i2t = self.cf("id2ts");
+        let cf_aa = self.cf("addr_activity");
+
+        let mut total = 0usize;
+        let mut indexed = 0usize;
+
+        tracing::info!("Migration 3→4: backfilling addr_activity index...");
+
+        for kv in self.db.iterator_cf(&cf_time, rocksdb::IteratorMode::Start) {
+            let (time_key, _) = kv.map_err(|e| MigError::Any(anyhow!(e)))?;
+            total += 1;
+
+            // Parse the time index key to get (ts, block_id)
+            let Some((_ts, block_id)) = crate::helpers::parse_time_index_key(&time_key) else {
+                continue;
+            };
+
+            // Fetch the block
+            let Some(block_bytes) = self.db.get_cf(&cf_blocks, block_id.as_bytes())
+                .map_err(|e| MigError::Any(anyhow!(e)))? else {
+                continue;
+            };
+
+            let Ok(sb) = serde_json::from_slice::<StoredBlock>(&block_bytes) else {
+                continue;
+            };
+
+            // Parse payload
+            let Some(pjson) = &sb.payload_json else { continue };
+            let Ok(env) = serde_json::from_str::<PayloadEnvelope>(pjson) else { continue };
+            let PayloadEnvelope::Plain(ref plain) = env else { continue };
+
+            let addrs = extract_involved_addresses(plain);
+            if addrs.is_empty() {
+                continue;
+            }
+
+            // Get the block's timestamp from id2ts
+            let ts = match self.db.get_cf(&cf_i2t, block_id.as_bytes())
+                .map_err(|e| MigError::Any(anyhow!(e)))?
+            {
+                Some(v) if v.len() == 8 => {
+                    let mut be = [0u8; 8];
+                    be.copy_from_slice(&v);
+                    u64::from_be_bytes(be) as i64
+                }
+                _ => continue,
+            };
+
+            // Write addr_activity entries
+            for addr in &addrs {
+                let key = key_addr_activity(addr, ts, &block_id);
+                self.db.put_cf(&cf_aa, &key, b"")
+                    .map_err(|e| MigError::Any(anyhow!(e)))?;
+            }
+
+            indexed += 1;
+
+            if indexed > 0 && indexed % 10_000 == 0 {
+                tracing::info!(
+                    "Migration 3→4: indexed {indexed} blocks so far (scanned {total})..."
+                );
+            }
+        }
+
+        tracing::info!(
+            "Migration 3→4: completed — indexed {indexed} blocks with addresses out of {total} total"
         );
         Ok(())
     }
