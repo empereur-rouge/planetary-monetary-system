@@ -1,4 +1,5 @@
 use anyhow::Result;
+use pms_storage::helpers::ActivityCategory;
 use pms_storage::{DagStorage, StoredBlock};
 use pms_testkit::test_rocks_store_with_limit;
 use pms_types_payload::{PayloadEnvelope, PlainPayload};
@@ -179,6 +180,207 @@ async fn addr_activity_multi_address_in_one_block() -> Result<()> {
 
     let (bob_ids, _) = store.recent_ids_by_address("bob", None, None, 100).await?;
     assert_eq!(bob_ids, vec!["multi1"]);
+
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Per-type activity index tests (addr_type_activity)
+// ═══════════════════════════════════════════════════════════════════
+
+fn reward_payload_with_both(fee_addr: &str, reward_addr: &str) -> PlainPayload {
+    PlainPayload::Reward {
+        fee_outputs: vec![TxOutput {
+            address: fee_addr.into(),
+            amount: "1.0".into(),
+            asset_id: None,
+        }],
+        reward_outputs: vec![TxOutput {
+            address: reward_addr.into(),
+            amount: "0.5".into(),
+            asset_id: None,
+        }],
+        burned: "0.05".into(),
+        tx_block_id: "txblk".into(),
+    }
+}
+
+#[tokio::test]
+async fn typed_index_filters_by_category() -> Result<()> {
+    let store = test_rocks_store_with_limit("typed-filter", 64).await?;
+
+    // Insert a mint block and a reward block for "coord"
+    let b1 = sb_with_payload("mint1", mint_payload("coord", "1000"));
+    store.append_block_atomic_with_utxo(&b1, None).await?;
+    sleep(Duration::from_millis(5)).await;
+
+    let b2 = sb_with_payload("reward1", reward_payload("coord"));
+    store.append_block_atomic_with_utxo(&b2, None).await?;
+    sleep(Duration::from_millis(5)).await;
+
+    let b3 = sb_with_payload("mint2", mint_payload("coord", "2000"));
+    store.append_block_atomic_with_utxo(&b3, None).await?;
+
+    // Filter by Mint category: should only return mint blocks
+    let cats = &[ActivityCategory::Mint.as_byte()];
+    let (mint_ids, _) = store
+        .recent_ids_by_address_and_categories("coord", cats, None, None, 100)
+        .await?;
+    assert_eq!(mint_ids.len(), 2);
+    assert_eq!(mint_ids[0], "mint2");
+    assert_eq!(mint_ids[1], "mint1");
+
+    // Filter by Fee category: should only return fee blocks
+    let cats = &[ActivityCategory::Fee.as_byte()];
+    let (fee_ids, _) = store
+        .recent_ids_by_address_and_categories("coord", cats, None, None, 100)
+        .await?;
+    assert_eq!(fee_ids.len(), 1);
+    assert_eq!(fee_ids[0], "reward1");
+
+    // Filter by Reward category: should return nothing (reward_outputs was empty)
+    let cats = &[ActivityCategory::Reward.as_byte()];
+    let (reward_ids, _) = store
+        .recent_ids_by_address_and_categories("coord", cats, None, None, 100)
+        .await?;
+    assert!(reward_ids.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_index_reward_fee_split() -> Result<()> {
+    let store = test_rocks_store_with_limit("typed-fee-split", 64).await?;
+
+    // Reward block where "coord" gets fee and "validator" gets reward
+    let b = sb_with_payload("rblk", reward_payload_with_both("coord", "validator"));
+    store.append_block_atomic_with_utxo(&b, None).await?;
+
+    // coord should have Fee category
+    let cats = &[ActivityCategory::Fee.as_byte()];
+    let (ids, _) = store
+        .recent_ids_by_address_and_categories("coord", cats, None, None, 100)
+        .await?;
+    assert_eq!(ids, vec!["rblk"]);
+
+    // coord should NOT have Reward category
+    let cats = &[ActivityCategory::Reward.as_byte()];
+    let (ids, _) = store
+        .recent_ids_by_address_and_categories("coord", cats, None, None, 100)
+        .await?;
+    assert!(ids.is_empty());
+
+    // validator should have Reward category
+    let cats = &[ActivityCategory::Reward.as_byte()];
+    let (ids, _) = store
+        .recent_ids_by_address_and_categories("validator", cats, None, None, 100)
+        .await?;
+    assert_eq!(ids, vec!["rblk"]);
+
+    // validator should NOT have Fee category
+    let cats = &[ActivityCategory::Fee.as_byte()];
+    let (ids, _) = store
+        .recent_ids_by_address_and_categories("validator", cats, None, None, 100)
+        .await?;
+    assert!(ids.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_index_multi_category_merge() -> Result<()> {
+    let store = test_rocks_store_with_limit("typed-multi-cat", 64).await?;
+
+    // Insert interleaved mint and fee blocks for "coord"
+    let b1 = sb_with_payload("mint1", mint_payload("coord", "100"));
+    store.append_block_atomic_with_utxo(&b1, None).await?;
+    sleep(Duration::from_millis(5)).await;
+
+    let b2 = sb_with_payload("fee1", reward_payload("coord"));
+    store.append_block_atomic_with_utxo(&b2, None).await?;
+    sleep(Duration::from_millis(5)).await;
+
+    let b3 = sb_with_payload("mint2", mint_payload("coord", "200"));
+    store.append_block_atomic_with_utxo(&b3, None).await?;
+    sleep(Duration::from_millis(5)).await;
+
+    let b4 = sb_with_payload("fee2", reward_payload("coord"));
+    store.append_block_atomic_with_utxo(&b4, None).await?;
+
+    // Query both Mint + Fee categories: should merge newest-first
+    let cats = &[
+        ActivityCategory::Mint.as_byte(),
+        ActivityCategory::Fee.as_byte(),
+    ];
+    let (ids, _) = store
+        .recent_ids_by_address_and_categories("coord", cats, None, None, 100)
+        .await?;
+    assert_eq!(ids.len(), 4);
+    assert_eq!(ids[0], "fee2");
+    assert_eq!(ids[1], "mint2");
+    assert_eq!(ids[2], "fee1");
+    assert_eq!(ids[3], "mint1");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_index_pagination() -> Result<()> {
+    let store = test_rocks_store_with_limit("typed-page", 64).await?;
+
+    // Insert 5 mint blocks
+    for i in 0..5 {
+        let id = format!("m{i}");
+        let b = sb_with_payload(&id, mint_payload("alice", "10"));
+        store.append_block_atomic_with_utxo(&b, None).await?;
+        sleep(Duration::from_millis(5)).await;
+    }
+
+    let cats = &[ActivityCategory::Mint.as_byte()];
+
+    // Page 1 (limit 2)
+    let (page1, cursor1) = store
+        .recent_ids_by_address_and_categories("alice", cats, None, None, 2)
+        .await?;
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1[0], "m4");
+    assert_eq!(page1[1], "m3");
+    assert!(cursor1.is_some());
+
+    // Page 2
+    let (ts, id, has_more) = cursor1.unwrap();
+    assert!(has_more);
+    let (page2, cursor2) = store
+        .recent_ids_by_address_and_categories("alice", cats, Some(ts), Some(id), 2)
+        .await?;
+    assert_eq!(page2.len(), 2);
+    assert_eq!(page2[0], "m2");
+    assert_eq!(page2[1], "m1");
+
+    // Page 3
+    let (ts, id, _) = cursor2.unwrap();
+    let (page3, cursor3) = store
+        .recent_ids_by_address_and_categories("alice", cats, Some(ts), Some(id), 2)
+        .await?;
+    assert_eq!(page3.len(), 1);
+    assert_eq!(page3[0], "m0");
+    assert!(cursor3.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_index_empty_categories_returns_empty() -> Result<()> {
+    let store = test_rocks_store_with_limit("typed-empty-cat", 64).await?;
+
+    let b = sb_with_payload("blk1", mint_payload("alice", "100"));
+    store.append_block_atomic_with_utxo(&b, None).await?;
+
+    // Empty categories slice should return nothing
+    let (ids, _) = store
+        .recent_ids_by_address_and_categories("alice", &[], None, None, 100)
+        .await?;
+    assert!(ids.is_empty());
 
     Ok(())
 }

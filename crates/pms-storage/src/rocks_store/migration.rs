@@ -1,4 +1,7 @@
-use crate::helpers::{extract_involved_addresses, key_addr_activity, key_time_index, ts_to_be};
+use crate::helpers::{
+    extract_involved_addresses, extract_involved_with_category, key_addr_activity,
+    key_addr_type_activity, key_time_index, ts_to_be,
+};
 use crate::rocks_store::store::RocksStore;
 use crate::{CURRENT_VER, DagStorage, MigError, StoredBlock};
 use anyhow::anyhow;
@@ -41,6 +44,7 @@ impl RocksStore {
                 1 => self.mig_1_to_2().await?,
                 2 => self.mig_2_to_3().await?,
                 3 => self.mig_3_to_4().await?,
+                4 => self.mig_4_to_5().await?,
                 _ => return Err(MigError::Unexpected(v)),
             }
             v += 1;
@@ -260,6 +264,96 @@ impl RocksStore {
 
         tracing::info!(
             "Migration 3→4: completed — indexed {indexed} blocks with addresses out of {total} total"
+        );
+        Ok(())
+    }
+
+    // Migration 4 -> 5 :
+    //
+    // Backfill the `addr_type_activity` column family for all existing blocks.
+    // Iterates `by_time` CF (which has all blocks), parses payload, extracts
+    // (address, category) pairs and writes typed index entries.
+    //
+    // Idempotent: entries are keyed by (addr, cat, ts, block_id),
+    // so re-writing is harmless.
+    async fn mig_4_to_5(&self) -> std::result::Result<(), MigError> {
+        let cf_time = self.cf("by_time");
+        let cf_blocks = self.cf("blocks");
+        let cf_i2t = self.cf("id2ts");
+        let cf_ata = self.cf("addr_type_activity");
+
+        let mut total = 0usize;
+        let mut indexed = 0usize;
+
+        tracing::info!("Migration 4→5: backfilling addr_type_activity index...");
+
+        for kv in self.db.iterator_cf(&cf_time, rocksdb::IteratorMode::Start) {
+            let (time_key, _) = kv.map_err(|e| MigError::Any(anyhow!(e)))?;
+            total += 1;
+
+            let Some((_ts, block_id)) = crate::helpers::parse_time_index_key(&time_key) else {
+                continue;
+            };
+
+            let Some(block_bytes) = self
+                .db
+                .get_cf(&cf_blocks, block_id.as_bytes())
+                .map_err(|e| MigError::Any(anyhow!(e)))?
+            else {
+                continue;
+            };
+
+            let Ok(sb) = serde_json::from_slice::<StoredBlock>(&block_bytes) else {
+                continue;
+            };
+
+            let Some(pjson) = &sb.payload_json else {
+                continue;
+            };
+            let Ok(env) = serde_json::from_str::<PayloadEnvelope>(pjson) else {
+                continue;
+            };
+            let PayloadEnvelope::Plain(ref plain) = env else {
+                continue;
+            };
+
+            let typed = extract_involved_with_category(plain);
+            if typed.is_empty() {
+                continue;
+            }
+
+            // Get the block's timestamp from id2ts
+            let ts = match self
+                .db
+                .get_cf(&cf_i2t, block_id.as_bytes())
+                .map_err(|e| MigError::Any(anyhow!(e)))?
+            {
+                Some(v) if v.len() == 8 => {
+                    let mut be = [0u8; 8];
+                    be.copy_from_slice(&v);
+                    u64::from_be_bytes(be) as i64
+                }
+                _ => continue,
+            };
+
+            for (addr, cat) in &typed {
+                let key = key_addr_type_activity(addr, cat.as_byte(), ts, &block_id);
+                self.db
+                    .put_cf(&cf_ata, &key, b"")
+                    .map_err(|e| MigError::Any(anyhow!(e)))?;
+            }
+
+            indexed += 1;
+
+            if indexed > 0 && indexed % 10_000 == 0 {
+                tracing::info!(
+                    "Migration 4→5: indexed {indexed} blocks so far (scanned {total})..."
+                );
+            }
+        }
+
+        tracing::info!(
+            "Migration 4→5: completed — indexed {indexed} blocks with typed categories out of {total} total"
         );
         Ok(())
     }

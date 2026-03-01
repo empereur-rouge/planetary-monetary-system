@@ -95,6 +95,7 @@ impl RocksStore {
             "compliance_frozen",     // Frozen addresses: address -> FrozenEntry (JSON)
             "compliance_log",        // Compliance audit trail: block_id -> ComplianceLogEntry (JSON)
             "addr_activity",         // Per-address activity index: [addr][0x00][ts:8][block_id] -> ""
+            "addr_type_activity",    // Per-address-per-type index: [addr][0x00][cat:1][ts:8][block_id] -> ""
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -214,6 +215,7 @@ impl RocksStore {
         "compliance_frozen",
         "compliance_log",
         "addr_activity",
+        "addr_type_activity",
     ];
 
     /// Ouvre un RocksDB avec les column families de **plusieurs prefixes** à la fois.
@@ -529,6 +531,240 @@ impl RocksStore {
             None
         };
 
+        Ok((ids, next_cursor))
+    }
+
+    /// Write addr_activity index entries for a block with pre-computed addresses.
+    /// Used for Encrypted payloads where addresses are known by the caller
+    /// (e.g. the coordinator) but can't be extracted from the stored payload.
+    pub fn write_addr_activity_entries(&self, block_id: &str, addresses: &[String]) -> Result<()> {
+        if addresses.is_empty() {
+            return Ok(());
+        }
+        let cf_aa = self.cf("addr_activity");
+        let ts = crate::helpers::now_ms_i64();
+        let mut batch = rocksdb::WriteBatch::default();
+        for addr in addresses {
+            let key = crate::helpers::key_addr_activity(addr, ts, block_id);
+            batch.put_cf(&cf_aa, &key, b"");
+        }
+        self.db.write(batch)?;
+        Ok(())
+    }
+
+    /// Paginated reverse-chronological scan of the `addr_type_activity` CF for a
+    /// single address filtered by one or more activity categories.
+    ///
+    /// When a single category is given, it's a simple prefix scan.
+    /// When multiple categories are given, we do a k-way merge across category
+    /// prefixes (k ≤ 9) picking the newest entry each round.
+    pub async fn recent_ids_by_address_and_categories(
+        &self,
+        addr: &str,
+        categories: &[u8],
+        after_ts: Option<i64>,
+        after_id: Option<String>,
+        limit: usize,
+    ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
+        use crate::helpers::{
+            key_addr_type_activity, parse_addr_type_activity_key, prefix_addr_type_activity,
+        };
+
+        if categories.is_empty() {
+            return Ok((vec![], None));
+        }
+
+        let cf_ata = self.cf("addr_type_activity");
+        let addr_len = addr.len();
+
+        // For a single category, use a simple prefix scan (common case)
+        if categories.len() == 1 {
+            let cat = categories[0];
+            let prefix = prefix_addr_type_activity(addr, cat);
+
+            let seek_key =
+                if let (Some(ts), Some(ref id)) = (after_ts, after_id.as_deref()) {
+                    key_addr_type_activity(addr, cat, ts, id)
+                } else {
+                    let mut end_key = prefix.clone();
+                    // [addr][0x00][cat] → bump last byte to go past the prefix
+                    if let Some(last) = end_key.last_mut() {
+                        *last = cat.wrapping_add(1);
+                    }
+                    end_key
+                };
+
+            let mut ids = Vec::with_capacity(limit + 1);
+            let iter = self.db.iterator_cf(
+                &cf_ata,
+                IteratorMode::From(&seek_key, Direction::Reverse),
+            );
+            let mut skipped_cursor = false;
+
+            for item in iter {
+                let (k, _) = item?;
+                if k.len() < prefix.len() || &k[..prefix.len()] != prefix.as_slice() {
+                    break;
+                }
+                let Some((_cat, ts, block_id)) =
+                    parse_addr_type_activity_key(&k, addr_len)
+                else {
+                    continue;
+                };
+
+                if !skipped_cursor && after_ts.is_some() && after_id.is_some() {
+                    if Some(ts) == after_ts && Some(&block_id) == after_id.as_ref() {
+                        skipped_cursor = true;
+                        continue;
+                    }
+                    skipped_cursor = true;
+                }
+
+                ids.push(block_id);
+                if ids.len() > limit {
+                    break;
+                }
+            }
+
+            return self.finalize_ids_cursor(ids, limit).await;
+        }
+
+        // Multi-category: k-way merge across category prefixes
+        // Build one iterator per category, each positioned at the right start
+        struct CatIter<'a> {
+            prefix: Vec<u8>,
+            iter: rocksdb::DBIteratorWithThreadMode<
+                'a,
+                DBWithThreadMode<MultiThreaded>,
+            >,
+            current: Option<(i64, String)>, // (ts, block_id) of the peeked entry
+            addr_len: usize,
+        }
+
+        let mut iters: Vec<CatIter<'_>> = Vec::with_capacity(categories.len());
+
+        for &cat in categories {
+            let prefix = prefix_addr_type_activity(addr, cat);
+            let seek_key =
+                if let (Some(ts), Some(ref id)) = (after_ts, after_id.as_deref()) {
+                    key_addr_type_activity(addr, cat, ts, id)
+                } else {
+                    let mut end_key = prefix.clone();
+                    if let Some(last) = end_key.last_mut() {
+                        *last = cat.wrapping_add(1);
+                    }
+                    end_key
+                };
+
+            let iter = self.db.iterator_cf(
+                &cf_ata,
+                IteratorMode::From(&seek_key, Direction::Reverse),
+            );
+
+            let mut ci = CatIter {
+                prefix,
+                iter,
+                current: None,
+                addr_len,
+            };
+            // Advance to first valid entry (skip exact cursor if needed)
+            ci.advance(after_ts, after_id.as_deref());
+            if ci.current.is_some() {
+                iters.push(ci);
+            }
+        }
+
+        impl CatIter<'_> {
+            fn advance(&mut self, skip_ts: Option<i64>, skip_id: Option<&str>) {
+                loop {
+                    let Some(Ok((k, _))) = self.iter.next() else {
+                        self.current = None;
+                        return;
+                    };
+                    if k.len() < self.prefix.len()
+                        || &k[..self.prefix.len()] != self.prefix.as_slice()
+                    {
+                        self.current = None;
+                        return;
+                    }
+                    let Some((_cat, ts, block_id)) =
+                        parse_addr_type_activity_key(&k, self.addr_len)
+                    else {
+                        continue;
+                    };
+                    // Skip exact cursor entry
+                    if let (Some(sts), Some(sid)) = (skip_ts, skip_id) {
+                        if ts == sts && block_id == sid {
+                            continue;
+                        }
+                    }
+                    self.current = Some((ts, block_id));
+                    return;
+                }
+            }
+            fn advance_next(&mut self) {
+                self.advance(None, None);
+            }
+        }
+
+        // Merge: pick the iterator with the highest timestamp each round
+        let mut ids = Vec::with_capacity(limit + 1);
+        while !iters.is_empty() && ids.len() <= limit {
+            // Find iterator with the newest entry
+            let best_idx = iters
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| {
+                    let (ts_a, id_a) = a.current.as_ref().unwrap();
+                    let (ts_b, id_b) = b.current.as_ref().unwrap();
+                    ts_a.cmp(ts_b).then_with(|| id_a.cmp(id_b))
+                })
+                .map(|(i, _)| i)
+                .unwrap();
+
+            let (_, block_id) = iters[best_idx].current.clone().unwrap();
+            ids.push(block_id);
+
+            iters[best_idx].advance_next();
+            if iters[best_idx].current.is_none() {
+                iters.swap_remove(best_idx);
+            }
+        }
+
+        self.finalize_ids_cursor(ids, limit).await
+    }
+
+    /// Shared logic for building the pagination cursor from a collected ids vec.
+    async fn finalize_ids_cursor(
+        &self,
+        mut ids: Vec<String>,
+        limit: usize,
+    ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
+        let has_more = ids.len() > limit;
+        if has_more {
+            ids.pop();
+        }
+        let next_cursor = if has_more {
+            ids.last().and_then(|last_id| {
+                let cf_i2t = self.cf("id2ts");
+                self.db
+                    .get_cf(&cf_i2t, last_id.as_bytes())
+                    .ok()
+                    .flatten()
+                    .and_then(|v| {
+                        if v.len() == 8 {
+                            let mut b = [0u8; 8];
+                            b.copy_from_slice(&v);
+                            let ts = u64::from_be_bytes(b) as i64;
+                            Some((ts, last_id.clone(), true))
+                        } else {
+                            None
+                        }
+                    })
+            })
+        } else {
+            None
+        };
         Ok((ids, next_cursor))
     }
 
@@ -1156,17 +1392,34 @@ impl DagStorage for RocksStore {
         // 1.b) Indices DAG
         self.apply_dag_indices(&mut batch, b)?;
 
-        // 1.c) Per-address activity index
+        // 1.c) Per-address activity indexes (addr_activity + addr_type_activity)
         if let Some(pjson) = &b.payload_json {
             if let Ok(env) = serde_json::from_str::<pms_types_payload::PayloadEnvelope>(pjson) {
                 if let pms_types_payload::PayloadEnvelope::Plain(ref plain) = env {
+                    let ts = crate::helpers::now_ms_i64();
+
+                    // Untyped index (addr_activity)
                     let addrs = crate::helpers::extract_involved_addresses(plain);
                     if !addrs.is_empty() {
                         let cf_aa = self.cf("addr_activity");
-                        let ts = crate::helpers::now_ms_i64();
                         for addr in &addrs {
                             let key = crate::helpers::key_addr_activity(addr, ts, &b.id);
                             batch.put_cf(&cf_aa, &key, b"");
+                        }
+                    }
+
+                    // Typed index (addr_type_activity)
+                    let typed = crate::helpers::extract_involved_with_category(plain);
+                    if !typed.is_empty() {
+                        let cf_ata = self.cf("addr_type_activity");
+                        for (addr, cat) in &typed {
+                            let key = crate::helpers::key_addr_type_activity(
+                                addr,
+                                cat.as_byte(),
+                                ts,
+                                &b.id,
+                            );
+                            batch.put_cf(&cf_ata, &key, b"");
                         }
                     }
                 }
@@ -1191,6 +1444,18 @@ impl DagStorage for RocksStore {
     ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
         // Delegate to the inherent method
         self.recent_ids_by_address(addr, after_ts, after_id, limit)
+            .await
+    }
+
+    async fn recent_ids_by_address_and_categories(
+        &self,
+        addr: &str,
+        categories: &[u8],
+        after_ts: Option<i64>,
+        after_id: Option<String>,
+        limit: usize,
+    ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
+        self.recent_ids_by_address_and_categories(addr, categories, after_ts, after_id, limit)
             .await
     }
 }

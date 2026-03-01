@@ -63,4 +63,19 @@ pub trait DagStorage: Send + Sync {
     ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
         Ok((vec![], None))
     }
+
+    /// Like `recent_ids_by_address` but filtered by one or more activity
+    /// categories (see `ActivityCategory`).  When a single category is given
+    /// it's a simple prefix scan; multiple categories trigger a k-way merge.
+    /// Default no-op returns empty results (used by non-RocksDB backends).
+    async fn recent_ids_by_address_and_categories(
+        &self,
+        _addr: &str,
+        _categories: &[u8],
+        _after_ts: Option<i64>,
+        _after_id: Option<String>,
+        _limit: usize,
+    ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
+        Ok((vec![], None))
+    }
 }

@@ -77,6 +77,15 @@ pub async fn get_wallet_activity(
     let limit = q.limit.unwrap_or(50).min(500);
     let type_filters = parse_type_filter(&q.filter_type);
 
+    // Map API filter strings to storage-level category bytes for indexed lookup
+    let category_bytes: Vec<u8> = type_filters
+        .iter()
+        .filter_map(|s| pms_storage::helpers::ActivityCategory::from_filter_type(s))
+        .map(|c| c.as_byte())
+        .collect::<std::collections::BTreeSet<u8>>()
+        .into_iter()
+        .collect();
+
     // Per-address index scan: directly fetches blocks involving this address
     // in reverse-chronological order.  No MAX_SCANNED needed.
     const BATCH_SIZE: usize = 500;
@@ -89,11 +98,25 @@ pub async fn get_wallet_activity(
     let mut last_cursor: Option<(i64, String, bool)>;
 
     loop {
-        let (ids, next_cursor) = app
-            .store
-            .recent_ids_by_address(&address, cursor_ts, cursor_id.clone(), BATCH_SIZE)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // When type filters are set, use the per-type index for O(matching) scan;
+        // otherwise use the untyped per-address index.
+        let (ids, next_cursor) = if !category_bytes.is_empty() {
+            app.store
+                .recent_ids_by_address_and_categories(
+                    &address,
+                    &category_bytes,
+                    cursor_ts,
+                    cursor_id.clone(),
+                    BATCH_SIZE,
+                )
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        } else {
+            app.store
+                .recent_ids_by_address(&address, cursor_ts, cursor_id.clone(), BATCH_SIZE)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        };
 
         if ids.is_empty() {
             last_cursor = None;

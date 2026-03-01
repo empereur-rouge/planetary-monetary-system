@@ -178,3 +178,170 @@ pub fn extract_involved_addresses(plain: &PlainPayload) -> Vec<String> {
     addrs.dedup();
     addrs
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Per-address-per-type activity index helpers
+// ═══════════════════════════════════════════════════════════════════
+
+/// Activity categories for the `addr_type_activity` CF.
+/// Each variant maps to a 1-byte discriminant used as part of the key.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityCategory {
+    Mint = 1,
+    Transfer = 2,
+    Fee = 3,
+    Reward = 4,
+    Nft = 5,
+    TokenCreate = 6,
+    Bridge = 7,
+    Compliance = 8,
+    Reverse = 9,
+}
+
+impl ActivityCategory {
+    /// Map an API `filter_type` string to a category.
+    pub fn from_filter_type(s: &str) -> Option<Self> {
+        match s {
+            "mint" => Some(Self::Mint),
+            "transfer_in" | "transfer_out" | "transfer_self" => Some(Self::Transfer),
+            "fee_received" => Some(Self::Fee),
+            "reward" => Some(Self::Reward),
+            "nft_mint" | "nft_transfer_in" | "nft_transfer_out" | "nft_burn" | "nft_use" => {
+                Some(Self::Nft)
+            }
+            "token_create" => Some(Self::TokenCreate),
+            "bridge_lock_in" | "bridge_mint" => Some(Self::Bridge),
+            "freeze" | "unfreeze" | "seized" | "seize_received" => Some(Self::Compliance),
+            "reverse_received" => Some(Self::Reverse),
+            _ => None,
+        }
+    }
+
+    pub fn as_byte(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Extract `(address, category)` pairs from a `PlainPayload`.
+///
+/// Unlike `extract_involved_addresses`, this distinguishes between fee and
+/// reward addresses in `Reward` blocks, assigning each its own category.
+pub fn extract_involved_with_category(plain: &PlainPayload) -> Vec<(String, ActivityCategory)> {
+    let mut out = Vec::new();
+    match plain {
+        PlainPayload::Mint { outputs } => {
+            for o in outputs {
+                out.push((o.address.clone(), ActivityCategory::Mint));
+            }
+        }
+        PlainPayload::TxUtxo(tx) => {
+            for o in &tx.outputs {
+                out.push((o.address.clone(), ActivityCategory::Transfer));
+            }
+        }
+        PlainPayload::Reward {
+            fee_outputs,
+            reward_outputs,
+            ..
+        } => {
+            for o in fee_outputs {
+                out.push((o.address.clone(), ActivityCategory::Fee));
+            }
+            for o in reward_outputs {
+                out.push((o.address.clone(), ActivityCategory::Reward));
+            }
+        }
+        PlainPayload::Nft(action) => match action {
+            pms_types_nft::NftAction::Mint { creator, .. } => {
+                out.push((creator.clone(), ActivityCategory::Nft));
+            }
+            pms_types_nft::NftAction::Transfer { from, to, .. } => {
+                out.push((from.clone(), ActivityCategory::Nft));
+                out.push((to.clone(), ActivityCategory::Nft));
+            }
+            pms_types_nft::NftAction::Use { user, .. } => {
+                out.push((user.clone(), ActivityCategory::Nft));
+            }
+            pms_types_nft::NftAction::Burn { burner, .. } => {
+                out.push((burner.clone(), ActivityCategory::Nft));
+            }
+            pms_types_nft::NftAction::BatchBurn { burner, .. } => {
+                out.push((burner.clone(), ActivityCategory::Nft));
+            }
+        },
+        PlainPayload::TokenCreate(meta) => {
+            out.push((meta.creator.clone(), ActivityCategory::TokenCreate));
+        }
+        PlainPayload::BridgeLock { dest_address, .. } => {
+            out.push((dest_address.clone(), ActivityCategory::Bridge));
+        }
+        PlainPayload::BridgeMint { outputs, .. } => {
+            for o in outputs {
+                out.push((o.address.clone(), ActivityCategory::Bridge));
+            }
+        }
+        PlainPayload::Freeze { address, .. } | PlainPayload::Unfreeze { address, .. } => {
+            out.push((address.clone(), ActivityCategory::Compliance));
+        }
+        PlainPayload::Seize {
+            from_address,
+            outputs,
+            ..
+        } => {
+            out.push((from_address.clone(), ActivityCategory::Compliance));
+            for o in outputs {
+                out.push((o.address.clone(), ActivityCategory::Compliance));
+            }
+        }
+        PlainPayload::Reverse { outputs, .. } => {
+            for o in outputs {
+                out.push((o.address.clone(), ActivityCategory::Reverse));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Build key for the `addr_type_activity` CF.
+/// Format: `[addr_bytes][0x00][category:1][ts_be:8][block_id_bytes]`
+pub fn key_addr_type_activity(addr: &str, cat: u8, ts_ms: i64, block_id: &str) -> Vec<u8> {
+    let mut k = Vec::with_capacity(addr.len() + 1 + 1 + 8 + block_id.len());
+    k.extend_from_slice(addr.as_bytes());
+    k.push(0);
+    k.push(cat);
+    k.extend_from_slice(&(ts_ms as u64).to_be_bytes());
+    k.extend_from_slice(block_id.as_bytes());
+    k
+}
+
+/// Build prefix for iterating a specific category for an address.
+/// Format: `[addr_bytes][0x00][category:1]`
+pub fn prefix_addr_type_activity(addr: &str, cat: u8) -> Vec<u8> {
+    let mut k = Vec::with_capacity(addr.len() + 2);
+    k.extend_from_slice(addr.as_bytes());
+    k.push(0);
+    k.push(cat);
+    k
+}
+
+/// Parse an `addr_type_activity` key, given the known address length.
+/// Returns `(category, ts_ms, block_id)`.
+pub fn parse_addr_type_activity_key(key: &[u8], addr_len: usize) -> Option<(u8, i64, String)> {
+    // key = [addr:addr_len][0x00][cat:1][ts:8][block_id:...]
+    let min_len = addr_len + 1 + 1 + 8;
+    if key.len() < min_len {
+        return None;
+    }
+    if key[addr_len] != 0 {
+        return None;
+    }
+    let cat = key[addr_len + 1];
+    let ts_start = addr_len + 2;
+    let mut ts_be = [0u8; 8];
+    ts_be.copy_from_slice(&key[ts_start..ts_start + 8]);
+    let ts_ms = u64::from_be_bytes(ts_be) as i64;
+    let id = std::str::from_utf8(&key[ts_start + 8..]).ok()?.to_string();
+    Some((cat, ts_ms, id))
+}
