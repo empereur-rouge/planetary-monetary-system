@@ -121,7 +121,9 @@ pub async fn gather_wallet_utxos_dec(
                     }
                 }
             }
-            _ => {}
+            _other => {
+                tracing::trace!("compute_utxos_for_address: skipped variant (no UTXO impact)");
+            }
         }
     }
 
@@ -258,7 +260,9 @@ pub async fn gather_address_utxos_dec(
                     }
                 }
             }
-            _ => {}
+            _other => {
+                tracing::trace!("compute_all_utxos: skipped variant (no UTXO impact)");
+            }
         }
     }
 

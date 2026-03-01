@@ -127,7 +127,10 @@ impl ConcurrentDag {
         dag.children_count
             .insert(genesis.id.clone(), AtomicU64::new(0));
         dag.blocks.insert(genesis.id.clone(), genesis.clone());
-        dag.insertion_order.lock().unwrap().push_back(genesis.id);
+        match dag.insertion_order.lock() {
+            Ok(mut order) => order.push_back(genesis.id),
+            Err(poisoned) => poisoned.into_inner().push_back(genesis.id),
+        }
         dag
     }
 
@@ -511,7 +514,10 @@ impl ConcurrentDag {
 
     /// Check if a block is final (helper)
     pub fn is_final(&self, block_id: &str) -> bool {
-        self.finality.read().unwrap().finalized.contains(block_id)
+        match self.finality.read() {
+            Ok(f) => f.finalized.contains(block_id),
+            Err(poisoned) => poisoned.into_inner().finalized.contains(block_id),
+        }
     }
 
     /// Load the DAG from storage (RAM replay), with optional capacity limit.
@@ -568,7 +574,13 @@ impl ConcurrentDag {
         {
             let mut keys: Vec<String> = dag.blocks.iter().map(|e| e.key().clone()).collect();
             keys.sort();
-            let mut order = dag.insertion_order.lock().unwrap();
+            let mut order = match dag.insertion_order.lock() {
+                Ok(o) => o,
+                Err(poisoned) => {
+                    tracing::error!("insertion_order mutex poisoned during bootstrap — recovering");
+                    poisoned.into_inner()
+                }
+            };
             for key in keys {
                 order.push_back(key);
             }

@@ -167,18 +167,18 @@ pub mod mock {
 
     impl NftStorage for InMemoryNftStore {
         fn get_owner(&self, token_id: &str) -> Result<Option<String>> {
-            let data = self.owners.read().unwrap();
+            let data = self.owners.read().unwrap_or_else(|p| p.into_inner());
             Ok(data.get(token_id).cloned())
         }
 
         fn set_owner(&self, token_id: &str, owner: &str) -> Result<()> {
-            let mut data = self.owners.write().unwrap();
+            let mut data = self.owners.write().unwrap_or_else(|p| p.into_inner());
             data.insert(token_id.to_string(), owner.to_string());
             Ok(())
         }
 
         fn delete(&self, token_id: &str) -> Result<()> {
-            let mut data = self.owners.write().unwrap();
+            let mut data = self.owners.write().unwrap_or_else(|p| p.into_inner());
             data.remove(token_id);
             Ok(())
         }
@@ -186,7 +186,7 @@ pub mod mock {
         /// Implémentation simple par scan linéaire.
         /// Acceptable pour les tests, mais inefficace pour de gros volumes.
         fn get_by_owner(&self, owner: &str) -> Result<Vec<String>> {
-            let data = self.owners.read().unwrap();
+            let data = self.owners.read().unwrap_or_else(|p| p.into_inner());
             let tokens: Vec<String> = data
                 .iter()
                 .filter(|(_, v)| *v == owner)
@@ -196,18 +196,18 @@ pub mod mock {
         }
 
         fn get_block_id(&self, token_id: &str) -> Result<Option<String>> {
-            let data = self.block_ids.read().unwrap();
+            let data = self.block_ids.read().unwrap_or_else(|p| p.into_inner());
             Ok(data.get(token_id).cloned())
         }
 
         fn set_block_id(&self, token_id: &str, block_id: &str) -> Result<()> {
-            let mut data = self.block_ids.write().unwrap();
+            let mut data = self.block_ids.write().unwrap_or_else(|p| p.into_inner());
             data.insert(token_id.to_string(), block_id.to_string());
             Ok(())
         }
 
         fn delete_block_id(&self, token_id: &str) -> Result<()> {
-            let mut data = self.block_ids.write().unwrap();
+            let mut data = self.block_ids.write().unwrap_or_else(|p| p.into_inner());
             data.remove(token_id);
             Ok(())
         }

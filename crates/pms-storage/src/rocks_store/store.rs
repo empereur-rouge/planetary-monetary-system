@@ -813,7 +813,7 @@ impl RocksStore {
             let mut checkpoint_tick = interval(checkpoint_every);
             checkpoint_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-            eprintln!(
+            tracing::info!(
                 "[rocks] background maintenance started (flush={:?}, compact={:?}, stats={:?}, checkpoint={:?}, backup_root={})",
                 flush_every, compact_every, stats_every, checkpoint_every, backup_root,
             );
@@ -822,43 +822,43 @@ impl RocksStore {
                 tokio::select! {
                     // Signal d’arrêt propre (Server::run appelle cancel.cancel())
                     _ = cancel.cancelled() => {
-                        eprintln!("[rocks] background maintenance cancelled, exiting");
+                        tracing::info!("[rocks] background maintenance cancelled, exiting");
                         break;
                     }
 
-                    // Flush WAL (évite d’avoir un WAL trop gros, améliore la durabilité)
+                    // Flush WAL (évite d'avoir un WAL trop gros, améliore la durabilité)
                     _ = flush_tick.tick() => {
                         if let Err(e) = self.flush_wal().await {
-                            eprintln!("[rocks] flush_wal failed: {e:#}");
+                            tracing::error!("[rocks] flush_wal failed: {e:#}");
                         }
                     }
 
                     // Compaction de toutes les CF (réduction fragmentation, taille disque)
                     _ = compact_tick.tick() => {
                         if let Err(e) = self.compact_all().await {
-                            eprintln!("[rocks] compact_all failed: {e:#}");
+                            tracing::error!("[rocks] compact_all failed: {e:#}");
                         }
                     }
 
                     // Log de stats RocksDB (diagnostic: taille, compaction, etc.)
                     _ = stats_tick.tick() => {
                         if let Err(e) = self.log_stats().await {
-                            eprintln!("[rocks] log_stats failed: {e:#}");
+                            tracing::error!("[rocks] log_stats failed: {e:#}");
                         }
                     }
 
                     // Checkpoint + rotation (snapshots de sécurité)
                     _ = checkpoint_tick.tick() => {
                         if let Err(e) = self.create_checkpoint(&backup_root) {
-                            eprintln!("[rocks] create_checkpoint failed: {e:#}");
+                            tracing::error!("[rocks] create_checkpoint failed: {e:#}");
                         } else if let Err(e) = rotate_checkpoints(&backup_root, 7) {
-                            eprintln!("[rocks] rotate_checkpoints failed: {e:#}");
+                            tracing::error!("[rocks] rotate_checkpoints failed: {e:#}");
                         }
                     }
                 }
             }
 
-            eprintln!("[rocks] background maintenance stopped");
+            tracing::info!("[rocks] background maintenance stopped");
         })
     }
 

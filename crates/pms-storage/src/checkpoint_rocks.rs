@@ -15,7 +15,7 @@ pub fn rotate_checkpoints(backup_root: &str, keep_last: usize) -> Result<()> {
     // 0) Si keep_last == 0 → on ne garde rien (tout supprimer)
     // ------------------------------------------------------------
     if keep_last == 0 {
-        eprintln!(
+        tracing::info!(
             "[rocks] rotate_checkpoints: keep_last=0 → tout supprimer dans {}",
             backup_root
         );
@@ -25,7 +25,7 @@ pub fn rotate_checkpoints(backup_root: &str, keep_last: usize) -> Result<()> {
 
     // Si le dossier n’existe pas → rien à faire.
     if !root.exists() {
-        eprintln!(
+        tracing::info!(
             "[rocks] rotate_checkpoints: backup_root inexistant, skip: {}",
             root.display()
         );
@@ -59,7 +59,7 @@ pub fn rotate_checkpoints(backup_root: &str, keep_last: usize) -> Result<()> {
 
     // Si aucun snapshot → rien à faire
     if entries.is_empty() {
-        eprintln!(
+        tracing::info!(
             "[rocks] rotate_checkpoints: aucun checkpoint trouvé dans {}",
             root.display()
         );
@@ -78,7 +78,7 @@ pub fn rotate_checkpoints(backup_root: &str, keep_last: usize) -> Result<()> {
     });
 
     let total = entries.len();
-    eprintln!(
+    tracing::info!(
         "[rocks] rotate_checkpoints: trouvés {} checkpoints dans {}",
         total,
         root.display()
@@ -88,7 +88,7 @@ pub fn rotate_checkpoints(backup_root: &str, keep_last: usize) -> Result<()> {
     // 3) Si total <= keep_last → rien à supprimer
     // ------------------------------------------------------------
     if total <= keep_last {
-        eprintln!(
+        tracing::info!(
             "[rocks] rotate_checkpoints: total ({}) <= keep_last ({}), skip",
             total, keep_last
         );
@@ -101,7 +101,7 @@ pub fn rotate_checkpoints(backup_root: &str, keep_last: usize) -> Result<()> {
     let to_remove = total - keep_last;
     let (old, _recent) = entries.split_at(to_remove);
 
-    eprintln!(
+    tracing::info!(
         "[rocks] rotate_checkpoints: suppression des {} plus anciens (on gardera {})",
         to_remove, keep_last
     );
@@ -110,7 +110,7 @@ pub fn rotate_checkpoints(backup_root: &str, keep_last: usize) -> Result<()> {
     // 5) Supprime chaque ancien snapshot récursivement (rm -rf)
     // ------------------------------------------------------------
     for path in old {
-        eprintln!("[rocks] deleting old checkpoint: {}", path.display());
+        tracing::info!("[rocks] deleting old checkpoint: {}", path.display());
         fs::remove_dir_all(path).with_context(|| format!("remove_dir_all({})", path.display()))?;
     }
 

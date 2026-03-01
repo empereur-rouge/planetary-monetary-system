@@ -480,11 +480,13 @@ impl Dag {
                 // 3) finalise le milestone lui-même
                 self.finality.finalized.insert(block.id.clone());
             }
-            _ => {}
+            _other => {
+                tracing::trace!(block_id = %block.id, "maybe_update_finality_with: non-Milestone payload, skipping");
+            }
         }
     }
 
-    /// Appelée après ajout d’un bloc pour mettre à jour la finalité.
+    /// Appelée après ajout d'un bloc pour mettre à jour la finalité.
     pub fn update_finality_after_insert(&mut self, new_block_id: &str) {
         let k = self.finality.depth_k;
 

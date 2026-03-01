@@ -146,22 +146,51 @@ impl ValidatePolicy {
             // Cela évite une confusion accidentelle ou une tentative de fraude
             // où quelqu'un utiliserait le mode Dev (moins de validations) avec
             // des clés de production.
-            if settings.network.mode == pms_config::NetworkMode::Dev {
-                let is_mainnet_key = custom_key == pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET;
-                let is_testnet_key = custom_key == pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET;
+            match settings.network.mode {
+                pms_config::NetworkMode::Dev => {
+                    // Dev mode must NOT use production keys
+                    let is_mainnet_key =
+                        custom_key == pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET;
+                    let is_testnet_key =
+                        custom_key == pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET;
 
-                if is_mainnet_key || is_testnet_key {
-                    return Err(ValidationError::ProdKeyInDevMode {
-                        network: if is_mainnet_key {
-                            "MAINNET".to_string()
-                        } else {
-                            "TESTNET".to_string()
-                        },
-                    });
+                    if is_mainnet_key || is_testnet_key {
+                        return Err(ValidationError::ProdKeyInDevMode {
+                            network: if is_mainnet_key {
+                                "MAINNET".to_string()
+                            } else {
+                                "TESTNET".to_string()
+                            },
+                        });
+                    }
+                }
+                pms_config::NetworkMode::Mainnet => {
+                    // Mainnet: custom key must match the hardcoded mainnet key
+                    if custom_key != pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET {
+                        tracing::error!(
+                            "SECURITY: custom coordinator_public_key in Mainnet mode \
+                             does not match hardcoded key. Ignoring custom key."
+                        );
+                        p.coordinator_public_key =
+                            Some(pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET.to_string());
+                        return Ok(p);
+                    }
+                }
+                pms_config::NetworkMode::Testnet => {
+                    // Testnet: custom key must match the hardcoded testnet key
+                    if custom_key != pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET {
+                        tracing::error!(
+                            "SECURITY: custom coordinator_public_key in Testnet mode \
+                             does not match hardcoded key. Ignoring custom key."
+                        );
+                        p.coordinator_public_key =
+                            Some(pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET.to_string());
+                        return Ok(p);
+                    }
                 }
             }
 
-            // Config specifies a custom coordinator key (useful for tests)
+            // Config specifies a valid coordinator key
             p.coordinator_public_key = Some(custom_key.clone());
         } else {
             // Use hardcoded keys based on network mode

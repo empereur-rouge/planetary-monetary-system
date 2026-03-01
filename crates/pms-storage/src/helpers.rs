@@ -172,8 +172,9 @@ pub fn extract_involved_addresses(plain: &PlainPayload) -> Vec<String> {
         PlainPayload::Reverse { outputs, .. } => {
             addrs.extend(outputs.iter().map(|o| o.address.clone()));
         }
-        // EncryptedReward, Genesis, Milestone, ConfigUpdate: no extractable addresses
-        _ => {}
+        _other => {
+            tracing::trace!("extract_addresses_from_payload: skipped variant (no extractable addresses)");
+        }
     }
     addrs.dedup();
     addrs
@@ -299,7 +300,9 @@ pub fn extract_involved_with_category(plain: &PlainPayload) -> Vec<(String, Acti
                 out.push((o.address.clone(), ActivityCategory::Reverse));
             }
         }
-        _ => {}
+        _other => {
+            tracing::trace!("addr_activity_pairs: skipped variant (no per-address activity)");
+        }
     }
     out
 }

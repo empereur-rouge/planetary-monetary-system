@@ -64,7 +64,9 @@ impl TuiApp {
                         {
                             break;
                         }
-                        _ => {}
+                        other => {
+                            tracing::trace!("unhandled key event: {:?}", other);
+                        }
                     }
                 }
             }

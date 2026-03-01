@@ -138,7 +138,9 @@ pub fn collect_involved_addresses(plain: &PlainPayload) -> Vec<String> {
         PlainPayload::Reverse { outputs, .. } => {
             addrs.extend(outputs.iter().map(|o| o.address.clone()));
         }
-        _ => {} // Genesis, Milestone, ConfigUpdate
+        _other => {
+            tracing::trace!("extract_addresses: skipped payload variant (no extractable addresses)");
+        }
     }
     addrs.dedup();
     addrs
@@ -303,7 +305,9 @@ pub async fn scan_decrypt_recent_for_address(
                         });
                     }
                 }
-                _ => {}
+                _other => {
+                    tracing::trace!("decrypt_history: skipped non-EncryptedReward plain payload");
+                }
             }
         }
     }
@@ -383,7 +387,9 @@ pub async fn history_page_for_address(
                     });
                 }
             }
-            _ => {}
+            _other => {
+                tracing::trace!("history_page_encrypted: skipped non-encrypted payload variant");
+            }
         }
     }
 
@@ -441,7 +447,9 @@ pub async fn history_plain_for_address(
                         });
                     }
                 }
-                _ => {} // Skip Encrypted payloads
+                _other => {
+                    tracing::trace!("history_page_for_address: skipped encrypted payload");
+                }
             }
         }
     }

@@ -69,13 +69,23 @@ where
             nonce = nonce.wrapping_add(1);
         }
 
-        loop {
+        // Second pass: random probing with a hard limit to prevent infinite loops
+        for _ in 0..10_000_000 {
             nonce = rng.random_range(0..u64::MAX);
             let id = (self.compute_id)(&parents, &self.payload, nonce);
             if !(self.id_exists)(&id) && ok_pow(&id, self.difficulty_leading_zeros) {
                 return (nonce, id);
             }
         }
+
+        // Exhausted all attempts — return best-effort with PoW disabled
+        tracing::error!(
+            difficulty = self.difficulty_leading_zeros,
+            "PoW mining exhausted 11M nonce attempts — returning block without PoW guarantee"
+        );
+        nonce = rng.random_range(0..u64::MAX);
+        let id = (self.compute_id)(&parents, &self.payload, nonce);
+        (nonce, id)
     }
 
     pub fn build(self) -> Block {

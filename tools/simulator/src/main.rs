@@ -312,7 +312,9 @@ async fn main() -> anyhow::Result<()> {
     // 15. Graceful shutdown
     tracing::info!("Shutting down...");
     for handle in handles {
-        let _ = handle.join.await;
+        if let Err(e) = handle.join.await {
+            tracing::error!("agent task panicked: {e:?}");
+        }
     }
 
     println!("Simulation complete.");

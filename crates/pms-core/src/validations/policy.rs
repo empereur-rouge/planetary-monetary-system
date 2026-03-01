@@ -62,7 +62,7 @@ pub fn validate_mint_policy(
         }
     } else {
         // Dev local sans liste admin → on laisse passer mais on log
-        eprintln!("[policy] validate_mint_policy: signer_pubkeys vide, bypass admin check (dev?)");
+        tracing::warn!("[policy] validate_mint_policy: signer_pubkeys vide, bypass admin check (dev?)");
     }
 
     // ============================================================

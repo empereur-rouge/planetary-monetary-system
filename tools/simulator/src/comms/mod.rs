@@ -30,13 +30,15 @@ impl CommsRouter {
 
     /// Send a message to a specific agent
     pub async fn send_to(&self, target: &str, msg: AgentMessage) {
-        // Log globally for TUI
+        // Log globally for TUI (non-critical, ignore errors during shutdown)
         let _ = self.global_log.send(msg.clone());
 
         // Deliver to target's inbox
         let inboxes = self.inboxes.read().await;
         if let Some(tx) = inboxes.get(target) {
-            let _ = tx.send(msg);
+            if tx.send(msg).is_err() {
+                tracing::trace!("agent inbox closed for {target}");
+            }
         }
     }
 
@@ -47,7 +49,9 @@ impl CommsRouter {
         let inboxes = self.inboxes.read().await;
         for (name, tx) in inboxes.iter() {
             if name != sender {
-                let _ = tx.send(msg.clone());
+                if tx.send(msg.clone()).is_err() {
+                    tracing::trace!("agent inbox closed for {name}");
+                }
             }
         }
     }
