@@ -75,7 +75,7 @@ async fn validate_before_relay_rocks() -> Result<()> {
             protocol_version: bad.protocol_version,
             signature_hex: bad.signature_hex,
             signer_pk_hex: bad.signer_pk_hex,
-            metadata: bad.metadata,
+            metadata: bad.metadata.map(Box::new),
         })
         .await?;
 

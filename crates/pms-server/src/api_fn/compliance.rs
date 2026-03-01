@@ -14,7 +14,7 @@ fn is_admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     if let Some(ref token) = state.admin_token {
         if let Some(auth) = headers.get("authorization") {
             if let Ok(val) = auth.to_str() {
-                return val.strip_prefix("Bearer ").map_or(false, |t| {
+                return val.strip_prefix("Bearer ").is_some_and(|t| {
                     use subtle::ConstantTimeEq;
                     t.as_bytes().ct_eq(token.as_bytes()).into()
                 });

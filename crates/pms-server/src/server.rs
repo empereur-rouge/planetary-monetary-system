@@ -931,7 +931,7 @@ impl Server {
                                 protocol_version,
                                 signer_pk_hex,
                                 signature_hex,
-                                metadata,
+                                metadata: metadata.map(|b| *b),
                             };
                             this.process_incoming_blocks(vec![wb], sa).await;
                         }

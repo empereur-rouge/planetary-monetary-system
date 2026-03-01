@@ -61,15 +61,13 @@ impl BridgeEngine {
         if let Some(existing) = self
             .bridge_store
             .get_bridge_link(&req.ledger_a, &req.ledger_b)?
-        {
-            if existing.enabled {
+            && existing.enabled {
                 bail!(
                     "bridge already enabled between '{}' and '{}'",
                     req.ledger_a,
                     req.ledger_b
                 );
             }
-        }
 
         let now = now_ms();
         let (a, b) = if req.ledger_a <= req.ledger_b {
@@ -361,7 +359,7 @@ impl BridgeEngine {
 
         let payload_json = payload_opt
             .as_ref()
-            .map(|p| serde_json::to_string(p))
+            .map(serde_json::to_string)
             .transpose()?;
 
         let mut wb = WireBlock {

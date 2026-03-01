@@ -51,6 +51,7 @@ pub async fn spawn_node_generic_rocks(
 }
 
 /// Same as spawn_node_generic_rocks but with custom wallet seed for unique node_id
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_node_generic_rocks_with_seed(
     db_path: &str,
     prefix: &str,

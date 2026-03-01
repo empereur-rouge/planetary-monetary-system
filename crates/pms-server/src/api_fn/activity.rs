@@ -307,7 +307,7 @@ pub async fn stream_wallet_activity(
                         PayloadEnvelope::Encrypted(_) |
                         PayloadEnvelope::Plain(PlainPayload::EncryptedReward { .. })
                     );
-                    if !addr_match && !(is_encrypted && sk_opt.is_some()) {
+                    if !(addr_match || is_encrypted && sk_opt.is_some()) {
                         continue;
                     }
 

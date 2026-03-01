@@ -164,7 +164,7 @@ async fn two_nodes_share_blocks_debug_rocks() -> Result<()> {
                 protocol_version: wb.protocol_version,
                 signature_hex: wb.signature_hex,
                 signer_pk_hex: wb.signer_pk_hex,
-                metadata: wb.metadata.clone(),
+                metadata: wb.metadata.clone().map(Box::new),
             })
             .await?;
 

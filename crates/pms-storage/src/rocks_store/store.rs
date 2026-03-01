@@ -345,6 +345,7 @@ impl RocksStore {
     }
 
     // helper privé appelé après append_block_atomic
+    #[allow(dead_code)]
     pub(crate) fn trim_by_time(&self) -> Result<()> {
         if self.tip_limit == 0 {
             return Ok(());
@@ -582,7 +583,7 @@ impl RocksStore {
             let cat = categories[0];
             let prefix = prefix_addr_type_activity(addr, cat);
 
-            let seek_key = if let (Some(ts), Some(ref id)) = (after_ts, after_id.as_deref()) {
+            let seek_key = if let (Some(ts), Some(id)) = (after_ts, after_id.as_deref()) {
                 key_addr_type_activity(addr, cat, ts, id)
             } else {
                 let mut end_key = prefix.clone();
@@ -638,7 +639,7 @@ impl RocksStore {
 
         for &cat in categories {
             let prefix = prefix_addr_type_activity(addr, cat);
-            let seek_key = if let (Some(ts), Some(ref id)) = (after_ts, after_id.as_deref()) {
+            let seek_key = if let (Some(ts), Some(id)) = (after_ts, after_id.as_deref()) {
                 key_addr_type_activity(addr, cat, ts, id)
             } else {
                 let mut end_key = prefix.clone();
@@ -1394,33 +1395,33 @@ impl DagStorage for RocksStore {
 
         // 1.c) Per-address activity indexes (addr_activity + addr_type_activity)
         if let Some(pjson) = &b.payload_json {
-            if let Ok(env) = serde_json::from_str::<pms_types_payload::PayloadEnvelope>(pjson) {
-                if let pms_types_payload::PayloadEnvelope::Plain(ref plain) = env {
-                    let ts = crate::helpers::now_ms_i64();
+            if let Ok(pms_types_payload::PayloadEnvelope::Plain(ref plain)) =
+                serde_json::from_str::<pms_types_payload::PayloadEnvelope>(pjson)
+            {
+                let ts = crate::helpers::now_ms_i64();
 
-                    // Untyped index (addr_activity)
-                    let addrs = crate::helpers::extract_involved_addresses(plain);
-                    if !addrs.is_empty() {
-                        let cf_aa = self.cf("addr_activity");
-                        for addr in &addrs {
-                            let key = crate::helpers::key_addr_activity(addr, ts, &b.id);
-                            batch.put_cf(&cf_aa, &key, b"");
-                        }
+                // Untyped index (addr_activity)
+                let addrs = crate::helpers::extract_involved_addresses(plain);
+                if !addrs.is_empty() {
+                    let cf_aa = self.cf("addr_activity");
+                    for addr in &addrs {
+                        let key = crate::helpers::key_addr_activity(addr, ts, &b.id);
+                        batch.put_cf(&cf_aa, &key, b"");
                     }
+                }
 
-                    // Typed index (addr_type_activity)
-                    let typed = crate::helpers::extract_involved_with_category(plain);
-                    if !typed.is_empty() {
-                        let cf_ata = self.cf("addr_type_activity");
-                        for (addr, cat) in &typed {
-                            let key = crate::helpers::key_addr_type_activity(
-                                addr,
-                                cat.as_byte(),
-                                ts,
-                                &b.id,
-                            );
-                            batch.put_cf(&cf_ata, &key, b"");
-                        }
+                // Typed index (addr_type_activity)
+                let typed = crate::helpers::extract_involved_with_category(plain);
+                if !typed.is_empty() {
+                    let cf_ata = self.cf("addr_type_activity");
+                    for (addr, cat) in &typed {
+                        let key = crate::helpers::key_addr_type_activity(
+                            addr,
+                            cat.as_byte(),
+                            ts,
+                            &b.id,
+                        );
+                        batch.put_cf(&cf_ata, &key, b"");
                     }
                 }
             }

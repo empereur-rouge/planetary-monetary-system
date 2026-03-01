@@ -36,7 +36,7 @@ pub enum NetMsg {
         signer_pk_hex: String,
         signature_hex: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        metadata: Option<BlockMetadata>,
+        metadata: Option<Box<BlockMetadata>>,
     },
     // --- rattrapage / sync ciblé ---
     /// Demande les tips connues du pair (bornées)

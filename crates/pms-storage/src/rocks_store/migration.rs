@@ -106,7 +106,7 @@ impl RocksStore {
                     (i as f64 / total as f64) * 100.0
                 );
             }
-            let maybe_b = self.get_block(&id).await.map_err(MigError::Any)?;
+            let maybe_b = self.get_block(id).await.map_err(MigError::Any)?;
             let b = match maybe_b {
                 Some(b) => b,
                 None => continue,
@@ -181,7 +181,7 @@ impl RocksStore {
             synthetic_ts += 1;
             missing += 1;
 
-            if missing > 0 && missing % 10_000 == 0 {
+            if missing > 0 && missing.is_multiple_of(10_000) {
                 tracing::info!(
                     "Migration 2→3: rebuilt {missing} entries so far (scanned {total})..."
                 );
@@ -275,7 +275,7 @@ impl RocksStore {
 
             indexed += 1;
 
-            if indexed > 0 && indexed % 10_000 == 0 {
+            if indexed > 0 && indexed.is_multiple_of(10_000) {
                 tracing::info!(
                     "Migration 3→4: indexed {indexed} blocks so far (scanned {total})..."
                 );
@@ -365,7 +365,7 @@ impl RocksStore {
 
             indexed += 1;
 
-            if indexed > 0 && indexed % 10_000 == 0 {
+            if indexed > 0 && indexed.is_multiple_of(10_000) {
                 tracing::info!(
                     "Migration 4→5: indexed {indexed} blocks so far (scanned {total})..."
                 );

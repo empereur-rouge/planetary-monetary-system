@@ -45,7 +45,6 @@ jobs:
 
       - name: Clippy (Linting)
         run: cargo clippy --workspace -- -D warnings
-        continue-on-error: true  # Don't fail on warnings during transition
 
       - name: Run Tests
         run: cargo test --workspace

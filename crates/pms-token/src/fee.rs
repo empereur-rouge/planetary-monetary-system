@@ -138,7 +138,7 @@ impl FeePolicy {
                 None => remaining, // Dernier palier : tout le restant
             };
 
-            fee = fee + (Amount::from_decimal(taxable_in_tier) * tier_ratio);
+            fee += Amount::from_decimal(taxable_in_tier) * tier_ratio;
             remaining -= taxable_in_tier;
         }
 
