@@ -1415,12 +1415,8 @@ impl DagStorage for RocksStore {
                 if !typed.is_empty() {
                     let cf_ata = self.cf("addr_type_activity");
                     for (addr, cat) in &typed {
-                        let key = crate::helpers::key_addr_type_activity(
-                            addr,
-                            cat.as_byte(),
-                            ts,
-                            &b.id,
-                        );
+                        let key =
+                            crate::helpers::key_addr_type_activity(addr, cat.as_byte(), ts, &b.id);
                         batch.put_cf(&cf_ata, &key, b"");
                     }
                 }

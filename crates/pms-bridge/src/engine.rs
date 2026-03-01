@@ -61,13 +61,14 @@ impl BridgeEngine {
         if let Some(existing) = self
             .bridge_store
             .get_bridge_link(&req.ledger_a, &req.ledger_b)?
-            && existing.enabled {
-                bail!(
-                    "bridge already enabled between '{}' and '{}'",
-                    req.ledger_a,
-                    req.ledger_b
-                );
-            }
+            && existing.enabled
+        {
+            bail!(
+                "bridge already enabled between '{}' and '{}'",
+                req.ledger_a,
+                req.ledger_b
+            );
+        }
 
         let now = now_ms();
         let (a, b) = if req.ledger_a <= req.ledger_b {
