@@ -1,9 +1,9 @@
 use crate::api::AppState;
 use crate::helper::is_admin_authorized;
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
 use pms_config::LedgerDef;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -34,7 +34,12 @@ pub async fn list_ledgers(
     let search = q.search.map(|s| s.to_lowercase());
 
     let Some(mgr) = &state.ledger_mgr else {
-        let symbol = state._cfg.network.symbol.clone().unwrap_or_else(|| "PMS".into());
+        let symbol = state
+            ._cfg
+            .network
+            .symbol
+            .clone()
+            .unwrap_or_else(|| "PMS".into());
         let single = LedgerInfo {
             id: "main".into(),
             network_id: state._cfg.network.network_id.clone(),
@@ -116,11 +121,7 @@ pub async fn admin_list_ledgers(
     }
 
     let Some(mgr) = &state.ledger_mgr else {
-        return (
-            StatusCode::OK,
-            Json(json!({"ledgers": [], "count": 0})),
-        )
-            .into_response();
+        return (StatusCode::OK, Json(json!({"ledgers": [], "count": 0}))).into_response();
     };
 
     let ledgers: Vec<serde_json::Value> = mgr
@@ -141,7 +142,11 @@ pub async fn admin_list_ledgers(
         .collect();
 
     let count = ledgers.len();
-    (StatusCode::OK, Json(json!({"ledgers": ledgers, "count": count}))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({"ledgers": ledgers, "count": count})),
+    )
+        .into_response()
 }
 
 /// GET /admin/ledgers/{id} — Détail d'un ledger spécifique.

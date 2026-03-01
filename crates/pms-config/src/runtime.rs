@@ -35,18 +35,31 @@ pub fn validate_fee_tiers(tiers: &[FeeTier]) -> Result<(), String> {
 
     let mut prev_boundary = Decimal::ZERO;
     for (i, tier) in tiers.iter().enumerate() {
-        let _ratio = Decimal::from_str_exact(&tier.ratio)
-            .map_err(|e| format!("Tier {} ratio '{}' is not a valid decimal: {}", i, tier.ratio, e))?;
+        let _ratio = Decimal::from_str_exact(&tier.ratio).map_err(|e| {
+            format!(
+                "Tier {} ratio '{}' is not a valid decimal: {}",
+                i, tier.ratio, e
+            )
+        })?;
         if _ratio < Decimal::ZERO {
             return Err(format!("Tier {} ratio must be >= 0, got {}", i, _ratio));
         }
 
         if i < tiers.len() - 1 {
             match &tier.up_to {
-                None => return Err(format!("Tier {} must have up_to (only last tier can be None)", i)),
+                None => {
+                    return Err(format!(
+                        "Tier {} must have up_to (only last tier can be None)",
+                        i
+                    ));
+                }
                 Some(up_to_str) => {
-                    let up_to = Decimal::from_str_exact(up_to_str)
-                        .map_err(|e| format!("Tier {} up_to '{}' is not a valid decimal: {}", i, up_to_str, e))?;
+                    let up_to = Decimal::from_str_exact(up_to_str).map_err(|e| {
+                        format!(
+                            "Tier {} up_to '{}' is not a valid decimal: {}",
+                            i, up_to_str, e
+                        )
+                    })?;
                     if up_to <= prev_boundary {
                         return Err(format!(
                             "Tier {} up_to ({}) must be strictly greater than previous boundary ({})",
@@ -162,7 +175,12 @@ impl RuntimeConfig {
     /// Applique une mise à jour, valide le résultat, et retourne la nouvelle config.
     /// La validation globale (`validate_fee_config`) s'exécute une seule fois
     /// après toutes les mutations (y compris les sous-updates d'un BatchUpdate).
-    pub fn apply_update(&self, update: &ConfigUpdate, block_id: &str, timestamp: i64) -> Result<Self, String> {
+    pub fn apply_update(
+        &self,
+        update: &ConfigUpdate,
+        block_id: &str,
+        timestamp: i64,
+    ) -> Result<Self, String> {
         let result = self.apply_update_inner(update, block_id, timestamp)?;
         result.validate_fee_config()?;
         Ok(result)
@@ -170,7 +188,12 @@ impl RuntimeConfig {
 
     /// Applique les mutations sans validation globale (utilisé en interne par BatchUpdate).
     /// Valide eagerly les données malformées (tiers invalides, distribution invalide).
-    fn apply_update_inner(&self, update: &ConfigUpdate, block_id: &str, timestamp: i64) -> Result<Self, String> {
+    fn apply_update_inner(
+        &self,
+        update: &ConfigUpdate,
+        block_id: &str,
+        timestamp: i64,
+    ) -> Result<Self, String> {
         let mut new_config = self.clone();
         new_config.updated_at_block = block_id.to_string();
         new_config.updated_at_timestamp = timestamp;
@@ -297,10 +320,15 @@ pub enum ConfigUpdate {
     ClearFeeTiers,
 
     /// Définir la distribution N-way des fees
-    SetFeeDistribution { beneficiaries: Vec<crate::FeeBeneficiary> },
+    SetFeeDistribution {
+        beneficiaries: Vec<crate::FeeBeneficiary>,
+    },
 
     /// Modifier les fees de minting (base fixe + ratio sur montant)
-    SetMintFee { base: Option<String>, ratio: Option<String> },
+    SetMintFee {
+        base: Option<String>,
+        ratio: Option<String>,
+    },
 
     /// Modifier le fee de création de token
     SetTokenCreationFee { fee: Option<String> },
@@ -371,7 +399,9 @@ mod tests {
         let config = RuntimeConfig::default();
         let update = ConfigUpdate::SetFeeRate { bps: 200 };
 
-        let new_config = config.apply_update(&update, "block-001", 1234567890).unwrap();
+        let new_config = config
+            .apply_update(&update, "block-001", 1234567890)
+            .unwrap();
 
         assert_eq!(new_config.fee_rate_bps, 200);
         assert_eq!(new_config.updated_at_block, "block-001");
@@ -385,7 +415,9 @@ mod tests {
             ConfigUpdate::SetMintEnabled { enabled: false },
         ]);
 
-        let new_config = config.apply_update(&update, "block-002", 1234567890).unwrap();
+        let new_config = config
+            .apply_update(&update, "block-002", 1234567890)
+            .unwrap();
 
         assert_eq!(new_config.fee_rate_bps, 150);
         assert!(!new_config.mint_enabled);
@@ -411,7 +443,11 @@ mod tests {
     fn test_apply_coordinator_fee_alone_breaks_split() {
         let config = RuntimeConfig::default();
         // Setting coordinator alone makes split invalid (7000 + 3300 != 10000)
-        let result = config.apply_update(&ConfigUpdate::SetCoordinatorFee { bps: 7000 }, "block-003", 100);
+        let result = config.apply_update(
+            &ConfigUpdate::SetCoordinatorFee { bps: 7000 },
+            "block-003",
+            100,
+        );
         assert!(result.is_err());
     }
 
@@ -419,7 +455,11 @@ mod tests {
     fn test_apply_treasury_fee_alone_breaks_split() {
         let config = RuntimeConfig::default();
         // Setting treasury alone makes split invalid (6700 + 4000 != 10000)
-        let result = config.apply_update(&ConfigUpdate::SetTreasuryFee { bps: 4000 }, "block-004", 100);
+        let result = config.apply_update(
+            &ConfigUpdate::SetTreasuryFee { bps: 4000 },
+            "block-004",
+            100,
+        );
         assert!(result.is_err());
     }
 
@@ -439,10 +479,18 @@ mod tests {
     fn test_apply_set_fee_tiers() {
         let config = RuntimeConfig::default();
         let tiers = vec![
-            FeeTier { up_to: Some("100".into()), ratio: "0.03".into() },
-            FeeTier { up_to: None, ratio: "0.01".into() },
+            FeeTier {
+                up_to: Some("100".into()),
+                ratio: "0.03".into(),
+            },
+            FeeTier {
+                up_to: None,
+                ratio: "0.01".into(),
+            },
         ];
-        let update = ConfigUpdate::SetFeeTiers { tiers: tiers.clone() };
+        let update = ConfigUpdate::SetFeeTiers {
+            tiers: tiers.clone(),
+        };
         let new_config = config.apply_update(&update, "block-t1", 100).unwrap();
 
         assert_eq!(new_config.fee_tiers.len(), 2);
@@ -450,7 +498,9 @@ mod tests {
         assert_eq!(new_config.fee_tiers[1].up_to, None);
 
         // ClearFeeTiers
-        let cleared = new_config.apply_update(&ConfigUpdate::ClearFeeTiers, "block-t2", 200).unwrap();
+        let cleared = new_config
+            .apply_update(&ConfigUpdate::ClearFeeTiers, "block-t2", 200)
+            .unwrap();
         assert!(cleared.fee_tiers.is_empty());
     }
 
@@ -459,9 +509,21 @@ mod tests {
         let config = RuntimeConfig::default();
         let update = ConfigUpdate::SetFeeDistribution {
             beneficiaries: vec![
-                crate::FeeBeneficiary { role: "coordinator".into(), percent_bps: 5000, address: None },
-                crate::FeeBeneficiary { role: "client".into(), percent_bps: 3000, address: Some("cli_addr".into()) },
-                crate::FeeBeneficiary { role: "treasury".into(), percent_bps: 2000, address: None },
+                crate::FeeBeneficiary {
+                    role: "coordinator".into(),
+                    percent_bps: 5000,
+                    address: None,
+                },
+                crate::FeeBeneficiary {
+                    role: "client".into(),
+                    percent_bps: 3000,
+                    address: Some("cli_addr".into()),
+                },
+                crate::FeeBeneficiary {
+                    role: "treasury".into(),
+                    percent_bps: 2000,
+                    address: None,
+                },
             ],
         };
         let new_config = config.apply_update(&update, "block-fd", 300).unwrap();
@@ -487,7 +549,9 @@ mod tests {
     #[test]
     fn test_apply_set_token_creation_fee() {
         let config = RuntimeConfig::default();
-        let update = ConfigUpdate::SetTokenCreationFee { fee: Some("100".into()) };
+        let update = ConfigUpdate::SetTokenCreationFee {
+            fee: Some("100".into()),
+        };
         let new_config = config.apply_update(&update, "block-tcf", 500).unwrap();
 
         assert_eq!(new_config.token_creation_fee, Some("100".into()));
@@ -496,7 +560,9 @@ mod tests {
     #[test]
     fn test_apply_set_nft_mint_fee() {
         let config = RuntimeConfig::default();
-        let update = ConfigUpdate::SetNftMintFee { fee: Some("0.5".into()) };
+        let update = ConfigUpdate::SetNftMintFee {
+            fee: Some("0.5".into()),
+        };
         let new_config = config.apply_update(&update, "block-nmf", 600).unwrap();
 
         assert_eq!(new_config.nft_mint_fee, Some("0.5".into()));
@@ -511,8 +577,16 @@ mod tests {
         let new_config = config.apply_update(&update, "block-nfe", 700).unwrap();
 
         assert_eq!(new_config.nft_fee_exempt_types.len(), 2);
-        assert!(new_config.nft_fee_exempt_types.contains(&"cube".to_string()));
-        assert!(new_config.nft_fee_exempt_types.contains(&"reward".to_string()));
+        assert!(
+            new_config
+                .nft_fee_exempt_types
+                .contains(&"cube".to_string())
+        );
+        assert!(
+            new_config
+                .nft_fee_exempt_types
+                .contains(&"reward".to_string())
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -522,9 +596,18 @@ mod tests {
     #[test]
     fn test_validate_fee_tiers_valid() {
         let tiers = vec![
-            FeeTier { up_to: Some("100".into()), ratio: "0.03".into() },
-            FeeTier { up_to: Some("10000".into()), ratio: "0.015".into() },
-            FeeTier { up_to: None, ratio: "0.005".into() },
+            FeeTier {
+                up_to: Some("100".into()),
+                ratio: "0.03".into(),
+            },
+            FeeTier {
+                up_to: Some("10000".into()),
+                ratio: "0.015".into(),
+            },
+            FeeTier {
+                up_to: None,
+                ratio: "0.005".into(),
+            },
         ];
         assert!(validate_fee_tiers(&tiers).is_ok());
     }
@@ -536,35 +619,52 @@ mod tests {
 
     #[test]
     fn test_validate_fee_tiers_no_catchall() {
-        let tiers = vec![
-            FeeTier { up_to: Some("100".into()), ratio: "0.03".into() },
-        ];
+        let tiers = vec![FeeTier {
+            up_to: Some("100".into()),
+            ratio: "0.03".into(),
+        }];
         assert!(validate_fee_tiers(&tiers).is_err());
     }
 
     #[test]
     fn test_validate_fee_tiers_unordered() {
         let tiers = vec![
-            FeeTier { up_to: Some("10000".into()), ratio: "0.03".into() },
-            FeeTier { up_to: Some("100".into()), ratio: "0.015".into() },
-            FeeTier { up_to: None, ratio: "0.005".into() },
+            FeeTier {
+                up_to: Some("10000".into()),
+                ratio: "0.03".into(),
+            },
+            FeeTier {
+                up_to: Some("100".into()),
+                ratio: "0.015".into(),
+            },
+            FeeTier {
+                up_to: None,
+                ratio: "0.005".into(),
+            },
         ];
         assert!(validate_fee_tiers(&tiers).is_err());
     }
 
     #[test]
     fn test_validate_fee_tiers_negative_ratio() {
-        let tiers = vec![
-            FeeTier { up_to: None, ratio: "-0.01".into() },
-        ];
+        let tiers = vec![FeeTier {
+            up_to: None,
+            ratio: "-0.01".into(),
+        }];
         assert!(validate_fee_tiers(&tiers).is_err());
     }
 
     #[test]
     fn test_validate_fee_tiers_invalid_decimal() {
         let tiers = vec![
-            FeeTier { up_to: Some("abc".into()), ratio: "0.01".into() },
-            FeeTier { up_to: None, ratio: "0.005".into() },
+            FeeTier {
+                up_to: Some("abc".into()),
+                ratio: "0.01".into(),
+            },
+            FeeTier {
+                up_to: None,
+                ratio: "0.005".into(),
+            },
         ];
         assert!(validate_fee_tiers(&tiers).is_err());
     }
@@ -573,7 +673,10 @@ mod tests {
     fn test_set_fee_tiers_rejected_if_invalid() {
         let config = RuntimeConfig::default();
         let bad_tiers = vec![
-            FeeTier { up_to: Some("100".into()), ratio: "0.03".into() },
+            FeeTier {
+                up_to: Some("100".into()),
+                ratio: "0.03".into(),
+            },
             // Missing catch-all
         ];
         let result = config.apply_update(
@@ -615,8 +718,16 @@ mod tests {
         let result = config.apply_update(
             &ConfigUpdate::SetFeeDistribution {
                 beneficiaries: vec![
-                    crate::FeeBeneficiary { role: "coordinator".into(), percent_bps: 6000, address: None },
-                    crate::FeeBeneficiary { role: "treasury".into(), percent_bps: 5000, address: None },
+                    crate::FeeBeneficiary {
+                        role: "coordinator".into(),
+                        percent_bps: 6000,
+                        address: None,
+                    },
+                    crate::FeeBeneficiary {
+                        role: "treasury".into(),
+                        percent_bps: 5000,
+                        address: None,
+                    },
                 ],
             },
             "block-bad",

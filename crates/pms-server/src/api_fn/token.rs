@@ -73,11 +73,16 @@ pub async fn admin_create_token(
     // Validate asset_id format (alphanumeric lowercase, 1-32 chars)
     if req.asset_id.is_empty()
         || req.asset_id.len() > 32
-        || !req.asset_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        || !req
+            .asset_id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "asset_id must be 1-32 chars, lowercase alphanumeric or underscore" })),
+            Json(
+                json!({ "error": "asset_id must be 1-32 chars, lowercase alphanumeric or underscore" }),
+            ),
         );
     }
 
@@ -129,6 +134,7 @@ pub async fn admin_create_token(
     }
 
     // Create TokenCreate block on-chain
+    use pms_storage::PutResult;
     use pms_types_block::Block;
     use pms_types_payload::{PayloadEnvelope, PlainPayload};
     use pms_utils::check_pow::check_pow_leading_zero_bits;
@@ -136,7 +142,6 @@ pub async fn admin_create_token(
     use pms_wallet::SignerBackend;
     use pms_wallet::signing_wire::canonical_wireblock_message;
     use pms_wire::WireBlock;
-    use pms_storage::PutResult;
     use rust_decimal::Decimal;
 
     let node_wallet = &state.node_wallet;
@@ -164,7 +169,10 @@ pub async fn admin_create_token(
         payload: Some(PayloadEnvelope::Plain(tc_payload)),
         nonce: 0,
         metadata: Some(pms_types_block::BlockMetadata {
-            description: Some(format!("TokenCreate: {} ({})", metadata.asset_id, metadata.symbol)),
+            description: Some(format!(
+                "TokenCreate: {} ({})",
+                metadata.asset_id, metadata.symbol
+            )),
             ..Default::default()
         }),
         signer_pk: None,
@@ -216,7 +224,9 @@ pub async fn admin_create_token(
     let block_id = wb.id.clone();
     match state.srv.adapter_arc().persist_block(&wb).await {
         Ok(PutResult::Inserted) => {
-            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
+            crate::metrics::BLOCKS_PERSISTED
+                .with_label_values(&[&state.ledger_id])
+                .inc();
             let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
         }
         Ok(_) => {} // AlreadyExists or Rejected - token is still registered in RocksDB
@@ -226,16 +236,17 @@ pub async fn admin_create_token(
     }
 
     // Charge creation fee (if configured)
-    let creation_fee_dec =
-        crate::api_fn::tx_helpers::load_token_creation_fee(&state.store, Some(&state.effective_fees))
-            .unwrap_or(Decimal::ZERO);
+    let creation_fee_dec = crate::api_fn::tx_helpers::load_token_creation_fee(
+        &state.store,
+        Some(&state.effective_fees),
+    )
+    .unwrap_or(Decimal::ZERO);
 
     if creation_fee_dec > Decimal::ZERO {
-        if let Some(reward_id) = crate::api_fn::tx_helpers::create_reward_block(
-            &state,
-            creation_fee_dec,
-            &block_id,
-        ).await {
+        if let Some(reward_id) =
+            crate::api_fn::tx_helpers::create_reward_block(&state, creation_fee_dec, &block_id)
+                .await
+        {
             tracing::info!(
                 "[ADMIN] Token creation fee {} PMS distributed via block {}",
                 creation_fee_dec,
@@ -253,8 +264,12 @@ pub async fn admin_create_token(
         }
     }
 
-    tracing::info!("[ADMIN] Token created on-chain: {} ({}) block={}",
-        metadata.asset_id, metadata.symbol, &block_id[..16.min(block_id.len())]);
+    tracing::info!(
+        "[ADMIN] Token created on-chain: {} ({}) block={}",
+        metadata.asset_id,
+        metadata.symbol,
+        &block_id[..16.min(block_id.len())]
+    );
 
     (
         StatusCode::CREATED,
@@ -282,6 +297,7 @@ pub async fn admin_mint_token(
     headers: HeaderMap,
     Json(req): Json<MintTokenRequest>,
 ) -> impl IntoResponse {
+    use pms_storage::PutResult;
     use pms_types::TxOutput;
     use pms_types_block::Block;
     use pms_types_payload::{PayloadEnvelope, PlainPayload};
@@ -290,7 +306,6 @@ pub async fn admin_mint_token(
     use pms_wallet::SignerBackend;
     use pms_wallet::signing_wire::canonical_wireblock_message;
     use pms_wire::WireBlock;
-    use pms_storage::PutResult;
     use rust_decimal::Decimal;
 
     if !is_admin_authorized(&state, &headers) {
@@ -351,7 +366,9 @@ pub async fn admin_mint_token(
     }
 
     // Compute mint fee (if configured)
-    let mint_fee_dec = if let Some(mint_fee_policy) = crate::api_fn::tx_helpers::load_mint_fee_policy(&state.store, Some(&state.effective_fees)) {
+    let mint_fee_dec = if let Some(mint_fee_policy) =
+        crate::api_fn::tx_helpers::load_mint_fee_policy(&state.store, Some(&state.effective_fees))
+    {
         mint_fee_policy
             .compute_fee(&amount_dec.to_string())
             .map(|a| a.inner())
@@ -369,8 +386,11 @@ pub async fn admin_mint_token(
 
     // Add fee output if configured (fee always in PMS native token)
     if mint_fee_dec > Decimal::ZERO {
-        let fee_addr = state.settings.admin.wallet_addresses.first()
-            .or(state.settings.fees.treasury_addresses.first());
+        let fee_addr = state.settings.admin.wallet_addresses.first().or(state
+            .settings
+            .fees
+            .treasury_addresses
+            .first());
         if let Some(addr) = fee_addr {
             outputs.push(TxOutput {
                 address: addr.clone(),
@@ -380,7 +400,9 @@ pub async fn admin_mint_token(
         }
     }
 
-    let mint_payload = PlainPayload::Mint { outputs: outputs.clone() };
+    let mint_payload = PlainPayload::Mint {
+        outputs: outputs.clone(),
+    };
 
     // Resolve parent
     let parent_id = match state.srv.adapter_arc().top_tips(1).await {
@@ -458,7 +480,9 @@ pub async fn admin_mint_token(
     // Persist & update UTXOs
     match state.srv.adapter_arc().persist_block(&wb).await {
         Ok(PutResult::Inserted) => {
-            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
+            crate::metrics::BLOCKS_PERSISTED
+                .with_label_values(&[&state.ledger_id])
+                .inc();
             let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
 
             // Update UTXO set for all outputs

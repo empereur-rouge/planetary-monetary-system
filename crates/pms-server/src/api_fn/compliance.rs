@@ -96,12 +96,7 @@ pub async fn admin_freeze(
 
     let parents = match tx_helpers::get_block_parents(&state.store, &state.settings).await {
         Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e})),
-            )
-        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     };
 
     let adapter = state.srv.adapter_arc();
@@ -116,12 +111,7 @@ pub async fn admin_freeze(
     .await
     {
         Ok(wb) => wb,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e})),
-            )
-        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     };
 
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
@@ -141,10 +131,7 @@ pub async fn admin_freeze(
             StatusCode::CONFLICT,
             Json(json!({"error": "block already exists"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e})),
-        ),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     }
 }
 
@@ -177,12 +164,7 @@ pub async fn admin_unfreeze(
 
     let parents = match tx_helpers::get_block_parents(&state.store, &state.settings).await {
         Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e})),
-            )
-        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     };
 
     let adapter = state.srv.adapter_arc();
@@ -197,12 +179,7 @@ pub async fn admin_unfreeze(
     .await
     {
         Ok(wb) => wb,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e})),
-            )
-        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     };
 
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
@@ -222,10 +199,7 @@ pub async fn admin_unfreeze(
             StatusCode::CONFLICT,
             Json(json!({"error": "block already exists"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e})),
-        ),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     }
 }
 
@@ -330,12 +304,7 @@ pub async fn admin_seize(
 
     let parents = match tx_helpers::get_block_parents(&state.store, &state.settings).await {
         Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e})),
-            )
-        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     };
 
     let wb = match tx_helpers::forge_and_sign_block(
@@ -349,12 +318,7 @@ pub async fn admin_seize(
     .await
     {
         Ok(wb) => wb,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e})),
-            )
-        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     };
 
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
@@ -395,10 +359,7 @@ pub async fn admin_seize(
             StatusCode::CONFLICT,
             Json(json!({"error": "block already exists"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e})),
-        ),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     }
 }
 
@@ -425,13 +386,13 @@ pub async fn admin_reverse(
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "original block not found"})),
-            )
+            );
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("store error: {e}")})),
-            )
+            );
         }
     };
 
@@ -446,7 +407,7 @@ pub async fn admin_reverse(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "only TxUtxo transactions can be reversed"})),
-            )
+            );
         }
     };
 
@@ -510,7 +471,7 @@ pub async fn admin_reverse(
                     Json(json!({
                         "error": format!("cannot find creator block for input {}#{}", inp.out.txid, inp.out.index),
                     })),
-                )
+                );
             }
         };
 
@@ -563,7 +524,7 @@ pub async fn admin_reverse(
                     Json(json!({
                         "error": format!("cannot resolve original output {}#{}", inp.out.txid, inp.out.index),
                     })),
-                )
+                );
             }
         }
     }
@@ -585,12 +546,7 @@ pub async fn admin_reverse(
 
     let parents = match tx_helpers::get_block_parents(&state.store, &state.settings).await {
         Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e})),
-            )
-        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     };
 
     let wb = match tx_helpers::forge_and_sign_block(
@@ -604,18 +560,12 @@ pub async fn admin_reverse(
     .await
     {
         Ok(wb) => wb,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e})),
-            )
-        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     };
 
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
         Ok(pms_storage::PutResult::Inserted) => {
-            tx_helpers::apply_utxo_delta(&adapter, &wb.id, &reverse_inputs, &reverse_outputs)
-                .await;
+            tx_helpers::apply_utxo_delta(&adapter, &wb.id, &reverse_inputs, &reverse_outputs).await;
 
             let refunded: Vec<String> = refund_amounts.keys().map(|(a, _)| a.clone()).collect();
             (
@@ -636,10 +586,7 @@ pub async fn admin_reverse(
             StatusCode::CONFLICT,
             Json(json!({"error": "block already exists"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e})),
-        ),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     }
 }
 
@@ -718,7 +665,7 @@ pub async fn admin_shadow_balance(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": e.to_string()})),
-            )
+            );
         }
     };
 
@@ -741,10 +688,7 @@ pub async fn admin_shadow_balance(
             }
         }
 
-        let pms_bal = by_asset
-            .get(&None)
-            .map(|v| v.0)
-            .unwrap_or(Decimal::ZERO);
+        let pms_bal = by_asset.get(&None).map(|v| v.0).unwrap_or(Decimal::ZERO);
         total_pms += pms_bal;
 
         let assets: Vec<serde_json::Value> = by_asset

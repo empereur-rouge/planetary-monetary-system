@@ -58,13 +58,17 @@ pub enum ValidationError {
     Other(&'static str),
 
     // Configuration Security Errors
-    #[error("invalid platform address signature: address '{address}' is not authorized by the master key")]
+    #[error(
+        "invalid platform address signature: address '{address}' is not authorized by the master key"
+    )]
     InvalidPlatformSignature { address: String },
 
     #[error("missing platform address signature in config (required for Mainnet/Testnet)")]
     MissingPlatformSignature,
 
-    #[error("cannot use {network} coordinator key in Dev mode - this is a critical security misconfiguration")]
+    #[error(
+        "cannot use {network} coordinator key in Dev mode - this is a critical security misconfiguration"
+    )]
     ProdKeyInDevMode { network: String },
 
     #[error("config error: {0}")]

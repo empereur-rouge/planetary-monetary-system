@@ -132,7 +132,8 @@ impl NodeRewardsStorage for RocksStore {
             .cf_handle(&format!("{}:node_reward_addresses", self.prefix))
             .context("CF node_reward_addresses not found")?;
 
-        self.db.put_cf(&cf, node_pk.as_bytes(), address.as_bytes())?;
+        self.db
+            .put_cf(&cf, node_pk.as_bytes(), address.as_bytes())?;
         Ok(())
     }
 

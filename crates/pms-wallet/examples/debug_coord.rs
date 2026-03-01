@@ -1,6 +1,6 @@
-use pms_wallet::Wallet;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use pms_wallet::Wallet;
 
 fn main() {
     let expected_address = "8e1ahpltzjauwev6lf0jql9szau3gl44u9rye4u6vat95sd9dzx23yvfmlt25q9avx7wxmc2qvcgwpaypegmq9s6u5fr9";
@@ -38,9 +38,18 @@ fn main() {
     println!();
     println!("=== CROSS-CHECK ===");
     println!("  hex vs mne addr match:    {}", addr_hex == addr_mne);
-    println!("  hex vs mne pubkey match:  {}", w_hex.public_key_hex == w_mne.public_key_hex);
-    println!("  hex vs mne x25519 match:  {}", w_hex.x25519_pub_hex == w_mne.x25519_pub_hex);
-    println!("  hex vs mne privkey match: {}", w_hex.private_key_b64 == w_mne.private_key_b64);
+    println!(
+        "  hex vs mne pubkey match:  {}",
+        w_hex.public_key_hex == w_mne.public_key_hex
+    );
+    println!(
+        "  hex vs mne x25519 match:  {}",
+        w_hex.x25519_pub_hex == w_mne.x25519_pub_hex
+    );
+    println!(
+        "  hex vs mne privkey match: {}",
+        w_hex.private_key_b64 == w_mne.private_key_b64
+    );
     println!("  mne priv_hex == input:    {}", mne_priv_hex == priv_hex);
 
     println!();
@@ -51,6 +60,8 @@ fn main() {
     if addr_hex != expected_address {
         println!();
         println!("  !!! ADDRESS MISMATCH — the stored address was computed differently !!!");
-        println!("  Likely cause: the coordinator.json was generated with an older/buggy X25519 derivation");
+        println!(
+            "  Likely cause: the coordinator.json was generated with an older/buggy X25519 derivation"
+        );
     }
 }

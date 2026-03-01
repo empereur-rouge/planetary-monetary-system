@@ -24,7 +24,10 @@ pub trait NetDagAdapter: Send + Sync {
     async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64);
 
     /// Retourne le supply en circulation d'un asset spécifique (None = PMS natif).
-    async fn circulating_supply_by_asset(&self, asset_id: Option<&str>) -> (rust_decimal::Decimal, u64);
+    async fn circulating_supply_by_asset(
+        &self,
+        asset_id: Option<&str>,
+    ) -> (rust_decimal::Decimal, u64);
 
     /// Retourne la balance d'une adresse (somme des UTXOs non dépensés PMS).
     async fn balance_by_address(&self, address: &str) -> rust_decimal::Decimal;
@@ -36,7 +39,14 @@ pub trait NetDagAdapter: Send + Sync {
     ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)>;
 
     /// Ajoute un UTXO manuellement (utilisé par le coordinateur pour les EncryptedReward)
-    async fn add_utxo(&self, txid: String, index: u32, address: String, amount: String, asset_id: Option<String>);
+    async fn add_utxo(
+        &self,
+        txid: String,
+        index: u32,
+        address: String,
+        amount: String,
+        asset_id: Option<String>,
+    );
 
     /// Supprime un UTXO du cache (utilisé quand un input est consommé par une TX encrypted)
     /// Retourne true si l'UTXO existait et a été supprimé, false sinon.

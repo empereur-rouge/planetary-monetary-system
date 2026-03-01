@@ -115,17 +115,29 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
                         spent.insert((inp.out.txid.clone(), inp.out.index));
                     }
                 }
-                if let pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::BridgeLock { inputs, .. }) = p {
+                if let pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::BridgeLock {
+                    inputs,
+                    ..
+                }) = p
+                {
                     for inp in inputs {
                         spent.insert((inp.out.txid.clone(), inp.out.index));
                     }
                 }
-                if let pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Seize { inputs, .. }) = p {
+                if let pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Seize {
+                    inputs,
+                    ..
+                }) = p
+                {
                     for inp in inputs {
                         spent.insert((inp.out.txid.clone(), inp.out.index));
                     }
                 }
-                if let pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Reverse { inputs, .. }) = p {
+                if let pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Reverse {
+                    inputs,
+                    ..
+                }) = p
+                {
                     for inp in inputs {
                         spent.insert((inp.out.txid.clone(), inp.out.index));
                     }
@@ -143,15 +155,18 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
                 Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::TxUtxo(tx))) => {
                     Some((tx.outputs.clone(), 0))
                 }
-                Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::BridgeMint { outputs, .. })) => {
-                    Some((outputs.clone(), 0))
-                }
-                Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Seize { outputs, .. })) => {
-                    Some((outputs.clone(), 0))
-                }
-                Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Reverse { outputs, .. })) => {
-                    Some((outputs.clone(), 0))
-                }
+                Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::BridgeMint {
+                    outputs,
+                    ..
+                })) => Some((outputs.clone(), 0)),
+                Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Seize {
+                    outputs,
+                    ..
+                })) => Some((outputs.clone(), 0)),
+                Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::Reverse {
+                    outputs,
+                    ..
+                })) => Some((outputs.clone(), 0)),
                 _ => None,
             };
 

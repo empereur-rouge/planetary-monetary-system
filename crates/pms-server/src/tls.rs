@@ -9,8 +9,8 @@ use std::fs;
 pub fn load_tls(cert_path: &str, key_path: &str) -> anyhow::Result<ServerConfig> {
     // Load certificates from PEM file
     let cert_pem = fs::read(cert_path)?;
-    let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
-        .collect::<Result<_, _>>()?;
+    let cert_chain: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(&cert_pem).collect::<Result<_, _>>()?;
 
     // Load private key (supports PKCS#8, SEC1/EC, and RSA formats automatically)
     let key_pem = fs::read(key_path)?;
@@ -43,8 +43,8 @@ pub fn load_client_config(
 
     // 2. Load Client Cert/Key (Mutual TLS)
     let cert_pem = fs::read(cert_path)?;
-    let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
-        .collect::<Result<_, _>>()?;
+    let cert_chain: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(&cert_pem).collect::<Result<_, _>>()?;
 
     let key_pem = fs::read(key_path)?;
     let key = PrivateKeyDer::from_pem_slice(&key_pem)?;

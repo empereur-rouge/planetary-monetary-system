@@ -1,8 +1,8 @@
 use crate::rocks_store::store::RocksStore;
 use anyhow::Result;
 use pms_types_payload::TokenMetadata;
-use std::sync::Arc;
 use rocksdb::BoundColumnFamily;
+use std::sync::Arc;
 
 impl RocksStore {
     fn cf_token_registry(&self) -> Arc<BoundColumnFamily<'_>> {
@@ -13,15 +13,28 @@ impl RocksStore {
     fn validate_token_metadata(metadata: &TokenMetadata) -> Result<()> {
         // asset_id: alphanumeric + underscore/hyphen, 1-64 chars
         if metadata.asset_id.is_empty() || metadata.asset_id.len() > 64 {
-            anyhow::bail!("asset_id must be 1-64 characters, got {}", metadata.asset_id.len());
+            anyhow::bail!(
+                "asset_id must be 1-64 characters, got {}",
+                metadata.asset_id.len()
+            );
         }
-        if !metadata.asset_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            anyhow::bail!("asset_id must be alphanumeric/underscore/hyphen: {}", metadata.asset_id);
+        if !metadata
+            .asset_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            anyhow::bail!(
+                "asset_id must be alphanumeric/underscore/hyphen: {}",
+                metadata.asset_id
+            );
         }
 
         // symbol: 1-10 chars
         if metadata.symbol.is_empty() || metadata.symbol.len() > 10 {
-            anyhow::bail!("symbol must be 1-10 characters, got {}", metadata.symbol.len());
+            anyhow::bail!(
+                "symbol must be 1-10 characters, got {}",
+                metadata.symbol.len()
+            );
         }
 
         // name: 1-128 chars

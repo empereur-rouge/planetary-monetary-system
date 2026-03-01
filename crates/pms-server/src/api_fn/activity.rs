@@ -1,8 +1,8 @@
 use crate::api::AppState;
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::Json;
 use futures_util::Stream;
 use pms_storage::DagStorage;
 use pms_types_payload::{PayloadEnvelope, PlainPayload};
@@ -91,7 +91,11 @@ pub async fn get_wallet_activity(
     const BATCH_SIZE: usize = 500;
 
     let adapter = app.srv.adapter_arc();
-    let ledger_tag = if app.ledger_id == "main" { None } else { Some(app.ledger_id.clone()) };
+    let ledger_tag = if app.ledger_id == "main" {
+        None
+    } else {
+        Some(app.ledger_id.clone())
+    };
     let mut items = Vec::new();
     let mut cursor_ts = q.after_ts;
     let mut cursor_id = q.after_id.clone();
@@ -152,7 +156,11 @@ pub async fn get_wallet_activity(
                     tx_block_id,
                 }) => match &q.x25519_sk_hex {
                     Some(sk) => match pms_wallet::history::try_decrypt_encrypted_reward(
-                        &encrypted_outputs, &burned, &tx_block_id, sk, &address,
+                        &encrypted_outputs,
+                        &burned,
+                        &tx_block_id,
+                        sk,
+                        &address,
                     ) {
                         Some(decrypted) => decrypted,
                         None => continue,
@@ -161,7 +169,11 @@ pub async fn get_wallet_activity(
                 },
                 PayloadEnvelope::Encrypted(enc) => match &q.x25519_sk_hex {
                     Some(sk) => match enc.decrypt_as_payload(sk) {
-                        Ok(decrypted) if pms_wallet::history::involves_address(&decrypted, &address) => decrypted,
+                        Ok(decrypted)
+                            if pms_wallet::history::involves_address(&decrypted, &address) =>
+                        {
+                            decrypted
+                        }
                         _ => continue,
                     },
                     None => continue,
@@ -177,8 +189,7 @@ pub async fn get_wallet_activity(
             let classified = classify_activity(&plain, &address, &*adapter).await;
             for item in classified {
                 // Apply type filter
-                if !type_filters.is_empty()
-                    && !type_filters.contains(&item.activity_type.as_str())
+                if !type_filters.is_empty() && !type_filters.contains(&item.activity_type.as_str())
                 {
                     continue;
                 }
@@ -215,7 +226,11 @@ pub async fn get_wallet_activity(
     }
 
     // Sort newest first
-    items.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms).then_with(|| b.block_id.cmp(&a.block_id)));
+    items.sort_by(|a, b| {
+        b.ts_ms
+            .cmp(&a.ts_ms)
+            .then_with(|| b.block_id.cmp(&a.block_id))
+    });
     let has_more = items.len() > limit;
     items.truncate(limit);
 
@@ -250,11 +265,10 @@ pub async fn stream_wallet_activity(
     Path(address): Path<String>,
     Query(q): Query<StreamActivityQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
-    let bus = app
-        .srv
-        .adapter_arc()
-        .event_bus()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "event bus not available".to_string()))?;
+    let bus = app.srv.adapter_arc().event_bus().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "event bus not available".to_string(),
+    ))?;
 
     let mut rx = bus.subscribe();
     let type_filters: Vec<String> = parse_type_filter(&q.filter_type)
@@ -263,7 +277,11 @@ pub async fn stream_wallet_activity(
         .collect();
     let addr = address.clone();
     let sk_opt = q.x25519_sk_hex.clone();
-    let ledger_tag = if app.ledger_id == "main" { None } else { Some(app.ledger_id.clone()) };
+    let ledger_tag = if app.ledger_id == "main" {
+        None
+    } else {
+        Some(app.ledger_id.clone())
+    };
 
     let stream = async_stream::stream! {
         loop {
@@ -448,7 +466,11 @@ async fn classify_activity(
                     activity_type: "transfer_in".to_string(),
                     direction: "in".to_string(),
                     amount: Some(received.to_string()),
-                    asset_id: tx.outputs.iter().find(|o| o.address == addr).and_then(|o| o.asset_id.clone()),
+                    asset_id: tx
+                        .outputs
+                        .iter()
+                        .find(|o| o.address == addr)
+                        .and_then(|o| o.asset_id.clone()),
                     counterparty: sender_addr,
                     ledger_id: None,
                     payload: payload_val,
@@ -604,25 +626,25 @@ async fn classify_activity(
             }]
         }
 
-        PlainPayload::BridgeMint { outputs, .. } => {
-            outputs
-                .iter()
-                .filter(|o| o.address == addr)
-                .map(|o| ActivityItem {
-                    block_id: String::new(),
-                    ts_ms: 0,
-                    activity_type: "bridge_mint".to_string(),
-                    direction: "in".to_string(),
-                    amount: Some(o.amount.clone()),
-                    asset_id: o.asset_id.clone(),
-                    counterparty: None,
-                    ledger_id: None,
-                    payload: serde_json::to_value(plain).unwrap_or_default(),
-                })
-                .collect()
-        }
+        PlainPayload::BridgeMint { outputs, .. } => outputs
+            .iter()
+            .filter(|o| o.address == addr)
+            .map(|o| ActivityItem {
+                block_id: String::new(),
+                ts_ms: 0,
+                activity_type: "bridge_mint".to_string(),
+                direction: "in".to_string(),
+                amount: Some(o.amount.clone()),
+                asset_id: o.asset_id.clone(),
+                counterparty: None,
+                ledger_id: None,
+                payload: serde_json::to_value(plain).unwrap_or_default(),
+            })
+            .collect(),
 
-        PlainPayload::Freeze { address, reason, .. } if address == addr => {
+        PlainPayload::Freeze {
+            address, reason, ..
+        } if address == addr => {
             vec![ActivityItem {
                 block_id: String::new(),
                 ts_ms: 0,
@@ -721,23 +743,21 @@ async fn classify_activity(
 /// Sync version for SSE (no UTXO lookup, outputs-only for TxUtxo sender detection).
 fn classify_activity_sync(plain: &PlainPayload, addr: &str) -> Vec<ActivityItem> {
     match plain {
-        PlainPayload::Mint { outputs } => {
-            outputs
-                .iter()
-                .filter(|o| o.address == addr)
-                .map(|o| ActivityItem {
-                    block_id: String::new(),
-                    ts_ms: 0,
-                    activity_type: "mint".to_string(),
-                    direction: "in".to_string(),
-                    amount: Some(o.amount.clone()),
-                    asset_id: o.asset_id.clone(),
-                    counterparty: None,
-                    ledger_id: None,
-                    payload: serde_json::to_value(plain).unwrap_or_default(),
-                })
-                .collect()
-        }
+        PlainPayload::Mint { outputs } => outputs
+            .iter()
+            .filter(|o| o.address == addr)
+            .map(|o| ActivityItem {
+                block_id: String::new(),
+                ts_ms: 0,
+                activity_type: "mint".to_string(),
+                direction: "in".to_string(),
+                amount: Some(o.amount.clone()),
+                asset_id: o.asset_id.clone(),
+                counterparty: None,
+                ledger_id: None,
+                payload: serde_json::to_value(plain).unwrap_or_default(),
+            })
+            .collect(),
 
         PlainPayload::TxUtxo(tx) => {
             // In SSE mode, we can't do async UTXO lookups.
@@ -756,7 +776,11 @@ fn classify_activity_sync(plain: &PlainPayload, addr: &str) -> Vec<ActivityItem>
                     activity_type: "transfer_in".to_string(),
                     direction: "in".to_string(),
                     amount: Some(received.to_string()),
-                    asset_id: tx.outputs.iter().find(|o| o.address == addr).and_then(|o| o.asset_id.clone()),
+                    asset_id: tx
+                        .outputs
+                        .iter()
+                        .find(|o| o.address == addr)
+                        .and_then(|o| o.asset_id.clone()),
                     counterparty: None,
                     ledger_id: None,
                     payload: serde_json::to_value(tx).unwrap_or_default(),
@@ -880,7 +904,9 @@ fn classify_activity_sync(plain: &PlainPayload, addr: &str) -> Vec<ActivityItem>
             }
         }
 
-        PlainPayload::Freeze { address, reason, .. } if address == addr => {
+        PlainPayload::Freeze {
+            address, reason, ..
+        } if address == addr => {
             vec![ActivityItem {
                 block_id: String::new(),
                 ts_ms: 0,
@@ -1049,9 +1075,9 @@ async fn resolve_sender(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pms_types::{OutputId, Transaction, TxInput, TxOutput};
     use pms_types_nft::NftAction;
     use pms_types_payload::TokenMetadata;
-    use pms_types::{OutputId, Transaction, TxInput, TxOutput};
 
     // ── helpers ──────────────────────────────────────────────────────
 
@@ -1500,23 +1526,70 @@ mod tests {
 
         #[async_trait]
         impl NetDagAdapter for MockAdapter {
-            async fn have_block(&self, _id: &str) -> bool { false }
-            async fn persist_block(&self, _wb: &pms_wire::WireBlock) -> anyhow::Result<pms_storage::PutResult> {
+            async fn have_block(&self, _id: &str) -> bool {
+                false
+            }
+            async fn persist_block(
+                &self,
+                _wb: &pms_wire::WireBlock,
+            ) -> anyhow::Result<pms_storage::PutResult> {
                 Ok(pms_storage::PutResult::Inserted)
             }
-            async fn broadcast_block(&self, _b: &pms_wire::WireBlock) -> anyhow::Result<()> { Ok(()) }
-            async fn top_tips(&self, _limit: usize) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-            async fn get_block(&self, _id: &str) -> anyhow::Result<Option<pms_wire::WireBlock>> { Ok(None) }
-            async fn recent_ids(&self, _limit: usize) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-            async fn get_blocks_by_ids(&self, _ids: &[String]) -> anyhow::Result<Vec<pms_wire::WireBlock>> { Ok(vec![]) }
-            fn min_pow_leading_zero_bits(&self) -> u8 { 0 }
-            async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) { (rust_decimal::Decimal::ZERO, 0) }
-            async fn circulating_supply_by_asset(&self, _asset_id: Option<&str>) -> (rust_decimal::Decimal, u64) { (rust_decimal::Decimal::ZERO, 0) }
-            async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal { rust_decimal::Decimal::ZERO }
-            async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> { vec![] }
-            async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {}
-            async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool { false }
-            async fn get_utxo(&self, _output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
+            async fn broadcast_block(&self, _b: &pms_wire::WireBlock) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn top_tips(&self, _limit: usize) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn get_block(&self, _id: &str) -> anyhow::Result<Option<pms_wire::WireBlock>> {
+                Ok(None)
+            }
+            async fn recent_ids(&self, _limit: usize) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn get_blocks_by_ids(
+                &self,
+                _ids: &[String],
+            ) -> anyhow::Result<Vec<pms_wire::WireBlock>> {
+                Ok(vec![])
+            }
+            fn min_pow_leading_zero_bits(&self) -> u8 {
+                0
+            }
+            async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) {
+                (rust_decimal::Decimal::ZERO, 0)
+            }
+            async fn circulating_supply_by_asset(
+                &self,
+                _asset_id: Option<&str>,
+            ) -> (rust_decimal::Decimal, u64) {
+                (rust_decimal::Decimal::ZERO, 0)
+            }
+            async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
+                rust_decimal::Decimal::ZERO
+            }
+            async fn utxos_by_address(
+                &self,
+                _address: &str,
+            ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+                vec![]
+            }
+            async fn add_utxo(
+                &self,
+                _txid: String,
+                _index: u32,
+                _address: String,
+                _amount: String,
+                _asset_id: Option<String>,
+            ) {
+            }
+            async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool {
+                false
+            }
+            async fn get_utxo(
+                &self,
+                _output_id: &pms_types::OutputId,
+            ) -> Option<pms_types::TxOutput> {
                 // Return a UTXO for the sender to test sender resolution
                 Some(pms_types::TxOutput {
                     address: "sender_addr".into(),
@@ -1528,7 +1601,10 @@ mod tests {
 
         let tx = Transaction {
             inputs: vec![TxInput {
-                out: OutputId { txid: "tx1".into(), index: 0 },
+                out: OutputId {
+                    txid: "tx1".into(),
+                    index: 0,
+                },
             }],
             outputs: vec![out("receiver_addr", "90"), out("sender_addr", "9")],
             fee: "1".into(),
@@ -1553,23 +1629,70 @@ mod tests {
 
         #[async_trait]
         impl NetDagAdapter for MockAdapter {
-            async fn have_block(&self, _id: &str) -> bool { false }
-            async fn persist_block(&self, _wb: &pms_wire::WireBlock) -> anyhow::Result<pms_storage::PutResult> {
+            async fn have_block(&self, _id: &str) -> bool {
+                false
+            }
+            async fn persist_block(
+                &self,
+                _wb: &pms_wire::WireBlock,
+            ) -> anyhow::Result<pms_storage::PutResult> {
                 Ok(pms_storage::PutResult::Inserted)
             }
-            async fn broadcast_block(&self, _b: &pms_wire::WireBlock) -> anyhow::Result<()> { Ok(()) }
-            async fn top_tips(&self, _limit: usize) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-            async fn get_block(&self, _id: &str) -> anyhow::Result<Option<pms_wire::WireBlock>> { Ok(None) }
-            async fn recent_ids(&self, _limit: usize) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-            async fn get_blocks_by_ids(&self, _ids: &[String]) -> anyhow::Result<Vec<pms_wire::WireBlock>> { Ok(vec![]) }
-            fn min_pow_leading_zero_bits(&self) -> u8 { 0 }
-            async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) { (rust_decimal::Decimal::ZERO, 0) }
-            async fn circulating_supply_by_asset(&self, _asset_id: Option<&str>) -> (rust_decimal::Decimal, u64) { (rust_decimal::Decimal::ZERO, 0) }
-            async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal { rust_decimal::Decimal::ZERO }
-            async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> { vec![] }
-            async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {}
-            async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool { false }
-            async fn get_utxo(&self, _output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
+            async fn broadcast_block(&self, _b: &pms_wire::WireBlock) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn top_tips(&self, _limit: usize) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn get_block(&self, _id: &str) -> anyhow::Result<Option<pms_wire::WireBlock>> {
+                Ok(None)
+            }
+            async fn recent_ids(&self, _limit: usize) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn get_blocks_by_ids(
+                &self,
+                _ids: &[String],
+            ) -> anyhow::Result<Vec<pms_wire::WireBlock>> {
+                Ok(vec![])
+            }
+            fn min_pow_leading_zero_bits(&self) -> u8 {
+                0
+            }
+            async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) {
+                (rust_decimal::Decimal::ZERO, 0)
+            }
+            async fn circulating_supply_by_asset(
+                &self,
+                _asset_id: Option<&str>,
+            ) -> (rust_decimal::Decimal, u64) {
+                (rust_decimal::Decimal::ZERO, 0)
+            }
+            async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
+                rust_decimal::Decimal::ZERO
+            }
+            async fn utxos_by_address(
+                &self,
+                _address: &str,
+            ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+                vec![]
+            }
+            async fn add_utxo(
+                &self,
+                _txid: String,
+                _index: u32,
+                _address: String,
+                _amount: String,
+                _asset_id: Option<String>,
+            ) {
+            }
+            async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool {
+                false
+            }
+            async fn get_utxo(
+                &self,
+                _output_id: &pms_types::OutputId,
+            ) -> Option<pms_types::TxOutput> {
                 Some(pms_types::TxOutput {
                     address: "sender_addr".into(),
                     amount: "100".into(),
@@ -1580,7 +1703,10 @@ mod tests {
 
         let tx = Transaction {
             inputs: vec![TxInput {
-                out: OutputId { txid: "tx1".into(), index: 0 },
+                out: OutputId {
+                    txid: "tx1".into(),
+                    index: 0,
+                },
             }],
             outputs: vec![out("bob", "99")],
             fee: "1".into(),
@@ -1605,23 +1731,70 @@ mod tests {
 
         #[async_trait]
         impl NetDagAdapter for MockAdapter {
-            async fn have_block(&self, _id: &str) -> bool { false }
-            async fn persist_block(&self, _wb: &pms_wire::WireBlock) -> anyhow::Result<pms_storage::PutResult> {
+            async fn have_block(&self, _id: &str) -> bool {
+                false
+            }
+            async fn persist_block(
+                &self,
+                _wb: &pms_wire::WireBlock,
+            ) -> anyhow::Result<pms_storage::PutResult> {
                 Ok(pms_storage::PutResult::Inserted)
             }
-            async fn broadcast_block(&self, _b: &pms_wire::WireBlock) -> anyhow::Result<()> { Ok(()) }
-            async fn top_tips(&self, _limit: usize) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-            async fn get_block(&self, _id: &str) -> anyhow::Result<Option<pms_wire::WireBlock>> { Ok(None) }
-            async fn recent_ids(&self, _limit: usize) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-            async fn get_blocks_by_ids(&self, _ids: &[String]) -> anyhow::Result<Vec<pms_wire::WireBlock>> { Ok(vec![]) }
-            fn min_pow_leading_zero_bits(&self) -> u8 { 0 }
-            async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) { (rust_decimal::Decimal::ZERO, 0) }
-            async fn circulating_supply_by_asset(&self, _asset_id: Option<&str>) -> (rust_decimal::Decimal, u64) { (rust_decimal::Decimal::ZERO, 0) }
-            async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal { rust_decimal::Decimal::ZERO }
-            async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> { vec![] }
-            async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {}
-            async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool { false }
-            async fn get_utxo(&self, _output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
+            async fn broadcast_block(&self, _b: &pms_wire::WireBlock) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn top_tips(&self, _limit: usize) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn get_block(&self, _id: &str) -> anyhow::Result<Option<pms_wire::WireBlock>> {
+                Ok(None)
+            }
+            async fn recent_ids(&self, _limit: usize) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn get_blocks_by_ids(
+                &self,
+                _ids: &[String],
+            ) -> anyhow::Result<Vec<pms_wire::WireBlock>> {
+                Ok(vec![])
+            }
+            fn min_pow_leading_zero_bits(&self) -> u8 {
+                0
+            }
+            async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) {
+                (rust_decimal::Decimal::ZERO, 0)
+            }
+            async fn circulating_supply_by_asset(
+                &self,
+                _asset_id: Option<&str>,
+            ) -> (rust_decimal::Decimal, u64) {
+                (rust_decimal::Decimal::ZERO, 0)
+            }
+            async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
+                rust_decimal::Decimal::ZERO
+            }
+            async fn utxos_by_address(
+                &self,
+                _address: &str,
+            ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
+                vec![]
+            }
+            async fn add_utxo(
+                &self,
+                _txid: String,
+                _index: u32,
+                _address: String,
+                _amount: String,
+                _asset_id: Option<String>,
+            ) {
+            }
+            async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool {
+                false
+            }
+            async fn get_utxo(
+                &self,
+                _output_id: &pms_types::OutputId,
+            ) -> Option<pms_types::TxOutput> {
                 Some(pms_types::TxOutput {
                     address: "alice".into(),
                     amount: "100".into(),
@@ -1632,7 +1805,10 @@ mod tests {
 
         let tx = Transaction {
             inputs: vec![TxInput {
-                out: OutputId { txid: "tx1".into(), index: 0 },
+                out: OutputId {
+                    txid: "tx1".into(),
+                    index: 0,
+                },
             }],
             outputs: vec![out("alice", "99")],
             fee: "1".into(),

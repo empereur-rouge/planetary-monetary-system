@@ -201,10 +201,7 @@ async fn bootstrap_from_store_prunes_to_capacity() -> Result<()> {
     );
 
     // Tip (last block) must survive
-    assert!(
-        dag.contains_block("b_00004999"),
-        "tip must survive pruning"
-    );
+    assert!(dag.contains_block("b_00004999"), "tip must survive pruning");
 
     // Old blocks should be gone
     assert!(
@@ -324,11 +321,7 @@ async fn bootstrap_from_store_unlimited_keeps_all() -> Result<()> {
 
     let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 0, 0).await?;
 
-    assert_eq!(
-        dag.len(),
-        1000,
-        "unlimited capacity should keep all blocks"
-    );
+    assert_eq!(dag.len(), 1000, "unlimited capacity should keep all blocks");
 
     Ok(())
 }
@@ -483,11 +476,7 @@ async fn bootstrap_under_capacity_no_pruning() -> Result<()> {
 
     let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
-    assert_eq!(
-        dag.len(),
-        100,
-        "under capacity, all blocks should be kept"
-    );
+    assert_eq!(dag.len(), 100, "under capacity, all blocks should be kept");
 
     Ok(())
 }
@@ -500,11 +489,7 @@ async fn bootstrap_at_exact_capacity() -> Result<()> {
 
     let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
-    assert_eq!(
-        dag.len(),
-        500,
-        "at exact capacity, no pruning should occur"
-    );
+    assert_eq!(dag.len(), 500, "at exact capacity, no pruning should occur");
 
     Ok(())
 }
@@ -547,10 +532,7 @@ async fn bootstrap_prune_diamond_topology() -> Result<()> {
     );
 
     // Tip must survive
-    assert!(
-        dag.contains_block("chain_0499"),
-        "tip must survive pruning"
-    );
+    assert!(dag.contains_block("chain_0499"), "tip must survive pruning");
 
     Ok(())
 }

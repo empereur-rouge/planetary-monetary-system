@@ -1,15 +1,15 @@
 use anyhow::{Context, Result};
 use pms_config::LedgerDef;
+use pms_core::CoreAdapter;
 use pms_core::concurrent_dag::ConcurrentDag;
 use pms_core::utxo::ShardedUtxoSet;
-use pms_core::CoreAdapter;
 use pms_interface::NetDagAdapter;
-use pms_storage::rocks_store::store::RocksStore;
 use pms_storage::DagStorage;
+use pms_storage::rocks_store::store::PmsDb;
+use pms_storage::rocks_store::store::RocksStore;
 use pms_types_block::Block;
 use pms_utils::compute_block_id;
 use pms_wire::WireMeta;
-use pms_storage::rocks_store::store::PmsDb;
 use std::sync::Arc;
 
 /// Un ledger complet et autonome.
@@ -54,10 +54,7 @@ impl LedgerInstance {
         }
 
         // Genesis block si DB vide pour ce prefix
-        let ids = store
-            .all_block_ids()
-            .await
-            .context("listing block IDs")?;
+        let ids = store.all_block_ids().await.context("listing block IDs")?;
 
         if ids.is_empty() {
             let genesis = Block::genesis(compute_block_id);
@@ -74,19 +71,27 @@ impl LedgerInstance {
 
         // Bootstrap DAG from store (with capacity limit for RAM pruning)
         let dag = Arc::new(
-            ConcurrentDag::bootstrap_from_store_with_capacity(&*store, max_dag_blocks, max_spent_outpoints)
-                .await
-                .with_context(|| format!("bootstrap DAG for ledger '{}'", def.id))?,
+            ConcurrentDag::bootstrap_from_store_with_capacity(
+                &*store,
+                max_dag_blocks,
+                max_spent_outpoints,
+            )
+            .await
+            .with_context(|| format!("bootstrap DAG for ledger '{}'", def.id))?,
         );
         tracing::info!(ledger = %def.id, blocks = dag.len(), max_dag_blocks, "DAG loaded");
 
         // Adapter + UTXO bootstrap from RocksDB utxo CF (authoritative, never pruned)
         let core_adapter = CoreAdapter::new(dag.clone(), store.clone());
         {
-            let all_utxos = store.iter_all_utxos()
+            let all_utxos = store
+                .iter_all_utxos()
                 .with_context(|| format!("iter_all_utxos for ledger '{}'", def.id))?;
             for (txid, idx, uv) in &all_utxos {
-                let oid = pms_types::OutputId { txid: txid.clone(), index: *idx };
+                let oid = pms_types::OutputId {
+                    txid: txid.clone(),
+                    index: *idx,
+                };
                 let txo = pms_types::TxOutput {
                     address: uv.address.clone(),
                     amount: uv.amount.clone(),

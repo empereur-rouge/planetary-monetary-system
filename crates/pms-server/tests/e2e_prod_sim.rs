@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use hex::FromHex;
-use k256::ecdsa::{SigningKey, Signature, signature::Signer};
+use k256::ecdsa::{Signature, SigningKey, signature::Signer};
 use pms_types_nft::NftMetadata;
 use pms_wallet::{SignerBackend, Wallet};
 use pms_wire::WireBlock;
@@ -100,8 +100,7 @@ fn generate_authority_keypair() -> (String, String) {
     let mut secret_bytes = [0u8; 32];
     rng.fill_bytes(&mut secret_bytes);
 
-    let signing_key = SigningKey::from_slice(&secret_bytes)
-        .expect("Failed to create signing key");
+    let signing_key = SigningKey::from_slice(&secret_bytes).expect("Failed to create signing key");
     let verifying_key = signing_key.verifying_key();
 
     let sk_hex = hex::encode(signing_key.to_bytes());
@@ -112,18 +111,15 @@ fn generate_authority_keypair() -> (String, String) {
 
 /// Sign cube attributes using Authority private key
 /// Format: "weight:X,size:Y,density:Z"
-fn sign_cube_attributes(
-    attrs: &CubeAttributes,
-    authority_sk_hex: &str,
-) -> Result<String> {
+fn sign_cube_attributes(attrs: &CubeAttributes, authority_sk_hex: &str) -> Result<String> {
     let message = format!(
         "weight:{},size:{},density:{}",
         attrs.weight, attrs.size, attrs.density
     );
 
     let sk_bytes = <Vec<u8>>::from_hex(authority_sk_hex)?;
-    let signing_key = SigningKey::from_slice(&sk_bytes)
-        .context("Failed to create SigningKey from bytes")?;
+    let signing_key =
+        SigningKey::from_slice(&sk_bytes).context("Failed to create SigningKey from bytes")?;
 
     let signature: Signature = signing_key.sign(message.as_bytes());
     let sig_der = signature.to_der();
@@ -139,8 +135,7 @@ fn update_config_with_authority_key(_authority_pk_hex: &str) -> Result<()> {
 
 /// Get workspace root directory
 fn get_workspace_root() -> Result<std::path::PathBuf> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .context("CARGO_MANIFEST_DIR not set")?;
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").context("CARGO_MANIFEST_DIR not set")?;
 
     let workspace_root = std::path::Path::new(&manifest_dir)
         .parent()
@@ -158,7 +153,10 @@ async fn start_docker_compose() -> Result<()> {
     let compose_file = workspace_root.join("docker-compose.e2e-prod.yml");
 
     if !compose_file.exists() {
-        anyhow::bail!("docker-compose.e2e-prod.yml not found at {:?}", compose_file);
+        anyhow::bail!(
+            "docker-compose.e2e-prod.yml not found at {:?}",
+            compose_file
+        );
     }
 
     // Stop any existing containers
@@ -172,7 +170,14 @@ async fn start_docker_compose() -> Result<()> {
     // Start services
     let status = Command::new("docker")
         .current_dir(&workspace_root)
-        .args(["compose", "-f", "docker-compose.e2e-prod.yml", "up", "-d", "--build"])
+        .args([
+            "compose",
+            "-f",
+            "docker-compose.e2e-prod.yml",
+            "up",
+            "-d",
+            "--build",
+        ])
         .status()
         .context("Failed to start docker-compose")?;
 
@@ -188,7 +193,14 @@ async fn start_docker_compose() -> Result<()> {
 
         let health = Command::new("docker")
             .current_dir(&workspace_root)
-            .args(["compose", "-f", "docker-compose.e2e-prod.yml", "ps", "--format", "json"])
+            .args([
+                "compose",
+                "-f",
+                "docker-compose.e2e-prod.yml",
+                "ps",
+                "--format",
+                "json",
+            ])
             .output();
 
         if let Ok(output) = health {
@@ -226,15 +238,15 @@ fn generate_cube_attributes() -> CubeAttributes {
     let mut rng = rand::rng();
 
     CubeAttributes {
-        weight: rng.random_range(500..=5000),   // 0.5kg to 5kg
-        size: rng.random_range(20..=80),        // 2cm to 8cm
-        density: rng.random_range(20..=100),    // 0.2 to 1.0
+        weight: rng.random_range(500..=5000), // 0.5kg to 5kg
+        size: rng.random_range(20..=80),      // 2cm to 8cm
+        density: rng.random_range(20..=100),  // 0.2 to 1.0
     }
 }
 
 /// Generate a unique token_id (64 hex chars)
 fn generate_token_id(index: usize) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
     hasher.update(format!("e2e-cube-{}-{}", index, rand::random::<u64>()));
@@ -288,7 +300,8 @@ async fn e2e_production_simulation() -> Result<()> {
         .build()?;
 
     // Verify /livez endpoint (Gateway health check)
-    let live_resp = client.get(format!("{}/livez", base_url))
+    let live_resp = client
+        .get(format!("{}/livez", base_url))
         .send()
         .await
         .context("Failed to connect to /livez")?;
@@ -309,7 +322,8 @@ async fn e2e_production_simulation() -> Result<()> {
     // Coordinator wallet (for Single Writer Mode)
     let coordinator_sk_hex = "52f4cb8344e318c120f87bc0efb429bdd6b379c700731af27aaf59efffc0b248";
     let coordinator_sk_bytes = <Vec<u8>>::from_hex(coordinator_sk_hex)?;
-    let coordinator_seed: [u8; 32] = coordinator_sk_bytes[..].try_into()
+    let coordinator_seed: [u8; 32] = coordinator_sk_bytes[..]
+        .try_into()
         .map_err(|_| anyhow::anyhow!("Invalid coordinator key length"))?;
     let wallet_coordinator = Wallet::from_seed(&coordinator_seed, None)
         .map_err(|e| anyhow::anyhow!("Coordinator wallet error: {}", e))?;
@@ -319,9 +333,21 @@ async fn e2e_production_simulation() -> Result<()> {
     let addr_b = wallet_b.encoded_public_key();
     let x25519_a = wallet_a.x25519_pub_hex().to_string();
 
-    println!("  👤 Wallet A: {}...{}", &addr_a[..16], &addr_a[addr_a.len()-8..]);
-    println!("  👤 Wallet B: {}...{}", &addr_b[..16], &addr_b[addr_b.len()-8..]);
-    println!("  🔧 Coordinator: {}...{}", &addr_coordinator[..16], &addr_coordinator[addr_coordinator.len()-8..]);
+    println!(
+        "  👤 Wallet A: {}...{}",
+        &addr_a[..16],
+        &addr_a[addr_a.len() - 8..]
+    );
+    println!(
+        "  👤 Wallet B: {}...{}",
+        &addr_b[..16],
+        &addr_b[addr_b.len() - 8..]
+    );
+    println!(
+        "  🔧 Coordinator: {}...{}",
+        &addr_coordinator[..16],
+        &addr_coordinator[addr_coordinator.len() - 8..]
+    );
 
     // ─────────────────────────────────────────────────────────────────────────
     // Phase 3: Mint 100 Cubes
@@ -368,7 +394,10 @@ async fn e2e_production_simulation() -> Result<()> {
 
         let status = resp.status();
         if !status.is_success() {
-            let error_text = resp.text().await.unwrap_or_else(|_| "No error message".to_string());
+            let error_text = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "No error message".to_string());
             anyhow::bail!("Mint {} failed with status {}: {}", i, status, error_text);
         }
 
@@ -395,7 +424,10 @@ async fn e2e_production_simulation() -> Result<()> {
         .json::<BalanceResponse>()
         .await?;
 
-    println!("  💰 Wallet A balance before burn: {} PMS", balance_a_before.balance);
+    println!(
+        "  💰 Wallet A balance before burn: {} PMS",
+        balance_a_before.balance
+    );
 
     // ─────────────────────────────────────────────────────────────────────────
     // Phase 4: Burn All Cubes
@@ -472,7 +504,11 @@ async fn e2e_production_simulation() -> Result<()> {
 
     if let Some(refund) = &burn_result.refund {
         println!("  💰 Total Refund: {} PMS", refund.amount);
-        println!("  👤 Recipient: {}...{}", &refund.recipient[..16], &refund.recipient[refund.recipient.len()-8..]);
+        println!(
+            "  👤 Recipient: {}...{}",
+            &refund.recipient[..16],
+            &refund.recipient[refund.recipient.len() - 8..]
+        );
     }
 
     // Wait for block to be processed and refund UTXO to be created
@@ -487,7 +523,10 @@ async fn e2e_production_simulation() -> Result<()> {
         .json::<BalanceResponse>()
         .await?;
 
-    println!("  💰 Wallet A balance after burn: {} PMS", balance_a_after_burn.balance);
+    println!(
+        "  💰 Wallet A balance after burn: {} PMS",
+        balance_a_after_burn.balance
+    );
 
     let balance_before = Decimal::from_str(&balance_a_before.balance)?;
     let balance_after = Decimal::from_str(&balance_a_after_burn.balance)?;
@@ -576,7 +615,8 @@ async fn e2e_production_simulation() -> Result<()> {
             };
 
             let payload_str = serde_json::to_string(&tx_payload)?;
-            let block_id = compute_block_id(&parents, &Some(serde_json::from_str(&payload_str)?), 0);
+            let block_id =
+                compute_block_id(&parents, &Some(serde_json::from_str(&payload_str)?), 0);
 
             let mut tx_wire_block = WireBlock {
                 id: block_id.clone(),
@@ -645,10 +685,24 @@ async fn e2e_production_simulation() -> Result<()> {
         .json::<serde_json::Value>()
         .await?;
 
-    println!("  💰 Total fees in pool: {} PMS", fee_pool_status["total_fees"].as_str().unwrap_or("0"));
-    println!("  💰 Total burn refunds: {} PMS", fee_pool_status["total_burn_refunds"].as_str().unwrap_or("0"));
-    println!("  📦 Transactions processed: {}", fee_pool_status["tx_count"]);
-    println!("  👥 Contributing nodes: {}", fee_pool_status["num_contributors"]);
+    println!(
+        "  💰 Total fees in pool: {} PMS",
+        fee_pool_status["total_fees"].as_str().unwrap_or("0")
+    );
+    println!(
+        "  💰 Total burn refunds: {} PMS",
+        fee_pool_status["total_burn_refunds"]
+            .as_str()
+            .unwrap_or("0")
+    );
+    println!(
+        "  📦 Transactions processed: {}",
+        fee_pool_status["tx_count"]
+    );
+    println!(
+        "  👥 Contributing nodes: {}",
+        fee_pool_status["num_contributors"]
+    );
 
     // Step 2: Trigger fee distribution (Coordinator only)
     println!("\n  🎯 Step 2: Trigger fee distribution");
@@ -665,11 +719,19 @@ async fn e2e_production_simulation() -> Result<()> {
         println!("  ℹ️  This might be expected if no fees were accumulated");
     } else {
         let distribute_result = distribute_resp.json::<serde_json::Value>().await?;
-        println!("  ✅ Distribution success: {}", distribute_result["success"]);
+        println!(
+            "  ✅ Distribution success: {}",
+            distribute_result["success"]
+        );
         if let Some(block_id) = distribute_result["reward_block_id"].as_str() {
             println!("  📦 Reward block: {}...", &block_id[..16]);
         }
-        println!("  💰 Total distributed: {} PMS", distribute_result["total_distributed"].as_str().unwrap_or("0"));
+        println!(
+            "  💰 Total distributed: {} PMS",
+            distribute_result["total_distributed"]
+                .as_str()
+                .unwrap_or("0")
+        );
         println!("  👥 Recipients: {}", distribute_result["num_recipients"]);
     }
 
@@ -687,7 +749,10 @@ async fn e2e_production_simulation() -> Result<()> {
 
     let coord_balance = Decimal::from_str(&coord_balance_phase6.balance)?;
 
-    println!("  💰 Coordinator balance: {} PMS (should receive 45% of fees)", coord_balance);
+    println!(
+        "  💰 Coordinator balance: {} PMS (should receive 45% of fees)",
+        coord_balance
+    );
 
     // Check Treasury wallet balances (should have received 15% of fees)
     let treasury_addrs = vec![
@@ -712,7 +777,10 @@ async fn e2e_production_simulation() -> Result<()> {
         println!("  💰 Treasury Wallet {}: {} PMS", idx + 1, balance);
     }
 
-    println!("  💰 Total Treasury Balance: {} PMS", total_treasury_balance);
+    println!(
+        "  💰 Total Treasury Balance: {} PMS",
+        total_treasury_balance
+    );
     println!("     (Should include 15% of transaction fees)");
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -721,8 +789,11 @@ async fn e2e_production_simulation() -> Result<()> {
     println!("\n📋 Phase 7: Test Coordinator Wallet Transfer (Coordinator -> Wallet B)");
     println!("  ℹ️  Testing that Coordinator can transfer tokens like a normal wallet");
 
-    let coord_transfer_amount = "0.001";  // Small amount since fees might be small
-    println!("  💸 Attempting to transfer {} PMS from Coordinator to Wallet B", coord_transfer_amount);
+    let coord_transfer_amount = "0.001"; // Small amount since fees might be small
+    println!(
+        "  💸 Attempting to transfer {} PMS from Coordinator to Wallet B",
+        coord_transfer_amount
+    );
 
     // Get Coordinator UTXOs
     let coord_utxos_response = client
@@ -735,7 +806,10 @@ async fn e2e_production_simulation() -> Result<()> {
         println!("  ℹ️  Skipping Coordinator transfer test");
     } else {
         let coord_utxos_resp: UtxosResponse = coord_utxos_response.json().await?;
-        println!("  📊 Coordinator has {} UTXOs", coord_utxos_resp.utxos.len());
+        println!(
+            "  📊 Coordinator has {} UTXOs",
+            coord_utxos_resp.utxos.len()
+        );
 
         if !coord_utxos_resp.utxos.is_empty() {
             let coord_utxo = &coord_utxos_resp.utxos[0];
@@ -785,7 +859,11 @@ async fn e2e_production_simulation() -> Result<()> {
             };
 
             let coord_payload_str = serde_json::to_string(&coord_tx_payload)?;
-            let coord_block_id = compute_block_id(&coord_parents, &Some(serde_json::from_str(&coord_payload_str)?), 0);
+            let coord_block_id = compute_block_id(
+                &coord_parents,
+                &Some(serde_json::from_str(&coord_payload_str)?),
+                0,
+            );
 
             let mut coord_tx_block = WireBlock {
                 id: coord_block_id.clone(),
@@ -826,7 +904,10 @@ async fn e2e_production_simulation() -> Result<()> {
 
                 let b_balance = Decimal::from_str(&balance_b_after_coord.balance)?;
 
-                println!("  💰 Wallet B balance after Coordinator transfer: {} PMS", b_balance);
+                println!(
+                    "  💰 Wallet B balance after Coordinator transfer: {} PMS",
+                    b_balance
+                );
                 println!("  ✅ Coordinator wallet can transfer tokens like a normal wallet");
             }
         }

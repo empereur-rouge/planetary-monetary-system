@@ -1,6 +1,6 @@
 use crate::rocks_store::store::RocksStore;
-use std::sync::Arc;
 use rocksdb::BoundColumnFamily;
+use std::sync::Arc;
 
 impl RocksStore {
     /// Récupère un handle de colonne "prefix:<name>"

@@ -290,11 +290,14 @@ impl ShardedUtxoSet {
                             true, // add
                         ));
                         self.supply_add_compact(compact);
-                        shard.insert(id.clone(), CompactOutput {
-                            address: compact.address.clone(),
-                            amount: compact.amount,
-                            asset_id: compact.asset_id.clone(),
-                        });
+                        shard.insert(
+                            id.clone(),
+                            CompactOutput {
+                                address: compact.address.clone(),
+                                amount: compact.amount,
+                                asset_id: compact.asset_id.clone(),
+                            },
+                        );
                     }
                 }
             } // shard write lock dropped here
@@ -331,10 +334,7 @@ impl ShardedUtxoSet {
     }
 
     /// Retourne le supply d'un token spécifique depuis le cache.
-    pub async fn circulating_supply_by_asset(
-        &self,
-        asset_id: Option<&str>,
-    ) -> (Decimal, usize) {
+    pub async fn circulating_supply_by_asset(&self, asset_id: Option<&str>) -> (Decimal, usize) {
         let cache = match self.supply_cache.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),

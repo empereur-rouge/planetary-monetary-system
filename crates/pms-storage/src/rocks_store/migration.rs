@@ -6,8 +6,8 @@ use crate::rocks_store::store::RocksStore;
 use crate::{CURRENT_VER, DagStorage, MigError, StoredBlock};
 use anyhow::anyhow;
 use pms_types_payload::PayloadEnvelope;
-use std::sync::Arc;
 use rocksdb::BoundColumnFamily;
+use std::sync::Arc;
 
 impl RocksStore {
     // --- helpers internes versionning ------------------------------------
@@ -99,7 +99,12 @@ impl RocksStore {
 
         for (i, id) in ids.iter().enumerate() {
             if i > 0 && i % 10_000 == 0 {
-                tracing::info!("Migration 1→2: processed {}/{} blocks ({:.1}%)", i, total, (i as f64 / total as f64) * 100.0);
+                tracing::info!(
+                    "Migration 1→2: processed {}/{} blocks ({:.1}%)",
+                    i,
+                    total,
+                    (i as f64 / total as f64) * 100.0
+                );
             }
             let maybe_b = self.get_block(&id).await.map_err(MigError::Any)?;
             let b = match maybe_b {
@@ -147,8 +152,7 @@ impl RocksStore {
             let (k, _) = kv.map_err(|e| MigError::Any(anyhow!(e)))?;
             total += 1;
 
-            let id = String::from_utf8(k.to_vec())
-                .map_err(|e| MigError::Any(anyhow!(e)))?;
+            let id = String::from_utf8(k.to_vec()).map_err(|e| MigError::Any(anyhow!(e)))?;
 
             // Skip sentinel key from migration 0→1
             if id == "__init__" {
@@ -156,7 +160,9 @@ impl RocksStore {
             }
 
             // Check if id2ts already has this block
-            if self.db.get_cf(&cf_i2t, id.as_bytes())
+            if self
+                .db
+                .get_cf(&cf_i2t, id.as_bytes())
                 .map_err(|e| MigError::Any(anyhow!(e)))?
                 .is_some()
             {
@@ -165,9 +171,11 @@ impl RocksStore {
 
             // Write synthetic timestamp
             let time_key = key_time_index(synthetic_ts, &id);
-            self.db.put_cf(&cf_time, &time_key, b"")
+            self.db
+                .put_cf(&cf_time, &time_key, b"")
                 .map_err(|e| MigError::Any(anyhow!(e)))?;
-            self.db.put_cf(&cf_i2t, id.as_bytes(), ts_to_be(synthetic_ts))
+            self.db
+                .put_cf(&cf_i2t, id.as_bytes(), ts_to_be(synthetic_ts))
                 .map_err(|e| MigError::Any(anyhow!(e)))?;
 
             synthetic_ts += 1;
@@ -215,8 +223,11 @@ impl RocksStore {
             };
 
             // Fetch the block
-            let Some(block_bytes) = self.db.get_cf(&cf_blocks, block_id.as_bytes())
-                .map_err(|e| MigError::Any(anyhow!(e)))? else {
+            let Some(block_bytes) = self
+                .db
+                .get_cf(&cf_blocks, block_id.as_bytes())
+                .map_err(|e| MigError::Any(anyhow!(e)))?
+            else {
                 continue;
             };
 
@@ -225,9 +236,15 @@ impl RocksStore {
             };
 
             // Parse payload
-            let Some(pjson) = &sb.payload_json else { continue };
-            let Ok(env) = serde_json::from_str::<PayloadEnvelope>(pjson) else { continue };
-            let PayloadEnvelope::Plain(ref plain) = env else { continue };
+            let Some(pjson) = &sb.payload_json else {
+                continue;
+            };
+            let Ok(env) = serde_json::from_str::<PayloadEnvelope>(pjson) else {
+                continue;
+            };
+            let PayloadEnvelope::Plain(ref plain) = env else {
+                continue;
+            };
 
             let addrs = extract_involved_addresses(plain);
             if addrs.is_empty() {
@@ -235,7 +252,9 @@ impl RocksStore {
             }
 
             // Get the block's timestamp from id2ts
-            let ts = match self.db.get_cf(&cf_i2t, block_id.as_bytes())
+            let ts = match self
+                .db
+                .get_cf(&cf_i2t, block_id.as_bytes())
                 .map_err(|e| MigError::Any(anyhow!(e)))?
             {
                 Some(v) if v.len() == 8 => {
@@ -249,7 +268,8 @@ impl RocksStore {
             // Write addr_activity entries
             for addr in &addrs {
                 let key = key_addr_activity(addr, ts, &block_id);
-                self.db.put_cf(&cf_aa, &key, b"")
+                self.db
+                    .put_cf(&cf_aa, &key, b"")
                     .map_err(|e| MigError::Any(anyhow!(e)))?;
             }
 

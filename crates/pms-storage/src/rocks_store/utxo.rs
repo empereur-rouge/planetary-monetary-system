@@ -15,7 +15,7 @@ pub struct UtxoApply {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UtxoDelta {
-    pub spend: Vec<(String, u32)>,                                  // (txid, index)
+    pub spend: Vec<(String, u32)>, // (txid, index)
     pub create: Vec<(String, u32, String, String, Option<String>)>, // (txid, index, address, amount, asset_id)
 }
 
@@ -133,8 +133,8 @@ impl RocksStore {
         let mut out = Vec::new();
         for item in self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
             let (key, val) = item?;
-            let key_str = std::str::from_utf8(&key)
-                .map_err(|e| anyhow::anyhow!("invalid utxo key: {e}"))?;
+            let key_str =
+                std::str::from_utf8(&key).map_err(|e| anyhow::anyhow!("invalid utxo key: {e}"))?;
             let (txid, idx) = parse_utxo_key(key_str)?;
             let uv: UtxoValue = serde_json::from_slice(&val)?;
             out.push((txid, idx, uv));
@@ -153,10 +153,12 @@ fn index_to_ascii(idx: u32) -> String {
 
 /// Parse a UTXO key in format "{txid}:{index}" into (txid, index).
 fn parse_utxo_key(key: &str) -> Result<(String, u32)> {
-    let colon = key.rfind(':')
+    let colon = key
+        .rfind(':')
         .ok_or_else(|| anyhow::anyhow!("invalid utxo key format (no ':'): {key}"))?;
     let txid = key[..colon].to_string();
-    let idx: u32 = key[colon + 1..].parse()
+    let idx: u32 = key[colon + 1..]
+        .parse()
         .map_err(|e| anyhow::anyhow!("invalid utxo key index: {e}"))?;
     Ok((txid, idx))
 }

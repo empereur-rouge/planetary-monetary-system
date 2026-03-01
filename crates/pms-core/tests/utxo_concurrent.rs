@@ -13,7 +13,7 @@ use pms_types::{OutputId, TxOutput};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 fn out_id(txid: &str, index: u32) -> OutputId {
     OutputId {
@@ -78,8 +78,18 @@ async fn concurrent_balance_query_during_apply_diff() {
             let utxos = utxos.clone();
             handles.push(tokio::spawn(async move {
                 for round in 0u32..50 {
-                    let old_txid = format!("{:02x}w{}{}", (writer_id * 50 + round) % 256, writer_id, round);
-                    let new_txid = format!("{:02x}n{}{}", (writer_id * 50 + round) % 256, writer_id, round);
+                    let old_txid = format!(
+                        "{:02x}w{}{}",
+                        (writer_id * 50 + round) % 256,
+                        writer_id,
+                        round
+                    );
+                    let new_txid = format!(
+                        "{:02x}n{}{}",
+                        (writer_id * 50 + round) % 256,
+                        writer_id,
+                        round
+                    );
 
                     // Créer un UTXO puis le spend dans le round suivant
                     utxos
@@ -143,8 +153,18 @@ async fn concurrent_utxos_query_during_apply_diff() {
             let utxos = utxos.clone();
             handles.push(tokio::spawn(async move {
                 for round in 0u32..50 {
-                    let old_txid = format!("{:02x}w{}{}", (writer_id * 50 + round) % 256, writer_id, round);
-                    let new_txid = format!("{:02x}n{}{}", (writer_id * 50 + round) % 256, writer_id, round);
+                    let old_txid = format!(
+                        "{:02x}w{}{}",
+                        (writer_id * 50 + round) % 256,
+                        writer_id,
+                        round
+                    );
+                    let new_txid = format!(
+                        "{:02x}n{}{}",
+                        (writer_id * 50 + round) % 256,
+                        writer_id,
+                        round
+                    );
 
                     utxos
                         .add(out_id(&old_txid, 0), pms_output("Bob", "1.00000000"))
@@ -227,8 +247,7 @@ async fn concurrent_mixed_reads_during_add_remove() {
             for round in 0u32..200 {
                 let txid = format!("{:02x}rw{}", round % 256, round);
                 let id = out_id(&txid, 0);
-                u.add(id.clone(), pms_output("Charlie", "1.00000000"))
-                    .await;
+                u.add(id.clone(), pms_output("Charlie", "1.00000000")).await;
                 u.remove(&id).await;
                 tokio::task::yield_now().await;
             }
@@ -343,7 +362,12 @@ async fn consistency_after_concurrent_operations() {
         // 4 writers : chacun fait des transferts entre 2 adresses
         // Alpha ↔ Beta, Gamma ↔ Delta
         // Chaque transfert conserve le montant (pas de fee pour simplifier)
-        let pairs = [("Alpha", "Beta"), ("Beta", "Alpha"), ("Gamma", "Delta"), ("Delta", "Gamma")];
+        let pairs = [
+            ("Alpha", "Beta"),
+            ("Beta", "Alpha"),
+            ("Gamma", "Delta"),
+            ("Delta", "Gamma"),
+        ];
 
         for (w_id, (from, to)) in pairs.iter().enumerate() {
             let utxos = utxos.clone();
@@ -351,15 +375,22 @@ async fn consistency_after_concurrent_operations() {
             let to = to.to_string();
             handles.push(tokio::spawn(async move {
                 for round in 0u32..50 {
-                    let spend_txid = format!("{:02x}s{}r{}", (w_id * 60 + round as usize) % 256, w_id, round);
-                    let out_txid = format!("{:02x}o{}r{}", (w_id * 60 + round as usize) % 256, w_id, round);
+                    let spend_txid = format!(
+                        "{:02x}s{}r{}",
+                        (w_id * 60 + round as usize) % 256,
+                        w_id,
+                        round
+                    );
+                    let out_txid = format!(
+                        "{:02x}o{}r{}",
+                        (w_id * 60 + round as usize) % 256,
+                        w_id,
+                        round
+                    );
 
                     // Créer un UTXO, puis le transférer
                     utxos
-                        .add(
-                            out_id(&spend_txid, 0),
-                            pms_output(&from, "0.10000000"),
-                        )
+                        .add(out_id(&spend_txid, 0), pms_output(&from, "0.10000000"))
                         .await;
 
                     let spends = vec![out_id(&spend_txid, 0)];
@@ -388,10 +419,7 @@ async fn consistency_after_concurrent_operations() {
     })
     .await;
 
-    assert!(
-        result.is_ok(),
-        "DEADLOCK: consistency test hung for 10s"
-    );
+    assert!(result.is_ok(), "DEADLOCK: consistency test hung for 10s");
 
     // --- Vérifications de cohérence post-concurrence ---
 
@@ -615,10 +643,22 @@ async fn rebuild_indexes_matches_incremental_state() {
     let alice_utxos_after = utxos.utxos_by_address("Alice").await;
     let bob_utxos_after = utxos.utxos_by_address("Bob").await;
 
-    assert_eq!(supply_before, supply_after, "PMS supply mismatch after rebuild");
-    assert_eq!(eden_supply_before, eden_supply_after, "EDEN supply mismatch");
-    assert_eq!(gold_supply_before, gold_supply_after, "GOLD supply mismatch");
-    assert_eq!(alice_pms_before, alice_pms_after, "Alice PMS balance mismatch");
+    assert_eq!(
+        supply_before, supply_after,
+        "PMS supply mismatch after rebuild"
+    );
+    assert_eq!(
+        eden_supply_before, eden_supply_after,
+        "EDEN supply mismatch"
+    );
+    assert_eq!(
+        gold_supply_before, gold_supply_after,
+        "GOLD supply mismatch"
+    );
+    assert_eq!(
+        alice_pms_before, alice_pms_after,
+        "Alice PMS balance mismatch"
+    );
     assert_eq!(bob_pms_before, bob_pms_after, "Bob PMS balance mismatch");
     assert_eq!(
         alice_utxos_before.len(),
@@ -634,7 +674,10 @@ async fn rebuild_indexes_matches_incremental_state() {
     // Valeurs attendues
     assert_eq!(alice_pms_after, Decimal::from_str("70.00000000").unwrap());
     assert_eq!(bob_pms_after, Decimal::from_str("80.00000000").unwrap());
-    assert_eq!(eden_supply_after.0, Decimal::from_str("1000.00000000").unwrap());
+    assert_eq!(
+        eden_supply_after.0,
+        Decimal::from_str("1000.00000000").unwrap()
+    );
     assert_eq!(gold_supply_after.0, Decimal::ZERO, "gold was removed");
 }
 
@@ -697,17 +740,22 @@ async fn stress_high_contention_no_deadlock() {
                 for round in 0u32..200 {
                     let from_addr = format!("addr_{}", (writer_id * 7 + round) % 100);
                     let to_addr = format!("addr_{}", (writer_id * 11 + round + 1) % 100);
-                    let spend_txid =
-                        format!("{:02x}tx{}r{}", (writer_id * 60 + round) % 256, writer_id, round);
-                    let out_txid =
-                        format!("{:02x}out{}r{}", (writer_id * 60 + round) % 256, writer_id, round);
+                    let spend_txid = format!(
+                        "{:02x}tx{}r{}",
+                        (writer_id * 60 + round) % 256,
+                        writer_id,
+                        round
+                    );
+                    let out_txid = format!(
+                        "{:02x}out{}r{}",
+                        (writer_id * 60 + round) % 256,
+                        writer_id,
+                        round
+                    );
 
                     // Crée un UTXO puis le transfère (net supply = 0)
                     utxos
-                        .add(
-                            out_id(&spend_txid, 0),
-                            pms_output(&from_addr, "0.01000000"),
-                        )
+                        .add(out_id(&spend_txid, 0), pms_output(&from_addr, "0.01000000"))
                         .await;
 
                     let spends = vec![out_id(&spend_txid, 0)];

@@ -65,7 +65,10 @@ pub fn resolve_effective_fees(
         },
         Some(ov) => EffectiveFees {
             ratio: ov.ratio.clone().unwrap_or_else(|| global.ratio.clone()),
-            base_fee: ov.base_fee.clone().unwrap_or_else(|| global.base_fee.clone()),
+            base_fee: ov
+                .base_fee
+                .clone()
+                .unwrap_or_else(|| global.base_fee.clone()),
             platform_fee_ratio: ov
                 .platform_fee_ratio
                 .clone()
@@ -79,13 +82,22 @@ pub fn resolve_effective_fees(
             } else {
                 ov.fee_tiers.clone()
             },
-            mint_fee_base: ov.mint_fee_base.clone().or_else(|| global.mint_fee_base.clone()),
-            mint_fee_ratio: ov.mint_fee_ratio.clone().or_else(|| global.mint_fee_ratio.clone()),
+            mint_fee_base: ov
+                .mint_fee_base
+                .clone()
+                .or_else(|| global.mint_fee_base.clone()),
+            mint_fee_ratio: ov
+                .mint_fee_ratio
+                .clone()
+                .or_else(|| global.mint_fee_ratio.clone()),
             token_creation_fee: ov
                 .token_creation_fee
                 .clone()
                 .or_else(|| global.token_creation_fee.clone()),
-            nft_mint_fee: ov.nft_mint_fee.clone().or_else(|| global.nft_mint_fee.clone()),
+            nft_mint_fee: ov
+                .nft_mint_fee
+                .clone()
+                .or_else(|| global.nft_mint_fee.clone()),
             nft_fee_exempt_types: if ov.nft_fee_exempt_types.is_empty() {
                 global.nft_fee_exempt_types.clone()
             } else {
@@ -171,10 +183,7 @@ pub fn load_token_creation_fee(
 /// Load NFT mint fee.
 /// Priority: RuntimeConfig > EffectiveFees (per-ledger).
 /// Returns None if not configured.
-pub fn load_nft_mint_fee(
-    store: &Arc<RocksStore>,
-    eff: Option<&EffectiveFees>,
-) -> Option<Decimal> {
+pub fn load_nft_mint_fee(store: &Arc<RocksStore>, eff: Option<&EffectiveFees>) -> Option<Decimal> {
     let rc = store
         .get_runtime_config()
         .unwrap_or_else(|_| RuntimeConfig::default());
@@ -286,9 +295,9 @@ pub async fn forge_and_sign_block(
     // Serialize payload
     let payload_json = match &block.payload {
         None => None,
-        Some(env) => Some(
-            serde_json::to_string(env).map_err(|e| format!("payload serialize: {e:#}"))?,
-        ),
+        Some(env) => {
+            Some(serde_json::to_string(env).map_err(|e| format!("payload serialize: {e:#}"))?)
+        }
     };
 
     // Create WireBlock + sign
@@ -314,10 +323,7 @@ pub async fn forge_and_sign_block(
 
 /// Persist a block, increment metrics, and broadcast.
 /// Returns the PutResult from the adapter.
-pub async fn persist_and_broadcast(
-    state: &AppState,
-    wb: &WireBlock,
-) -> Result<PutResult, String> {
+pub async fn persist_and_broadcast(state: &AppState, wb: &WireBlock) -> Result<PutResult, String> {
     let adapter = state.srv.adapter_arc();
     let res = adapter
         .persist_block(wb)
@@ -435,15 +441,12 @@ pub async fn create_reward_block(
     }
 
     let eff = &state.effective_fees;
-    let fee_config = eff
-        .fee_distribution
-        .clone()
-        .unwrap_or_else(|| {
-            FeeDistributionConfig::new(
-                eff.coordinator_fee_percent as u16 * 100,
-                eff.treasury_fee_percent as u16 * 100,
-            )
-        });
+    let fee_config = eff.fee_distribution.clone().unwrap_or_else(|| {
+        FeeDistributionConfig::new(
+            eff.coordinator_fee_percent as u16 * 100,
+            eff.treasury_fee_percent as u16 * 100,
+        )
+    });
 
     let coordinator_address = node_wallet.get_address("8e");
 
@@ -455,7 +458,8 @@ pub async fn create_reward_block(
         settings.admin.wallet_addresses.clone()
     };
 
-    let fee_outputs_raw = compute_fee_outputs(fee_dec, &treasury_addrs, &coordinator_address, &fee_config);
+    let fee_outputs_raw =
+        compute_fee_outputs(fee_dec, &treasury_addrs, &coordinator_address, &fee_config);
 
     if fee_outputs_raw.is_empty() {
         return None;
@@ -571,7 +575,10 @@ mod tests {
             base_fee: Some("0.5".into()),
             platform_fee_ratio: Some("0.10".into()),
             block_reward: Some("0.2".into()),
-            fee_tiers: vec![FeeTier { up_to: Some("50".into()), ratio: "0.05".into() }],
+            fee_tiers: vec![FeeTier {
+                up_to: Some("50".into()),
+                ratio: "0.05".into(),
+            }],
             mint_fee_base: Some("2.0".into()),
             mint_fee_ratio: Some("0.03".into()),
             token_creation_fee: Some("200".into()),

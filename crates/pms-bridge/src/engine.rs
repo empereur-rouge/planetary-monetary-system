@@ -14,8 +14,8 @@ use std::sync::Arc;
 use crate::auth::BridgeAuth;
 use crate::store::BridgeStore;
 use crate::types::{
-    BridgeDisableRequest, BridgeEnableRequest, BridgeLink,
-    BridgeTransferRequest, BridgeTransferResponse,
+    BridgeDisableRequest, BridgeEnableRequest, BridgeLink, BridgeTransferRequest,
+    BridgeTransferResponse,
 };
 
 /// Orchestre les opérations de pont cross-ledger.
@@ -275,10 +275,7 @@ impl BridgeEngine {
         );
 
         // 5) Anti-replay check
-        if self
-            .bridge_store
-            .is_bridge_lock_consumed(&lock_block_id)?
-        {
+        if self.bridge_store.is_bridge_lock_consumed(&lock_block_id)? {
             bail!("BridgeLock {} already consumed", lock_block_id);
         }
 

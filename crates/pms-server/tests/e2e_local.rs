@@ -13,7 +13,7 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use hex::FromHex;
-use k256::ecdsa::{SigningKey, Signature, signature::Signer};
+use k256::ecdsa::{Signature, SigningKey, signature::Signer};
 use pms_types_nft::NftMetadata;
 use pms_wallet::{SignerBackend, Wallet};
 use pms_wire::WireBlock;
@@ -97,42 +97,41 @@ fn generate_cube_attributes() -> CubeAttributes {
     let mut rng = rand::rng();
 
     CubeAttributes {
-        weight: rng.random_range(500..=5000),   // 0.5kg to 5kg
-        size: rng.random_range(20..=80),        // 2cm to 8cm
-        density: rng.random_range(20..=100),    // 0.2 to 1.0
+        weight: rng.random_range(500..=5000), // 0.5kg to 5kg
+        size: rng.random_range(20..=80),      // 2cm to 8cm
+        density: rng.random_range(20..=100),  // 0.2 to 1.0
     }
 }
 
 /// Generate a unique token_id (64 hex chars)
 fn generate_token_id(index: usize) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
     hasher.update(b"e2e_local_test_cube_");
     hasher.update(index.to_string().as_bytes());
-    hasher.update(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
-        .to_string()
-        .as_bytes());
+    hasher.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string()
+            .as_bytes(),
+    );
     let hash = hasher.finalize();
     hex::encode(hash)
 }
 
 /// Sign cube attributes with Authority private key
-fn sign_cube_attributes(
-    attrs: &CubeAttributes,
-    authority_sk_hex: &str,
-) -> Result<String> {
+fn sign_cube_attributes(attrs: &CubeAttributes, authority_sk_hex: &str) -> Result<String> {
     let message = format!(
         "weight:{},size:{},density:{}",
         attrs.weight, attrs.size, attrs.density
     );
 
     let sk_bytes = <Vec<u8>>::from_hex(authority_sk_hex)?;
-    let signing_key = SigningKey::from_slice(&sk_bytes)
-        .context("Failed to create SigningKey from bytes")?;
+    let signing_key =
+        SigningKey::from_slice(&sk_bytes).context("Failed to create SigningKey from bytes")?;
 
     let signature: Signature = signing_key.sign(message.as_bytes());
     let sig_der = signature.to_der();
@@ -148,8 +147,7 @@ fn generate_authority_keypair() -> (String, String) {
     let mut secret_bytes = [0u8; 32];
     rng.fill_bytes(&mut secret_bytes);
 
-    let signing_key = SigningKey::from_slice(&secret_bytes)
-        .expect("Failed to create signing key");
+    let signing_key = SigningKey::from_slice(&secret_bytes).expect("Failed to create signing key");
     let verifying_key = signing_key.verifying_key();
 
     let sk_hex = hex::encode(signing_key.to_bytes());
@@ -189,9 +187,7 @@ async fn e2e_local_simulation() -> Result<()> {
     println!("📋 Phase 1: Verify Server Connection");
 
     let base_url = "http://127.0.0.1:8080"; // Direct Engine, no Gateway, no TLS
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
 
     // Try to connect
     let health_resp = client
@@ -201,7 +197,10 @@ async fn e2e_local_simulation() -> Result<()> {
         .context("Failed to connect to server. Is it running?")?;
 
     if !health_resp.status().is_success() {
-        anyhow::bail!("Server health check failed. Status: {}", health_resp.status());
+        anyhow::bail!(
+            "Server health check failed. Status: {}",
+            health_resp.status()
+        );
     }
 
     println!("  ✅ Server is running and responding\n");
@@ -219,7 +218,8 @@ async fn e2e_local_simulation() -> Result<()> {
     // Coordinator wallet (for Single Writer Mode)
     let coordinator_sk_hex = "52f4cb8344e318c120f87bc0efb429bdd6b379c700731af27aaf59efffc0b248";
     let coordinator_sk_bytes = <Vec<u8>>::from_hex(coordinator_sk_hex)?;
-    let coordinator_seed: [u8; 32] = coordinator_sk_bytes[..].try_into()
+    let coordinator_seed: [u8; 32] = coordinator_sk_bytes[..]
+        .try_into()
         .map_err(|_| anyhow::anyhow!("Invalid coordinator key length"))?;
     let wallet_coordinator = Wallet::from_seed(&coordinator_seed, None)
         .map_err(|e| anyhow::anyhow!("Coordinator wallet error: {}", e))?;
@@ -232,9 +232,21 @@ async fn e2e_local_simulation() -> Result<()> {
     // Generate Authority keypair (note: in production, this is pre-configured)
     let (authority_sk, _authority_pk) = generate_authority_keypair();
 
-    println!("  👤 Wallet A: {}...{}", &addr_a[..16], &addr_a[addr_a.len()-8..]);
-    println!("  👤 Wallet B: {}...{}", &addr_b[..16], &addr_b[addr_b.len()-8..]);
-    println!("  🔧 Coordinator: {}...{}", &addr_coordinator[..16], &addr_coordinator[addr_coordinator.len()-8..]);
+    println!(
+        "  👤 Wallet A: {}...{}",
+        &addr_a[..16],
+        &addr_a[addr_a.len() - 8..]
+    );
+    println!(
+        "  👤 Wallet B: {}...{}",
+        &addr_b[..16],
+        &addr_b[addr_b.len() - 8..]
+    );
+    println!(
+        "  🔧 Coordinator: {}...{}",
+        &addr_coordinator[..16],
+        &addr_coordinator[addr_coordinator.len() - 8..]
+    );
 
     // ─────────────────────────────────────────────────────────────────────────
     // Phase 3: Mint 100 Cubes
@@ -281,7 +293,10 @@ async fn e2e_local_simulation() -> Result<()> {
 
         let status = resp.status();
         if !status.is_success() {
-            let error_text = resp.text().await.unwrap_or_else(|_| "No error message".to_string());
+            let error_text = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "No error message".to_string());
             anyhow::bail!("Mint {} failed with status {}: {}", i, status, error_text);
         }
 
@@ -308,7 +323,10 @@ async fn e2e_local_simulation() -> Result<()> {
         .json::<BalanceResponse>()
         .await?;
 
-    println!("  💰 Wallet A balance before burn: {} PMS", balance_a_before.balance);
+    println!(
+        "  💰 Wallet A balance before burn: {} PMS",
+        balance_a_before.balance
+    );
 
     // ─────────────────────────────────────────────────────────────────────────
     // Phase 4: Burn All Cubes
@@ -387,7 +405,11 @@ async fn e2e_local_simulation() -> Result<()> {
 
     if let Some(refund) = &burn_result.refund {
         println!("  💰 Total Refund: {} PMS", refund.amount);
-        println!("  👤 Recipient: {}...{}", &refund.recipient[..16], &refund.recipient[refund.recipient.len()-8..]);
+        println!(
+            "  👤 Recipient: {}...{}",
+            &refund.recipient[..16],
+            &refund.recipient[refund.recipient.len() - 8..]
+        );
     }
 
     // Verify balance increased
@@ -401,7 +423,10 @@ async fn e2e_local_simulation() -> Result<()> {
         .json::<BalanceResponse>()
         .await?;
 
-    println!("  💰 Wallet A balance after burn: {} PMS", balance_a_after.balance);
+    println!(
+        "  💰 Wallet A balance after burn: {} PMS",
+        balance_a_after.balance
+    );
 
     // ─────────────────────────────────────────────────────────────────────────
     // Phase 5: Transfer PMS from A to B

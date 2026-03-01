@@ -127,10 +127,7 @@ impl ConcurrentDag {
         dag.children_count
             .insert(genesis.id.clone(), AtomicU64::new(0));
         dag.blocks.insert(genesis.id.clone(), genesis.clone());
-        dag.insertion_order
-            .lock()
-            .unwrap()
-            .push_back(genesis.id);
+        dag.insertion_order.lock().unwrap().push_back(genesis.id);
         dag
     }
 
@@ -543,11 +540,7 @@ impl ConcurrentDag {
                     match serde_json::from_str(json) {
                         Ok(p) => Some(p),
                         Err(e) => {
-                            tracing::error!(
-                                "Failed to parse payload for block {}: {}",
-                                sb.id,
-                                e
-                            );
+                            tracing::error!("Failed to parse payload for block {}: {}", sb.id, e);
                             None
                         }
                     }
@@ -584,15 +577,26 @@ impl ConcurrentDag {
         // Diagnostic: count tips and parentless blocks before pruning
         {
             let total = dag.blocks.len();
-            let tips_count = dag.children_count.iter()
-                .filter(|e| dag.blocks.contains_key(e.key()) && e.value().load(Ordering::Relaxed) == 0)
+            let tips_count = dag
+                .children_count
+                .iter()
+                .filter(|e| {
+                    dag.blocks.contains_key(e.key()) && e.value().load(Ordering::Relaxed) == 0
+                })
                 .count();
-            let parentless = dag.blocks.iter()
+            let parentless = dag
+                .blocks
+                .iter()
                 .filter(|e| e.value().parents.is_empty())
                 .count();
-            let orphan_parents = dag.blocks.iter()
+            let orphan_parents = dag
+                .blocks
+                .iter()
                 .filter(|e| {
-                    e.value().parents.iter().any(|p| !dag.blocks.contains_key(p))
+                    e.value()
+                        .parents
+                        .iter()
+                        .any(|p| !dag.blocks.contains_key(p))
                 })
                 .count();
             tracing::warn!(
@@ -712,10 +716,7 @@ mod tests {
         );
 
         // The tip (b7) must still exist
-        assert!(
-            dag.contains_block("b7"),
-            "Latest tip should not be pruned"
-        );
+        assert!(dag.contains_block("b7"), "Latest tip should not be pruned");
 
         // Oldest blocks should be gone
         assert!(
@@ -740,8 +741,14 @@ mod tests {
         // 5 blocks, capacity 3 → remove 2 oldest (genesis, t1)
         // Remaining: t2, t3, t4
         assert_eq!(dag.len(), 3, "should prune to exactly capacity");
-        assert!(!dag.contains_block("genesis"), "genesis (oldest) should be pruned");
-        assert!(!dag.contains_block("t1"), "t1 (2nd oldest) should be pruned");
+        assert!(
+            !dag.contains_block("genesis"),
+            "genesis (oldest) should be pruned"
+        );
+        assert!(
+            !dag.contains_block("t1"),
+            "t1 (2nd oldest) should be pruned"
+        );
 
         // Latest tips survive (they're at the back of insertion_order)
         assert!(dag.contains_block("t4"), "t4 (latest) should survive");
@@ -866,7 +873,10 @@ mod tests {
             } else {
                 vec![format!("b{}", i - 1)]
             };
-            dag.insert_block(make_block(&format!("b{}", i), parents.iter().map(|s| s.as_str()).collect()));
+            dag.insert_block(make_block(
+                &format!("b{}", i),
+                parents.iter().map(|s| s.as_str()).collect(),
+            ));
         }
         assert_eq!(dag.len(), 100);
 
@@ -881,10 +891,7 @@ mod tests {
 
         // Insert 30 more blocks (continuing the chain)
         for i in 100..130 {
-            dag.insert_block(make_block(
-                &format!("b{}", i),
-                vec![&format!("b{}", i - 1)],
-            ));
+            dag.insert_block(make_block(&format!("b{}", i), vec![&format!("b{}", i - 1)]));
         }
 
         // Second prune: must still work despite ghost entries from first prune
@@ -932,10 +939,7 @@ mod tests {
             dag.len()
         );
         assert!(dag.contains_block("b199"), "latest tip must survive");
-        assert!(
-            !dag.contains_block("b0"),
-            "genesis should be long pruned"
-        );
+        assert!(!dag.contains_block("b0"), "genesis should be long pruned");
     }
 
     // ─── Diamond / multi-parent topology ───────────────────────────
@@ -963,11 +967,7 @@ mod tests {
 
         // e is the only tip, g/a/b should be prunable
         assert!(dag.contains_block("e"), "tip e must survive");
-        assert!(
-            dag.len() <= 4,
-            "should prune to ~3, got {}",
-            dag.len()
-        );
+        assert!(dag.len() <= 4, "should prune to ~3, got {}", dag.len());
 
         // Verify children_count consistency: for surviving blocks with parents
         // still in DAG, the parent's children_count should be > 0
@@ -1044,10 +1044,7 @@ mod tests {
             } else {
                 format!("b{}", i - 1)
             };
-            dag.insert_block(make_block(
-                &format!("b{}", i),
-                vec![&parent],
-            ));
+            dag.insert_block(make_block(&format!("b{}", i), vec![&parent]));
         }
         dag.prune_oldest();
 
@@ -1111,10 +1108,7 @@ mod tests {
             } else {
                 format!("b{}", i - 1)
             };
-            dag.insert_block(make_block(
-                &format!("b{}", i),
-                vec![&parent],
-            ));
+            dag.insert_block(make_block(&format!("b{}", i), vec![&parent]));
         }
         dag.prune_oldest();
 
@@ -1498,9 +1492,6 @@ mod tests {
 
         assert_eq!(dag.len(), 1, "capacity 1 should keep exactly 1 block");
         let tips = dag.find_tips();
-        assert!(
-            !tips.is_empty(),
-            "the surviving block must be a tip"
-        );
+        assert!(!tips.is_empty(), "the surviving block must be a tip");
     }
 }

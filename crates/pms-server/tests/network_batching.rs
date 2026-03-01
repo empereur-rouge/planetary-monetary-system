@@ -76,7 +76,10 @@ impl NetDagAdapter for MockAdapter {
         (rust_decimal::Decimal::ZERO, 0)
     }
 
-    async fn circulating_supply_by_asset(&self, _asset_id: Option<&str>) -> (rust_decimal::Decimal, u64) {
+    async fn circulating_supply_by_asset(
+        &self,
+        _asset_id: Option<&str>,
+    ) -> (rust_decimal::Decimal, u64) {
         (rust_decimal::Decimal::ZERO, 0)
     }
 
@@ -91,7 +94,14 @@ impl NetDagAdapter for MockAdapter {
         Vec::new()
     }
 
-    async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {
+    async fn add_utxo(
+        &self,
+        _txid: String,
+        _index: u32,
+        _address: String,
+        _amount: String,
+        _asset_id: Option<String>,
+    ) {
         // Mock: no-op
     }
 

@@ -29,10 +29,7 @@ pub async fn post_json(
     (status, json)
 }
 
-pub async fn get_json(
-    app: &axum::Router,
-    path: &str,
-) -> (StatusCode, serde_json::Value) {
+pub async fn get_json(app: &axum::Router, path: &str) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method("GET")
         .uri(path)

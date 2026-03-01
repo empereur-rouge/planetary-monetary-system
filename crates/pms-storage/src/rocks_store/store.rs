@@ -5,7 +5,10 @@ use crate::helpers::{be_to_ts, le_to_u64, now_ms_i64, parse_time_index_key, ts_t
 use crate::{DagStorage, PutResult, StoredBlock};
 use anyhow::{Context, Result};
 use pms_wire::WireBlock;
-use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options};
+use rocksdb::{
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBWithThreadMode, Direction, IteratorMode,
+    MultiThreaded, Options,
+};
 
 /// Thread-safe DB handle usable with `Arc<PmsDb>`.
 /// `MultiThreaded` mode allows `create_cf(&self, ...)` (no `&mut self` needed),
@@ -91,11 +94,11 @@ impl RocksStore {
             "node_block_counts", // Block count per node: node_pk -> count
             "node_fee_pool", // Fee pool: single key "pool" -> amount (u64)
             "node_reward_addresses", // Reward addresses: node_pk -> address
-            "token_registry",        // Token registry: asset_id -> TokenMetadata (JSON)
-            "compliance_frozen",     // Frozen addresses: address -> FrozenEntry (JSON)
-            "compliance_log",        // Compliance audit trail: block_id -> ComplianceLogEntry (JSON)
-            "addr_activity",         // Per-address activity index: [addr][0x00][ts:8][block_id] -> ""
-            "addr_type_activity",    // Per-address-per-type index: [addr][0x00][cat:1][ts:8][block_id] -> ""
+            "token_registry", // Token registry: asset_id -> TokenMetadata (JSON)
+            "compliance_frozen", // Frozen addresses: address -> FrozenEntry (JSON)
+            "compliance_log", // Compliance audit trail: block_id -> ComplianceLogEntry (JSON)
+            "addr_activity", // Per-address activity index: [addr][0x00][ts:8][block_id] -> ""
+            "addr_type_activity", // Per-address-per-type index: [addr][0x00][cat:1][ts:8][block_id] -> ""
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -220,10 +223,7 @@ impl RocksStore {
 
     /// Ouvre un RocksDB avec les column families de **plusieurs prefixes** à la fois.
     /// Retourne un `Arc<DB>` partageable entre N `RocksStore` instances.
-    pub async fn open_db_multi_prefix(
-        path: &str,
-        prefixes: &[String],
-    ) -> Result<Arc<PmsDb>> {
+    pub async fn open_db_multi_prefix(path: &str, prefixes: &[String]) -> Result<Arc<PmsDb>> {
         let path = PathBuf::from(path);
         std::fs::create_dir_all(&path)
             .with_context(|| format!("create_dir_all({})", path.display()))?;
@@ -279,7 +279,8 @@ impl RocksStore {
         if path.exists() {
             let existing = PmsDb::list_cf(&db_opts, &path).unwrap_or_default();
             // Re-collect declared names properly
-            let mut declared_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut declared_names: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             declared_names.insert("default".to_string());
             for prefix in prefixes {
                 for &cf_name in Self::CF_NAMES {
@@ -470,10 +471,9 @@ impl RocksStore {
         };
 
         let mut ids = Vec::with_capacity(limit + 1);
-        let iter = self.db.iterator_cf(
-            &cf_aa,
-            IteratorMode::From(&seek_key, Direction::Reverse),
-        );
+        let iter = self
+            .db
+            .iterator_cf(&cf_aa, IteratorMode::From(&seek_key, Direction::Reverse));
         let mut skipped_cursor = false;
 
         for item in iter {
@@ -582,23 +582,21 @@ impl RocksStore {
             let cat = categories[0];
             let prefix = prefix_addr_type_activity(addr, cat);
 
-            let seek_key =
-                if let (Some(ts), Some(ref id)) = (after_ts, after_id.as_deref()) {
-                    key_addr_type_activity(addr, cat, ts, id)
-                } else {
-                    let mut end_key = prefix.clone();
-                    // [addr][0x00][cat] → bump last byte to go past the prefix
-                    if let Some(last) = end_key.last_mut() {
-                        *last = cat.wrapping_add(1);
-                    }
-                    end_key
-                };
+            let seek_key = if let (Some(ts), Some(ref id)) = (after_ts, after_id.as_deref()) {
+                key_addr_type_activity(addr, cat, ts, id)
+            } else {
+                let mut end_key = prefix.clone();
+                // [addr][0x00][cat] → bump last byte to go past the prefix
+                if let Some(last) = end_key.last_mut() {
+                    *last = cat.wrapping_add(1);
+                }
+                end_key
+            };
 
             let mut ids = Vec::with_capacity(limit + 1);
-            let iter = self.db.iterator_cf(
-                &cf_ata,
-                IteratorMode::From(&seek_key, Direction::Reverse),
-            );
+            let iter = self
+                .db
+                .iterator_cf(&cf_ata, IteratorMode::From(&seek_key, Direction::Reverse));
             let mut skipped_cursor = false;
 
             for item in iter {
@@ -606,9 +604,7 @@ impl RocksStore {
                 if k.len() < prefix.len() || &k[..prefix.len()] != prefix.as_slice() {
                     break;
                 }
-                let Some((_cat, ts, block_id)) =
-                    parse_addr_type_activity_key(&k, addr_len)
-                else {
+                let Some((_cat, ts, block_id)) = parse_addr_type_activity_key(&k, addr_len) else {
                     continue;
                 };
 
@@ -633,10 +629,7 @@ impl RocksStore {
         // Build one iterator per category, each positioned at the right start
         struct CatIter<'a> {
             prefix: Vec<u8>,
-            iter: rocksdb::DBIteratorWithThreadMode<
-                'a,
-                DBWithThreadMode<MultiThreaded>,
-            >,
+            iter: rocksdb::DBIteratorWithThreadMode<'a, DBWithThreadMode<MultiThreaded>>,
             current: Option<(i64, String)>, // (ts, block_id) of the peeked entry
             addr_len: usize,
         }
@@ -645,21 +638,19 @@ impl RocksStore {
 
         for &cat in categories {
             let prefix = prefix_addr_type_activity(addr, cat);
-            let seek_key =
-                if let (Some(ts), Some(ref id)) = (after_ts, after_id.as_deref()) {
-                    key_addr_type_activity(addr, cat, ts, id)
-                } else {
-                    let mut end_key = prefix.clone();
-                    if let Some(last) = end_key.last_mut() {
-                        *last = cat.wrapping_add(1);
-                    }
-                    end_key
-                };
+            let seek_key = if let (Some(ts), Some(ref id)) = (after_ts, after_id.as_deref()) {
+                key_addr_type_activity(addr, cat, ts, id)
+            } else {
+                let mut end_key = prefix.clone();
+                if let Some(last) = end_key.last_mut() {
+                    *last = cat.wrapping_add(1);
+                }
+                end_key
+            };
 
-            let iter = self.db.iterator_cf(
-                &cf_ata,
-                IteratorMode::From(&seek_key, Direction::Reverse),
-            );
+            let iter = self
+                .db
+                .iterator_cf(&cf_ata, IteratorMode::From(&seek_key, Direction::Reverse));
 
             let mut ci = CatIter {
                 prefix,
@@ -943,15 +934,14 @@ impl RocksStore {
         cf_names.push("default".to_string());
         cf_names.extend(required.into_iter());
 
-        let db = PmsDb::open_cf_as_secondary(&db_opts, &primary, &secondary, &cf_names).with_context(
-            || {
+        let db = PmsDb::open_cf_as_secondary(&db_opts, &primary, &secondary, &cf_names)
+            .with_context(|| {
                 format!(
                     "open RocksDB secondary at {} (primary={})",
                     secondary.display(),
                     primary.display()
                 )
-            },
-        )?;
+            })?;
 
         Ok(Self {
             db: Arc::new(db),
@@ -1121,7 +1111,13 @@ impl DagStorage for RocksStore {
         let cf_children_set = self.cf("children_set");
 
         // Sanity: ensure CF exist (they should, since new() created them).
-        let _ = (&cf_blocks, &cf_idx, &cf_tips, &cf_children_cnt, &cf_children_set);
+        let _ = (
+            &cf_blocks,
+            &cf_idx,
+            &cf_tips,
+            &cf_children_cnt,
+            &cf_children_set,
+        );
 
         // 2. insert / update idx
         for b in &blocks {
@@ -1383,7 +1379,11 @@ impl DagStorage for RocksStore {
                     asset_id: Option<&'a str>,
                 }
 
-                let val = OutVal { addr, amt, asset_id: asset_id.as_deref() };
+                let val = OutVal {
+                    addr,
+                    amt,
+                    asset_id: asset_id.as_deref(),
+                };
                 let json = serde_json::to_vec(&val)?;
                 batch.put_cf(&cf_utxo, &key, &json);
             }

@@ -107,8 +107,8 @@ impl FeePolicy {
     /// Calcul marginal par paliers.
     /// Chaque palier taxe uniquement la portion du montant dans sa tranche.
     fn compute_tiered_fee(&self, amount: &str, base: Amount) -> Result<Amount, FeeError> {
-        let total_amount = Amount::parse_pms(amount)
-            .map_err(|e| FeeError::Amount(format!("amount: {}", e)))?;
+        let total_amount =
+            Amount::parse_pms(amount).map_err(|e| FeeError::Amount(format!("amount: {}", e)))?;
 
         let mut fee = base;
         let mut remaining = total_amount.inner();
@@ -219,8 +219,14 @@ mod tests {
         let policy = FeePolicy::tiered(
             "0",
             vec![
-                FeeTier { up_to: Some("100".into()), ratio: "0.03".into() },
-                FeeTier { up_to: None, ratio: "0.005".into() },
+                FeeTier {
+                    up_to: Some("100".into()),
+                    ratio: "0.03".into(),
+                },
+                FeeTier {
+                    up_to: None,
+                    ratio: "0.005".into(),
+                },
             ],
         );
         // 50 PMS : tout dans tier 1 → 50 * 0.03 = 1.5
@@ -233,8 +239,14 @@ mod tests {
         let policy = FeePolicy::tiered(
             "0",
             vec![
-                FeeTier { up_to: Some("100".into()), ratio: "0.03".into() },
-                FeeTier { up_to: None, ratio: "0.005".into() },
+                FeeTier {
+                    up_to: Some("100".into()),
+                    ratio: "0.03".into(),
+                },
+                FeeTier {
+                    up_to: None,
+                    ratio: "0.005".into(),
+                },
             ],
         );
         // 200 PMS : 100*0.03=3.0 + 100*0.005=0.5 → 3.5
@@ -247,9 +259,18 @@ mod tests {
         let policy = FeePolicy::tiered(
             "0",
             vec![
-                FeeTier { up_to: Some("100".into()), ratio: "0.03".into() },
-                FeeTier { up_to: Some("10000".into()), ratio: "0.015".into() },
-                FeeTier { up_to: None, ratio: "0.005".into() },
+                FeeTier {
+                    up_to: Some("100".into()),
+                    ratio: "0.03".into(),
+                },
+                FeeTier {
+                    up_to: Some("10000".into()),
+                    ratio: "0.015".into(),
+                },
+                FeeTier {
+                    up_to: None,
+                    ratio: "0.005".into(),
+                },
             ],
         );
         // 15000 PMS :
@@ -266,8 +287,14 @@ mod tests {
         let policy = FeePolicy::tiered(
             "0.001",
             vec![
-                FeeTier { up_to: Some("100".into()), ratio: "0.03".into() },
-                FeeTier { up_to: None, ratio: "0.005".into() },
+                FeeTier {
+                    up_to: Some("100".into()),
+                    ratio: "0.03".into(),
+                },
+                FeeTier {
+                    up_to: None,
+                    ratio: "0.005".into(),
+                },
             ],
         );
         // 200 PMS : base=0.001 + 100*0.03 + 100*0.005 = 0.001 + 3.0 + 0.5 = 3.501
@@ -280,8 +307,14 @@ mod tests {
         let policy = FeePolicy::tiered(
             "0",
             vec![
-                FeeTier { up_to: Some("100".into()), ratio: "0.03".into() },
-                FeeTier { up_to: None, ratio: "0.01".into() },
+                FeeTier {
+                    up_to: Some("100".into()),
+                    ratio: "0.03".into(),
+                },
+                FeeTier {
+                    up_to: None,
+                    ratio: "0.01".into(),
+                },
             ],
         );
         // Exactement 100 PMS : tout dans tier 1 → 100 * 0.03 = 3.0
@@ -294,8 +327,14 @@ mod tests {
         let policy = FeePolicy::tiered(
             "0.001",
             vec![
-                FeeTier { up_to: Some("100".into()), ratio: "0.03".into() },
-                FeeTier { up_to: None, ratio: "0.005".into() },
+                FeeTier {
+                    up_to: Some("100".into()),
+                    ratio: "0.03".into(),
+                },
+                FeeTier {
+                    up_to: None,
+                    ratio: "0.005".into(),
+                },
             ],
         );
         // 0 PMS : juste le base fee
@@ -308,9 +347,13 @@ mod tests {
         let linear = FeePolicy::new("0", "0.03");
         assert!(!linear.is_tiered());
 
-        let tiered = FeePolicy::tiered("0", vec![
-            FeeTier { up_to: None, ratio: "0.01".into() },
-        ]);
+        let tiered = FeePolicy::tiered(
+            "0",
+            vec![FeeTier {
+                up_to: None,
+                ratio: "0.01".into(),
+            }],
+        );
         assert!(tiered.is_tiered());
     }
 
@@ -319,8 +362,14 @@ mod tests {
         let policy = FeePolicy::tiered(
             "0",
             vec![
-                FeeTier { up_to: Some("100".into()), ratio: "0.03".into() },
-                FeeTier { up_to: None, ratio: "0.01".into() },
+                FeeTier {
+                    up_to: Some("100".into()),
+                    ratio: "0.03".into(),
+                },
+                FeeTier {
+                    up_to: None,
+                    ratio: "0.01".into(),
+                },
             ],
         );
         // 150 PMS : fee = 100*0.03 + 50*0.01 = 3.0 + 0.5 = 3.5

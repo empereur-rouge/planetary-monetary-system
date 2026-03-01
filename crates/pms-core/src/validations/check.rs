@@ -444,7 +444,12 @@ pub fn validate_block(
                     ));
                 }
             }
-            PlainPayload::BridgeLock { inputs, dest_ledger_id, dest_address, .. } => {
+            PlainPayload::BridgeLock {
+                inputs,
+                dest_ledger_id,
+                dest_address,
+                ..
+            } => {
                 // SECURITY: Only Coordinator can create BridgeLock blocks
                 if let Some(coord_pk) = &policy.coordinator_public_key {
                     if let Some(spk) = &b.signer_pk {
@@ -475,7 +480,11 @@ pub fn validate_block(
                     ));
                 }
             }
-            PlainPayload::BridgeMint { outputs, lock_block_id, source_ledger_id } => {
+            PlainPayload::BridgeMint {
+                outputs,
+                lock_block_id,
+                source_ledger_id,
+            } => {
                 // SECURITY: Only Coordinator can create BridgeMint blocks
                 if let Some(coord_pk) = &policy.coordinator_public_key {
                     if let Some(spk) = &b.signer_pk {
@@ -509,12 +518,14 @@ pub fn validate_block(
             PlainPayload::Freeze { address, .. } => {
                 require_coordinator_signature(b, policy, "Freeze")?;
                 if address.trim().is_empty() {
-                    return Err(ValidationError::Other(
-                        "Freeze: address cannot be empty",
-                    ));
+                    return Err(ValidationError::Other("Freeze: address cannot be empty"));
                 }
             }
-            PlainPayload::Unfreeze { address, freeze_block_id, .. } => {
+            PlainPayload::Unfreeze {
+                address,
+                freeze_block_id,
+                ..
+            } => {
                 require_coordinator_signature(b, policy, "Unfreeze")?;
                 if address.trim().is_empty() || freeze_block_id.trim().is_empty() {
                     return Err(ValidationError::Other(
@@ -522,12 +533,15 @@ pub fn validate_block(
                     ));
                 }
             }
-            PlainPayload::Seize { inputs, outputs, from_address, .. } => {
+            PlainPayload::Seize {
+                inputs,
+                outputs,
+                from_address,
+                ..
+            } => {
                 require_coordinator_signature(b, policy, "Seize")?;
                 if inputs.is_empty() || outputs.is_empty() {
-                    return Err(ValidationError::Other(
-                        "Seize: inputs and outputs required",
-                    ));
+                    return Err(ValidationError::Other("Seize: inputs and outputs required"));
                 }
                 if from_address.trim().is_empty() {
                     return Err(ValidationError::Other(
@@ -535,7 +549,12 @@ pub fn validate_block(
                     ));
                 }
             }
-            PlainPayload::Reverse { original_block_id, inputs, outputs, .. } => {
+            PlainPayload::Reverse {
+                original_block_id,
+                inputs,
+                outputs,
+                ..
+            } => {
                 require_coordinator_signature(b, policy, "Reverse")?;
                 if original_block_id.trim().is_empty() || inputs.is_empty() || outputs.is_empty() {
                     return Err(ValidationError::Other(

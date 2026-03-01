@@ -7,9 +7,9 @@
 
 use crate::api;
 use crate::limits::{
-    HANDSHAKE_TIMEOUT_MS, MAX_BLOCKS_BATCH, MAX_INFLIGHT_GETBLOCK, MAX_LINE_BYTES,
-    MAX_ORPHANS, MAX_PARENT_DEPS, MAX_PARSE_ERRORS, PER_PEER_Q_CAP, PING_EVERY_MS,
-    RATE_BURST, RATE_MSGS_PER_SEC, SEEN_CAPACITY,
+    HANDSHAKE_TIMEOUT_MS, MAX_BLOCKS_BATCH, MAX_INFLIGHT_GETBLOCK, MAX_LINE_BYTES, MAX_ORPHANS,
+    MAX_PARENT_DEPS, MAX_PARSE_ERRORS, PER_PEER_Q_CAP, PING_EVERY_MS, RATE_BURST,
+    RATE_MSGS_PER_SEC, SEEN_CAPACITY,
 };
 use crate::rate::TokenBucket;
 use crate::stats::Stats;
@@ -794,10 +794,8 @@ impl Server {
             let idle_timeout = Duration::from_secs(60);
 
             loop {
-                let read_result = tokio::time::timeout(
-                    idle_timeout,
-                    reader.read_line(&mut line),
-                ).await;
+                let read_result =
+                    tokio::time::timeout(idle_timeout, reader.read_line(&mut line)).await;
 
                 let bytes_read = match read_result {
                     Ok(Ok(n)) if n > 0 => n,
@@ -811,120 +809,109 @@ impl Server {
                     }
                 };
                 let _ = bytes_read;
-            {
-                if !handshaked && Instant::now() > handshake_deadline {
-                    this.peers.remove(&sa);
-                    break;
-                }
-
-                if line.len() > MAX_LINE_BYTES {
-                    this.peers.remove(&sa);
-                    break;
-                }
-
-                let parsed = serde_json::from_str::<NetMsg>(&line);
-                if parsed.is_err() {
-                    if let Some(mut pe) = this.peers.get_mut(&sa) {
-                        pe.parse_errors = pe.parse_errors.saturating_add(1);
-                        if pe.parse_errors > MAX_PARSE_ERRORS {
-                            break;
-                        }
+                {
+                    if !handshaked && Instant::now() > handshake_deadline {
+                        this.peers.remove(&sa);
+                        break;
                     }
-                    line.clear();
-                    continue;
-                }
-                let msg = parsed.unwrap();
 
-                // Add general log for incoming message type
-                println!("[SRV] {} -> Recv Msg: {:?}", sa, msg);
-
-                if !handshaked {
-                    match msg {
-                        NetMsg::Hello { proto, node_id, .. } => {
-                            if proto != 1 {
-                                let _ = this
-                                    .unicast(
-                                        &sa,
-                                        NetMsg::HelloAck {
-                                            ok: false,
-                                            reason: Some("bad proto".into()),
-                                        },
-                                    )
-                                    .await;
-                                this.peers.remove(&sa);
-                                break;
-                            }
-                            if node_id == this.node_id {
-                                let _ = this
-                                    .unicast(
-                                        &sa,
-                                        NetMsg::HelloAck {
-                                            ok: false,
-                                            reason: Some("loopback".into()),
-                                        },
-                                    )
-                                    .await;
-                                this.peers.remove(&sa);
-                                break;
-                            }
-                            let _ = this
-                                .unicast(
-                                    &sa,
-                                    NetMsg::HelloAck {
-                                        ok: true,
-                                        reason: None,
-                                    },
-                                )
-                                .await;
-                            handshaked = true;
-                            let _ = this.unicast(&sa, NetMsg::GetTips { limit: 64 }).await;
-                            line.clear();
-                            continue;
-                        }
-                        NetMsg::HelloAck { ok, .. } => {
-                            if !ok {
-                                this.peers.remove(&sa);
-                                break;
-                            }
-                            handshaked = true;
-                            let _ = this.unicast(&sa, NetMsg::GetTips { limit: 64 }).await;
-                            line.clear();
-                            continue;
-                        }
-                        _ => {
-                            this.peers.remove(&sa);
-                            break;
-                        }
+                    if line.len() > MAX_LINE_BYTES {
+                        this.peers.remove(&sa);
+                        break;
                     }
-                }
 
-                match msg {
-                    NetMsg::Ping => {
-                        let mut allow = false;
+                    let parsed = serde_json::from_str::<NetMsg>(&line);
+                    if parsed.is_err() {
                         if let Some(mut pe) = this.peers.get_mut(&sa) {
-                            allow = pe.bucket.take(1);
+                            pe.parse_errors = pe.parse_errors.saturating_add(1);
+                            if pe.parse_errors > MAX_PARSE_ERRORS {
+                                break;
+                            }
                         }
-                        if allow {
-                            let _ = this.unicast(&sa, NetMsg::Pong).await;
+                        line.clear();
+                        continue;
+                    }
+                    let msg = parsed.unwrap();
+
+                    // Add general log for incoming message type
+                    println!("[SRV] {} -> Recv Msg: {:?}", sa, msg);
+
+                    if !handshaked {
+                        match msg {
+                            NetMsg::Hello { proto, node_id, .. } => {
+                                if proto != 1 {
+                                    let _ = this
+                                        .unicast(
+                                            &sa,
+                                            NetMsg::HelloAck {
+                                                ok: false,
+                                                reason: Some("bad proto".into()),
+                                            },
+                                        )
+                                        .await;
+                                    this.peers.remove(&sa);
+                                    break;
+                                }
+                                if node_id == this.node_id {
+                                    let _ = this
+                                        .unicast(
+                                            &sa,
+                                            NetMsg::HelloAck {
+                                                ok: false,
+                                                reason: Some("loopback".into()),
+                                            },
+                                        )
+                                        .await;
+                                    this.peers.remove(&sa);
+                                    break;
+                                }
+                                let _ = this
+                                    .unicast(
+                                        &sa,
+                                        NetMsg::HelloAck {
+                                            ok: true,
+                                            reason: None,
+                                        },
+                                    )
+                                    .await;
+                                handshaked = true;
+                                let _ = this.unicast(&sa, NetMsg::GetTips { limit: 64 }).await;
+                                line.clear();
+                                continue;
+                            }
+                            NetMsg::HelloAck { ok, .. } => {
+                                if !ok {
+                                    this.peers.remove(&sa);
+                                    break;
+                                }
+                                handshaked = true;
+                                let _ = this.unicast(&sa, NetMsg::GetTips { limit: 64 }).await;
+                                line.clear();
+                                continue;
+                            }
+                            _ => {
+                                this.peers.remove(&sa);
+                                break;
+                            }
                         }
                     }
-                    NetMsg::Pong => {
-                        if let Some((_, waiter)) = this.pong_waiters.remove(&sa) {
-                            let _ = waiter.send(());
+
+                    match msg {
+                        NetMsg::Ping => {
+                            let mut allow = false;
+                            if let Some(mut pe) = this.peers.get_mut(&sa) {
+                                allow = pe.bucket.take(1);
+                            }
+                            if allow {
+                                let _ = this.unicast(&sa, NetMsg::Pong).await;
+                            }
                         }
-                    }
-                    NetMsg::Block {
-                        id,
-                        parents,
-                        payload_json,
-                        nonce,
-                        network_id,
-                        protocol_version,
-                        signer_pk_hex,
-                        signature_hex,
-                        metadata,
-                    } => {
-                        let wb = WireBlock {
+                        NetMsg::Pong => {
+                            if let Some((_, waiter)) = this.pong_waiters.remove(&sa) {
+                                let _ = waiter.send(());
+                            }
+                        }
+                        NetMsg::Block {
                             id,
                             parents,
                             payload_json,
@@ -934,116 +921,133 @@ impl Server {
                             signer_pk_hex,
                             signature_hex,
                             metadata,
-                        };
-                        this.process_incoming_blocks(vec![wb], sa).await;
-                    }
-                    NetMsg::Inv { ids } => {
-                        eprintln!("[SRV] {} <- Inv({} ids)", sa, ids.len());
-                        let mut to_fetch = Vec::with_capacity(ids.len());
-                        for id in ids {
-                            // Check all ledgers (multi-ledger aware)
-                            if this.have_block_any(&id).await {
-                                continue;
-                            }
-                            // Check gossip cache - DISABLED: was causing premature filtering
-                            // The inflight_fetch check below is sufficient to prevent spam
-                            // if this.seen_inv_recently_and_mark(&id).await {
-                            //     continue;
-                            // }
-                            eprintln!("[SRV] Processing Inv ID: {}", id.get(..8).unwrap_or(&id));
-                            let mut inflight = this.inflight_fetch.lock().await;
-                            if let Some(ts) = inflight.get(&id) {
-                                if ts.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS {
+                        } => {
+                            let wb = WireBlock {
+                                id,
+                                parents,
+                                payload_json,
+                                nonce,
+                                network_id,
+                                protocol_version,
+                                signer_pk_hex,
+                                signature_hex,
+                                metadata,
+                            };
+                            this.process_incoming_blocks(vec![wb], sa).await;
+                        }
+                        NetMsg::Inv { ids } => {
+                            eprintln!("[SRV] {} <- Inv({} ids)", sa, ids.len());
+                            let mut to_fetch = Vec::with_capacity(ids.len());
+                            for id in ids {
+                                // Check all ledgers (multi-ledger aware)
+                                if this.have_block_any(&id).await {
                                     continue;
                                 }
+                                // Check gossip cache - DISABLED: was causing premature filtering
+                                // The inflight_fetch check below is sufficient to prevent spam
+                                // if this.seen_inv_recently_and_mark(&id).await {
+                                //     continue;
+                                // }
+                                eprintln!(
+                                    "[SRV] Processing Inv ID: {}",
+                                    id.get(..8).unwrap_or(&id)
+                                );
+                                let mut inflight = this.inflight_fetch.lock().await;
+                                if let Some(ts) = inflight.get(&id) {
+                                    if ts.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS {
+                                        continue;
+                                    }
+                                }
+                                if inflight.len() < MAX_INFLIGHT_GETBLOCK {
+                                    inflight.insert(id.clone(), Instant::now());
+                                    to_fetch.push(id.clone()); // Log clone
+                                    eprintln!("[SRV] Requesting {} from {}", id, sa);
+                                } else {
+                                    break;
+                                }
                             }
-                            if inflight.len() < MAX_INFLIGHT_GETBLOCK {
-                                inflight.insert(id.clone(), Instant::now());
-                                to_fetch.push(id.clone()); // Log clone
-                                eprintln!("[SRV] Requesting {} from {}", id, sa);
+                            if !to_fetch.is_empty() {
+                                if to_fetch.len() == 1 {
+                                    let _ = this
+                                        .broadcast(&NetMsg::GetBlock {
+                                            id: to_fetch[0].clone(),
+                                        })
+                                        .await;
+                                } else {
+                                    let _ =
+                                        this.broadcast(&NetMsg::GetBlocks { ids: to_fetch }).await;
+                                }
+                            }
+                        }
+                        NetMsg::GetBlock { id } => {
+                            // Search across all ledgers
+                            if let Some(wb) = this.get_block_any(&id).await {
+                                let _ =
+                                    this.unicast(&sa, NetMsg::Blocks { blocks: vec![wb] }).await;
+                            }
+                        }
+                        NetMsg::GetBlocks { ids } => {
+                            eprintln!("[SRV] {sa} -> GetBlocks({} ids)", ids.len());
+                            let blocks = this.get_blocks_any(&ids).await;
+                            if !blocks.is_empty() {
+                                eprintln!("[SRV] Sending {} blocks to {}", blocks.len(), sa);
+                                let _ = this.unicast(&sa, NetMsg::Blocks { blocks }).await;
                             } else {
-                                break;
+                                eprintln!("[SRV] GetBlocks returned empty for {} ids", ids.len());
                             }
                         }
-                        if !to_fetch.is_empty() {
-                            if to_fetch.len() == 1 {
-                                let _ = this
-                                    .broadcast(&NetMsg::GetBlock {
-                                        id: to_fetch[0].clone(),
-                                    })
-                                    .await;
-                            } else {
-                                let _ = this.broadcast(&NetMsg::GetBlocks { ids: to_fetch }).await;
+                        NetMsg::Blocks { mut blocks } => {
+                            if blocks.len() > MAX_BLOCKS_BATCH {
+                                blocks.truncate(MAX_BLOCKS_BATCH);
                             }
+                            this.process_incoming_blocks(blocks, sa).await;
                         }
-                    }
-                    NetMsg::GetBlock { id } => {
-                        // Search across all ledgers
-                        if let Some(wb) = this.get_block_any(&id).await {
-                            let _ = this.unicast(&sa, NetMsg::Blocks { blocks: vec![wb] }).await;
+                        NetMsg::GetTips { limit } => {
+                            // Aggregate tips from all ledgers
+                            let ids = this.all_tips(limit).await;
+                            println!("[SRV] Serving GetTips: {} tips", ids.len());
+                            let _ = this.unicast(&sa, NetMsg::Tips { ids }).await;
                         }
-                    }
-                    NetMsg::GetBlocks { ids } => {
-                        eprintln!("[SRV] {sa} -> GetBlocks({} ids)", ids.len());
-                        let blocks = this.get_blocks_any(&ids).await;
-                        if !blocks.is_empty() {
-                            eprintln!("[SRV] Sending {} blocks to {}", blocks.len(), sa);
-                            let _ = this.unicast(&sa, NetMsg::Blocks { blocks }).await;
-                        } else {
-                            eprintln!("[SRV] GetBlocks returned empty for {} ids", ids.len());
-                        }
-                    }
-                    NetMsg::Blocks { mut blocks } => {
-                        if blocks.len() > MAX_BLOCKS_BATCH {
-                            blocks.truncate(MAX_BLOCKS_BATCH);
-                        }
-                        this.process_incoming_blocks(blocks, sa).await;
-                    }
-                    NetMsg::GetTips { limit } => {
-                        // Aggregate tips from all ledgers
-                        let ids = this.all_tips(limit).await;
-                        println!("[SRV] Serving GetTips: {} tips", ids.len());
-                        let _ = this.unicast(&sa, NetMsg::Tips { ids }).await;
-                    }
-                    NetMsg::Tips { ids } => {
-                        let mut to_fetch = Vec::new();
-                        println!("[SRV] Processing Tips: {} ids", ids.len());
-                        for id in ids {
-                            // Check all ledgers
-                            if this.have_block_any(&id).await {
-                                continue;
-                            }
-                            // BUG FIX: Don't check seen_inv for Tips!
-                            // Tips are authoritative sync info. If we don't have the block and it's not inflight,
-                            // we must fetch it, even if we saw an Inv recently (e.g. failed fetch).
-                            // if this.seen_inv_recently_and_mark(&id).await { countinue; }
-                            let mut inflight = this.inflight_fetch.lock().await;
-                            let in_inflight = inflight.contains_key(&id);
-                            println!(
-                                "[SRV] Tips {}: have=false, inflight={}",
-                                id.get(..8).unwrap_or(&id),
-                                in_inflight
-                            );
+                        NetMsg::Tips { ids } => {
+                            let mut to_fetch = Vec::new();
+                            println!("[SRV] Processing Tips: {} ids", ids.len());
+                            for id in ids {
+                                // Check all ledgers
+                                if this.have_block_any(&id).await {
+                                    continue;
+                                }
+                                // BUG FIX: Don't check seen_inv for Tips!
+                                // Tips are authoritative sync info. If we don't have the block and it's not inflight,
+                                // we must fetch it, even if we saw an Inv recently (e.g. failed fetch).
+                                // if this.seen_inv_recently_and_mark(&id).await { countinue; }
+                                let mut inflight = this.inflight_fetch.lock().await;
+                                let in_inflight = inflight.contains_key(&id);
+                                println!(
+                                    "[SRV] Tips {}: have=false, inflight={}",
+                                    id.get(..8).unwrap_or(&id),
+                                    in_inflight
+                                );
 
-                            if let Some(ts) = inflight.get(&id) {
-                                if ts.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS {
-                                    continue;
+                                if let Some(ts) = inflight.get(&id) {
+                                    if ts.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS {
+                                        continue;
+                                    }
+                                }
+                                if inflight.len() < MAX_INFLIGHT_GETBLOCK {
+                                    inflight.insert(id.clone(), Instant::now());
+                                    to_fetch.push(id);
                                 }
                             }
-                            if inflight.len() < MAX_INFLIGHT_GETBLOCK {
-                                inflight.insert(id.clone(), Instant::now());
-                                to_fetch.push(id);
+                            if !to_fetch.is_empty() {
+                                println!("[SRV] Sending GetBlocks for {} items", to_fetch.len());
+                                let _ =
+                                    this.unicast(&sa, NetMsg::GetBlocks { ids: to_fetch }).await;
                             }
                         }
-                        if !to_fetch.is_empty() {
-                            println!("[SRV] Sending GetBlocks for {} items", to_fetch.len());
-                            let _ = this.unicast(&sa, NetMsg::GetBlocks { ids: to_fetch }).await;
-                        }
+                        NetMsg::Hello { .. } | NetMsg::HelloAck { .. } => {}
                     }
-                    NetMsg::Hello { .. } | NetMsg::HelloAck { .. } => {}
-                }
-                line.clear();
-            } // end inner block
+                    line.clear();
+                } // end inner block
             } // end loop
             this.pong_waiters.remove(&sa);
         });
@@ -1182,7 +1186,11 @@ impl Server {
                 continue; // déjà vu en gossip récemment et pas demandé explicitement
             }
             */
-            eprintln!("[SRV] Processing block {} (net={})", wb.id.get(..8).unwrap_or(&wb.id), &wb.network_id);
+            eprintln!(
+                "[SRV] Processing block {} (net={})",
+                wb.id.get(..8).unwrap_or(&wb.id),
+                &wb.network_id
+            );
             if block_adapter.have_block(&wb.id).await {
                 continue;
             }
@@ -1203,7 +1211,11 @@ impl Server {
 
                     // Register dependency: when 'p' arrives, re-process 'wb' (bounded)
                     if self.parent_dependency.len() < MAX_PARENT_DEPS {
-                        eprintln!("[SRV] Add dep: parent={} child={}", p.get(..8).unwrap_or(p), wb.id.get(..8).unwrap_or(&wb.id));
+                        eprintln!(
+                            "[SRV] Add dep: parent={} child={}",
+                            p.get(..8).unwrap_or(p),
+                            wb.id.get(..8).unwrap_or(&wb.id)
+                        );
                         self.parent_dependency
                             .entry(p.clone())
                             .or_default()
@@ -1254,13 +1266,19 @@ impl Server {
             let persist_start = tokio::time::Instant::now();
             // =======================================
 
-            println!("[SRV] Calling persist_block for {} (net={})", wb.id.get(..8).unwrap_or(&wb.id), &wb.network_id);
+            println!(
+                "[SRV] Calling persist_block for {} (net={})",
+                wb.id.get(..8).unwrap_or(&wb.id),
+                &wb.network_id
+            );
             let result = block_adapter.persist_block(&wb).await;
             println!("[SRV] persist_block returned: {:?}", result);
 
             match result {
                 Ok(PutResult::Inserted) => {
-                    crate::metrics::BLOCKS_PERSISTED.with_label_values(&["main"]).inc();
+                    crate::metrics::BLOCKS_PERSISTED
+                        .with_label_values(&["main"])
+                        .inc();
                     // ====== BENCHMARK: Log bloc validé ======
                     let persist_ms = persist_start.elapsed().as_millis();
                     tracing::info!(
@@ -1290,16 +1308,25 @@ impl Server {
                         );
                         for child_id in children {
                             if let Some((_, child_wb)) = self.orphans.remove(&child_id) {
-                                eprintln!("[SRV] Queueing unblocked child {}", child_id.get(..8).unwrap_or(&child_id));
+                                eprintln!(
+                                    "[SRV] Queueing unblocked child {}",
+                                    child_id.get(..8).unwrap_or(&child_id)
+                                );
                                 process_queue.push_back(child_wb);
                             } else {
-                                eprintln!("[SRV] Orphan {} missing from map!", child_id.get(..8).unwrap_or(&child_id));
+                                eprintln!(
+                                    "[SRV] Orphan {} missing from map!",
+                                    child_id.get(..8).unwrap_or(&child_id)
+                                );
                             }
                         }
                     }
                 }
                 Ok(PutResult::AlreadyExists) => {
-                    eprintln!("[SRV] Block {} already exists, skipping", wb.id.get(..8).unwrap_or(&wb.id));
+                    eprintln!(
+                        "[SRV] Block {} already exists, skipping",
+                        wb.id.get(..8).unwrap_or(&wb.id)
+                    );
                     // Check orphans just in case
                     if let Some((_, children)) = self.parent_dependency.remove(&wb.id) {
                         for child_id in children {
@@ -1324,10 +1351,7 @@ impl Server {
                     // Extract missing parent ID from structured rejection messages
                     let missing_parent_id = extract_missing_parent_id(&reason);
                     if let Some(pid_clean) = missing_parent_id {
-                        eprintln!(
-                            "[SRV] {sa} -> GetBlock(missing parent={})",
-                            pid_clean
-                        );
+                        eprintln!("[SRV] {sa} -> GetBlock(missing parent={})", pid_clean);
 
                         // Save orphan & dep (bounded)
                         if self.orphans.len() < MAX_ORPHANS {
@@ -1346,12 +1370,12 @@ impl Server {
                             || inflight.contains_key(&pid_clean)
                         {
                             inflight.insert(pid_clean.clone(), Instant::now());
-                            let _ = self
-                                .broadcast(&NetMsg::GetBlock { id: pid_clean })
-                                .await;
+                            let _ = self.broadcast(&NetMsg::GetBlock { id: pid_clean }).await;
                         }
                     } else {
-                        crate::metrics::BLOCKS_REJECTED.with_label_values(&["main"]).inc();
+                        crate::metrics::BLOCKS_REJECTED
+                            .with_label_values(&["main"])
+                            .inc();
                     }
                 }
                 Err(e) => {

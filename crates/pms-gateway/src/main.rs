@@ -171,7 +171,10 @@ async fn main() -> Result<()> {
         .route("/v1/wallet/{address}/utxos", get(routes::proxy_get))
         // Wallet activity (proxy)
         .route("/v1/wallet/{address}/activity", get(routes::proxy_get))
-        .route("/v1/wallet/{address}/activity/stream", get(routes::proxy_stream))
+        .route(
+            "/v1/wallet/{address}/activity/stream",
+            get(routes::proxy_stream),
+        )
         // Balance route (proxy)
         .route("/v1/balance", post(routes::proxy_post))
         // TX prepare (proxy) - Prepares unsigned transaction for client signing

@@ -101,8 +101,12 @@ pub async fn gather_wallet_utxos_dec(
                     }
                 }
             }
-            PlainPayload::Seize { inputs, outputs, .. }
-            | PlainPayload::Reverse { inputs, outputs, .. } => {
+            PlainPayload::Seize {
+                inputs, outputs, ..
+            }
+            | PlainPayload::Reverse {
+                inputs, outputs, ..
+            } => {
                 for inp in inputs {
                     spent.insert((inp.out.txid.clone(), inp.out.index));
                 }
@@ -234,8 +238,12 @@ pub async fn gather_address_utxos_dec(
                     }
                 }
             }
-            PlainPayload::Seize { inputs, outputs, .. }
-            | PlainPayload::Reverse { inputs, outputs, .. } => {
+            PlainPayload::Seize {
+                inputs, outputs, ..
+            }
+            | PlainPayload::Reverse {
+                inputs, outputs, ..
+            } => {
                 for inp in &inputs {
                     spent.insert((inp.out.txid.clone(), inp.out.index));
                 }
