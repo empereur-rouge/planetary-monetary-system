@@ -349,3 +349,386 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
         other => panic!("Mint non-admin en Mainnet devrait être UnauthorizedMint, got: {other:?}"),
     }
 }
+
+/// Testnet with empty signer_pubkeys must reject mint (not bypass).
+#[test]
+fn mint_policy_rejects_empty_signer_pubkeys_in_testnet() {
+    let settings = Settings {
+        rocks: Rocks {
+            path: "/tmp/rocks-test".to_string(),
+            prefix: "pms:test".to_string(),
+            tip_limit: 100,
+            max_dag_blocks: 0,
+            max_spent_outpoints: 0,
+            checkpoint_interval_secs: None,
+        },
+        network: Network {
+            mode: NetworkMode::Testnet,
+            network_id: "pms-testnet-v1".into(),
+            protocol_version: 1,
+            symbol: None,
+        },
+        address: Address { hrp: "8e".into() },
+        admin: Admin {
+            wallet_addresses: vec![],
+            signer_pubkeys: vec![], // empty — must be rejected
+            treasury_wallets_file: None,
+        },
+        client: None,
+        tls: None,
+        limits: Limits {
+            max_body_bytes: 0,
+            request_timeout_ms: 0,
+            rate_limit_rps: 0,
+            burst: 0,
+        },
+        auth: Auth {
+            require_signed_submit: true,
+            admin_api_token: None,
+            allowed_ips: vec![],
+            api_keys_file: None,
+        },
+        secrets: SecretSettings {
+            node_identity_key_path: "".to_string(),
+            admin_wallet_file: None,
+        },
+        validation: ValidationSettings {
+            min_pow_leading_zero_bits: 0,
+            max_payload_bytes: 0,
+            min_parents_after_boot: 0,
+            max_parents: 0,
+            require_unique_parents: false,
+            forbid_self_parent: false,
+            max_inputs: 0,
+            max_outputs: 0,
+            max_tx_bytes: 0,
+            max_fee_per_tx: 0,
+            enforce_parent_existence: false,
+            enforce_fee_recipient: false,
+            allowed_fee_addresses: vec![],
+            coordinator_public_key: None,
+            coordinator_x25519_public_key: None,
+            coordinator_tx_only: false,
+            enforce_single_writer: false,
+        },
+        fees: FeesSettings {
+            epsilon: "0.001".to_string(),
+            ratio: "0.035".to_string(),
+            base_fee: "0.0".to_string(),
+            mode: FeePickMode::Uniform,
+            seed: None,
+            platform_address: None,
+            platform_address_signature: None,
+            platform_fee_ratio: "0.45".to_string(),
+            fee_tiers: vec![],
+            treasury_addresses: vec![],
+            distribution_interval_sec: 600,
+            treasury_fee_percent: 35,
+            coordinator_fee_percent: 65,
+            fee_distribution: None,
+            mint_fee_base: None,
+            mint_fee_ratio: None,
+            token_creation_fee: None,
+            nft_mint_fee: None,
+            nft_fee_exempt_types: vec![],
+            block_reward: "0.1".to_string(),
+            annual_inflation_percent: 2.0,
+            creator_reward_percent: 70,
+            treasury_reward_percent: 20,
+            burn_percent: 10,
+            daily_inflation_enabled: false,
+            daily_inflation_interval_sec: 86400,
+        },
+        p2p: P2pConfig {
+            known_peers: String::new(),
+            bind_addr: None,
+            allowed_peer_ips: vec![],
+            strict_whitelist: false,
+        },
+        ledgers: vec![],
+    };
+
+    let wb = WireBlock {
+        id: "testnet-block".into(),
+        parents: vec![],
+        payload_json: None,
+        nonce: 0,
+        network_id: settings.network.network_id.clone(),
+        protocol_version: settings.network.protocol_version as u16,
+        signer_pk_hex: "04aabbccdd".into(),
+        signature_hex: "dummy".into(),
+        metadata: None,
+    };
+
+    let outputs = vec![TxOutput {
+        address: "any".into(),
+        amount: "1".into(),
+        asset_id: None,
+    }];
+
+    let res = validate_mint_policy(&outputs, &wb, &settings);
+    match res {
+        Err(ValidationError::UnauthorizedMint { signer_pk_hex, .. }) => {
+            assert!(
+                signer_pk_hex.contains("signer_pubkeys is empty"),
+                "error should mention empty signer_pubkeys, got: {signer_pk_hex}"
+            );
+        }
+        other => panic!(
+            "Empty signer_pubkeys in Testnet should be UnauthorizedMint, got: {other:?}"
+        ),
+    }
+}
+
+/// Mainnet with empty signer_pubkeys must also reject mint.
+#[test]
+fn mint_policy_rejects_empty_signer_pubkeys_in_mainnet() {
+    let settings = Settings {
+        rocks: Rocks {
+            path: "/tmp/rocks-test".to_string(),
+            prefix: "pms:main".to_string(),
+            tip_limit: 100,
+            max_dag_blocks: 0,
+            max_spent_outpoints: 0,
+            checkpoint_interval_secs: None,
+        },
+        network: Network {
+            mode: NetworkMode::Mainnet,
+            network_id: "pms-main".into(),
+            protocol_version: 1,
+            symbol: None,
+        },
+        address: Address { hrp: "8e".into() },
+        admin: Admin {
+            wallet_addresses: vec![],
+            signer_pubkeys: vec![], // empty — must be rejected
+            treasury_wallets_file: None,
+        },
+        client: None,
+        tls: None,
+        limits: Limits {
+            max_body_bytes: 0,
+            request_timeout_ms: 0,
+            rate_limit_rps: 0,
+            burst: 0,
+        },
+        auth: Auth {
+            require_signed_submit: true,
+            admin_api_token: None,
+            allowed_ips: vec![],
+            api_keys_file: None,
+        },
+        secrets: SecretSettings {
+            node_identity_key_path: "".to_string(),
+            admin_wallet_file: None,
+        },
+        validation: ValidationSettings {
+            min_pow_leading_zero_bits: 0,
+            max_payload_bytes: 0,
+            min_parents_after_boot: 0,
+            max_parents: 0,
+            require_unique_parents: false,
+            forbid_self_parent: false,
+            max_inputs: 0,
+            max_outputs: 0,
+            max_tx_bytes: 0,
+            max_fee_per_tx: 0,
+            enforce_parent_existence: false,
+            enforce_fee_recipient: false,
+            allowed_fee_addresses: vec![],
+            coordinator_public_key: None,
+            coordinator_x25519_public_key: None,
+            coordinator_tx_only: false,
+            enforce_single_writer: false,
+        },
+        fees: FeesSettings {
+            epsilon: "0.001".to_string(),
+            ratio: "0.035".to_string(),
+            base_fee: "0.0".to_string(),
+            mode: FeePickMode::Uniform,
+            seed: None,
+            platform_address: None,
+            platform_address_signature: None,
+            platform_fee_ratio: "0.45".to_string(),
+            fee_tiers: vec![],
+            treasury_addresses: vec![],
+            distribution_interval_sec: 600,
+            treasury_fee_percent: 35,
+            coordinator_fee_percent: 65,
+            fee_distribution: None,
+            mint_fee_base: None,
+            mint_fee_ratio: None,
+            token_creation_fee: None,
+            nft_mint_fee: None,
+            nft_fee_exempt_types: vec![],
+            block_reward: "0.1".to_string(),
+            annual_inflation_percent: 2.0,
+            creator_reward_percent: 70,
+            treasury_reward_percent: 20,
+            burn_percent: 10,
+            daily_inflation_enabled: false,
+            daily_inflation_interval_sec: 86400,
+        },
+        p2p: P2pConfig {
+            known_peers: String::new(),
+            bind_addr: None,
+            allowed_peer_ips: vec![],
+            strict_whitelist: false,
+        },
+        ledgers: vec![],
+    };
+
+    let wb = WireBlock {
+        id: "mainnet-block".into(),
+        parents: vec![],
+        payload_json: None,
+        nonce: 0,
+        network_id: settings.network.network_id.clone(),
+        protocol_version: settings.network.protocol_version as u16,
+        signer_pk_hex: "04aabbccdd".into(),
+        signature_hex: "dummy".into(),
+        metadata: None,
+    };
+
+    let outputs = vec![TxOutput {
+        address: "any".into(),
+        amount: "1".into(),
+        asset_id: None,
+    }];
+
+    let res = validate_mint_policy(&outputs, &wb, &settings);
+    match res {
+        Err(ValidationError::UnauthorizedMint { signer_pk_hex, .. }) => {
+            assert!(
+                signer_pk_hex.contains("signer_pubkeys is empty"),
+                "error should mention empty signer_pubkeys, got: {signer_pk_hex}"
+            );
+        }
+        other => panic!(
+            "Empty signer_pubkeys in Mainnet should be UnauthorizedMint, got: {other:?}"
+        ),
+    }
+}
+
+/// Dev mode with empty signer_pubkeys should still bypass (allow mint).
+#[test]
+fn mint_policy_allows_empty_signer_pubkeys_in_dev() {
+    let settings = Settings {
+        rocks: Rocks {
+            path: "/tmp/rocks-test".to_string(),
+            prefix: "pms:dev".to_string(),
+            tip_limit: 100,
+            max_dag_blocks: 0,
+            max_spent_outpoints: 0,
+            checkpoint_interval_secs: None,
+        },
+        network: Network {
+            mode: NetworkMode::Dev,
+            network_id: "pms-dev".into(),
+            protocol_version: 1,
+            symbol: None,
+        },
+        address: Address { hrp: "8e".into() },
+        admin: Admin {
+            wallet_addresses: vec![],
+            signer_pubkeys: vec![], // empty — allowed in Dev
+            treasury_wallets_file: None,
+        },
+        client: None,
+        tls: None,
+        limits: Limits {
+            max_body_bytes: 0,
+            request_timeout_ms: 0,
+            rate_limit_rps: 0,
+            burst: 0,
+        },
+        auth: Auth {
+            require_signed_submit: false,
+            admin_api_token: None,
+            allowed_ips: vec![],
+            api_keys_file: None,
+        },
+        secrets: SecretSettings {
+            node_identity_key_path: "".to_string(),
+            admin_wallet_file: None,
+        },
+        validation: ValidationSettings {
+            min_pow_leading_zero_bits: 0,
+            max_payload_bytes: 0,
+            min_parents_after_boot: 0,
+            max_parents: 0,
+            require_unique_parents: false,
+            forbid_self_parent: false,
+            max_inputs: 0,
+            max_outputs: 0,
+            max_tx_bytes: 0,
+            max_fee_per_tx: 0,
+            enforce_parent_existence: false,
+            enforce_fee_recipient: false,
+            allowed_fee_addresses: vec![],
+            coordinator_public_key: None,
+            coordinator_x25519_public_key: None,
+            coordinator_tx_only: false,
+            enforce_single_writer: false,
+        },
+        fees: FeesSettings {
+            epsilon: "0.001".to_string(),
+            ratio: "0.035".to_string(),
+            base_fee: "0.0".to_string(),
+            mode: FeePickMode::Uniform,
+            seed: None,
+            platform_address: None,
+            platform_address_signature: None,
+            platform_fee_ratio: "0.45".to_string(),
+            fee_tiers: vec![],
+            treasury_addresses: vec![],
+            distribution_interval_sec: 600,
+            treasury_fee_percent: 35,
+            coordinator_fee_percent: 65,
+            fee_distribution: None,
+            mint_fee_base: None,
+            mint_fee_ratio: None,
+            token_creation_fee: None,
+            nft_mint_fee: None,
+            nft_fee_exempt_types: vec![],
+            block_reward: "0.1".to_string(),
+            annual_inflation_percent: 2.0,
+            creator_reward_percent: 70,
+            treasury_reward_percent: 20,
+            burn_percent: 10,
+            daily_inflation_enabled: false,
+            daily_inflation_interval_sec: 86400,
+        },
+        p2p: P2pConfig {
+            known_peers: String::new(),
+            bind_addr: None,
+            allowed_peer_ips: vec![],
+            strict_whitelist: false,
+        },
+        ledgers: vec![],
+    };
+
+    let wb = WireBlock {
+        id: "dev-block".into(),
+        parents: vec![],
+        payload_json: None,
+        nonce: 0,
+        network_id: settings.network.network_id.clone(),
+        protocol_version: settings.network.protocol_version as u16,
+        signer_pk_hex: "04anything".into(),
+        signature_hex: "dummy".into(),
+        metadata: None,
+    };
+
+    let outputs = vec![TxOutput {
+        address: "any".into(),
+        amount: "1".into(),
+        asset_id: None,
+    }];
+
+    let res = validate_mint_policy(&outputs, &wb, &settings);
+    assert!(
+        res.is_ok(),
+        "Empty signer_pubkeys in Dev should bypass and allow mint, got: {res:?}"
+    );
+}

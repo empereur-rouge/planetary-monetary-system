@@ -208,6 +208,8 @@ if [ "$DO_INIT_COORD" = "false" ]; then
         "grep '^wallet_addresses' $REMOTE_DIR/$CONFIG_FILE 2>/dev/null" || echo "")
     SAVED_TREASURY_ADDRS=$(ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" \
         "grep '^treasury_addresses' $REMOTE_DIR/$CONFIG_FILE 2>/dev/null" || echo "")
+    SAVED_SIGNER_PUBKEYS=$(ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" \
+        "grep '^signer_pubkeys' $REMOTE_DIR/$CONFIG_FILE 2>/dev/null" || echo "")
 fi
 
 scp -q $SSH_OPTS "$CONFIG_FILE" "$VPS_USER@$VPS_IP:$REMOTE_DIR/$CONFIG_FILE"
@@ -231,6 +233,16 @@ if [ "$DO_INIT_COORD" = "false" ] && [ -n "$SAVED_COORD_KEY" ]; then
                 sed -i 's|^treasury_addresses = .*|${SAVED_TREASURY_ADDRS}|' $REMOTE_DIR/$CONFIG_FILE
             else
                 sed -i '/^\[fees\]/a ${SAVED_TREASURY_ADDRS}' $REMOTE_DIR/$CONFIG_FILE
+            fi
+        "
+    fi
+    # Restore signer_pubkeys (mint policy authorization)
+    if [ -n "$SAVED_SIGNER_PUBKEYS" ]; then
+        ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" "
+            if grep -q '^signer_pubkeys' $REMOTE_DIR/$CONFIG_FILE; then
+                sed -i 's|^signer_pubkeys = .*|${SAVED_SIGNER_PUBKEYS}|' $REMOTE_DIR/$CONFIG_FILE
+            else
+                sed -i '/^\[admin\]/a ${SAVED_SIGNER_PUBKEYS}' $REMOTE_DIR/$CONFIG_FILE
             fi
         "
     fi
@@ -472,10 +484,22 @@ if [ "\$DO_BUILD" = "true" ]; then
         COORD_ADDR=\$(python3 -c "import json; print(json.load(open('etc/pms/coordinator.json'))['address'])" 2>/dev/null || echo "")
         TREASURY_ADDR=\$(python3 -c "import json; d=json.load(open('etc/pms/treasury-wallets.json')); print(d[0]['address'] if isinstance(d,list) and d else d.get('wallets',[])[0]['address'] if 'wallets' in d else '')" 2>/dev/null || echo "")
 
+        COORD_PUBKEY=\$(python3 -c "import json; print(json.load(open('etc/pms/coordinator.json'))['public_key'])" 2>/dev/null || echo "")
+
         if [ -n "\$COORD_ADDR" ]; then
             # Set admin wallet_addresses = [coordinator address]
             sed -i "s|^wallet_addresses = \\[\\]|wallet_addresses = [\"\$COORD_ADDR\"]|" \$CONFIG_FILE
             echo -e "   \${GREEN}admin.wallet_addresses = [\$COORD_ADDR]\${NC}"
+        fi
+
+        if [ -n "\$COORD_PUBKEY" ]; then
+            # Set admin signer_pubkeys = [coordinator public key] (required for mint policy in testnet/mainnet)
+            if grep -q '^signer_pubkeys' \$CONFIG_FILE; then
+                sed -i "s|^signer_pubkeys = .*|signer_pubkeys = [\"\$COORD_PUBKEY\"]|" \$CONFIG_FILE
+            else
+                sed -i "/^\\[admin\\]/a signer_pubkeys = [\"\$COORD_PUBKEY\"]" \$CONFIG_FILE
+            fi
+            echo -e "   \${GREEN}admin.signer_pubkeys = [\${COORD_PUBKEY:0:20}...]\${NC}"
         fi
 
         if [ -n "\$TREASURY_ADDR" ]; then

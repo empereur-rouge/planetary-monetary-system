@@ -60,9 +60,18 @@ pub fn validate_mint_policy(
                 signer_pk_hex: signer.to_string(),
             });
         }
-    } else {
+    } else if settings.network.mode == pms_config::NetworkMode::Dev {
         // Dev local sans liste admin → on laisse passer mais on log
-        tracing::warn!("[policy] validate_mint_policy: signer_pubkeys vide, bypass admin check (dev?)");
+        tracing::warn!("[policy] validate_mint_policy: signer_pubkeys vide, bypass admin check (dev)");
+    } else {
+        // Testnet/Mainnet : signer_pubkeys obligatoire
+        return Err(ValidationError::UnauthorizedMint {
+            id: wb.id.clone(),
+            signer_pk_hex: format!(
+                "{} (admin.signer_pubkeys is empty — required in {:?} mode)",
+                signer, settings.network.mode
+            ),
+        });
     }
 
     // ============================================================
