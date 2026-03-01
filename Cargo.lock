@@ -2562,6 +2562,7 @@ dependencies = [
  "pms-core",
  "pms-interface",
  "pms-storage",
+ "pms-types",
  "pms-types-block",
  "pms-utils",
  "pms-wallet",

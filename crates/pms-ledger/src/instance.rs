@@ -80,12 +80,27 @@ impl LedgerInstance {
         );
         tracing::info!(ledger = %def.id, blocks = dag.len(), max_dag_blocks, "DAG loaded");
 
-        // Adapter + UTXO bootstrap
+        // Adapter + UTXO bootstrap from RocksDB utxo CF (authoritative, never pruned)
         let core_adapter = CoreAdapter::new(dag.clone(), store.clone());
-        core_adapter
-            .bootstrap_utxos()
-            .await
-            .with_context(|| format!("bootstrap UTXOs for ledger '{}'", def.id))?;
+        {
+            let all_utxos = store.iter_all_utxos()
+                .with_context(|| format!("iter_all_utxos for ledger '{}'", def.id))?;
+            for (txid, idx, uv) in &all_utxos {
+                let oid = pms_types::OutputId { txid: txid.clone(), index: *idx };
+                let txo = pms_types::TxOutput {
+                    address: uv.address.clone(),
+                    amount: uv.amount.clone(),
+                    asset_id: uv.asset_id.clone(),
+                };
+                core_adapter.utxos.add(oid, txo).await;
+            }
+            core_adapter.utxos.rebuild_indexes().await;
+            tracing::info!(
+                ledger = %def.id,
+                utxos = all_utxos.len(),
+                "UTXO set bootstrapped from RocksDB"
+            );
+        }
 
         let utxos = core_adapter.utxos.clone();
         let adapter: Arc<dyn NetDagAdapter> = core_adapter;

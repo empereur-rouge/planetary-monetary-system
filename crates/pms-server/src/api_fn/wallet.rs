@@ -3,7 +3,6 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use pms_wallet::decode_address;
-use pms_wallet::utxo_store::gather_wallet_utxos_dec;
 use axum::extract::Path;
 
 #[derive(serde::Serialize)]
@@ -28,8 +27,12 @@ pub struct UtxoResp {
 #[derive(serde::Deserialize)]
 pub struct BalanceReq {
     bech32_addr: String,
+    // Kept for backward compatibility (no longer used server-side)
+    #[allow(dead_code)]
     x25519_sk_hex: String,
+    #[allow(dead_code)]
     ecdsa_pk_hex: String,
+    #[allow(dead_code)]
     scan_limit: Option<usize>,
 }
 #[derive(serde::Serialize)]
@@ -48,41 +51,26 @@ pub async fn wallet_balance(
     State(app): State<AppState>,
     Json(req): Json<BalanceReq>,
 ) -> Result<Json<BalanceResp>, (StatusCode, String)> {
-    let hrp = &app.settings.address.hrp;
-
-    // déduire x25519 pub depuis l’adresse pour sanity check (optionnel)
-    let (_h20, xpk_hex) = decode_address(&req.bech32_addr)
+    // Validate address
+    let (_h20, _xpk_hex) = decode_address(&req.bech32_addr)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid address: {e}")))?;
 
-    let scan = req.scan_limit.unwrap_or(2000);
+    // Balance from O(1) cache + UTXO list from shard-batched lookup
+    let adapter = app.srv.adapter_arc();
+    let balance = adapter.balance_by_address(&req.bech32_addr).await;
+    let utxos = adapter.utxos_by_address(&req.bech32_addr).await;
 
-    let utxos = gather_wallet_utxos_dec(
-        &app.store,
-        &req.ecdsa_pk_hex, // Pass true public key from request
-        &xpk_hex,
-        &req.x25519_sk_hex,
-        &hrp,
-        scan,
-    )
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    use rust_decimal::Decimal;
-    let mut sum = Decimal::ZERO;
     let list = utxos
         .into_iter()
-        .map(|u| {
-            sum += u.amount;
-            UtxoView {
-                txid: u.txid,
-                index: u.index,
-                amount: u.amount.to_string(),
-            }
+        .map(|(oid, txo)| UtxoView {
+            txid: oid.txid,
+            index: oid.index,
+            amount: txo.amount,
         })
         .collect::<Vec<_>>();
 
     Ok(Json(BalanceResp {
-        balance: sum.to_string(),
+        balance: balance.to_string(),
         utxos: list,
     }))
 }

@@ -54,26 +54,17 @@ pub async fn internal_utxos(
     State(app): State<AppState>,
     Path(address): Path<String>,
 ) -> impl IntoResponse {
-    use pms_wallet::utxo_store::gather_address_utxos_dec;
-    let hrp = app.settings.address.hrp.clone();
-    match gather_address_utxos_dec(&app.store, &hrp, &address, 2000).await {
-        Ok(list) => {
-            let utxos = list
-                .into_iter()
-                .map(|u| UtxoItem {
-                    txid: u.txid,
-                    index: u.index,
-                    amount: u.amount.to_string(),
-                    address: address.clone(),
-                })
-                .collect();
-            (StatusCode::OK, Json(UtxosResp { utxos }))
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(UtxosResp { utxos: vec![] }),
-        ),
-    }
+    let utxo_list = app.srv.adapter_arc().utxos_by_address(&address).await;
+    let utxos = utxo_list
+        .into_iter()
+        .map(|(oid, txo)| UtxoItem {
+            txid: oid.txid,
+            index: oid.index,
+            amount: txo.amount,
+            address: txo.address,
+        })
+        .collect();
+    (StatusCode::OK, Json(UtxosResp { utxos }))
 }
 
 #[derive(Serialize)]

@@ -9,6 +9,7 @@ pms-config = { path = "../pms-config" }
 pms-storage = { path = "../pms-storage" }
 pms-core = { path = "../pms-core" }
 pms-interface = { path = "../pms-interface" }
+pms-types = { path = "../pms-types" }
 pms-types-block = { path = "../pms-types-block" }
 pms-utils = { path = "../pms-utils" }
 pms-wire = { path = "../pms-wire" }

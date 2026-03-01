@@ -373,17 +373,24 @@ impl ShardedUtxoSet {
             None => return Decimal::ZERO,
         };
 
+        // Group by shard index to acquire each lock only once
+        let mut by_shard: HashMap<usize, Vec<OutputId>> = HashMap::new();
+        for op in out_points {
+            by_shard.entry(Self::shard_index(&op)).or_default().push(op);
+        }
+
         let mut total = Decimal::ZERO;
-        for out_point in &out_points {
-            let idx = Self::shard_index(out_point);
-            let shard = self.shards[idx].read().await;
-            if let Some(compact) = shard.get(out_point) {
-                let matches = match (&compact.asset_id, asset_id) {
-                    (Some(a), Some(b)) => a.as_ref() == b,
-                    _ => false,
-                };
-                if matches {
-                    total += compact.amount;
+        for (shard_idx, ops) in by_shard {
+            let shard = self.shards[shard_idx].read().await;
+            for op in &ops {
+                if let Some(compact) = shard.get(op) {
+                    let matches = match (&compact.asset_id, asset_id) {
+                        (Some(a), Some(b)) => a.as_ref() == b,
+                        _ => false,
+                    };
+                    if matches {
+                        total += compact.amount;
+                    }
                 }
             }
         }
@@ -393,6 +400,9 @@ impl ShardedUtxoSet {
 
     /// Retourne tous les UTXOs d'une adresse (tous les assets).
     /// Utilise l'index secondaire.
+    ///
+    /// Groups lookups by shard to minimize lock acquisitions:
+    /// max 256 locks instead of N (one per UTXO).
     pub async fn utxos_by_address(&self, address: &str) -> Vec<(OutputId, TxOutput)> {
         // Collect OutputIds first, then DROP the DashMap guard before awaiting shard locks.
         // This prevents deadlock with apply_diff() which holds shard write lock → DashMap.
@@ -402,12 +412,19 @@ impl ShardedUtxoSet {
         };
         // DashMap Ref guard is dropped here
 
+        // Group by shard index to acquire each lock only once
+        let mut by_shard: HashMap<usize, Vec<OutputId>> = HashMap::new();
+        for op in out_points {
+            by_shard.entry(Self::shard_index(&op)).or_default().push(op);
+        }
+
         let mut result = Vec::new();
-        for out_point in out_points {
-            let idx = Self::shard_index(&out_point);
-            let shard = self.shards[idx].read().await;
-            if let Some(compact) = shard.get(&out_point) {
-                result.push((out_point, compact.to_tx_output()));
+        for (shard_idx, ops) in by_shard {
+            let shard = self.shards[shard_idx].read().await;
+            for op in ops {
+                if let Some(compact) = shard.get(&op) {
+                    result.push((op, compact.to_tx_output()));
+                }
             }
         }
 

@@ -124,6 +124,23 @@ impl RocksStore {
             Ok(None)
         }
     }
+
+    /// Iterate all unspent UTXOs from the `utxo` CF.
+    /// Returns (txid, index, UtxoValue) for each entry.
+    /// This is the authoritative UTXO state (never pruned, unlike the in-memory DAG).
+    pub fn iter_all_utxos(&self) -> Result<Vec<(String, u32, UtxoValue)>> {
+        let cf = self.cf_utxo();
+        let mut out = Vec::new();
+        for item in self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
+            let (key, val) = item?;
+            let key_str = std::str::from_utf8(&key)
+                .map_err(|e| anyhow::anyhow!("invalid utxo key: {e}"))?;
+            let (txid, idx) = parse_utxo_key(key_str)?;
+            let uv: UtxoValue = serde_json::from_slice(&val)?;
+            out.push((txid, idx, uv));
+        }
+        Ok(out)
+    }
 }
 
 /// Petit utilitaire pour encoder un u32 en ASCII sans allocs inutiles.
@@ -132,4 +149,14 @@ impl RocksStore {
 fn index_to_ascii(idx: u32) -> String {
     // simple & lisible, la micro-optimisation n'est pas critique
     idx.to_string()
+}
+
+/// Parse a UTXO key in format "{txid}:{index}" into (txid, index).
+fn parse_utxo_key(key: &str) -> Result<(String, u32)> {
+    let colon = key.rfind(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid utxo key format (no ':'): {key}"))?;
+    let txid = key[..colon].to_string();
+    let idx: u32 = key[colon + 1..].parse()
+        .map_err(|e| anyhow::anyhow!("invalid utxo key index: {e}"))?;
+    Ok((txid, idx))
 }
