@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+    # paste v1.0.15 unmaintained (RUSTSEC-2024-0436)
+    # Pinned by dec v0.4.11 (via pms-wallet), no upstream fix available
+    "RUSTSEC-2024-0436",
+]
