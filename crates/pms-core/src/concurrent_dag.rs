@@ -229,6 +229,12 @@ impl ConcurrentDag {
     /// Recent tips at the back of the deque survive naturally because pruning
     /// stops once `blocks.len() <= max_blocks`.
     ///
+    /// **Safety:** At least one tip is always preserved. If a candidate block
+    /// is one of the last remaining tips, it is pushed back to the end of the
+    /// deque instead of being removed. This guarantees that fee distribution,
+    /// parent selection, and other tip-dependent operations never see an empty
+    /// tip set.
+    ///
     /// Does NOT touch `spent_outpoints` (needed for double-spend detection).
     fn prune_oldest(&self) {
         if self.max_blocks == 0 {
@@ -242,6 +248,7 @@ impl ConcurrentDag {
 
         let to_remove = current_len - self.max_blocks;
         let mut removed = 0;
+        let mut tip_skips = 0usize;
 
         let mut order = match self.insertion_order.lock() {
             Ok(o) => o,
@@ -254,13 +261,40 @@ impl ConcurrentDag {
             }
         };
 
-        while removed < to_remove {
+        // Count current tips so we know when we're about to remove the last one.
+        let mut live_tips: usize = self
+            .children_count
+            .iter()
+            .filter(|e| e.value().load(Ordering::Relaxed) == 0)
+            .count();
+
+        // Safety cap: never iterate more than the deque length to avoid infinite loops
+        // when all remaining blocks are tips.
+        let max_iterations = order.len();
+        let mut iterations = 0;
+
+        while removed < to_remove && iterations < max_iterations {
             let Some(old_id) = order.pop_front() else {
                 break;
             };
+            iterations += 1;
 
             // Skip ghost entries: blocks already removed by a previous prune cycle.
             if !self.blocks.contains_key(&old_id) {
+                continue;
+            }
+
+            // Protect the last tip: if this block is a tip and it's the only one
+            // remaining, push it to the back of the deque and skip it.
+            let is_tip = self
+                .children_count
+                .get(&old_id)
+                .map(|c| c.value().load(Ordering::Relaxed) == 0)
+                .unwrap_or(false);
+
+            if is_tip && live_tips <= 1 {
+                order.push_back(old_id);
+                tip_skips += 1;
                 continue;
             }
 
@@ -269,6 +303,18 @@ impl ConcurrentDag {
             self.children_count.remove(&old_id);
             self.children_idx.remove(&old_id);
             removed += 1;
+
+            if is_tip {
+                live_tips = live_tips.saturating_sub(1);
+            }
+        }
+
+        if tip_skips > 0 {
+            tracing::warn!(
+                tip_skips,
+                live_tips,
+                "DAG prune_oldest: protected last tip(s) from removal"
+            );
         }
 
         tracing::info!(
@@ -1371,6 +1417,90 @@ mod tests {
         assert!(
             dag.contains_block("t49_a0"),
             "latest chain tip must survive"
+        );
+    }
+
+    // ─── Tip protection: pruning never leaves the DAG tipless ────────
+
+    #[test]
+    fn test_pruning_preserves_at_least_one_tip_all_orphans() {
+        // Critical scenario: ALL blocks in the DAG are orphaned tips
+        // (no block has children). This reproduces the 03:48 AM fee
+        // distribution failure: pruning removed all tips, leaving
+        // find_tips() empty and fee distribution silently blocked.
+        let dag = ConcurrentDag::with_capacity(3);
+
+        // Insert 6 orphaned tips (all children of a non-existent parent)
+        dag.insert_block(make_block("t1", vec!["phantom"]));
+        dag.insert_block(make_block("t2", vec!["phantom"]));
+        dag.insert_block(make_block("t3", vec!["phantom"]));
+        dag.insert_block(make_block("t4", vec!["phantom"]));
+        dag.insert_block(make_block("t5", vec!["phantom"]));
+        dag.insert_block(make_block("t6", vec!["phantom"]));
+        // All 6 are tips (children_count == 0)
+
+        dag.prune_oldest();
+
+        // At least 1 tip must survive — the DAG must NEVER be tipless
+        let tips = dag.find_tips();
+        assert!(
+            !tips.is_empty(),
+            "DAG must never be tipless after pruning! \
+             blocks.len()={}, tips={:?}",
+            dag.len(),
+            tips
+        );
+        // Capacity is 3, so we should have roughly 3 blocks
+        assert!(
+            dag.len() >= 1 && dag.len() <= 4,
+            "DAG should be close to capacity (3), got {}",
+            dag.len()
+        );
+    }
+
+    #[test]
+    fn test_pruning_preserves_last_tip_in_mixed_dag() {
+        // Mix of non-tip blocks and exactly 1 tip. Pruning must
+        // protect the single tip even if it's the oldest block.
+        let dag = ConcurrentDag::with_capacity(2);
+
+        // Chain: g -> b1 -> b2 -> b3 (tip)
+        dag.insert_block(make_block("g", vec![]));
+        dag.insert_block(make_block("b1", vec!["g"]));
+        dag.insert_block(make_block("b2", vec!["b1"]));
+        dag.insert_block(make_block("b3", vec!["b2"]));
+        // Only b3 is a tip (children_count == 0)
+
+        dag.prune_oldest();
+
+        // b3 must survive — it's the only tip
+        assert!(
+            dag.contains_block("b3"),
+            "the only tip (b3) must survive pruning"
+        );
+        let tips = dag.find_tips();
+        assert!(
+            !tips.is_empty(),
+            "find_tips() must not be empty after pruning"
+        );
+    }
+
+    #[test]
+    fn test_pruning_all_tips_capacity_one() {
+        // Edge case: capacity=1 and multiple tips. Must keep exactly 1.
+        let dag = ConcurrentDag::with_capacity(1);
+
+        dag.insert_block(make_block("t1", vec![]));
+        dag.insert_block(make_block("t2", vec![]));
+        dag.insert_block(make_block("t3", vec![]));
+
+        dag.prune_oldest();
+
+        assert_eq!(dag.len(), 1, "capacity 1 should keep exactly 1 block");
+        let tips = dag.find_tips();
+        assert!(
+            !tips.is_empty(),
+            "the surviving block must be a tip"
         );
     }
 }

@@ -220,8 +220,25 @@ pub async fn perform_fee_distribution(
             // Fetch current tip from DAG
             match state.srv.adapter_arc().top_tips(1).await {
                 Ok(tips) if !tips.is_empty() => tips[0].clone(),
-                _ => {
-                    // No tips available? Should be rare unless genesis
+                Ok(_empty) => {
+                    let pool_total = state.fee_pool.read().await.total_fees;
+                    tracing::error!(
+                        pool_total = %pool_total,
+                        "Fee distribution BLOCKED: top_tips() returned empty. \
+                         DAG may have been over-pruned. Fees are accumulating."
+                    );
+                    return Ok(DistributeFeesResult {
+                        success: false,
+                        reward_block_id: None,
+                        total_distributed: "0".to_string(),
+                        num_recipients: 0,
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Fee distribution BLOCKED: top_tips() returned error"
+                    );
                     return Ok(DistributeFeesResult {
                         success: false,
                         reward_block_id: None,

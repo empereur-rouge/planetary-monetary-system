@@ -905,6 +905,11 @@ pub fn spawn_fee_distributor_task(state: AppState) {
                                 "✅ Automated distribution success: {} PMS",
                                 res.total_distributed
                             );
+                        } else if !res.success {
+                            tracing::warn!(
+                                "⚠️ Automated fee distribution returned success=false \
+                                 (no tips or not coordinator?)"
+                            );
                         }
                     }
                     Err(e) => {
