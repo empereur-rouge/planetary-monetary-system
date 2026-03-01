@@ -263,7 +263,8 @@ pub async fn send_tx_with_split_fee(
                 asset_id: None,
             }, // idx 2 - platform fee
             // STRICT VALIDATION: Explicitly pay miner fee to admin/coordinator
-            TxOutput {                // Caller `spam_transactions` passes `admin_address_ref` as `admin_addr`.
+            TxOutput {
+                // Caller `spam_transactions` passes `admin_address_ref` as `admin_addr`.
                 address: platform_addr.into(),
                 amount: miner_part.to_string(),
                 asset_id: None,

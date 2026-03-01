@@ -254,8 +254,9 @@ async fn main() -> Result<()> {
 
         // Get private key as hex
         let priv_b64 = &wallet.private_key_b64;
-        let priv_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, priv_b64)
-            .unwrap_or_default();
+        let priv_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, priv_b64)
+                .unwrap_or_default();
         let priv_hex = hex::encode(&priv_bytes);
 
         let output = serde_json::json!({

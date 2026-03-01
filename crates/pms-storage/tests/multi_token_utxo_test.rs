@@ -19,9 +19,7 @@ struct TestStore {
 
 async fn mk_store(prefix: &str) -> Result<TestStore> {
     let dir = tempdir()?;
-    let path = dir
-        .path()
-        .join(format!("rocks-mt-{}", nanoid::nanoid!(5)));
+    let path = dir.path().join(format!("rocks-mt-{}", nanoid::nanoid!(5)));
     std::fs::create_dir_all(&path)?;
     let path_str = path.to_string_lossy().to_string();
     let store = Arc::new(RocksStore::new(&path_str, 64, prefix, None).await?);
@@ -40,7 +38,11 @@ async fn mint_edenite_creates_utxo_with_asset_id() -> Result<()> {
     let mint = UtxoApply {
         txid: "mint_eden_001".into(),
         inputs: vec![], // Mint n'a pas d'inputs
-        outputs: vec![("Alice".into(), "1000.00000000".into(), Some("edenite".into()))],
+        outputs: vec![(
+            "Alice".into(),
+            "1000.00000000".into(),
+            Some("edenite".into()),
+        )],
     };
 
     let ok = ts.store.utxo_apply_tx_atomic(&mint).await?;
@@ -86,9 +88,13 @@ async fn mint_multiple_tokens_in_one_tx() -> Result<()> {
         txid: "mint_multi_001".into(),
         inputs: vec![],
         outputs: vec![
-            ("Alice".into(), "10.00000000".into(), None),                       // PMS
-            ("Alice".into(), "500.00000000".into(), Some("edenite".into())),     // EDEN
-            ("Bob".into(), "200.0000".into(), Some("gold".into())),              // GOLD
+            ("Alice".into(), "10.00000000".into(), None), // PMS
+            (
+                "Alice".into(),
+                "500.00000000".into(),
+                Some("edenite".into()),
+            ), // EDEN
+            ("Bob".into(), "200.0000".into(), Some("gold".into())), // GOLD
         ],
     };
 
@@ -122,7 +128,11 @@ async fn transfer_edenite_between_users() -> Result<()> {
     let mint = UtxoApply {
         txid: "mint_001".into(),
         inputs: vec![],
-        outputs: vec![("Alice".into(), "100.00000000".into(), Some("edenite".into()))],
+        outputs: vec![(
+            "Alice".into(),
+            "100.00000000".into(),
+            Some("edenite".into()),
+        )],
     };
     assert!(ts.store.utxo_apply_tx_atomic(&mint).await?);
 
@@ -171,7 +181,11 @@ async fn transfer_mixed_assets_in_one_tx() -> Result<()> {
     let mint_eden = UtxoApply {
         txid: "mint_eden".into(),
         inputs: vec![],
-        outputs: vec![("Alice".into(), "100.00000000".into(), Some("edenite".into()))],
+        outputs: vec![(
+            "Alice".into(),
+            "100.00000000".into(),
+            Some("edenite".into()),
+        )],
     };
     assert!(ts.store.utxo_apply_tx_atomic(&mint_pms).await?);
     assert!(ts.store.utxo_apply_tx_atomic(&mint_eden).await?);
@@ -181,10 +195,10 @@ async fn transfer_mixed_assets_in_one_tx() -> Result<()> {
         txid: "tx_mixed".into(),
         inputs: vec![("mint_pms".into(), 0), ("mint_eden".into(), 0)],
         outputs: vec![
-            ("Bob".into(), "80.00000000".into(), Some("edenite".into())),    // EDEN to Bob
-            ("Alice".into(), "20.00000000".into(), Some("edenite".into())),  // EDEN change
-            ("FeePool".into(), "0.10000000".into(), None),                    // fee PMS
-            ("Alice".into(), "4.90000000".into(), None),                      // PMS change
+            ("Bob".into(), "80.00000000".into(), Some("edenite".into())), // EDEN to Bob
+            ("Alice".into(), "20.00000000".into(), Some("edenite".into())), // EDEN change
+            ("FeePool".into(), "0.10000000".into(), None),                // fee PMS
+            ("Alice".into(), "4.90000000".into(), None),                  // PMS change
         ],
     };
     let ok = ts.store.utxo_apply_tx_atomic(&transfer).await?;
@@ -214,7 +228,11 @@ async fn double_spend_edenite_rejected() -> Result<()> {
     let mint = UtxoApply {
         txid: "mint_ds".into(),
         inputs: vec![],
-        outputs: vec![("Alice".into(), "100.00000000".into(), Some("edenite".into()))],
+        outputs: vec![(
+            "Alice".into(),
+            "100.00000000".into(),
+            Some("edenite".into()),
+        )],
     };
     assert!(ts.store.utxo_apply_tx_atomic(&mint).await?);
 
@@ -230,7 +248,11 @@ async fn double_spend_edenite_rejected() -> Result<()> {
     let tx2 = UtxoApply {
         txid: "tx2".into(),
         inputs: vec![("mint_ds".into(), 0)],
-        outputs: vec![("Charlie".into(), "100.00000000".into(), Some("edenite".into()))],
+        outputs: vec![(
+            "Charlie".into(),
+            "100.00000000".into(),
+            Some("edenite".into()),
+        )],
     };
     let ok = ts.store.utxo_apply_tx_atomic(&tx2).await?;
     assert!(!ok, "double-spend should be rejected");

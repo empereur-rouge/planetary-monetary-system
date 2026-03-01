@@ -220,22 +220,18 @@ pub fn involves_any_address(plain: &PlainPayload, candidates: &[String]) -> bool
                     .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c)))
         }
         PlainPayload::Nft(action) => nft_involves_any(action, candidates),
-        PlainPayload::TokenCreate(meta) => {
-            candidates
-                .iter()
-                .any(|c| meta.creator.eq_ignore_ascii_case(c))
-        }
+        PlainPayload::TokenCreate(meta) => candidates
+            .iter()
+            .any(|c| meta.creator.eq_ignore_ascii_case(c)),
         PlainPayload::EncryptedReward { .. } => false,
-        PlainPayload::BridgeLock { dest_address, .. } => {
-            candidates.iter().any(|c| dest_address.eq_ignore_ascii_case(c))
-        }
+        PlainPayload::BridgeLock { dest_address, .. } => candidates
+            .iter()
+            .any(|c| dest_address.eq_ignore_ascii_case(c)),
         PlainPayload::BridgeMint { outputs, .. } => outputs
             .iter()
             .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c))),
         PlainPayload::Freeze { address, .. } | PlainPayload::Unfreeze { address, .. } => {
-            candidates
-                .iter()
-                .any(|c| address.eq_ignore_ascii_case(c))
+            candidates.iter().any(|c| address.eq_ignore_ascii_case(c))
         }
         PlainPayload::Seize {
             from_address,
@@ -413,9 +409,7 @@ pub async fn history_plain_for_address(
     }
 
     // Use per-address index to fetch only blocks involving this address
-    let (ids, _cursor) = store
-        .recent_ids_by_address(addr, None, None, limit)
-        .await?;
+    let (ids, _cursor) = store.recent_ids_by_address(addr, None, None, limit).await?;
 
     if ids.is_empty() {
         return Ok(vec![]);

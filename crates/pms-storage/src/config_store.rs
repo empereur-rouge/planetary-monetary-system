@@ -28,7 +28,8 @@ pub trait ConfigStorage: Send + Sync {
         timestamp: i64,
     ) -> Result<RuntimeConfig> {
         let current = self.get_runtime_config()?;
-        let new_config = current.apply_update(update, block_id, timestamp)
+        let new_config = current
+            .apply_update(update, block_id, timestamp)
             .map_err(|e| anyhow::anyhow!("config validation failed: {}", e))?;
         self.set_runtime_config(&new_config)?;
 

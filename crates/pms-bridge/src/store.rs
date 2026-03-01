@@ -113,11 +113,7 @@ impl BridgeStore {
     /// Récupère l'ID du bloc BridgeMint qui a consommé un lock donné.
     pub fn get_bridge_mint_for_lock(&self, lock_block_id: &str) -> Result<Option<String>> {
         let cf = self.store.cf("bridge_consumed");
-        match self
-            .store
-            .db
-            .get_cf(&cf, lock_block_id.as_bytes())?
-        {
+        match self.store.db.get_cf(&cf, lock_block_id.as_bytes())? {
             Some(val) => Ok(Some(
                 String::from_utf8(val.to_vec()).context("bridge_consumed value as utf8")?,
             )),

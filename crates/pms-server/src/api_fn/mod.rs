@@ -14,6 +14,6 @@ pub mod stream_blocks;
 pub mod supply;
 pub mod token;
 pub mod transaction;
-pub mod wallet;
 pub mod tx_helpers;
+pub mod wallet;
 pub mod wallet_factory;

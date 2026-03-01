@@ -2,8 +2,8 @@ use anyhow::Result;
 use pms_storage::helpers::ActivityCategory;
 use pms_storage::{DagStorage, StoredBlock};
 use pms_testkit::test_rocks_store_with_limit;
-use pms_types_payload::{PayloadEnvelope, PlainPayload};
 use pms_types::TxOutput;
+use pms_types_payload::{PayloadEnvelope, PlainPayload};
 use tokio::time::{Duration, sleep};
 
 fn sb_with_payload(id: &str, payload: PlainPayload) -> StoredBlock {
@@ -60,7 +60,9 @@ async fn addr_activity_indexes_mint_blocks() -> Result<()> {
     store.append_block_atomic_with_utxo(&b3, None).await?;
 
     // Alice should have 2 blocks
-    let (alice_ids, _) = store.recent_ids_by_address("alice", None, None, 100).await?;
+    let (alice_ids, _) = store
+        .recent_ids_by_address("alice", None, None, 100)
+        .await?;
     assert_eq!(alice_ids.len(), 2, "alice should have 2 activity entries");
     // newest first
     assert_eq!(alice_ids[0], "blk3");
@@ -72,7 +74,9 @@ async fn addr_activity_indexes_mint_blocks() -> Result<()> {
     assert_eq!(bob_ids[0], "blk2");
 
     // Carol should have 0 blocks
-    let (carol_ids, _) = store.recent_ids_by_address("carol", None, None, 100).await?;
+    let (carol_ids, _) = store
+        .recent_ids_by_address("carol", None, None, 100)
+        .await?;
     assert!(carol_ids.is_empty());
 
     Ok(())
@@ -89,7 +93,9 @@ async fn addr_activity_indexes_reward_blocks() -> Result<()> {
     let b2 = sb_with_payload("rblk2", reward_payload("coordinator"));
     store.append_block_atomic_with_utxo(&b2, None).await?;
 
-    let (ids, _) = store.recent_ids_by_address("coordinator", None, None, 100).await?;
+    let (ids, _) = store
+        .recent_ids_by_address("coordinator", None, None, 100)
+        .await?;
     assert_eq!(ids.len(), 2);
     assert_eq!(ids[0], "rblk2");
     assert_eq!(ids[1], "rblk1");
@@ -119,14 +125,18 @@ async fn addr_activity_pagination() -> Result<()> {
     // Fetch second page using cursor
     let (ts, id, has_more) = cursor1.unwrap();
     assert!(has_more);
-    let (page2, cursor2) = store.recent_ids_by_address("alice", Some(ts), Some(id), 2).await?;
+    let (page2, cursor2) = store
+        .recent_ids_by_address("alice", Some(ts), Some(id), 2)
+        .await?;
     assert_eq!(page2.len(), 2);
     assert_eq!(page2[0], "pblk2");
     assert_eq!(page2[1], "pblk1");
 
     // Fetch third page
     let (ts, id, _) = cursor2.unwrap();
-    let (page3, cursor3) = store.recent_ids_by_address("alice", Some(ts), Some(id), 2).await?;
+    let (page3, cursor3) = store
+        .recent_ids_by_address("alice", Some(ts), Some(id), 2)
+        .await?;
     assert_eq!(page3.len(), 1);
     assert_eq!(page3[0], "pblk0");
     assert!(cursor3.is_none(), "no more pages");
@@ -154,7 +164,9 @@ async fn addr_activity_no_index_for_genesis() -> Result<()> {
     store.append_block_atomic_with_utxo(&b, None).await?;
 
     // No address should have any activity
-    let (ids, _) = store.recent_ids_by_address("alice", None, None, 100).await?;
+    let (ids, _) = store
+        .recent_ids_by_address("alice", None, None, 100)
+        .await?;
     assert!(ids.is_empty());
 
     Ok(())
@@ -167,15 +179,25 @@ async fn addr_activity_multi_address_in_one_block() -> Result<()> {
     // A mint block with outputs for both alice and bob
     let payload = PlainPayload::Mint {
         outputs: vec![
-            TxOutput { address: "alice".into(), amount: "50".into(), asset_id: None },
-            TxOutput { address: "bob".into(), amount: "50".into(), asset_id: None },
+            TxOutput {
+                address: "alice".into(),
+                amount: "50".into(),
+                asset_id: None,
+            },
+            TxOutput {
+                address: "bob".into(),
+                amount: "50".into(),
+                asset_id: None,
+            },
         ],
     };
     let b = sb_with_payload("multi1", payload);
     store.append_block_atomic_with_utxo(&b, None).await?;
 
     // Both should find the block
-    let (alice_ids, _) = store.recent_ids_by_address("alice", None, None, 100).await?;
+    let (alice_ids, _) = store
+        .recent_ids_by_address("alice", None, None, 100)
+        .await?;
     assert_eq!(alice_ids, vec!["multi1"]);
 
     let (bob_ids, _) = store.recent_ids_by_address("bob", None, None, 100).await?;

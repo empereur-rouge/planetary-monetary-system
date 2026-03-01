@@ -1,6 +1,5 @@
 use pms_testkit::{
-    get_json, make_test_ctx, make_test_ctx_with_admin, mint_to_wallet_and_get_inputs,
-    post_json,
+    get_json, make_test_ctx, make_test_ctx_with_admin, mint_to_wallet_and_get_inputs, post_json,
 };
 use pms_wallet::{SignerBackend, Wallet};
 
@@ -48,13 +47,22 @@ async fn activity_mint_appears() -> anyhow::Result<()> {
 
     let path = format!("/v1/wallet/{}/activity", addr);
     let (status, json) = get_json(&ctx.app, &path).await;
-    assert!(status.is_success(), "activity query failed: {status} body={json}");
+    assert!(
+        status.is_success(),
+        "activity query failed: {status} body={json}"
+    );
 
     let items = json["items"].as_array().expect("items should be an array");
-    assert!(!items.is_empty(), "expected at least 1 activity item, got 0");
+    assert!(
+        !items.is_empty(),
+        "expected at least 1 activity item, got 0"
+    );
 
     let mint_item = items.iter().find(|i| i["activity_type"] == "mint");
-    assert!(mint_item.is_some(), "expected a 'mint' activity item, items={json}");
+    assert!(
+        mint_item.is_some(),
+        "expected a 'mint' activity item, items={json}"
+    );
 
     let mint = mint_item.unwrap();
     assert_eq!(mint["direction"], "in");
@@ -94,7 +102,9 @@ async fn activity_transfer_via_send_appears() -> anyhow::Result<()> {
     let taxable_amount = "4.00";
     let fee_policy =
         pms_token::fee::FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio);
-    let fee_dec = fee_policy.compute_fee(taxable_amount).expect("fee computation");
+    let fee_dec = fee_policy
+        .compute_fee(taxable_amount)
+        .expect("fee computation");
     let fee = fee_dec.to_string();
 
     let input_dec: rust_decimal::Decimal = u.amount.parse().unwrap();
@@ -128,7 +138,10 @@ async fn activity_transfer_via_send_appears() -> anyhow::Result<()> {
         w_to.x25519_sk_hex().unwrap()
     );
     let (status, json) = get_json(&ctx.app, &path).await;
-    assert!(status.is_success(), "receiver activity failed: {status} body={json}");
+    assert!(
+        status.is_success(),
+        "receiver activity failed: {status} body={json}"
+    );
 
     let items = json["items"].as_array().expect("items should be an array");
     let transfer_in = items.iter().find(|i| i["activity_type"] == "transfer_in");
@@ -163,7 +176,10 @@ async fn activity_seize_appears() -> anyhow::Result<()> {
         "reason": "court order",
     });
     let (status, seize_json) = post_json(&ctx.app, "/admin/compliance/seize", seize_body).await;
-    assert!(status.is_success(), "seize failed: {status} body={seize_json}");
+    assert!(
+        status.is_success(),
+        "seize failed: {status} body={seize_json}"
+    );
 
     // The treasury address receiving seized funds may differ from admin_addr
     // (config.dev.toml sets fees.treasury_addresses)
@@ -178,22 +194,37 @@ async fn activity_seize_appears() -> anyhow::Result<()> {
     // Victim should see "mint" + "seized" in activity
     let path = format!("/v1/wallet/{}/activity", victim_addr);
     let (status, json) = get_json(&ctx.app, &path).await;
-    assert!(status.is_success(), "victim activity failed: {status} body={json}");
+    assert!(
+        status.is_success(),
+        "victim activity failed: {status} body={json}"
+    );
 
     let items = json["items"].as_array().expect("items should be an array");
     let has_mint = items.iter().any(|i| i["activity_type"] == "mint");
     let has_seized = items.iter().any(|i| i["activity_type"] == "seized");
-    assert!(has_mint, "victim should have 'mint' in activity, items={json}");
-    assert!(has_seized, "victim should have 'seized' in activity, items={json}");
+    assert!(
+        has_mint,
+        "victim should have 'mint' in activity, items={json}"
+    );
+    assert!(
+        has_seized,
+        "victim should have 'seized' in activity, items={json}"
+    );
 
     // Check seized item details
-    let seized_item = items.iter().find(|i| i["activity_type"] == "seized").unwrap();
+    let seized_item = items
+        .iter()
+        .find(|i| i["activity_type"] == "seized")
+        .unwrap();
     assert_eq!(seized_item["direction"], "out");
 
     // Treasury address should see "seize_received"
     let path = format!("/v1/wallet/{}/activity", treasury_addr);
     let (status, json) = get_json(&ctx.app, &path).await;
-    assert!(status.is_success(), "treasury activity failed: {status} body={json}");
+    assert!(
+        status.is_success(),
+        "treasury activity failed: {status} body={json}"
+    );
 
     let items = json["items"].as_array().expect("items should be an array");
     let has_seize_received = items.iter().any(|i| i["activity_type"] == "seize_received");
@@ -234,13 +265,19 @@ async fn activity_freeze_appears() -> anyhow::Result<()> {
 
     let path = format!("/v1/wallet/{}/activity", target_addr);
     let (status, json) = get_json(&ctx.app, &path).await;
-    assert!(status.is_success(), "activity query failed: {status} body={json}");
+    assert!(
+        status.is_success(),
+        "activity query failed: {status} body={json}"
+    );
 
     let items = json["items"].as_array().expect("items should be an array");
     let has_freeze = items.iter().any(|i| i["activity_type"] == "freeze");
     assert!(has_freeze, "expected 'freeze' in activity, items={json}");
 
-    let freeze_item = items.iter().find(|i| i["activity_type"] == "freeze").unwrap();
+    let freeze_item = items
+        .iter()
+        .find(|i| i["activity_type"] == "freeze")
+        .unwrap();
     assert_eq!(freeze_item["direction"], "info");
 
     Ok(())
@@ -277,7 +314,9 @@ async fn activity_fee_received_appears() -> anyhow::Result<()> {
     let taxable_amount = "4.00";
     let fee_policy =
         pms_token::fee::FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio);
-    let fee_dec = fee_policy.compute_fee(taxable_amount).expect("fee computation");
+    let fee_dec = fee_policy
+        .compute_fee(taxable_amount)
+        .expect("fee computation");
     let fee = fee_dec.to_string();
 
     let input_dec: rust_decimal::Decimal = u.amount.parse().unwrap();
@@ -306,7 +345,10 @@ async fn activity_fee_received_appears() -> anyhow::Result<()> {
     // Admin should see fee_received from the Reward block
     let path = format!("/v1/wallet/{}/activity", admin_addr);
     let (status, json) = get_json(&ctx.app, &path).await;
-    assert!(status.is_success(), "admin activity failed: {status} body={json}");
+    assert!(
+        status.is_success(),
+        "admin activity failed: {status} body={json}"
+    );
 
     let items = json["items"].as_array().expect("items should be an array");
     let has_fee = items.iter().any(|i| i["activity_type"] == "fee_received");
@@ -315,7 +357,10 @@ async fn activity_fee_received_appears() -> anyhow::Result<()> {
         "admin should have 'fee_received' in activity, items={json}"
     );
 
-    let fee_item = items.iter().find(|i| i["activity_type"] == "fee_received").unwrap();
+    let fee_item = items
+        .iter()
+        .find(|i| i["activity_type"] == "fee_received")
+        .unwrap();
     assert_eq!(fee_item["direction"], "in");
 
     Ok(())
@@ -349,7 +394,11 @@ async fn activity_type_filter_works() -> anyhow::Result<()> {
     let path = format!("/v1/wallet/{}/activity", addr);
     let (_, json) = get_json(&ctx.app, &path).await;
     let items = json["items"].as_array().unwrap();
-    assert!(items.len() >= 2, "expected at least 2 items without filter, got {}", items.len());
+    assert!(
+        items.len() >= 2,
+        "expected at least 2 items without filter, got {}",
+        items.len()
+    );
 
     // Filter by mint only
     let path = format!("/v1/wallet/{}/activity?type=mint", addr);
@@ -386,10 +435,17 @@ async fn activity_empty_for_unknown_address() -> anyhow::Result<()> {
 
     let path = format!("/v1/wallet/{}/activity", addr);
     let (status, json) = get_json(&ctx.app, &path).await;
-    assert!(status.is_success(), "activity query failed: {status} body={json}");
+    assert!(
+        status.is_success(),
+        "activity query failed: {status} body={json}"
+    );
 
     let items = json["items"].as_array().expect("items should be an array");
-    assert!(items.is_empty(), "expected empty items for unknown address, got {}", items.len());
+    assert!(
+        items.is_empty(),
+        "expected empty items for unknown address, got {}",
+        items.len()
+    );
     assert_eq!(json["count"], 0);
     assert_eq!(json["has_more"], false);
 

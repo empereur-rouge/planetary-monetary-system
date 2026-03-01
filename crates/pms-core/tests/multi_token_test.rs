@@ -133,14 +133,17 @@ async fn valid_edenite_transfer() {
             token_output("Bob", "60.00000000", "edenite"),
             token_output("Alice", "40.00000000", "edenite"), // change EDEN
             pms_output("FeeRecipient", "0.10000000"),        // fee PMS
-            pms_output("Alice", "0.90000000"),                // change PMS
+            pms_output("Alice", "0.90000000"),               // change PMS
         ],
         fee: "0".into(),
         unlocks: vec![],
     };
 
     let result = validate_transaction_async(&utxos, &tx).await;
-    assert!(result.is_ok(), "valid EDEN transfer should pass: {result:?}");
+    assert!(
+        result.is_ok(),
+        "valid EDEN transfer should pass: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -184,10 +187,7 @@ async fn cannot_create_token_from_nothing() {
     };
 
     let result = validate_transaction_async(&utxos, &tx).await;
-    assert!(
-        result.is_err(),
-        "creating token from nothing should fail"
-    );
+    assert!(result.is_err(), "creating token from nothing should fail");
     let err = format!("{:?}", result.unwrap_err());
     assert!(err.contains("AssetBalanceMismatch"));
 }
@@ -428,9 +428,7 @@ async fn balance_by_address_and_asset() {
     assert_eq!(bob_eden, Decimal::from_str("100.00000000").unwrap());
 
     // Alice PMS balance
-    let alice_pms = utxos
-        .balance_by_address_and_asset("Alice", None)
-        .await;
+    let alice_pms = utxos.balance_by_address_and_asset("Alice", None).await;
     assert_eq!(alice_pms, Decimal::from_str("10.00000000").unwrap());
 
     // Alice GOLD balance (she has none)
@@ -454,7 +452,11 @@ async fn utxos_by_address_all_assets() {
     seed_pms(&utxos, "ee04", 0, "Bob", "99.00000000").await;
 
     let alice_utxos = utxos.utxos_by_address("Alice").await;
-    assert_eq!(alice_utxos.len(), 3, "Alice should have 3 UTXOs (PMS + EDEN + GOLD)");
+    assert_eq!(
+        alice_utxos.len(),
+        3,
+        "Alice should have 3 UTXOs (PMS + EDEN + GOLD)"
+    );
 
     // Vérifier qu'on a bien les 3 assets
     let asset_ids: Vec<Option<String>> = alice_utxos
@@ -487,8 +489,14 @@ async fn apply_diff_multi_asset() {
     // Simuler un transfer: Alice → Bob 60 EDEN, change 40 EDEN
     let spends = vec![out_id("ff01", 0), out_id("ff02", 0)];
     let creates = vec![
-        (out_id("tx01", 0), token_output("Bob", "60.00000000", "edenite")),
-        (out_id("tx01", 1), token_output("Alice", "40.00000000", "edenite")),
+        (
+            out_id("tx01", 0),
+            token_output("Bob", "60.00000000", "edenite"),
+        ),
+        (
+            out_id("tx01", 1),
+            token_output("Alice", "40.00000000", "edenite"),
+        ),
         (out_id("tx01", 2), pms_output("Alice", "4.90000000")),
         (out_id("tx01", 3), pms_output("FeePool", "0.10000000")),
     ];
@@ -527,7 +535,10 @@ fn txoutput_without_asset_id_deserializes_as_none() {
     // Un ancien TxOutput sérialisé sans champ asset_id
     let json = r#"{"address":"Alice","amount":"10.0"}"#;
     let output: TxOutput = serde_json::from_str(json).unwrap();
-    assert_eq!(output.asset_id, None, "missing asset_id should default to None");
+    assert_eq!(
+        output.asset_id, None,
+        "missing asset_id should default to None"
+    );
 }
 
 #[test]

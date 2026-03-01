@@ -9,8 +9,6 @@
 // Mode centralisé : seul le Coordinator traite les transactions.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-use rust_decimal::Decimal;
-use rust_decimal::prelude::FromPrimitive;
 use crate::api::AppState;
 use anyhow::Result;
 use pms_config::FeeDistributionConfig;
@@ -23,6 +21,8 @@ use pms_utils::compute_block_id;
 use pms_wallet::SignerBackend;
 use pms_wallet::signing_wire::canonical_wireblock_message;
 use pms_wire::WireBlock;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use serde::{Deserialize, Serialize};
 
 /// Représente un output de fee à inclure dans le bloc
@@ -88,8 +88,8 @@ pub fn compute_fee_outputs(
 
     let mut outputs = Vec::new();
     for beneficiary in &config.beneficiaries {
-        let amount = (total_fee * Decimal::from(beneficiary.percent_bps) / Decimal::from(10000))
-            .round_dp(8);
+        let amount =
+            (total_fee * Decimal::from(beneficiary.percent_bps) / Decimal::from(10000)).round_dp(8);
         if amount <= Decimal::ZERO {
             continue;
         }
@@ -482,7 +482,9 @@ pub async fn perform_fee_distribution(
     // 4. PERSIST
     match state.srv.adapter_arc().persist_block(&reward_wb).await {
         Ok(PutResult::Inserted) => {
-            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
+            crate::metrics::BLOCKS_PERSISTED
+                .with_label_values(&[&state.ledger_id])
+                .inc();
             let _ = state.srv.enqueue_broadcast(reward_wb.id.clone()).await;
 
             // 5. UPDATE UTXOS DIRECTLY
@@ -716,7 +718,9 @@ pub async fn perform_daily_inflation_mint(state: &AppState) -> Result<Distribute
     // 7. PERSIST & UPDATE UTXOs
     match state.srv.adapter_arc().persist_block(&wb).await {
         Ok(PutResult::Inserted) => {
-            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
+            crate::metrics::BLOCKS_PERSISTED
+                .with_label_values(&[&state.ledger_id])
+                .inc();
             let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
 
             for (idx, output) in all_outputs.iter().enumerate() {
@@ -798,9 +802,21 @@ mod tests {
         use pms_config::FeeBeneficiary;
         let config = FeeDistributionConfig {
             beneficiaries: vec![
-                FeeBeneficiary { role: "coordinator".into(), percent_bps: 5000, address: None },
-                FeeBeneficiary { role: "client".into(), percent_bps: 3000, address: Some("client_addr".into()) },
-                FeeBeneficiary { role: "treasury".into(), percent_bps: 2000, address: None },
+                FeeBeneficiary {
+                    role: "coordinator".into(),
+                    percent_bps: 5000,
+                    address: None,
+                },
+                FeeBeneficiary {
+                    role: "client".into(),
+                    percent_bps: 3000,
+                    address: Some("client_addr".into()),
+                },
+                FeeBeneficiary {
+                    role: "treasury".into(),
+                    percent_bps: 2000,
+                    address: None,
+                },
             ],
         };
         assert!(config.validate().is_ok());

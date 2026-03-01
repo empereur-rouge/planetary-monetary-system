@@ -9,7 +9,10 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 use crate::api::AppState;
-use axum::{Json, extract::{Query, State}};
+use axum::{
+    Json,
+    extract::{Query, State},
+};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 

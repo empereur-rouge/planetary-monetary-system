@@ -238,10 +238,7 @@ pub async fn wallet_send_tx(
     let parents = match tx_helpers::get_block_parents(&state.store, settings).await {
         Ok(p) => p,
         Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": e })),
-            );
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e })));
         }
     };
 
@@ -473,7 +470,9 @@ pub async fn prepare_tx(
                 }
             };
         for (output_id, _, amt) in &pms_selected {
-            tx_inputs.push(TxInput { out: output_id.clone() });
+            tx_inputs.push(TxInput {
+                out: output_id.clone(),
+            });
             inputs_detail.push(UtxoDetail {
                 txid: output_id.txid.clone(),
                 index: output_id.index,

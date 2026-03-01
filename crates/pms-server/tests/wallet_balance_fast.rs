@@ -1,4 +1,6 @@
-use pms_testkit::{make_test_ctx, make_test_ctx_with_admin, mint_to_wallet_and_get_inputs, post_json};
+use pms_testkit::{
+    make_test_ctx, make_test_ctx_with_admin, mint_to_wallet_and_get_inputs, post_json,
+};
 use pms_wallet::{SignerBackend, Wallet};
 
 fn clear_admin_env_conflicts() {
@@ -21,7 +23,9 @@ fn setup_admin_ctx() -> (std::sync::Arc<Wallet>, String, String) {
     let hrp = "8e";
     let admin_addr = admin.get_address(hrp);
     let admin_pubkey = admin.encoded_public_key();
-    unsafe { std::env::set_var("PMS_TEST_ADMIN_PUBKEY", &admin_pubkey); }
+    unsafe {
+        std::env::set_var("PMS_TEST_ADMIN_PUBKEY", &admin_pubkey);
+    }
     (admin, admin_addr, admin_pubkey)
 }
 
@@ -45,11 +49,18 @@ async fn wallet_balance_returns_correct_balance_from_ram() -> anyhow::Result<()>
     });
     let (status, json) = post_json(&ctx.app, "/wallet/balance", body).await;
 
-    assert!(status.is_success(), "balance query failed: {status} body={json}");
+    assert!(
+        status.is_success(),
+        "balance query failed: {status} body={json}"
+    );
 
     // Balance is Decimal::to_string() — may or may not have trailing zeros
     let bal: rust_decimal::Decimal = json["balance"].as_str().unwrap().parse().unwrap();
-    assert_eq!(bal, rust_decimal::Decimal::new(1000, 2), "balance mismatch: {json}");
+    assert_eq!(
+        bal,
+        rust_decimal::Decimal::new(1000, 2),
+        "balance mismatch: {json}"
+    );
 
     let utxos = json["utxos"].as_array().expect("utxos should be an array");
     assert_eq!(utxos.len(), 1, "expected 1 UTXO, got {}", utxos.len());
@@ -72,11 +83,18 @@ async fn wallet_balance_returns_zero_for_unknown_address() -> anyhow::Result<()>
     });
     let (status, json) = post_json(&ctx.app, "/wallet/balance", body).await;
 
-    assert!(status.is_success(), "balance query failed: {status} body={json}");
+    assert!(
+        status.is_success(),
+        "balance query failed: {status} body={json}"
+    );
     assert_eq!(json["balance"], "0", "expected zero balance: {json}");
 
     let utxos = json["utxos"].as_array().expect("utxos should be an array");
-    assert!(utxos.is_empty(), "expected empty utxos, got {}", utxos.len());
+    assert!(
+        utxos.is_empty(),
+        "expected empty utxos, got {}",
+        utxos.len()
+    );
 
     Ok(())
 }

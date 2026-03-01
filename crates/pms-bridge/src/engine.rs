@@ -14,8 +14,8 @@ use std::sync::Arc;
 use crate::auth::BridgeAuth;
 use crate::store::BridgeStore;
 use crate::types::{
-    BridgeDisableRequest, BridgeEnableRequest, BridgeLink,
-    BridgeTransferRequest, BridgeTransferResponse,
+    BridgeDisableRequest, BridgeEnableRequest, BridgeLink, BridgeTransferRequest,
+    BridgeTransferResponse,
 };
 
 /// Orchestre les opérations de pont cross-ledger.
@@ -61,14 +61,13 @@ impl BridgeEngine {
         if let Some(existing) = self
             .bridge_store
             .get_bridge_link(&req.ledger_a, &req.ledger_b)?
+            && existing.enabled
         {
-            if existing.enabled {
-                bail!(
-                    "bridge already enabled between '{}' and '{}'",
-                    req.ledger_a,
-                    req.ledger_b
-                );
-            }
+            bail!(
+                "bridge already enabled between '{}' and '{}'",
+                req.ledger_a,
+                req.ledger_b
+            );
         }
 
         let now = now_ms();
@@ -275,10 +274,7 @@ impl BridgeEngine {
         );
 
         // 5) Anti-replay check
-        if self
-            .bridge_store
-            .is_bridge_lock_consumed(&lock_block_id)?
-        {
+        if self.bridge_store.is_bridge_lock_consumed(&lock_block_id)? {
             bail!("BridgeLock {} already consumed", lock_block_id);
         }
 
@@ -364,7 +360,7 @@ impl BridgeEngine {
 
         let payload_json = payload_opt
             .as_ref()
-            .map(|p| serde_json::to_string(p))
+            .map(serde_json::to_string)
             .transpose()?;
 
         let mut wb = WireBlock {

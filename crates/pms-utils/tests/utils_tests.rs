@@ -24,7 +24,10 @@ fn test_pow_zero_bits_always_passes() {
 fn test_pow_4_bits_single_nibble() {
     // 4 bits = premier nibble doit être 0 (0x0)
     assert!(check_pow_leading_zero_bits("0abcdef123456789", 4));
-    assert!(check_pow_leading_zero_bits("00000000000000000000000000000000", 4));
+    assert!(check_pow_leading_zero_bits(
+        "00000000000000000000000000000000",
+        4
+    ));
 
     // Premier nibble non-zéro = échec
     assert!(!check_pow_leading_zero_bits("1abcdef123456789", 4));
@@ -129,7 +132,10 @@ fn test_compute_block_id_different_nonce() {
     let id1 = compute_block_id(&parents, &None, 1);
     let id2 = compute_block_id(&parents, &None, 2);
 
-    assert_ne!(id1, id2, "Nonces differents doivent produire IDs differents");
+    assert_ne!(
+        id1, id2,
+        "Nonces differents doivent produire IDs differents"
+    );
 }
 
 #[test]

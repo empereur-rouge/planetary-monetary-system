@@ -264,10 +264,7 @@ pub async fn faucet_mint(
     let parents = match tx_helpers::get_block_parents(&state.store, settings).await {
         Ok(p) => p,
         Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": e })),
-            );
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e })));
         }
     };
 
@@ -390,17 +387,22 @@ pub async fn wallet_send_simple(
     // ════════════════════════════════════════════════════════════════════
     let adapter = state.srv.adapter_arc();
 
-    let (selected_inputs, selected_sum) =
-        match tx_helpers::select_utxos(&adapter, &from_address, total_needed, &req.asset_id).await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(json!({ "error": e })),
-                );
-            }
-        };
+    let (selected_inputs, selected_sum) = match tx_helpers::select_utxos(
+        &adapter,
+        &from_address,
+        total_needed,
+        &req.asset_id,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": e })),
+            );
+        }
+    };
 
     // ════════════════════════════════════════════════════════════════════
     // 5) Build inputs
@@ -574,10 +576,7 @@ pub async fn wallet_send_simple(
     let parents = match tx_helpers::get_block_parents(&state.store, settings).await {
         Ok(p) => p,
         Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": e })),
-            );
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e })));
         }
     };
 
@@ -608,13 +607,8 @@ pub async fn wallet_send_simple(
     // ════════════════════════════════════════════════════════════════════
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
         Ok(PutResult::Inserted) => {
-            tx_helpers::apply_utxo_delta(
-                &adapter,
-                &wb.id,
-                &signed_tx.inputs,
-                &signed_tx.outputs,
-            )
-            .await;
+            tx_helpers::apply_utxo_delta(&adapter, &wb.id, &signed_tx.inputs, &signed_tx.outputs)
+                .await;
 
             // Create reward block for fee distribution
             tx_helpers::create_reward_block(&state, fee_dec, &wb.id).await;

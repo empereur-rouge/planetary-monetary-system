@@ -1,9 +1,9 @@
 use crate::api::AppState;
 use axum::Json;
+use axum::extract::Path;
 use axum::extract::State;
 use axum::http::StatusCode;
 use pms_wallet::decode_address;
-use axum::extract::Path;
 
 #[derive(serde::Serialize)]
 pub struct Outpoint {
@@ -22,7 +22,6 @@ pub struct UtxoItem {
 pub struct UtxoResp {
     pub utxos: Vec<UtxoItem>,
 }
-
 
 #[derive(serde::Deserialize)]
 pub struct BalanceReq {

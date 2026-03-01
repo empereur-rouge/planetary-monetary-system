@@ -1,7 +1,7 @@
 use crate::Dag;
 use crate::validations::amount::{amount_parse_non_neg_dec, amount_parse_pos_dec};
 use pms_errors::ValidationError;
-use pms_types::{PayloadEnvelope, PlainPayload, TxInput, Transaction};
+use pms_types::{PayloadEnvelope, PlainPayload, Transaction, TxInput};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 
@@ -81,7 +81,9 @@ pub async fn validate_transaction_async(
         match output_opt {
             Some(out) => {
                 let amount = amount_parse_pos_dec(&out.amount)?;
-                *inputs_by_asset.entry(out.asset_id.clone()).or_insert(Decimal::ZERO) += amount;
+                *inputs_by_asset
+                    .entry(out.asset_id.clone())
+                    .or_insert(Decimal::ZERO) += amount;
             }
             None => {
                 tracing::warn!("Input missing: {:?}", inp.out);
@@ -94,16 +96,23 @@ pub async fn validate_transaction_async(
     let mut outputs_by_asset: HashMap<Option<String>, Decimal> = HashMap::new();
     for o in &tx.outputs {
         let amount = amount_parse_pos_dec(&o.amount)?;
-        *outputs_by_asset.entry(o.asset_id.clone()).or_insert(Decimal::ZERO) += amount;
+        *outputs_by_asset
+            .entry(o.asset_id.clone())
+            .or_insert(Decimal::ZERO) += amount;
     }
 
     // 4. Vérifier la conservation par asset
     for (asset_id, in_sum) in &inputs_by_asset {
-        let out_sum = outputs_by_asset.get(asset_id).copied().unwrap_or(Decimal::ZERO);
+        let out_sum = outputs_by_asset
+            .get(asset_id)
+            .copied()
+            .unwrap_or(Decimal::ZERO);
         if *in_sum != out_sum {
             tracing::warn!(
                 "Asset balance mismatch: asset={:?}, inputs={}, outputs={}",
-                asset_id, in_sum, out_sum
+                asset_id,
+                in_sum,
+                out_sum
             );
             return Err(ValidationError::AssetBalanceMismatch {
                 asset_id: asset_id.clone(),

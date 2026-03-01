@@ -306,7 +306,10 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
         .route("/v1/tx/prepare", post(prepare_tx))
         .route("/v1/wallet/create", post(wallet_create))
         .route("/v1/wallet/restore/mnemonic", post(wallet_restore_mnemonic))
-        .route("/v1/wallet/restore/private-key", post(wallet_restore_private_key))
+        .route(
+            "/v1/wallet/restore/private-key",
+            post(wallet_restore_private_key),
+        )
         .route("/v1/wallet/send-simple", post(wallet_send_simple));
 
     let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
@@ -472,7 +475,9 @@ async fn dynamic_ledger_handler(
         .map(|q| format!("?{}", q))
         .unwrap_or_default();
     let new_uri = format!("/{}{}", rest, query);
-    parts.uri = new_uri.parse().unwrap_or_else(|_| http::Uri::from_static("/"));
+    parts.uri = new_uri
+        .parse()
+        .unwrap_or_else(|_| http::Uri::from_static("/"));
     let forwarded = Request::from_parts(parts, body);
 
     match router.oneshot(forwarded).await {

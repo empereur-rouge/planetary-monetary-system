@@ -22,7 +22,14 @@ use pms_wire::WireBlock;
 #[async_trait]
 impl<S> NetDagAdapter for CoreAdapter<S>
 where
-    S: DagStorage + NftStorage + ConfigStorage + NodeRewardsStorage + ComplianceStorage + Send + Sync + 'static,
+    S: DagStorage
+        + NftStorage
+        + ConfigStorage
+        + NodeRewardsStorage
+        + ComplianceStorage
+        + Send
+        + Sync
+        + 'static,
 {
     /// Est‑ce que j’ai déjà ce bloc en RAM ?
     ///
@@ -304,8 +311,10 @@ where
         }
 
         // 1.compliance) Apply compliance registry operations (Freeze / Unfreeze / Seize / Reverse)
-        if let Some(PayloadEnvelope::Plain(PlainPayload::Freeze { ref address, ref reason })) =
-            payload
+        if let Some(PayloadEnvelope::Plain(PlainPayload::Freeze {
+            ref address,
+            ref reason,
+        })) = payload
         {
             if let Err(e) = self.store.freeze_address(address, &wb.id, reason) {
                 return Ok(PutResult::Rejected(format!("Freeze failed: {e}")));
@@ -509,7 +518,10 @@ where
                 }
             }
             if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock {
-                inputs, amount, asset_id, ..
+                inputs,
+                amount,
+                asset_id,
+                ..
             })) = &block.payload
             {
                 use crate::validations::transactions::validate_bridge_lock_async;
@@ -645,8 +657,9 @@ where
                         // Parse fee (format décimal: "1.50000000")
                         if let Ok(fee_decimal) = rust_decimal::Decimal::from_str_exact(&tx.fee) {
                             // Convertir en satoshis (8 décimales) with overflow protection
-                            let fee_sats = match (fee_decimal * rust_decimal::Decimal::from(100_000_000))
-                                .to_u64()
+                            let fee_sats = match (fee_decimal
+                                * rust_decimal::Decimal::from(100_000_000))
+                            .to_u64()
                             {
                                 Some(v) => v,
                                 None => {
@@ -688,13 +701,25 @@ where
 
                 // Add fee distribution outputs (always PMS native)
                 for out in fee_outputs {
-                    create.push((sb.id.clone(), idx, out.address.clone(), out.amount.clone(), None));
+                    create.push((
+                        sb.id.clone(),
+                        idx,
+                        out.address.clone(),
+                        out.amount.clone(),
+                        None,
+                    ));
                     idx += 1;
                 }
 
                 // Add block reward outputs (always PMS native)
                 for out in reward_outputs {
-                    create.push((sb.id.clone(), idx, out.address.clone(), out.amount.clone(), None));
+                    create.push((
+                        sb.id.clone(),
+                        idx,
+                        out.address.clone(),
+                        out.amount.clone(),
+                        None,
+                    ));
                     idx += 1;
                 }
 
@@ -1144,7 +1169,10 @@ where
         (dec, count as u64)
     }
 
-    async fn circulating_supply_by_asset(&self, asset_id: Option<&str>) -> (rust_decimal::Decimal, u64) {
+    async fn circulating_supply_by_asset(
+        &self,
+        asset_id: Option<&str>,
+    ) -> (rust_decimal::Decimal, u64) {
         let (dec, count) = self.utxos.circulating_supply_by_asset(asset_id).await;
         (dec, count as u64)
     }
@@ -1160,10 +1188,24 @@ where
         self.utxos.utxos_by_address(address).await
     }
 
-    async fn add_utxo(&self, txid: String, index: u32, address: String, amount: String, asset_id: Option<String>) {
+    async fn add_utxo(
+        &self,
+        txid: String,
+        index: u32,
+        address: String,
+        amount: String,
+        asset_id: Option<String>,
+    ) {
         use pms_types::{OutputId, TxOutput};
         self.utxos
-            .add(OutputId { txid, index }, TxOutput { address, amount, asset_id })
+            .add(
+                OutputId { txid, index },
+                TxOutput {
+                    address,
+                    amount,
+                    asset_id,
+                },
+            )
             .await;
     }
 

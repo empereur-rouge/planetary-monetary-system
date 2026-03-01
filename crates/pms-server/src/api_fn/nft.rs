@@ -245,7 +245,11 @@ pub async fn mint_nft(
     // 1b. Compute NFT mint fee (if configured and not exempt)
     let nft_fee = {
         let nft_type = req.metadata.nft_type.as_deref();
-        if crate::api_fn::tx_helpers::is_nft_type_fee_exempt(&state.store, nft_type, Some(&state.effective_fees)) {
+        if crate::api_fn::tx_helpers::is_nft_type_fee_exempt(
+            &state.store,
+            nft_type,
+            Some(&state.effective_fees),
+        ) {
             rust_decimal::Decimal::ZERO
         } else {
             crate::api_fn::tx_helpers::load_nft_mint_fee(&state.store, Some(&state.effective_fees))
@@ -348,7 +352,9 @@ pub async fn mint_nft(
         Ok(pms_storage::PutResult::Inserted) => {
             let _ = state.srv.enqueue_broadcast(wire_block.id.clone()).await;
 
-            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
+            crate::metrics::BLOCKS_PERSISTED
+                .with_label_values(&[&state.ledger_id])
+                .inc();
 
             {
                 use pms_storage::NftStorage;
@@ -377,11 +383,9 @@ pub async fn mint_nft(
             // Distribute NFT mint fee via reward block
             let mut reward_block_id = None;
             if nft_fee > rust_decimal::Decimal::ZERO {
-                if let Some(rid) = crate::api_fn::tx_helpers::create_reward_block(
-                    &state,
-                    nft_fee,
-                    &block_id,
-                ).await {
+                if let Some(rid) =
+                    crate::api_fn::tx_helpers::create_reward_block(&state, nft_fee, &block_id).await
+                {
                     tracing::info!(
                         "NFT mint fee {} PMS distributed via block {}",
                         nft_fee,
@@ -554,7 +558,9 @@ pub async fn burn_nft(
     match state.srv.adapter_arc().persist_block(&wb).await {
         Ok(pms_storage::PutResult::Inserted) => {
             let _ = state.srv.enqueue_broadcast(block_id.clone()).await;
-            crate::metrics::BLOCKS_PERSISTED.with_label_values(&[&state.ledger_id]).inc();
+            crate::metrics::BLOCKS_PERSISTED
+                .with_label_values(&[&state.ledger_id])
+                .inc();
 
             if let Err(e) = state.store.apply_action(&nft_action) {
                 tracing::error!("Failed to apply BURN action to NFT store: {}", e);
@@ -732,8 +738,8 @@ pub async fn burn_nft_simple(
     State(state): State<AppState>,
     Json(req): Json<BurnNftSimpleRequest>,
 ) -> impl IntoResponse {
-    use crate::api_fn::wallet_factory::wallet_from_b64;
     use crate::api_fn::tx_helpers;
+    use crate::api_fn::wallet_factory::wallet_from_b64;
     use pms_types_nft::NftAction;
 
     // 1. Reconstruire le wallet depuis la clé privée
@@ -791,7 +797,9 @@ pub async fn burn_nft_simple(
         token_id: req.token_id.clone(),
         burner: burner_addr.clone(),
     };
-    let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(nft_action.clone())));
+    let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(
+        nft_action.clone(),
+    )));
 
     // 4. Get parents
     let settings = &*state.settings;
@@ -885,8 +893,8 @@ pub async fn burn_nft_batch_simple(
     State(state): State<AppState>,
     Json(req): Json<BurnNftBatchSimpleRequest>,
 ) -> impl IntoResponse {
-    use crate::api_fn::wallet_factory::wallet_from_b64;
     use crate::api_fn::tx_helpers;
+    use crate::api_fn::wallet_factory::wallet_from_b64;
     use pms_types_nft::NftAction;
 
     if req.token_ids.is_empty() {
@@ -951,7 +959,9 @@ pub async fn burn_nft_batch_simple(
         token_ids: req.token_ids.clone(),
         burner: burner_addr.clone(),
     };
-    let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(nft_action.clone())));
+    let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(
+        nft_action.clone(),
+    )));
 
     // 4. Get parents
     let settings = &*state.settings;

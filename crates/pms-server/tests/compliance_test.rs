@@ -19,7 +19,7 @@ use axum::extract::connect_info::ConnectInfo;
 use http::Request;
 use pms_storage::ComplianceStorage;
 use pms_testkit::make_test_ctx;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tower::ServiceExt;
 
@@ -202,10 +202,7 @@ async fn test_freeze_blocks_outgoing_tx() {
         "prepare_tx from frozen sender should be 403: {body}"
     );
     assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("frozen"),
+        body["error"].as_str().unwrap_or("").contains("frozen"),
         "error should mention frozen: {body}"
     );
 }
@@ -231,7 +228,11 @@ async fn test_freeze_blocks_incoming_tx() {
 
     // Freeze the receiver
     ctx.store
-        .freeze_address(receiver_addr, "freeze_block_2", "recipient under investigation")
+        .freeze_address(
+            receiver_addr,
+            "freeze_block_2",
+            "recipient under investigation",
+        )
         .unwrap();
 
     // prepare_tx to frozen address should return 403
@@ -250,10 +251,7 @@ async fn test_freeze_blocks_incoming_tx() {
         "prepare_tx to frozen receiver should be 403: {body}"
     );
     assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("frozen"),
+        body["error"].as_str().unwrap_or("").contains("frozen"),
         "error should mention frozen: {body}"
     );
 }
@@ -389,11 +387,7 @@ async fn test_shadow_balance_endpoint() {
     assert_eq!(status, 200, "shadow balance: {body}");
     assert_eq!(body["frozen_accounts"], 2);
 
-    let total: f64 = body["total_pms_frozen"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let total: f64 = body["total_pms_frozen"].as_str().unwrap().parse().unwrap();
     assert!(
         (total - 500.0).abs() < 0.01,
         "total PMS frozen should be ~500, got {total}"
@@ -418,10 +412,7 @@ async fn test_double_freeze_returns_error() {
     let result = ctx.store.freeze_address(addr, "block_2", "second freeze");
     assert!(result.is_err(), "second freeze should fail");
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("already frozen"),
+        result.unwrap_err().to_string().contains("already frozen"),
         "error should mention already frozen"
     );
 }
@@ -435,10 +426,7 @@ async fn test_unfreeze_non_frozen_returns_error() {
     let result = ctx.store.unfreeze_address(addr);
     assert!(result.is_err(), "unfreeze non-frozen should fail");
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("not frozen"),
+        result.unwrap_err().to_string().contains("not frozen"),
         "error should mention not frozen"
     );
 }

@@ -82,9 +82,8 @@ impl LedgerManager {
     /// Retourne le ledger par défaut ("main").
     /// Fallback: retourne le premier ledger disponible.
     pub fn default_ledger(&self) -> Option<Arc<LedgerInstance>> {
-        self.get("main").or_else(|| {
-            self.ledgers.iter().next().map(|r| r.value().clone())
-        })
+        self.get("main")
+            .or_else(|| self.ledgers.iter().next().map(|r| r.value().clone()))
     }
 
     /// Liste tous les IDs de ledgers actifs.

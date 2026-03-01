@@ -31,14 +31,8 @@ impl BridgeAuth {
         // Custom ↔ Custom : le signataire doit être owner des deux
         // (ou on pourrait accepter si owner d'un seul — mais enable nécessite accord mutuel)
         if let Some(signer) = signer_pubkey {
-            let is_owner_a = ledger_a
-                .owner_pubkey
-                .as_deref()
-                .map_or(false, |pk| pk == signer);
-            let is_owner_b = ledger_b
-                .owner_pubkey
-                .as_deref()
-                .map_or(false, |pk| pk == signer);
+            let is_owner_a = ledger_a.owner_pubkey.as_deref() == Some(signer);
+            let is_owner_b = ledger_b.owner_pubkey.as_deref() == Some(signer);
             // Pour l'instant on demande que le signataire soit owner d'au moins un des deux
             // TODO: two-party consent (signature des deux owners)
             is_owner_a || is_owner_b
@@ -64,14 +58,8 @@ impl BridgeAuth {
             return false;
         }
         if let Some(signer) = signer_pubkey {
-            let is_owner_a = ledger_a
-                .owner_pubkey
-                .as_deref()
-                .map_or(false, |pk| pk == signer);
-            let is_owner_b = ledger_b
-                .owner_pubkey
-                .as_deref()
-                .map_or(false, |pk| pk == signer);
+            let is_owner_a = ledger_a.owner_pubkey.as_deref() == Some(signer);
+            let is_owner_b = ledger_b.owner_pubkey.as_deref() == Some(signer);
             is_owner_a || is_owner_b
         } else {
             false
@@ -95,10 +83,7 @@ impl BridgeAuth {
             return false;
         }
         if let Some(signer) = signer_pubkey {
-            source_ledger
-                .owner_pubkey
-                .as_deref()
-                .map_or(false, |pk| pk == signer)
+            source_ledger.owner_pubkey.as_deref() == Some(signer)
         } else {
             false
         }
