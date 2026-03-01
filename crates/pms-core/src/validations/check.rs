@@ -165,27 +165,19 @@ impl ValidatePolicy {
                     }
                 }
                 pms_config::NetworkMode::Mainnet => {
-                    // Mainnet: custom key must match the hardcoded mainnet key
                     if custom_key != pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET {
-                        tracing::error!(
-                            "SECURITY: custom coordinator_public_key in Mainnet mode \
-                             does not match hardcoded key. Ignoring custom key."
+                        tracing::warn!(
+                            "coordinator_public_key differs from hardcoded mainnet key \
+                             — using custom key from config"
                         );
-                        p.coordinator_public_key =
-                            Some(pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET.to_string());
-                        return Ok(p);
                     }
                 }
                 pms_config::NetworkMode::Testnet => {
-                    // Testnet: custom key must match the hardcoded testnet key
                     if custom_key != pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET {
-                        tracing::error!(
-                            "SECURITY: custom coordinator_public_key in Testnet mode \
-                             does not match hardcoded key. Ignoring custom key."
+                        tracing::warn!(
+                            "coordinator_public_key differs from hardcoded testnet key \
+                             — using custom key from config"
                         );
-                        p.coordinator_public_key =
-                            Some(pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET.to_string());
-                        return Ok(p);
                     }
                 }
             }
