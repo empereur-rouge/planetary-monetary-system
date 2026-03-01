@@ -1394,34 +1394,8 @@ impl DagStorage for RocksStore {
         self.apply_dag_indices(&mut batch, b)?;
 
         // 1.c) Per-address activity indexes (addr_activity + addr_type_activity)
-        if let Some(pjson) = &b.payload_json {
-            if let Ok(pms_types_payload::PayloadEnvelope::Plain(ref plain)) =
-                serde_json::from_str::<pms_types_payload::PayloadEnvelope>(pjson)
-            {
-                let ts = crate::helpers::now_ms_i64();
-
-                // Untyped index (addr_activity)
-                let addrs = crate::helpers::extract_involved_addresses(plain);
-                if !addrs.is_empty() {
-                    let cf_aa = self.cf("addr_activity");
-                    for addr in &addrs {
-                        let key = crate::helpers::key_addr_activity(addr, ts, &b.id);
-                        batch.put_cf(&cf_aa, &key, b"");
-                    }
-                }
-
-                // Typed index (addr_type_activity)
-                let typed = crate::helpers::extract_involved_with_category(plain);
-                if !typed.is_empty() {
-                    let cf_ata = self.cf("addr_type_activity");
-                    for (addr, cat) in &typed {
-                        let key =
-                            crate::helpers::key_addr_type_activity(addr, cat.as_byte(), ts, &b.id);
-                        batch.put_cf(&cf_ata, &key, b"");
-                    }
-                }
-            }
-        }
+        let ts = crate::helpers::now_ms_i64();
+        self.apply_addr_activity_indices(&mut batch, b, ts)?;
 
         // 2) write atomique
         self.db.write(batch)?;
