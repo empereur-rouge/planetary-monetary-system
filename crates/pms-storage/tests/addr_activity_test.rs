@@ -406,3 +406,83 @@ async fn typed_index_empty_categories_returns_empty() -> Result<()> {
 
     Ok(())
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// write_addr_activity_entries_with_categories (for encrypted payloads)
+// ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn write_with_categories_indexes_both_cfs() -> Result<()> {
+    let store = test_rocks_store_with_limit("write-both-cfs", 64).await?;
+
+    // Simulate what the coordinator does for an encrypted TxUtxo payload:
+    // it extracts addresses and categories from the plain payload before encryption.
+    let addrs = vec!["alice".to_string(), "bob".to_string(), "admin".to_string()];
+    let typed = vec![
+        ("alice".to_string(), ActivityCategory::Transfer),
+        ("bob".to_string(), ActivityCategory::Transfer),
+        ("admin".to_string(), ActivityCategory::Fee),
+    ];
+    store.write_addr_activity_entries_with_categories("enc_blk1", &addrs, &typed)?;
+
+    // Untyped index: all three addresses should find the block
+    let (alice_ids, _) = store
+        .recent_ids_by_address("alice", None, None, 100)
+        .await?;
+    assert_eq!(alice_ids, vec!["enc_blk1"]);
+
+    let (bob_ids, _) = store.recent_ids_by_address("bob", None, None, 100).await?;
+    assert_eq!(bob_ids, vec!["enc_blk1"]);
+
+    let (admin_ids, _) = store
+        .recent_ids_by_address("admin", None, None, 100)
+        .await?;
+    assert_eq!(admin_ids, vec!["enc_blk1"]);
+
+    // Typed index: Transfer category
+    let cats = &[ActivityCategory::Transfer.as_byte()];
+    let (transfer_alice, _) = store
+        .recent_ids_by_address_and_categories("alice", cats, None, None, 100)
+        .await?;
+    assert_eq!(transfer_alice, vec!["enc_blk1"]);
+
+    let (transfer_bob, _) = store
+        .recent_ids_by_address_and_categories("bob", cats, None, None, 100)
+        .await?;
+    assert_eq!(transfer_bob, vec!["enc_blk1"]);
+
+    // Admin should NOT appear in Transfer category
+    let (transfer_admin, _) = store
+        .recent_ids_by_address_and_categories("admin", cats, None, None, 100)
+        .await?;
+    assert!(transfer_admin.is_empty());
+
+    // Typed index: Fee category — only admin
+    let cats = &[ActivityCategory::Fee.as_byte()];
+    let (fee_admin, _) = store
+        .recent_ids_by_address_and_categories("admin", cats, None, None, 100)
+        .await?;
+    assert_eq!(fee_admin, vec!["enc_blk1"]);
+
+    let (fee_alice, _) = store
+        .recent_ids_by_address_and_categories("alice", cats, None, None, 100)
+        .await?;
+    assert!(fee_alice.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn write_with_categories_empty_is_noop() -> Result<()> {
+    let store = test_rocks_store_with_limit("write-both-empty", 64).await?;
+
+    // Both empty — should succeed without error
+    store.write_addr_activity_entries_with_categories("blk", &[], &[])?;
+
+    let (ids, _) = store
+        .recent_ids_by_address("anyone", None, None, 100)
+        .await?;
+    assert!(ids.is_empty());
+
+    Ok(())
+}

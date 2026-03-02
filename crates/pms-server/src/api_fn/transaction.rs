@@ -275,13 +275,17 @@ pub async fn wallet_send_tx(
                 tx_helpers::apply_utxo_delta(&adapter, &wb.id, &tx.inputs, &tx.outputs).await;
             }
 
-            // Index activity for encrypted payload
-            // (Plain payloads are indexed automatically in append_block_atomic_with_utxo,
-            //  but encrypted payloads need explicit indexing since the coordinator
-            //  knows the plain payload before encryption.)
+            // Index activity for encrypted payload (both untyped + typed).
+            // Plain payloads are indexed automatically in append_block_atomic_with_utxo,
+            // but encrypted payloads need explicit indexing since the coordinator
+            // knows the plain payload before encryption.
             {
                 let addrs = pms_storage::helpers::extract_involved_addresses(&plain);
-                if let Err(e) = state.store.write_addr_activity_entries(&wb.id, &addrs) {
+                let typed = pms_storage::helpers::extract_involved_with_category(&plain);
+                if let Err(e) = state
+                    .store
+                    .write_addr_activity_entries_with_categories(&wb.id, &addrs, &typed)
+                {
                     tracing::warn!("addr_activity index for encrypted block: {e}");
                 }
             }

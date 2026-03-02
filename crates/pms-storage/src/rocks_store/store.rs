@@ -553,6 +553,46 @@ impl RocksStore {
         Ok(())
     }
 
+    /// Write **both** `addr_activity` (untyped) and `addr_type_activity` (typed)
+    /// index entries for a block in a single atomic WriteBatch.
+    ///
+    /// Used for encrypted payloads where the coordinator knows the plain payload
+    /// before encryption and can extract addresses + categories.
+    pub fn write_addr_activity_entries_with_categories(
+        &self,
+        block_id: &str,
+        addresses: &[String],
+        typed: &[(String, crate::helpers::ActivityCategory)],
+    ) -> Result<()> {
+        if addresses.is_empty() && typed.is_empty() {
+            return Ok(());
+        }
+        let ts = crate::helpers::now_ms_i64();
+        let mut batch = rocksdb::WriteBatch::default();
+
+        // Untyped index (addr_activity)
+        if !addresses.is_empty() {
+            let cf_aa = self.cf("addr_activity");
+            for addr in addresses {
+                let key = crate::helpers::key_addr_activity(addr, ts, block_id);
+                batch.put_cf(&cf_aa, &key, b"");
+            }
+        }
+
+        // Typed index (addr_type_activity)
+        if !typed.is_empty() {
+            let cf_ata = self.cf("addr_type_activity");
+            for (addr, cat) in typed {
+                let key =
+                    crate::helpers::key_addr_type_activity(addr, cat.as_byte(), ts, block_id);
+                batch.put_cf(&cf_ata, &key, b"");
+            }
+        }
+
+        self.db.write(batch)?;
+        Ok(())
+    }
+
     /// Paginated reverse-chronological scan of the `addr_type_activity` CF for a
     /// single address filtered by one or more activity categories.
     ///

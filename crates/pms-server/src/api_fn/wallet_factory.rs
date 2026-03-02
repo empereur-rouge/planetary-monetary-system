@@ -610,6 +610,18 @@ pub async fn wallet_send_simple(
             tx_helpers::apply_utxo_delta(&adapter, &wb.id, &signed_tx.inputs, &signed_tx.outputs)
                 .await;
 
+            // Index activity for encrypted payload (both untyped + typed).
+            {
+                let addrs = pms_storage::helpers::extract_involved_addresses(&plain);
+                let typed = pms_storage::helpers::extract_involved_with_category(&plain);
+                if let Err(e) = state
+                    .store
+                    .write_addr_activity_entries_with_categories(&wb.id, &addrs, &typed)
+                {
+                    tracing::warn!("addr_activity index for encrypted block: {e}");
+                }
+            }
+
             // Create reward block for fee distribution
             tx_helpers::create_reward_block(&state, fee_dec, &wb.id).await;
 

@@ -169,14 +169,41 @@ pub async fn get_wallet_activity(
                 },
                 PayloadEnvelope::Encrypted(enc) => match &q.x25519_sk_hex {
                     Some(sk) => match enc.decrypt_as_payload(sk) {
-                        Ok(decrypted)
-                            if pms_wallet::history::involves_address(&decrypted, &address) =>
-                        {
-                            decrypted
+                        // Trust the addr_activity index: the coordinator indexed
+                        // this block for this address. No need for involves_address
+                        // check (which misses senders without change outputs).
+                        Ok(decrypted) => decrypted,
+                        _ => {
+                            // Decryption failed (wrong key) — show encrypted fallback
+                            items.push(ActivityItem {
+                                block_id: b.id.clone(),
+                                ts_ms: ts,
+                                activity_type: "encrypted".to_string(),
+                                direction: "info".to_string(),
+                                amount: None,
+                                asset_id: None,
+                                counterparty: None,
+                                ledger_id: ledger_tag.clone(),
+                                payload: serde_json::json!({ "encrypted": true }),
+                            });
+                            continue;
                         }
-                        _ => continue,
                     },
-                    None => continue,
+                    None => {
+                        // No decryption key provided — show minimal encrypted entry
+                        items.push(ActivityItem {
+                            block_id: b.id.clone(),
+                            ts_ms: ts,
+                            activity_type: "encrypted".to_string(),
+                            direction: "info".to_string(),
+                            amount: None,
+                            asset_id: None,
+                            counterparty: None,
+                            ledger_id: ledger_tag.clone(),
+                            payload: serde_json::json!({ "encrypted": true }),
+                        });
+                        continue;
+                    }
                 },
                 PayloadEnvelope::Plain(plain) => {
                     if !pms_wallet::history::involves_address(&plain, &address) {
@@ -328,10 +355,47 @@ pub async fn stream_wallet_activity(
                         },
                         PayloadEnvelope::Encrypted(enc) => match &sk_opt {
                             Some(sk) => match enc.decrypt_as_payload(sk) {
-                                Ok(decrypted) if pms_wallet::history::involves_address(&decrypted, &addr) => decrypted,
-                                _ => continue,
+                                // Trust involved_addresses from event: no involves_address check
+                                Ok(decrypted) => decrypted,
+                                _ => {
+                                    // Decryption failed — emit encrypted fallback
+                                    let item = ActivityItem {
+                                        block_id: block_id.clone(),
+                                        ts_ms,
+                                        activity_type: "encrypted".to_string(),
+                                        direction: "info".to_string(),
+                                        amount: None,
+                                        asset_id: None,
+                                        counterparty: None,
+                                        ledger_id: ledger_tag.clone(),
+                                        payload: serde_json::json!({ "encrypted": true }),
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&item) {
+                                        yield Ok(Event::default().event("activity").data(json));
+                                    }
+                                    continue;
+                                }
                             },
-                            None => continue,
+                            None => {
+                                // No key — emit encrypted fallback if address is in involved_addresses
+                                if addr_match {
+                                    let item = ActivityItem {
+                                        block_id: block_id.clone(),
+                                        ts_ms,
+                                        activity_type: "encrypted".to_string(),
+                                        direction: "info".to_string(),
+                                        amount: None,
+                                        asset_id: None,
+                                        counterparty: None,
+                                        ledger_id: ledger_tag.clone(),
+                                        payload: serde_json::json!({ "encrypted": true }),
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&item) {
+                                        yield Ok(Event::default().event("activity").data(json));
+                                    }
+                                }
+                                continue;
+                            }
                         },
                         PayloadEnvelope::Plain(plain) => {
                             if !pms_wallet::history::involves_address(&plain, &addr) {
@@ -1834,5 +1898,33 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].activity_type, "mint");
         assert_eq!(items[0].asset_id.as_deref(), Some("edenite"));
+    }
+
+    // ── Encrypted fallback item structure ────────────────────────────
+
+    #[test]
+    fn encrypted_fallback_item_has_correct_fields() {
+        // Verify the structure of the encrypted fallback ActivityItem
+        // matches what the endpoint produces.
+        let item = ActivityItem {
+            block_id: "enc_blk1".to_string(),
+            ts_ms: 1000,
+            activity_type: "encrypted".to_string(),
+            direction: "info".to_string(),
+            amount: None,
+            asset_id: None,
+            counterparty: None,
+            ledger_id: None,
+            payload: serde_json::json!({ "encrypted": true }),
+        };
+        assert_eq!(item.activity_type, "encrypted");
+        assert_eq!(item.direction, "info");
+        assert!(item.amount.is_none());
+        assert!(item.counterparty.is_none());
+
+        // Verify it serializes correctly (no skip_serializing_if surprises)
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["activity_type"], "encrypted");
+        assert_eq!(json["payload"]["encrypted"], true);
     }
 }

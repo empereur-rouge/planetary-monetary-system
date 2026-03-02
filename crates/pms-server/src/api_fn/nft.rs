@@ -356,6 +356,21 @@ pub async fn mint_nft(
                 .with_label_values(&[&state.ledger_id])
                 .inc();
 
+            // Index activity for encrypted NFT payload (owner address + Nft category).
+            {
+                let addrs = vec![req.owner_address.clone()];
+                let typed = vec![(
+                    req.owner_address.clone(),
+                    pms_storage::helpers::ActivityCategory::Nft,
+                )];
+                if let Err(e) = state
+                    .store
+                    .write_addr_activity_entries_with_categories(&block_id, &addrs, &typed)
+                {
+                    tracing::warn!("addr_activity index for encrypted NFT block: {e}");
+                }
+            }
+
             {
                 use pms_storage::NftStorage;
 
