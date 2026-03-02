@@ -486,3 +486,174 @@ async fn write_with_categories_empty_is_noop() -> Result<()> {
 
     Ok(())
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// reindex_all_activity
+// ═══════════════════════════════════════════════════════════════════
+
+fn tx_payload(from_addr: &str, to_addr: &str, amount: &str) -> PlainPayload {
+    PlainPayload::TxUtxo(pms_types::Transaction {
+        inputs: vec![],
+        outputs: vec![
+            TxOutput {
+                address: to_addr.into(),
+                amount: amount.into(),
+                asset_id: None,
+            },
+            TxOutput {
+                address: from_addr.into(),
+                amount: "9".into(),
+                asset_id: None,
+            },
+        ],
+        fee: "1".into(),
+        unlocks: vec![],
+    })
+}
+
+/// Insert a block directly into "blocks" and "id2ts" CFs, bypassing
+/// `append_block_atomic` (which would already write activity indices).
+fn insert_block_raw(store: &pms_storage::rocks_store::store::RocksStore, sb: &StoredBlock) {
+    use pms_storage::helpers::ts_to_be;
+
+    let cf_blocks = store.cf("blocks");
+    let cf_i2t = store.cf("id2ts");
+
+    let json = serde_json::to_vec(sb).unwrap();
+    let ts = pms_storage::helpers::now_ms_i64();
+
+    store.db.put_cf(&cf_blocks, sb.id.as_bytes(), &json).unwrap();
+    store.db.put_cf(&cf_i2t, sb.id.as_bytes(), ts_to_be(ts)).unwrap();
+}
+
+#[tokio::test]
+async fn reindex_rebuilds_plain_payload_indexes() -> Result<()> {
+    let store = test_rocks_store_with_limit("reindex-plain", 64).await?;
+
+    // Insert blocks RAW (no activity indexes)
+    let b1 = sb_with_payload("rblk1", mint_payload("alice", "100"));
+    insert_block_raw(&store, &b1);
+    sleep(Duration::from_millis(5)).await;
+
+    let b2 = sb_with_payload("rblk2", tx_payload("alice", "bob", "50"));
+    insert_block_raw(&store, &b2);
+    sleep(Duration::from_millis(5)).await;
+
+    let b3 = sb_with_payload("rblk3", reward_payload("coord"));
+    insert_block_raw(&store, &b3);
+
+    // Before reindex: no activity entries
+    let (alice_ids, _) = store
+        .recent_ids_by_address("alice", None, None, 100)
+        .await?;
+    assert!(alice_ids.is_empty(), "alice should have 0 entries before reindex");
+
+    let (bob_ids, _) = store.recent_ids_by_address("bob", None, None, 100).await?;
+    assert!(bob_ids.is_empty(), "bob should have 0 entries before reindex");
+
+    // Run reindex
+    let stats = store.reindex_all_activity()?;
+    assert_eq!(stats.total_blocks, 3);
+    assert_eq!(stats.indexed, 3);
+    assert_eq!(stats.skipped_encrypted, 0);
+
+    // After reindex: activity entries present
+    let (alice_ids, _) = store
+        .recent_ids_by_address("alice", None, None, 100)
+        .await?;
+    assert_eq!(alice_ids.len(), 2, "alice should have 2 entries (mint + tx change)");
+
+    let (bob_ids, _) = store.recent_ids_by_address("bob", None, None, 100).await?;
+    assert_eq!(bob_ids.len(), 1, "bob should have 1 entry (tx recipient)");
+
+    let (coord_ids, _) = store
+        .recent_ids_by_address("coord", None, None, 100)
+        .await?;
+    assert_eq!(coord_ids.len(), 1, "coord should have 1 entry (fee_received)");
+
+    // Typed index should also work
+    let cats = &[ActivityCategory::Transfer.as_byte()];
+    let (transfer_bob, _) = store
+        .recent_ids_by_address_and_categories("bob", cats, None, None, 100)
+        .await?;
+    assert_eq!(transfer_bob, vec!["rblk2"]);
+
+    let cats = &[ActivityCategory::Mint.as_byte()];
+    let (mint_alice, _) = store
+        .recent_ids_by_address_and_categories("alice", cats, None, None, 100)
+        .await?;
+    assert_eq!(mint_alice, vec!["rblk1"]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn reindex_skips_encrypted_payloads() -> Result<()> {
+    let store = test_rocks_store_with_limit("reindex-encrypted", 64).await?;
+
+    // Insert a plain block
+    let b1 = sb_with_payload("blk1", mint_payload("alice", "100"));
+    insert_block_raw(&store, &b1);
+    sleep(Duration::from_millis(5)).await;
+
+    // Insert a fake encrypted block (just needs to parse as Encrypted variant)
+    let enc_payload = pms_types_payload::EncryptedPayload {
+        scheme: "x25519+aes256gcm".into(),
+        key_version: 1,
+        aad: pms_types_payload::AAD { len_hint: 0 },
+        commitment: "0000".into(),
+        ciphertext_b64: "AAAA".into(),
+        recipients: vec![],
+        nonce_b64: "AAAA".into(),
+    };
+    let env = PayloadEnvelope::Encrypted(enc_payload);
+    let b2 = StoredBlock {
+        id: "enc1".into(),
+        parents: vec![],
+        payload_json: Some(serde_json::to_string(&env).unwrap()),
+        nonce: 0,
+        network_id: "".to_string(),
+        protocol_version: 0,
+        signer_pk_hex: "".to_string(),
+        signature_hex: "".to_string(),
+        metadata: None,
+    };
+    insert_block_raw(&store, &b2);
+
+    // Run reindex
+    let stats = store.reindex_all_activity()?;
+    assert_eq!(stats.total_blocks, 2);
+    assert_eq!(stats.indexed, 1, "only the plain block should be indexed");
+    assert_eq!(stats.skipped_encrypted, 1);
+
+    // Only alice's plain block should be indexed
+    let (alice_ids, _) = store
+        .recent_ids_by_address("alice", None, None, 100)
+        .await?;
+    assert_eq!(alice_ids, vec!["blk1"]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn reindex_is_idempotent() -> Result<()> {
+    let store = test_rocks_store_with_limit("reindex-idempotent", 64).await?;
+
+    let b1 = sb_with_payload("blk1", mint_payload("alice", "100"));
+    insert_block_raw(&store, &b1);
+
+    // Reindex twice
+    let stats1 = store.reindex_all_activity()?;
+    let stats2 = store.reindex_all_activity()?;
+
+    assert_eq!(stats1.indexed, 1);
+    assert_eq!(stats2.indexed, 1);
+
+    // Alice should still have exactly 1 entry (not duplicated)
+    let (alice_ids, _) = store
+        .recent_ids_by_address("alice", None, None, 100)
+        .await?;
+    assert_eq!(alice_ids.len(), 1);
+
+    Ok(())
+}

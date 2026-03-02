@@ -1,6 +1,8 @@
 // pms-server/src/api
 use crate::Server;
-use crate::admin::{admin_compact, admin_get_config, admin_ping, admin_update_config};
+use crate::admin::{
+    admin_compact, admin_get_config, admin_ping, admin_reindex_activity, admin_update_config,
+};
 use crate::api_fn::activity::{get_wallet_activity, stream_wallet_activity};
 use crate::api_fn::blocks::{get_block_by_id, submit_block};
 use crate::api_fn::bridge::{
@@ -609,6 +611,8 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
             "/admin/compliance/shadow_balance",
             get(admin_shadow_balance),
         )
+        // Admin Maintenance - Reindex activity
+        .route("/admin/reindex-activity", post(admin_reindex_activity))
         // Admin API Key CRUD endpoints
         .route("/admin/api-keys", post(admin_create_api_key))
         .route("/admin/api-keys", get(admin_list_api_keys))

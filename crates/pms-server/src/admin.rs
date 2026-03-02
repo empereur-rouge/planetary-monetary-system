@@ -67,6 +67,54 @@ pub async fn admin_compact(State(state): State<AppState>, headers: HeaderMap) ->
     )
 }
 
+/// POST /admin/reindex-activity
+///
+/// Rebuild `addr_activity` and `addr_type_activity` indexes by scanning all
+/// stored blocks. Required after deploying the encrypted-activity fix on a
+/// node that already has historical blocks without index entries.
+///
+/// Only Plain payloads are indexed (Encrypted payloads need the recipient's
+/// private key and are handled at creation time by the coordinator).
+pub async fn admin_reindex_activity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+
+    tracing::info!("[ADMIN] Reindex activity requested");
+
+    match state.store.reindex_all_activity() {
+        Ok(stats) => {
+            tracing::info!(
+                "[ADMIN] Reindex complete: {} indexed, {} encrypted skipped, {} total",
+                stats.indexed,
+                stats.skipped_encrypted,
+                stats.total_blocks,
+            );
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "ok",
+                    "action": "reindex-activity",
+                    "stats": stats
+                })),
+            )
+        }
+        Err(e) => {
+            tracing::error!("[ADMIN] Reindex failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("reindex failed: {e}") })),
+            )
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ADMIN CONFIG API - Hot-Swap de la RuntimeConfig
 // ═══════════════════════════════════════════════════════════════════════════

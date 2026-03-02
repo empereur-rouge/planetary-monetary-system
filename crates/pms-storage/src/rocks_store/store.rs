@@ -23,6 +23,14 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReindexStats {
+    pub total_blocks: usize,
+    pub indexed: usize,
+    pub skipped_encrypted: usize,
+    pub skipped_no_payload: usize,
+}
+
 pub struct RocksStore {
     /// handle RocksDB partagé (MultiThreaded for dynamic CF creation)
     pub db: Arc<PmsDb>,
@@ -591,6 +599,99 @@ impl RocksStore {
 
         self.db.write(batch)?;
         Ok(())
+    }
+
+    /// Rebuild `addr_activity` and `addr_type_activity` indexes for ALL blocks
+    /// in the store. Uses the original block timestamp from `id2ts` to preserve
+    /// chronological order.
+    ///
+    /// Only indexes `Plain` payloads (encrypted payloads cannot be decoded
+    /// without the recipient's private key — the coordinator fix in `f0109ad`
+    /// handles indexing at creation time for new encrypted blocks).
+    pub fn reindex_all_activity(&self) -> Result<ReindexStats> {
+        let cf_blocks = self.cf("blocks");
+        let cf_i2t = self.cf("id2ts");
+        let cf_aa = self.cf("addr_activity");
+        let cf_ata = self.cf("addr_type_activity");
+
+        let mut stats = ReindexStats::default();
+
+        for kv in iter_cf_all(&self.db, &cf_blocks) {
+            let (_k, v) = kv?;
+            stats.total_blocks += 1;
+
+            let Ok(sb) = serde_json::from_slice::<crate::StoredBlock>(&v) else {
+                continue;
+            };
+
+            let Some(pjson) = &sb.payload_json else {
+                stats.skipped_no_payload += 1;
+                continue;
+            };
+
+            let Ok(env) =
+                serde_json::from_str::<pms_types_payload::PayloadEnvelope>(pjson)
+            else {
+                continue;
+            };
+
+            let plain = match env {
+                pms_types_payload::PayloadEnvelope::Plain(p) => p,
+                pms_types_payload::PayloadEnvelope::Encrypted(_) => {
+                    stats.skipped_encrypted += 1;
+                    continue;
+                }
+            };
+
+            // Get original timestamp from id2ts
+            let ts = match self.db.get_cf(&cf_i2t, sb.id.as_bytes())? {
+                Some(raw) if raw.len() == 8 => {
+                    let mut be = [0u8; 8];
+                    be.copy_from_slice(&raw);
+                    u64::from_be_bytes(be) as i64
+                }
+                _ => crate::helpers::now_ms_i64(), // fallback
+            };
+
+            let addrs = crate::helpers::extract_involved_addresses(&plain);
+            let typed = crate::helpers::extract_involved_with_category(&plain);
+
+            if addrs.is_empty() && typed.is_empty() {
+                continue;
+            }
+
+            let mut batch = rocksdb::WriteBatch::default();
+
+            for addr in &addrs {
+                let key = crate::helpers::key_addr_activity(addr, ts, &sb.id);
+                batch.put_cf(&cf_aa, &key, b"");
+            }
+            for (addr, cat) in &typed {
+                let key =
+                    crate::helpers::key_addr_type_activity(addr, cat.as_byte(), ts, &sb.id);
+                batch.put_cf(&cf_ata, &key, b"");
+            }
+
+            self.db.write(batch)?;
+            stats.indexed += 1;
+
+            if stats.indexed % 10_000 == 0 {
+                tracing::info!(
+                    "Reindex progress: {} indexed / {} scanned",
+                    stats.indexed,
+                    stats.total_blocks,
+                );
+            }
+        }
+
+        tracing::info!(
+            "Reindex complete: {} indexed, {} encrypted skipped, {} total blocks",
+            stats.indexed,
+            stats.skipped_encrypted,
+            stats.total_blocks,
+        );
+
+        Ok(stats)
     }
 
     /// Paginated reverse-chronological scan of the `addr_type_activity` CF for a
