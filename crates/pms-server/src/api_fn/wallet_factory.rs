@@ -33,6 +33,7 @@ pub struct WalletCreateResponse {
     pub private_key_hex: String,
     pub public_key_hex: String,
     pub x25519_pub_hex: String,
+    pub x25519_sk_hex: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mnemonic_words: Option<Vec<String>>,
 }
@@ -64,6 +65,7 @@ pub async fn wallet_create(
     let address = wallet.get_address(hrp);
     let priv_bytes = STANDARD.decode(&wallet.private_key_b64).unwrap_or_default();
     let private_key_hex = hex::encode(&priv_bytes);
+    let x25519_sk_hex = wallet.x25519_sk_hex().unwrap_or_default();
 
     (
         StatusCode::OK,
@@ -73,6 +75,7 @@ pub async fn wallet_create(
             private_key_hex,
             public_key_hex: wallet.public_key_hex,
             x25519_pub_hex: wallet.x25519_pub_hex,
+            x25519_sk_hex,
             mnemonic_words: wallet.mnemonic_words,
         })),
     )
@@ -95,6 +98,7 @@ pub struct RestoreMnemonicResponse {
     pub private_key_hex: String,
     pub public_key_hex: String,
     pub x25519_pub_hex: String,
+    pub x25519_sk_hex: String,
     pub mnemonic_words: Vec<String>,
 }
 
@@ -118,6 +122,7 @@ pub async fn wallet_restore_mnemonic(
     let address = wallet.get_address(hrp);
     let priv_bytes = STANDARD.decode(&wallet.private_key_b64).unwrap_or_default();
     let private_key_hex = hex::encode(&priv_bytes);
+    let x25519_sk_hex = wallet.x25519_sk_hex().unwrap_or_default();
     let mnemonic_words = wallet
         .mnemonic_words
         .clone()
@@ -131,6 +136,7 @@ pub async fn wallet_restore_mnemonic(
             private_key_hex,
             public_key_hex: wallet.public_key_hex,
             x25519_pub_hex: wallet.x25519_pub_hex,
+            x25519_sk_hex,
             mnemonic_words,
         })),
     )
@@ -163,6 +169,7 @@ pub async fn wallet_restore_private_key(
     };
 
     let address = wallet.get_address(hrp);
+    let x25519_sk_hex = wallet.x25519_sk_hex().unwrap_or_default();
 
     (
         StatusCode::OK,
@@ -172,6 +179,7 @@ pub async fn wallet_restore_private_key(
             private_key_hex: req.private_key_hex,
             public_key_hex: wallet.public_key_hex,
             x25519_pub_hex: wallet.x25519_pub_hex,
+            x25519_sk_hex,
             mnemonic_words: None,
         })),
     )
