@@ -1,7 +1,8 @@
 // pms-server/src/api
 use crate::Server;
 use crate::admin::{
-    admin_compact, admin_get_config, admin_ping, admin_reindex_activity, admin_update_config,
+    admin_compact, admin_get_config, admin_ping, admin_reindex_activity,
+    admin_reindex_activity_items, admin_update_config,
 };
 use crate::api_fn::activity::{get_wallet_activity, stream_wallet_activity};
 use crate::api_fn::blocks::{get_block_by_id, submit_block};
@@ -108,6 +109,8 @@ pub struct AppState {
     /// Protégé par un RwLock pour lectures concurrentes (middleware)
     /// et écritures exclusives (CRUD admin).
     pub api_key_store: SharedApiKeyStore,
+    /// In-memory cache for activity endpoint responses.
+    pub activity_cache: Arc<crate::api_fn::activity::ActivityCache>,
 }
 
 /// Sync the PMS_BLOCKS_TOTAL gauge with the actual in-memory DAG size for the default ledger.
@@ -613,6 +616,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         )
         // Admin Maintenance - Reindex activity
         .route("/admin/reindex-activity", post(admin_reindex_activity))
+        .route("/admin/reindex-activity-items", post(admin_reindex_activity_items))
         // Admin API Key CRUD endpoints
         .route("/admin/api-keys", post(admin_create_api_key))
         .route("/admin/api-keys", get(admin_list_api_keys))
@@ -806,6 +810,7 @@ pub async fn serve_api(
             &settings.fees,
             None,
         )),
+        activity_cache: Arc::new(crate::api_fn::activity::ActivityCache::new(10_000, 30)),
     };
 
     // ═══════════════════════════════════════════════════════════════════════

@@ -252,6 +252,7 @@ async fn main() -> Result<()> {
                     None,
                 ),
             ),
+            activity_cache: std::sync::Arc::new(pms_server::api_fn::activity::ActivityCache::new(10_000, 30)),
         };
 
         eprintln!("🔧 Launching Internal API at {}", addr);

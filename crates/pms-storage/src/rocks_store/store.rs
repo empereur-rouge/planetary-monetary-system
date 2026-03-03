@@ -107,6 +107,7 @@ impl RocksStore {
             "compliance_log", // Compliance audit trail: block_id -> ComplianceLogEntry (JSON)
             "addr_activity", // Per-address activity index: [addr][0x00][ts:8][block_id] -> ""
             "addr_type_activity", // Per-address-per-type index: [addr][0x00][cat:1][ts:8][block_id] -> ""
+            "activity_items", // Pre-computed activity items: same key as addr_activity -> JSON(Vec<StoredActivityItem>)
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -227,6 +228,7 @@ impl RocksStore {
         "compliance_log",
         "addr_activity",
         "addr_type_activity",
+        "activity_items",
     ];
 
     /// Ouvre un RocksDB avec les column families de **plusieurs prefixes** à la fois.
@@ -543,6 +545,150 @@ impl RocksStore {
         Ok((ids, next_cursor))
     }
 
+    /// Like `recent_ids_by_address` but also returns the timestamp from the key
+    /// and any pre-computed `StoredActivityItem`s from the `activity_items` CF.
+    ///
+    /// Returns `(entries, next_cursor)` where each entry is
+    /// `(block_id, ts_ms, Option<Vec<StoredActivityItem>>)`.
+    /// When `Some`, the items can be used directly without fetching the full block.
+    pub async fn recent_activity_items_by_address(
+        &self,
+        addr: &str,
+        after_ts: Option<i64>,
+        after_id: Option<String>,
+        limit: usize,
+    ) -> Result<(
+        Vec<(String, i64, Option<Vec<crate::activity_item::StoredActivityItem>>)>,
+        Option<(i64, String, bool)>,
+    )> {
+        use crate::helpers::{key_addr_activity, parse_addr_activity_key, prefix_addr_activity};
+
+        let cf_aa = self.cf("addr_activity");
+        let cf_items = self.cf("activity_items");
+        let addr_len = addr.len();
+        let prefix = prefix_addr_activity(addr);
+
+        let seek_key = if let (Some(ts), Some(id)) = (after_ts, after_id.as_deref()) {
+            key_addr_activity(addr, ts, id)
+        } else {
+            let mut end_key = prefix.clone();
+            if let Some(last) = end_key.last_mut() {
+                *last = 0x01;
+            }
+            end_key
+        };
+
+        let mut entries = Vec::with_capacity(limit + 1);
+        let iter = self
+            .db
+            .iterator_cf(&cf_aa, IteratorMode::From(&seek_key, Direction::Reverse));
+        let mut skipped_cursor = false;
+
+        for item in iter {
+            let (k, _) = item?;
+
+            if k.len() < prefix.len() || &k[..prefix.len()] != prefix.as_slice() {
+                break;
+            }
+
+            let Some((ts, block_id)) = parse_addr_activity_key(&k, addr_len) else {
+                continue;
+            };
+
+            if !skipped_cursor && after_ts.is_some() && after_id.is_some() {
+                if Some(ts) == after_ts && Some(&block_id) == after_id.as_ref() {
+                    skipped_cursor = true;
+                    continue;
+                }
+                skipped_cursor = true;
+            }
+
+            // Try to read pre-computed items from activity_items CF using the exact same key
+            let precomputed = self
+                .db
+                .get_cf(&cf_items, &k)
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_slice::<Vec<crate::activity_item::StoredActivityItem>>(&v).ok());
+
+            entries.push((block_id, ts, precomputed));
+            if entries.len() > limit {
+                break;
+            }
+        }
+
+        let has_more = entries.len() > limit;
+        if has_more {
+            entries.pop();
+        }
+
+        let next_cursor = if has_more {
+            entries.last().map(|(id, ts, _)| (*ts, id.clone(), true))
+        } else {
+            None
+        };
+
+        Ok((entries, next_cursor))
+    }
+
+    /// Like `recent_ids_by_address_and_categories` but also returns timestamps
+    /// and pre-computed `StoredActivityItem`s from the `activity_items` CF.
+    pub async fn recent_activity_items_by_address_and_categories(
+        &self,
+        addr: &str,
+        categories: &[u8],
+        after_ts: Option<i64>,
+        after_id: Option<String>,
+        limit: usize,
+    ) -> Result<(
+        Vec<(String, i64, Option<Vec<crate::activity_item::StoredActivityItem>>)>,
+        Option<(i64, String, bool)>,
+    )> {
+        // Get IDs + cursor from the existing typed scan
+        let (ids, cursor) = self
+            .recent_ids_by_address_and_categories(addr, categories, after_ts, after_id, limit)
+            .await?;
+
+        if ids.is_empty() {
+            return Ok((vec![], cursor));
+        }
+
+        // For each ID, look up ts from id2ts and items from activity_items
+        let cf_i2t = self.cf("id2ts");
+        let cf_items = self.cf("activity_items");
+        let mut entries = Vec::with_capacity(ids.len());
+
+        for id in &ids {
+            // Get timestamp
+            let ts = self
+                .db
+                .get_cf(&cf_i2t, id.as_bytes())?
+                .and_then(|v| {
+                    if v.len() == 8 {
+                        let mut be = [0u8; 8];
+                        be.copy_from_slice(&v);
+                        Some(u64::from_be_bytes(be) as i64)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            // Try to read pre-computed items
+            let item_key = crate::helpers::key_addr_activity(addr, ts, id);
+            let precomputed = self
+                .db
+                .get_cf(&cf_items, &item_key)
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_slice::<Vec<crate::activity_item::StoredActivityItem>>(&v).ok());
+
+            entries.push((id.clone(), ts, precomputed));
+        }
+
+        Ok((entries, cursor))
+    }
+
     /// Write addr_activity index entries for a block with pre-computed addresses.
     /// Used for Encrypted payloads where addresses are known by the caller
     /// (e.g. the coordinator) but can't be extracted from the stored payload.
@@ -566,11 +712,15 @@ impl RocksStore {
     ///
     /// Used for encrypted payloads where the coordinator knows the plain payload
     /// before encryption and can extract addresses + categories.
+    ///
+    /// If `precomputed_items` is provided, they are also written to the
+    /// `activity_items` CF for fast reads.
     pub fn write_addr_activity_entries_with_categories(
         &self,
         block_id: &str,
         addresses: &[String],
         typed: &[(String, crate::helpers::ActivityCategory)],
+        precomputed_items: Option<&std::collections::HashMap<String, Vec<crate::activity_item::StoredActivityItem>>>,
     ) -> Result<()> {
         if addresses.is_empty() && typed.is_empty() {
             return Ok(());
@@ -594,6 +744,18 @@ impl RocksStore {
                 let key =
                     crate::helpers::key_addr_type_activity(addr, cat.as_byte(), ts, block_id);
                 batch.put_cf(&cf_ata, &key, b"");
+            }
+        }
+
+        // Pre-computed activity items (activity_items CF)
+        if let Some(items_map) = precomputed_items {
+            let cf_items = self.cf("activity_items");
+            for (addr, items) in items_map {
+                if !items.is_empty() {
+                    let key = crate::helpers::key_addr_activity(addr, ts, block_id);
+                    let val = serde_json::to_vec(items)?;
+                    batch.put_cf(&cf_items, &key, &val);
+                }
             }
         }
 
@@ -686,6 +848,97 @@ impl RocksStore {
 
         tracing::info!(
             "Reindex complete: {} indexed, {} encrypted skipped, {} total blocks",
+            stats.indexed,
+            stats.skipped_encrypted,
+            stats.total_blocks,
+        );
+
+        Ok(stats)
+    }
+
+    /// Rebuild `activity_items` CF for ALL blocks in the store.
+    ///
+    /// For each block, extracts the plain payload, computes per-address items
+    /// via `precompute_all_items()`, and writes them to the `activity_items` CF.
+    ///
+    /// For TxUtxo payloads, `sender_addr = None` because historical UTXOs are
+    /// already spent (this means sender-based classification may be incomplete
+    /// for old blocks — the fallback path will handle it).
+    pub fn reindex_all_activity_items(&self) -> Result<ReindexStats> {
+        let cf_blocks = self.cf("blocks");
+        let cf_i2t = self.cf("id2ts");
+        let cf_items = self.cf("activity_items");
+
+        let mut stats = ReindexStats::default();
+
+        for kv in iter_cf_all(&self.db, &cf_blocks) {
+            let (_k, v) = kv?;
+            stats.total_blocks += 1;
+
+            let Ok(sb) = serde_json::from_slice::<crate::StoredBlock>(&v) else {
+                continue;
+            };
+
+            let Some(pjson) = &sb.payload_json else {
+                stats.skipped_no_payload += 1;
+                continue;
+            };
+
+            let Ok(env) =
+                serde_json::from_str::<pms_types_payload::PayloadEnvelope>(pjson)
+            else {
+                continue;
+            };
+
+            let plain = match env {
+                pms_types_payload::PayloadEnvelope::Plain(p) => p,
+                pms_types_payload::PayloadEnvelope::Encrypted(_) => {
+                    stats.skipped_encrypted += 1;
+                    continue;
+                }
+            };
+
+            // Get original timestamp from id2ts
+            let ts = match self.db.get_cf(&cf_i2t, sb.id.as_bytes())? {
+                Some(raw) if raw.len() == 8 => {
+                    let mut be = [0u8; 8];
+                    be.copy_from_slice(&raw);
+                    u64::from_be_bytes(be) as i64
+                }
+                _ => crate::helpers::now_ms_i64(),
+            };
+
+            let addrs = crate::helpers::extract_involved_addresses(&plain);
+            if addrs.is_empty() {
+                continue;
+            }
+
+            // Pre-compute items (sender=None for TxUtxo — UTXOs already spent)
+            let items_map = crate::helpers::precompute_all_items(&plain, &addrs, None);
+
+            let mut batch = rocksdb::WriteBatch::default();
+            for (addr, items) in &items_map {
+                if !items.is_empty() {
+                    let key = crate::helpers::key_addr_activity(addr, ts, &sb.id);
+                    let val = serde_json::to_vec(items)?;
+                    batch.put_cf(&cf_items, &key, &val);
+                }
+            }
+
+            self.db.write(batch)?;
+            stats.indexed += 1;
+
+            if stats.indexed % 10_000 == 0 {
+                tracing::info!(
+                    "Reindex activity_items progress: {} indexed / {} scanned",
+                    stats.indexed,
+                    stats.total_blocks,
+                );
+            }
+        }
+
+        tracing::info!(
+            "Reindex activity_items complete: {} indexed, {} encrypted skipped, {} total blocks",
             stats.indexed,
             stats.skipped_encrypted,
             stats.total_blocks,
@@ -1534,9 +1787,9 @@ impl DagStorage for RocksStore {
         // 1.b) Indices DAG
         self.apply_dag_indices(&mut batch, b)?;
 
-        // 1.c) Per-address activity indexes (addr_activity + addr_type_activity)
+        // 1.c) Per-address activity indexes (addr_activity + addr_type_activity + activity_items)
         let ts = crate::helpers::now_ms_i64();
-        self.apply_addr_activity_indices(&mut batch, b, ts)?;
+        self.apply_addr_activity_indices(&mut batch, b, ts, None)?;
 
         // 2) write atomique
         self.db.write(batch)?;

@@ -1,9 +1,11 @@
 // src/atomic.rs
 
 use crate::StoredBlock;
+use crate::activity_item::StoredActivityItem;
 use crate::helpers::{key_time_index, le_to_u64, now_ms_i64, ts_to_be, u64_to_le};
 use crate::rocks_store::store::RocksStore;
 use anyhow::Result;
+use std::collections::HashMap;
 
 use pms_types::Block;
 use pms_wire::WireMeta;
@@ -70,8 +72,8 @@ impl RocksStore {
             batch.put_cf(&cf_childset, edge_key, b"");
         }
 
-        // Per-address activity indexes (addr_activity + addr_type_activity)
-        self.apply_addr_activity_indices(&mut batch, b, now_ts)?;
+        // Per-address activity indexes (addr_activity + addr_type_activity + activity_items)
+        self.apply_addr_activity_indices(&mut batch, b, now_ts, None)?;
 
         // write atomiquement
         self.db.write(batch)?;
@@ -148,13 +150,18 @@ impl RocksStore {
         Ok(())
     }
 
-    /// Write per-address activity indexes (addr_activity + addr_type_activity)
+    /// Write per-address activity indexes (addr_activity + addr_type_activity + activity_items)
     /// into the provided WriteBatch.
+    ///
+    /// If `precomputed` is `Some`, those pre-classified items are written to the
+    /// `activity_items` CF. Otherwise, items are auto-computed from the plain payload
+    /// (with `sender_addr = None` for TxUtxo).
     pub(crate) fn apply_addr_activity_indices(
         &self,
         batch: &mut WriteBatch,
         b: &StoredBlock,
         ts: i64,
+        precomputed: Option<&HashMap<String, Vec<StoredActivityItem>>>,
     ) -> Result<()> {
         let Some(pjson) = &b.payload_json else {
             return Ok(());
@@ -182,6 +189,29 @@ impl RocksStore {
             for (addr, cat) in &typed {
                 let key = crate::helpers::key_addr_type_activity(addr, cat.as_byte(), ts, &b.id);
                 batch.put_cf(&cf_ata, &key, b"");
+            }
+        }
+
+        // Pre-computed activity items (activity_items CF)
+        let cf_items = self.cf("activity_items");
+        if let Some(items_map) = precomputed {
+            for (addr, items) in items_map {
+                if !items.is_empty() {
+                    let key = crate::helpers::key_addr_activity(addr, ts, &b.id);
+                    let val = serde_json::to_vec(items)?;
+                    batch.put_cf(&cf_items, &key, &val);
+                }
+            }
+        } else {
+            // Auto-compute from payload (sender=None for TxUtxo — best-effort)
+            let items_map =
+                crate::helpers::precompute_all_items(plain, &addrs, None);
+            for (addr, items) in &items_map {
+                if !items.is_empty() {
+                    let key = crate::helpers::key_addr_activity(addr, ts, &b.id);
+                    let val = serde_json::to_vec(items)?;
+                    batch.put_cf(&cf_items, &key, &val);
+                }
             }
         }
 

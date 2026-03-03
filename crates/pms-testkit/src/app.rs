@@ -100,6 +100,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
             &settings.fees,
             None,
         )),
+        activity_cache: Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
     };
 
     // 10) Router axum
@@ -200,6 +201,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
             &settings.fees,
             None,
         )),
+        activity_cache: Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
     };
 
     // 10) Router
@@ -309,6 +311,7 @@ pub async fn make_test_ctx_with_admin(
             &settings.fees,
             None,
         )),
+        activity_cache: Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
     };
 
     // 10) Router

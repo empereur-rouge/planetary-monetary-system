@@ -423,7 +423,7 @@ async fn write_with_categories_indexes_both_cfs() -> Result<()> {
         ("bob".to_string(), ActivityCategory::Transfer),
         ("admin".to_string(), ActivityCategory::Fee),
     ];
-    store.write_addr_activity_entries_with_categories("enc_blk1", &addrs, &typed)?;
+    store.write_addr_activity_entries_with_categories("enc_blk1", &addrs, &typed, None)?;
 
     // Untyped index: all three addresses should find the block
     let (alice_ids, _) = store
@@ -477,7 +477,7 @@ async fn write_with_categories_empty_is_noop() -> Result<()> {
     let store = test_rocks_store_with_limit("write-both-empty", 64).await?;
 
     // Both empty — should succeed without error
-    store.write_addr_activity_entries_with_categories("blk", &[], &[])?;
+    store.write_addr_activity_entries_with_categories("blk", &[], &[], None)?;
 
     let (ids, _) = store
         .recent_ids_by_address("anyone", None, None, 100)

@@ -7,6 +7,7 @@
 #![allow(clippy::useless_conversion)]
 extern crate core;
 
+pub mod activity_item;
 mod checkpoint_rocks;
 pub mod compliance_store;
 pub mod config_store;
@@ -20,6 +21,7 @@ pub mod rocks_store;
 pub mod store;
 pub mod traits;
 
+pub use activity_item::*;
 pub use compliance_store::*;
 pub use config_store::*;
 pub use migrations::*;
