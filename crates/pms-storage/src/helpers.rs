@@ -382,10 +382,12 @@ pub fn classify_for_storage(
         PlainPayload::TxUtxo(tx) => {
             let is_sender = sender_addr == Some(addr);
             let is_receiver = tx.outputs.iter().any(|o| o.address == addr);
+            let has_other_recipients = tx.outputs.iter().any(|o| o.address != addr);
             let payload_val = serde_json::to_value(tx).unwrap_or_default();
             let mut items = Vec::new();
 
-            if is_sender && is_receiver {
+            if is_sender && is_receiver && !has_other_recipients {
+                // True self-transfer (consolidation): ALL outputs go back to sender
                 let net: rust_decimal::Decimal = tx
                     .outputs
                     .iter()
@@ -401,6 +403,7 @@ pub fn classify_for_storage(
                     payload: payload_val,
                 });
             } else if is_sender {
+                // Transfer out (with or without change back to sender)
                 let recipient = tx
                     .outputs
                     .iter()

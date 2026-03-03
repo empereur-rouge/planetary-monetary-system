@@ -270,7 +270,14 @@ pub async fn wallet_send_tx(
     // ============================================================
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
         Ok(PutResult::Inserted) => {
-            // Apply UTXO delta for encrypted payload
+            // Resolve sender BEFORE spending UTXOs — once spent, get_utxo returns None.
+            let sender_addr = if let PlainPayload::TxUtxo(ref tx) = plain {
+                if let Some(first_input) = tx.inputs.first() {
+                    state.srv.adapter_arc().get_utxo(&first_input.out).await.map(|u| u.address)
+                } else { None }
+            } else { None };
+
+            // Apply UTXO delta for encrypted payload (spends inputs, creates outputs)
             if let PlainPayload::TxUtxo(ref tx) = plain {
                 tx_helpers::apply_utxo_delta(&adapter, &wb.id, &tx.inputs, &tx.outputs).await;
             }
@@ -280,14 +287,17 @@ pub async fn wallet_send_tx(
             // but encrypted payloads need explicit indexing since the coordinator
             // knows the plain payload before encryption.
             {
-                let addrs = pms_storage::helpers::extract_involved_addresses(&plain);
-                let typed = pms_storage::helpers::extract_involved_with_category(&plain);
-                // Pre-compute activity items (sender is known before persist)
-                let sender_addr = if let pms_types_payload::PlainPayload::TxUtxo(ref tx) = plain {
-                    if let Some(first_input) = tx.inputs.first() {
-                        state.srv.adapter_arc().get_utxo(&first_input.out).await.map(|u| u.address)
-                    } else { None }
-                } else { None };
+                let mut addrs = pms_storage::helpers::extract_involved_addresses(&plain);
+                let mut typed = pms_storage::helpers::extract_involved_with_category(&plain);
+                // Add sender to indexed addresses (extract_involved_addresses only
+                // returns output addresses for TxUtxo, but the sender may have no
+                // change output and would be missed).
+                if let Some(ref sa) = sender_addr {
+                    if !addrs.contains(sa) {
+                        addrs.push(sa.clone());
+                        typed.push((sa.clone(), pms_storage::helpers::ActivityCategory::Transfer));
+                    }
+                }
                 let precomputed = pms_storage::helpers::precompute_all_items(
                     &plain, &addrs, sender_addr.as_deref(),
                 );

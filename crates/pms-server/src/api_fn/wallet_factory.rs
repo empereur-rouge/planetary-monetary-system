@@ -607,18 +607,27 @@ pub async fn wallet_send_simple(
     // ════════════════════════════════════════════════════════════════════
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
         Ok(PutResult::Inserted) => {
+            // Resolve sender BEFORE spending UTXOs — once spent, get_utxo returns None.
+            let sender_addr = if let pms_types_payload::PlainPayload::TxUtxo(ref tx) = plain {
+                if let Some(first_input) = tx.inputs.first() {
+                    state.srv.adapter_arc().get_utxo(&first_input.out).await.map(|u| u.address)
+                } else { None }
+            } else { None };
+
             tx_helpers::apply_utxo_delta(&adapter, &wb.id, &signed_tx.inputs, &signed_tx.outputs)
                 .await;
 
             // Index activity for encrypted payload (both untyped + typed + precomputed items).
             {
-                let addrs = pms_storage::helpers::extract_involved_addresses(&plain);
-                let typed = pms_storage::helpers::extract_involved_with_category(&plain);
-                let sender_addr = if let pms_types_payload::PlainPayload::TxUtxo(ref tx) = plain {
-                    if let Some(first_input) = tx.inputs.first() {
-                        state.srv.adapter_arc().get_utxo(&first_input.out).await.map(|u| u.address)
-                    } else { None }
-                } else { None };
+                let mut addrs = pms_storage::helpers::extract_involved_addresses(&plain);
+                let mut typed = pms_storage::helpers::extract_involved_with_category(&plain);
+                // Add sender to indexed addresses if not already present
+                if let Some(ref sa) = sender_addr {
+                    if !addrs.contains(sa) {
+                        addrs.push(sa.clone());
+                        typed.push((sa.clone(), pms_storage::helpers::ActivityCategory::Transfer));
+                    }
+                }
                 let precomputed = pms_storage::helpers::precompute_all_items(
                     &plain, &addrs, sender_addr.as_deref(),
                 );

@@ -601,12 +601,13 @@ async fn classify_activity(
             let sender_addr = resolve_sender(tx, adapter).await;
             let is_sender = sender_addr.as_deref() == Some(addr);
             let is_receiver = tx.outputs.iter().any(|o| o.address == addr);
+            let has_other_recipients = tx.outputs.iter().any(|o| o.address != addr);
 
             let payload_val = serde_json::to_value(tx).unwrap_or_default();
             let mut items = Vec::new();
 
-            if is_sender && is_receiver {
-                // Self-transfer (consolidation, change)
+            if is_sender && is_receiver && !has_other_recipients {
+                // True self-transfer (consolidation): ALL outputs go back to sender
                 let net: rust_decimal::Decimal = tx
                     .outputs
                     .iter()
@@ -625,7 +626,7 @@ async fn classify_activity(
                     payload: payload_val,
                 });
             } else if is_sender {
-                // Sent to someone else
+                // Transfer out (with or without change back to sender)
                 let recipient = tx
                     .outputs
                     .iter()

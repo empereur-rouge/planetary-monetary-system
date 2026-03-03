@@ -208,13 +208,15 @@ async fn activity_transfer_in_encrypted() -> anyhow::Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Test 3: Plain transfer with change (sender+receiver perspectives)
 //
-// NOTE: addr_activity index only uses OUTPUT addresses for TxUtxo.
-// So the sender MUST appear in outputs (change) to be indexed.
-// classify_activity then detects (is_sender && is_receiver) → transfer_self.
-// The receiver (not sender) sees transfer_in.
-// "transfer_out" would require the sender NOT in outputs, but then they
-// wouldn't be indexed → unreachable via activity feed. This is a known
-// limitation of the current design.
+// NOTE: This test uses the plain persist path (persist_block), NOT the HTTP
+// handler.  In the plain path, resolve_sender() tries to look up the input
+// UTXO after it has been spent → returns None → sender classified as
+// transfer_in (for their change output).  This is a known limitation of the
+// plain/P2P persist path.
+//
+// The HTTP handler (POST /wallet/tx/send) resolves the sender BEFORE
+// spending the UTXOs, so encrypted blocks get correct transfer_out
+// classification.  See activity_transfer_out_via_precompute test.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -293,11 +295,10 @@ async fn activity_transfer_with_change() -> anyhow::Result<()> {
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Sender perspective: after TxUtxo persist, input UTXOs are SPENT,
-    // so resolve_sender() returns None → sender is NOT identified as sender.
-    // The sender's change output makes them appear as a receiver → transfer_in.
-    // NOTE: This means transfer_out and transfer_self are unreachable for the sender
-    // because resolve_sender can't find the sender after the UTXO is consumed.
+    // Sender perspective (plain persist path): input UTXOs are spent during
+    // persist, so resolve_sender() returns None → sender sees transfer_in for
+    // their change output.  In the encrypted handler path, sender is resolved
+    // BEFORE UTXO spending, giving correct transfer_out.
     let path = format!("/v1/wallet/{}/activity", sender_addr);
     let (status, json) = get_json(&ctx.app, &path).await;
     print_api("TRANSFER sender query", status, &json);
@@ -306,27 +307,23 @@ async fn activity_transfer_with_change() -> anyhow::Result<()> {
     assert!(status.is_success(), "sender activity failed: {status} body={json}");
     let items = json["items"].as_array().expect("items should be an array");
 
-    // Sender sees transfer_in for their CHANGE output (resolve_sender can't identify sender)
-    let sender_tx = items.iter().find(|i| {
-        i["activity_type"] == "transfer_in" && i["block_id"] != items.last().unwrap()["block_id"]
-    });
-    // If resolve_sender doesn't work, sender sees transfer_in with amount = change
+    // Plain path: resolve_sender returns None → sender sees transfer_in (change output)
     let has_transfer = items.iter().any(|i| {
         let at = i["activity_type"].as_str().unwrap_or("");
-        at == "transfer_in" || at == "transfer_self"
+        at == "transfer_in" || at == "transfer_out"
     });
     assert!(
         has_transfer,
         "expected sender to see transfer activity for TxUtxo block, items={json}"
     );
+    let tx_item = items.iter().find(|i| {
+        let at = i["activity_type"].as_str().unwrap_or("");
+        at == "transfer_in" || at == "transfer_out"
+    }).unwrap();
     println!(
-        "  [OK] sender sees: {} (expected transfer_in due to resolve_sender limitation)",
-        items.iter().find(|i| {
-            let at = i["activity_type"].as_str().unwrap_or("");
-            at == "transfer_in" || at == "transfer_self"
-        }).map(|i| format!("type={}, dir={}, amount={}", i["activity_type"], i["direction"], i["amount"])).unwrap_or_default()
+        "  [OK] sender sees: type={}, dir={}, amount={} (plain path: resolve_sender=None → transfer_in)",
+        tx_item["activity_type"], tx_item["direction"], tx_item["amount"]
     );
-    let _ = sender_tx; // suppress unused warning
 
     // Receiver should see transfer_in
     let path = format!("/v1/wallet/{}/activity", receiver_addr);
@@ -431,21 +428,152 @@ async fn activity_transfer_self() -> anyhow::Result<()> {
     assert!(status.is_success(), "activity query failed: {status} body={json}");
     let items = json["items"].as_array().expect("items should be an array");
 
-    // Same resolve_sender limitation: input UTXOs are spent after persist,
-    // so sender is NOT detected. The consolidation output appears as transfer_in.
+    // Plain path: resolve_sender returns None → sender sees transfer_in.
+    // NOTE: This "consolidation" test has an admin fee output, so even with
+    // resolved sender it would be transfer_out (not transfer_self) because
+    // has_other_recipients=true.  A true transfer_self requires ALL outputs
+    // to the sender (no other recipients).
     let has_transfer = items.iter().any(|i| {
         let at = i["activity_type"].as_str().unwrap_or("");
-        at == "transfer_in" || at == "transfer_self"
+        at == "transfer_in" || at == "transfer_out"
     });
     assert!(has_transfer, "expected transfer activity for consolidation, items={json}");
 
     let tx_item = items.iter().find(|i| {
         let at = i["activity_type"].as_str().unwrap_or("");
-        at == "transfer_in" || at == "transfer_self"
+        at == "transfer_in" || at == "transfer_out"
     }).unwrap();
     println!(
-        "  [OK] consolidation: type={}, direction={}, amount={} (transfer_self unreachable due to resolve_sender)",
+        "  [OK] consolidation: type={}, direction={}, amount={} (plain path: resolve_sender=None)",
         tx_item["activity_type"], tx_item["direction"], tx_item["amount"]
+    );
+
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test 4b: Pre-computed transfer_out via sender resolution BEFORE UTXO spend
+//
+// Verifies that classify_for_storage() and precompute_all_items() correctly
+// produce transfer_out for the sender when sender_addr is pre-resolved.
+// This is the logic used by the encrypted handler (POST /wallet/tx/send)
+// which resolves the sender BEFORE spending UTXOs.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn activity_transfer_out_via_precompute() -> anyhow::Result<()> {
+    let sender_addr = "sender_abc";
+    let receiver_addr = "receiver_xyz";
+    let admin_addr = "admin_fee";
+
+    println!("\n=== [TRANSFER_OUT_PRECOMPUTE] ===");
+    println!("  Sender: {sender_addr}");
+    println!("  Receiver: {receiver_addr}");
+
+    // Build TxUtxo: sender → receiver (5.00) + change to sender (4.50) + fee (0.50)
+    let tx = Transaction {
+        inputs: vec![TxInput {
+            out: OutputId {
+                txid: "tx1".into(),
+                index: 0,
+            },
+        }],
+        outputs: vec![
+            TxOutput {
+                address: receiver_addr.to_string(),
+                amount: "5.00".to_string(),
+                asset_id: None,
+            },
+            TxOutput {
+                address: sender_addr.to_string(),
+                amount: "4.50".to_string(),
+                asset_id: None,
+            },
+            TxOutput {
+                address: admin_addr.to_string(),
+                amount: "0.50".to_string(),
+                asset_id: None,
+            },
+        ],
+        fee: "0.50".to_string(),
+        unlocks: vec![],
+    };
+
+    let plain = PlainPayload::TxUtxo(tx);
+
+    // Pre-compute activity items with sender resolved (simulates encrypted handler)
+    let mut addrs = pms_storage::helpers::extract_involved_addresses(&plain);
+    let mut typed = pms_storage::helpers::extract_involved_with_category(&plain);
+    // Sender might not be in output addresses if no change — add it
+    if !addrs.contains(&sender_addr.to_string()) {
+        addrs.push(sender_addr.to_string());
+        typed.push((sender_addr.to_string(), pms_storage::helpers::ActivityCategory::Transfer));
+    }
+    println!("  Involved addresses: {:?}", addrs);
+
+    let precomputed = pms_storage::helpers::precompute_all_items(
+        &plain, &addrs, Some(sender_addr),
+    );
+
+    // Debug: show what was precomputed
+    for (addr, items) in &precomputed {
+        for item in items {
+            println!(
+                "  Precomputed for {}: type={}, dir={}, amount={:?}, counterparty={:?}",
+                addr, item.activity_type, item.direction, item.amount, item.counterparty
+            );
+        }
+    }
+
+    // === Sender should get transfer_out ===
+    let sender_items = precomputed.get(sender_addr).expect("sender should have items");
+    assert_eq!(sender_items.len(), 1, "sender should have exactly 1 item");
+    let si = &sender_items[0];
+    assert_eq!(si.activity_type, "transfer_out");
+    assert_eq!(si.direction, "out");
+    // Amount = sum of non-sender outputs = 5.00 + 0.50 = 5.50
+    assert_eq!(si.amount.as_deref(), Some("5.50"));
+    assert_eq!(si.counterparty.as_deref(), Some(receiver_addr));
+    println!(
+        "  [OK] sender: type={}, dir={}, amount={:?}, counterparty={:?}",
+        si.activity_type, si.direction, si.amount, si.counterparty
+    );
+
+    // === Receiver should get transfer_in ===
+    let recv_items = precomputed.get(receiver_addr).expect("receiver should have items");
+    assert_eq!(recv_items.len(), 1, "receiver should have exactly 1 item");
+    let ri = &recv_items[0];
+    assert_eq!(ri.activity_type, "transfer_in");
+    assert_eq!(ri.direction, "in");
+    assert_eq!(ri.amount.as_deref(), Some("5.00"));
+    assert_eq!(ri.counterparty.as_deref(), Some(sender_addr));
+    println!(
+        "  [OK] receiver: type={}, dir={}, amount={:?}, counterparty={:?}",
+        ri.activity_type, ri.direction, ri.amount, ri.counterparty
+    );
+
+    // === Admin (fee recipient) should get transfer_in ===
+    let admin_items = precomputed.get(admin_addr).expect("admin should have items");
+    assert_eq!(admin_items.len(), 1);
+    let ai = &admin_items[0];
+    assert_eq!(ai.activity_type, "transfer_in");
+    assert_eq!(ai.amount.as_deref(), Some("0.50"));
+    println!(
+        "  [OK] admin: type={}, dir={}, amount={:?}",
+        ai.activity_type, ai.direction, ai.amount
+    );
+
+    // === Without sender resolution → sender sees transfer_in (the bug we fixed) ===
+    let precomputed_no_sender = pms_storage::helpers::precompute_all_items(
+        &plain, &addrs, None,
+    );
+    let sender_no_resolve = precomputed_no_sender.get(sender_addr)
+        .expect("sender should have items even without sender resolution");
+    assert_eq!(sender_no_resolve[0].activity_type, "transfer_in",
+        "without sender resolution, sender sees transfer_in (known limitation of plain path)");
+    println!(
+        "  [OK] without sender resolution: sender sees {} (expected behavior for plain path)",
+        sender_no_resolve[0].activity_type
     );
 
     Ok(())
