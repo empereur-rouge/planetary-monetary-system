@@ -115,6 +115,54 @@ pub async fn admin_reindex_activity(
     }
 }
 
+/// POST /admin/reindex-activity-items
+///
+/// Rebuild the `activity_items` CF by scanning all stored blocks and
+/// pre-computing per-address activity items. This backfills the fast-path
+/// data for blocks that were created before the pre-computation optimization.
+///
+/// For TxUtxo blocks, sender resolution is best-effort (UTXOs may already be
+/// spent), so the fallback classify path is still used at read time for those.
+pub async fn admin_reindex_activity_items(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+
+    tracing::info!("[ADMIN] Reindex activity_items requested");
+
+    match state.store.reindex_all_activity_items() {
+        Ok(stats) => {
+            tracing::info!(
+                "[ADMIN] Reindex activity_items complete: {} indexed, {} encrypted skipped, {} total",
+                stats.indexed,
+                stats.skipped_encrypted,
+                stats.total_blocks,
+            );
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "ok",
+                    "action": "reindex-activity-items",
+                    "stats": stats
+                })),
+            )
+        }
+        Err(e) => {
+            tracing::error!("[ADMIN] Reindex activity_items failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("reindex failed: {e}") })),
+            )
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ADMIN CONFIG API - Hot-Swap de la RuntimeConfig
 // ═══════════════════════════════════════════════════════════════════════════

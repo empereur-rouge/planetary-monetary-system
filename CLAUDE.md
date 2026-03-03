@@ -7,6 +7,8 @@
 ## Tests
 - Always create new tests or update existing ones to cover the changes made.
 - Tests must validate the expected behavior independently of the implementation. Do not write tests that simply mirror the code you wrote — tests should verify correctness from the user's perspective, not confirm that your implementation runs without error.
+- **CRITICAL: Show test output before validation.** Every test MUST include `println!`/`eprintln!` statements that display key values (API responses, computed results, state changes). After writing a test, run it with `cargo test <test_name> -- --nocapture` and show the full output to the user. The user validates the test based on the printed output, NOT just on whether it passes. A test that passes but produces wrong output is a bug.
+- Never remove debug prints from tests after validation — they serve as living documentation and help catch regressions.
 
 ## Code Quality
 - Never use placeholder code, TODO stubs, or incomplete implementations. Always write the full, working code immediately.

@@ -357,6 +357,8 @@ pub async fn mint_nft(
                 .inc();
 
             // Index activity for encrypted NFT payload (owner address + Nft category).
+            // Pre-computed items are not available here (plain payload already encrypted);
+            // they will be computed from the block at read time (fallback path).
             {
                 let addrs = vec![req.owner_address.clone()];
                 let typed = vec![(
@@ -365,7 +367,7 @@ pub async fn mint_nft(
                 )];
                 if let Err(e) = state
                     .store
-                    .write_addr_activity_entries_with_categories(&block_id, &addrs, &typed)
+                    .write_addr_activity_entries_with_categories(&block_id, &addrs, &typed, None)
                 {
                     tracing::warn!("addr_activity index for encrypted NFT block: {e}");
                 }

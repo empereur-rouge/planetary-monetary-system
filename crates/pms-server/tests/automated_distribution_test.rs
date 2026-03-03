@@ -321,6 +321,7 @@ async fn test_automated_fee_distribution() {
             &settings.fees,
             None,
         )),
+        activity_cache: Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
     };
 
     // 8. Spawn Distributor

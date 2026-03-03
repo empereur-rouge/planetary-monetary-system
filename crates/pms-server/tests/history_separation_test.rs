@@ -68,6 +68,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
         effective_fees: std::sync::Arc::new(
             pms_server::api_fn::tx_helpers::resolve_effective_fees(&settings.fees, None),
         ),
+        activity_cache: std::sync::Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
     };
 
     // 4) Insert Blocks manually into Store (to bypass validation/mining for speed)

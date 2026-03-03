@@ -610,13 +610,21 @@ pub async fn wallet_send_simple(
             tx_helpers::apply_utxo_delta(&adapter, &wb.id, &signed_tx.inputs, &signed_tx.outputs)
                 .await;
 
-            // Index activity for encrypted payload (both untyped + typed).
+            // Index activity for encrypted payload (both untyped + typed + precomputed items).
             {
                 let addrs = pms_storage::helpers::extract_involved_addresses(&plain);
                 let typed = pms_storage::helpers::extract_involved_with_category(&plain);
+                let sender_addr = if let pms_types_payload::PlainPayload::TxUtxo(ref tx) = plain {
+                    if let Some(first_input) = tx.inputs.first() {
+                        state.srv.adapter_arc().get_utxo(&first_input.out).await.map(|u| u.address)
+                    } else { None }
+                } else { None };
+                let precomputed = pms_storage::helpers::precompute_all_items(
+                    &plain, &addrs, sender_addr.as_deref(),
+                );
                 if let Err(e) = state
                     .store
-                    .write_addr_activity_entries_with_categories(&wb.id, &addrs, &typed)
+                    .write_addr_activity_entries_with_categories(&wb.id, &addrs, &typed, Some(&precomputed))
                 {
                     tracing::warn!("addr_activity index for encrypted block: {e}");
                 }

@@ -1,4 +1,6 @@
+use crate::activity_item::StoredActivityItem;
 use pms_types_payload::PlainPayload;
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn be_u64(x: u64) -> [u8; 8] {
@@ -347,4 +349,331 @@ pub fn parse_addr_type_activity_key(key: &[u8], addr_len: usize) -> Option<(u8, 
     let ts_ms = u64::from_be_bytes(ts_be) as i64;
     let id = std::str::from_utf8(&key[ts_start + 8..]).ok()?.to_string();
     Some((cat, ts_ms, id))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pre-computed activity items (written at block persist time, read at query time)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Classify a `PlainPayload` into `StoredActivityItem`s for a given address.
+///
+/// This is the storage-layer equivalent of `classify_activity()` in pms-server.
+/// It is **synchronous**: the caller must pre-resolve the sender address for TxUtxo
+/// and pass it as `sender_addr`.
+pub fn classify_for_storage(
+    plain: &PlainPayload,
+    addr: &str,
+    sender_addr: Option<&str>,
+) -> Vec<StoredActivityItem> {
+    match plain {
+        PlainPayload::Mint { outputs } => outputs
+            .iter()
+            .filter(|o| o.address == addr)
+            .map(|o| StoredActivityItem {
+                activity_type: "mint".into(),
+                direction: "in".into(),
+                amount: Some(o.amount.clone()),
+                asset_id: o.asset_id.clone(),
+                counterparty: None,
+                payload: serde_json::to_value(plain).unwrap_or_default(),
+            })
+            .collect(),
+
+        PlainPayload::TxUtxo(tx) => {
+            let is_sender = sender_addr == Some(addr);
+            let is_receiver = tx.outputs.iter().any(|o| o.address == addr);
+            let payload_val = serde_json::to_value(tx).unwrap_or_default();
+            let mut items = Vec::new();
+
+            if is_sender && is_receiver {
+                let net: rust_decimal::Decimal = tx
+                    .outputs
+                    .iter()
+                    .filter(|o| o.address == addr)
+                    .filter_map(|o| o.amount.parse::<rust_decimal::Decimal>().ok())
+                    .sum();
+                items.push(StoredActivityItem {
+                    activity_type: "transfer_self".into(),
+                    direction: "info".into(),
+                    amount: Some(net.to_string()),
+                    asset_id: tx.outputs.first().and_then(|o| o.asset_id.clone()),
+                    counterparty: None,
+                    payload: payload_val,
+                });
+            } else if is_sender {
+                let recipient = tx
+                    .outputs
+                    .iter()
+                    .find(|o| o.address != addr)
+                    .map(|o| o.address.clone());
+                let sent: rust_decimal::Decimal = tx
+                    .outputs
+                    .iter()
+                    .filter(|o| o.address != addr)
+                    .filter_map(|o| o.amount.parse::<rust_decimal::Decimal>().ok())
+                    .sum();
+                items.push(StoredActivityItem {
+                    activity_type: "transfer_out".into(),
+                    direction: "out".into(),
+                    amount: Some(sent.to_string()),
+                    asset_id: tx.outputs.first().and_then(|o| o.asset_id.clone()),
+                    counterparty: recipient,
+                    payload: payload_val,
+                });
+            } else if is_receiver {
+                let received: rust_decimal::Decimal = tx
+                    .outputs
+                    .iter()
+                    .filter(|o| o.address == addr)
+                    .filter_map(|o| o.amount.parse::<rust_decimal::Decimal>().ok())
+                    .sum();
+                items.push(StoredActivityItem {
+                    activity_type: "transfer_in".into(),
+                    direction: "in".into(),
+                    amount: Some(received.to_string()),
+                    asset_id: tx
+                        .outputs
+                        .iter()
+                        .find(|o| o.address == addr)
+                        .and_then(|o| o.asset_id.clone()),
+                    counterparty: sender_addr.map(String::from),
+                    payload: payload_val,
+                });
+            }
+            items
+        }
+
+        PlainPayload::Reward {
+            fee_outputs,
+            reward_outputs,
+            ..
+        } => {
+            let payload_val = serde_json::to_value(plain).unwrap_or_default();
+            let mut items = Vec::new();
+            for o in fee_outputs.iter().filter(|o| o.address == addr) {
+                items.push(StoredActivityItem {
+                    activity_type: "fee_received".into(),
+                    direction: "in".into(),
+                    amount: Some(o.amount.clone()),
+                    asset_id: None,
+                    counterparty: None,
+                    payload: payload_val.clone(),
+                });
+            }
+            for o in reward_outputs.iter().filter(|o| o.address == addr) {
+                items.push(StoredActivityItem {
+                    activity_type: "reward".into(),
+                    direction: "in".into(),
+                    amount: Some(o.amount.clone()),
+                    asset_id: None,
+                    counterparty: None,
+                    payload: payload_val.clone(),
+                });
+            }
+            items
+        }
+
+        PlainPayload::Nft(action) => {
+            let payload_val = serde_json::to_value(action).unwrap_or_default();
+            match action {
+                pms_types_nft::NftAction::Mint { creator, .. } if creator == addr => {
+                    vec![StoredActivityItem {
+                        activity_type: "nft_mint".into(),
+                        direction: "in".into(),
+                        amount: None,
+                        asset_id: None,
+                        counterparty: None,
+                        payload: payload_val,
+                    }]
+                }
+                pms_types_nft::NftAction::Transfer { from, to, .. } => {
+                    if to == addr {
+                        vec![StoredActivityItem {
+                            activity_type: "nft_transfer_in".into(),
+                            direction: "in".into(),
+                            amount: None,
+                            asset_id: None,
+                            counterparty: Some(from.clone()),
+                            payload: payload_val,
+                        }]
+                    } else if from == addr {
+                        vec![StoredActivityItem {
+                            activity_type: "nft_transfer_out".into(),
+                            direction: "out".into(),
+                            amount: None,
+                            asset_id: None,
+                            counterparty: Some(to.clone()),
+                            payload: payload_val,
+                        }]
+                    } else {
+                        vec![]
+                    }
+                }
+                pms_types_nft::NftAction::Burn { burner, .. }
+                | pms_types_nft::NftAction::BatchBurn { burner, .. }
+                    if burner == addr =>
+                {
+                    vec![StoredActivityItem {
+                        activity_type: "nft_burn".into(),
+                        direction: "out".into(),
+                        amount: None,
+                        asset_id: None,
+                        counterparty: None,
+                        payload: payload_val,
+                    }]
+                }
+                pms_types_nft::NftAction::Use { user, .. } if user == addr => {
+                    vec![StoredActivityItem {
+                        activity_type: "nft_use".into(),
+                        direction: "info".into(),
+                        amount: None,
+                        asset_id: None,
+                        counterparty: None,
+                        payload: payload_val,
+                    }]
+                }
+                _ => vec![],
+            }
+        }
+
+        PlainPayload::TokenCreate(meta) if meta.creator == addr => {
+            vec![StoredActivityItem {
+                activity_type: "token_create".into(),
+                direction: "info".into(),
+                amount: None,
+                asset_id: Some(meta.asset_id.clone()),
+                counterparty: None,
+                payload: serde_json::to_value(meta).unwrap_or_default(),
+            }]
+        }
+
+        PlainPayload::BridgeLock {
+            dest_address,
+            amount,
+            asset_id,
+            ..
+        } if dest_address == addr => {
+            vec![StoredActivityItem {
+                activity_type: "bridge_lock_in".into(),
+                direction: "in".into(),
+                amount: Some(amount.clone()),
+                asset_id: asset_id.clone(),
+                counterparty: None,
+                payload: serde_json::to_value(plain).unwrap_or_default(),
+            }]
+        }
+
+        PlainPayload::BridgeMint { outputs, .. } => outputs
+            .iter()
+            .filter(|o| o.address == addr)
+            .map(|o| StoredActivityItem {
+                activity_type: "bridge_mint".into(),
+                direction: "in".into(),
+                amount: Some(o.amount.clone()),
+                asset_id: o.asset_id.clone(),
+                counterparty: None,
+                payload: serde_json::to_value(plain).unwrap_or_default(),
+            })
+            .collect(),
+
+        PlainPayload::Freeze {
+            address, reason, ..
+        } if address == addr => {
+            vec![StoredActivityItem {
+                activity_type: "freeze".into(),
+                direction: "info".into(),
+                amount: None,
+                asset_id: None,
+                counterparty: None,
+                payload: serde_json::json!({ "reason": reason }),
+            }]
+        }
+
+        PlainPayload::Unfreeze {
+            address, reason, ..
+        } if address == addr => {
+            vec![StoredActivityItem {
+                activity_type: "unfreeze".into(),
+                direction: "info".into(),
+                amount: None,
+                asset_id: None,
+                counterparty: None,
+                payload: serde_json::json!({ "reason": reason }),
+            }]
+        }
+
+        PlainPayload::Seize {
+            from_address,
+            outputs,
+            reason,
+            ..
+        } => {
+            let payload_val = serde_json::json!({ "reason": reason });
+            let mut items = Vec::new();
+            if from_address == addr {
+                let total: rust_decimal::Decimal = outputs
+                    .iter()
+                    .filter_map(|o| o.amount.parse::<rust_decimal::Decimal>().ok())
+                    .sum();
+                items.push(StoredActivityItem {
+                    activity_type: "seized".into(),
+                    direction: "out".into(),
+                    amount: Some(total.to_string()),
+                    asset_id: None,
+                    counterparty: None,
+                    payload: payload_val.clone(),
+                });
+            }
+            for o in outputs.iter().filter(|o| o.address == addr) {
+                items.push(StoredActivityItem {
+                    activity_type: "seize_received".into(),
+                    direction: "in".into(),
+                    amount: Some(o.amount.clone()),
+                    asset_id: None,
+                    counterparty: Some(from_address.clone()),
+                    payload: payload_val.clone(),
+                });
+            }
+            items
+        }
+
+        PlainPayload::Reverse {
+            outputs, reason, ..
+        } => {
+            let payload_val = serde_json::json!({ "reason": reason });
+            outputs
+                .iter()
+                .filter(|o| o.address == addr)
+                .map(|o| StoredActivityItem {
+                    activity_type: "reverse_received".into(),
+                    direction: "in".into(),
+                    amount: Some(o.amount.clone()),
+                    asset_id: o.asset_id.clone(),
+                    counterparty: None,
+                    payload: payload_val.clone(),
+                })
+                .collect()
+        }
+
+        _ => vec![],
+    }
+}
+
+/// Pre-compute activity items for ALL involved addresses in one pass.
+///
+/// Returns a map: `address → Vec<StoredActivityItem>`.
+/// The caller must pre-resolve the TxUtxo sender address and pass it in.
+pub fn precompute_all_items(
+    plain: &PlainPayload,
+    involved_addrs: &[String],
+    sender_addr: Option<&str>,
+) -> HashMap<String, Vec<StoredActivityItem>> {
+    let mut map = HashMap::new();
+    for addr in involved_addrs {
+        let items = classify_for_storage(plain, addr, sender_addr);
+        if !items.is_empty() {
+            map.insert(addr.clone(), items);
+        }
+    }
+    map
 }

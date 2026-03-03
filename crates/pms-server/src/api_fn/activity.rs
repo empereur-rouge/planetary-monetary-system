@@ -3,6 +3,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use dashmap::DashMap;
 use futures_util::Stream;
 use pms_storage::DagStorage;
 use pms_types_payload::{PayloadEnvelope, PlainPayload};
@@ -45,7 +46,7 @@ pub struct ActivityQuery {
     pub x25519_sk_hex: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ActivityResp {
     pub address: String,
     pub items: Vec<ActivityItem>,
@@ -66,6 +67,76 @@ pub struct StreamActivityQuery {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Activity Cache
+// ═══════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct ActivityCacheKey {
+    address: String,
+    filter_type: Option<String>,
+    asset_id: Option<String>,
+    limit: usize,
+    after_ts: Option<i64>,
+    after_id: Option<String>,
+}
+
+/// In-memory cache for activity responses.
+/// Uses DashMap for lock-free concurrent reads with per-address invalidation.
+pub struct ActivityCache {
+    entries: DashMap<ActivityCacheKey, (ActivityResp, std::time::Instant)>,
+    ttl: std::time::Duration,
+    max_entries: usize,
+}
+
+impl ActivityCache {
+    pub fn new(max_entries: usize, ttl_secs: u64) -> Self {
+        Self {
+            entries: DashMap::new(),
+            ttl: std::time::Duration::from_secs(ttl_secs),
+            max_entries,
+        }
+    }
+
+    fn get(&self, key: &ActivityCacheKey) -> Option<ActivityResp> {
+        let entry = self.entries.get(key)?;
+        let (resp, created) = entry.value();
+        if created.elapsed() < self.ttl {
+            let cloned = resp.clone();
+            drop(entry);
+            Some(cloned)
+        } else {
+            drop(entry);
+            self.entries.remove(key);
+            None
+        }
+    }
+
+    fn put(&self, key: ActivityCacheKey, resp: ActivityResp) {
+        // Evict if over capacity (simple strategy: clear oldest ~10%)
+        if self.entries.len() >= self.max_entries {
+            let cutoff = self.entries.len() / 10;
+            let mut removed = 0;
+            self.entries.retain(|_, (_, created)| {
+                if removed >= cutoff {
+                    return true;
+                }
+                if created.elapsed() >= self.ttl {
+                    removed += 1;
+                    return false;
+                }
+                true
+            });
+        }
+        self.entries.insert(key, (resp, std::time::Instant::now()));
+    }
+
+    /// Invalidate all cache entries for a specific address.
+    pub fn invalidate_address(&self, addr: &str) {
+        self.entries.retain(|k, _| k.address != addr);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // GET /v1/wallet/{address}/activity
 // ═══════════════════════════════════════════════════════════════════
 
@@ -74,8 +145,26 @@ pub async fn get_wallet_activity(
     Path(address): Path<String>,
     Query(q): Query<ActivityQuery>,
 ) -> Result<Json<ActivityResp>, (StatusCode, String)> {
-    let limit = q.limit.unwrap_or(50).min(500);
+    let limit = q.limit.unwrap_or(50).min(2000);
     let type_filters = parse_type_filter(&q.filter_type);
+
+    // Cache lookup (skip for requests with decryption keys — those are user-specific)
+    let cache_key = if q.x25519_sk_hex.is_none() {
+        let key = ActivityCacheKey {
+            address: address.clone(),
+            filter_type: q.filter_type.clone(),
+            asset_id: q.asset_id.clone(),
+            limit,
+            after_ts: q.after_ts,
+            after_id: q.after_id.clone(),
+        };
+        if let Some(cached) = app.activity_cache.get(&key) {
+            return Ok(Json(cached));
+        }
+        Some(key)
+    } else {
+        None
+    };
 
     // Map API filter strings to storage-level category bytes for indexed lookup
     let category_bytes: Vec<u8> = type_filters
@@ -102,11 +191,11 @@ pub async fn get_wallet_activity(
     let mut last_cursor: Option<(i64, String, bool)>;
 
     loop {
-        // When type filters are set, use the per-type index for O(matching) scan;
-        // otherwise use the untyped per-address index.
-        let (ids, next_cursor) = if !category_bytes.is_empty() {
+        // Fetch entries with pre-computed items when available.
+        // Each entry = (block_id, ts_ms, Option<Vec<StoredActivityItem>>).
+        let (entries, next_cursor) = if !category_bytes.is_empty() {
             app.store
-                .recent_ids_by_address_and_categories(
+                .recent_activity_items_by_address_and_categories(
                     &address,
                     &category_bytes,
                     cursor_ts,
@@ -117,64 +206,116 @@ pub async fn get_wallet_activity(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         } else {
             app.store
-                .recent_ids_by_address(&address, cursor_ts, cursor_id.clone(), BATCH_SIZE)
+                .recent_activity_items_by_address(
+                    &address,
+                    cursor_ts,
+                    cursor_id.clone(),
+                    BATCH_SIZE,
+                )
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         };
 
-        if ids.is_empty() {
+        if entries.is_empty() {
             last_cursor = None;
             break;
         }
 
-        let blocks = app
-            .store
-            .get_blocks_by_ids(&ids)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // Partition entries: fast path (pre-computed) vs fallback (need block fetch)
+        let mut fallback_ids = Vec::new();
+        for (block_id, ts, maybe_items) in &entries {
+            if let Some(stored_items) = maybe_items {
+                // ── Fast path: use pre-computed items directly ──
+                for si in stored_items {
+                    if !type_filters.is_empty()
+                        && !type_filters.contains(&si.activity_type.as_str())
+                    {
+                        continue;
+                    }
+                    if let Some(ref filter_asset) = q.asset_id {
+                        if si.asset_id.as_deref() != Some(filter_asset.as_str()) {
+                            continue;
+                        }
+                    }
+                    items.push(ActivityItem {
+                        block_id: block_id.clone(),
+                        ts_ms: *ts,
+                        activity_type: si.activity_type.clone(),
+                        direction: si.direction.clone(),
+                        amount: si.amount.clone(),
+                        asset_id: si.asset_id.clone(),
+                        counterparty: si.counterparty.clone(),
+                        ledger_id: ledger_tag.clone(),
+                        payload: si.payload.clone(),
+                    });
+                }
+            } else {
+                // No pre-computed items — need fallback
+                fallback_ids.push((block_id.clone(), *ts));
+            }
+        }
 
-        let id_ts = app
-            .store
-            .ts_for_ids(&ids)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // ── Fallback path: fetch full blocks, parse, and classify ──
+        if !fallback_ids.is_empty() {
+            let ids: Vec<String> = fallback_ids.iter().map(|(id, _)| id.clone()).collect();
+            let blocks = app
+                .store
+                .get_blocks_by_ids(&ids)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        for b in &blocks {
-            let ts = *id_ts.get(&b.id).unwrap_or(&0);
-            let Some(env) = b
-                .payload_json
-                .as_ref()
-                .and_then(|s| serde_json::from_str::<PayloadEnvelope>(s).ok())
-            else {
-                continue;
-            };
+            let ts_map: std::collections::HashMap<String, i64> =
+                fallback_ids.iter().cloned().collect();
 
-            let plain = match env {
-                PayloadEnvelope::Plain(PlainPayload::EncryptedReward {
-                    encrypted_outputs,
-                    burned,
-                    tx_block_id,
-                }) => match &q.x25519_sk_hex {
-                    Some(sk) => match pms_wallet::history::try_decrypt_encrypted_reward(
-                        &encrypted_outputs,
-                        &burned,
-                        &tx_block_id,
-                        sk,
-                        &address,
-                    ) {
-                        Some(decrypted) => decrypted,
+            for b in &blocks {
+                let ts = ts_map.get(&b.id).copied().unwrap_or(0);
+                let Some(env) = b
+                    .payload_json
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str::<PayloadEnvelope>(s).ok())
+                else {
+                    continue;
+                };
+
+                let plain = match env {
+                    PayloadEnvelope::Plain(PlainPayload::EncryptedReward {
+                        encrypted_outputs,
+                        burned,
+                        tx_block_id,
+                    }) => match &q.x25519_sk_hex {
+                        Some(sk) => {
+                            match pms_wallet::history::try_decrypt_encrypted_reward(
+                                &encrypted_outputs,
+                                &burned,
+                                &tx_block_id,
+                                sk,
+                                &address,
+                            ) {
+                                Some(decrypted) => decrypted,
+                                None => continue,
+                            }
+                        }
                         None => continue,
                     },
-                    None => continue,
-                },
-                PayloadEnvelope::Encrypted(enc) => match &q.x25519_sk_hex {
-                    Some(sk) => match enc.decrypt_as_payload(sk) {
-                        // Trust the addr_activity index: the coordinator indexed
-                        // this block for this address. No need for involves_address
-                        // check (which misses senders without change outputs).
-                        Ok(decrypted) => decrypted,
-                        _ => {
-                            // Decryption failed (wrong key) — show encrypted fallback
+                    PayloadEnvelope::Encrypted(enc) => match &q.x25519_sk_hex {
+                        Some(sk) => match enc.decrypt_as_payload(sk) {
+                            Ok(decrypted) => decrypted,
+                            _ => {
+                                items.push(ActivityItem {
+                                    block_id: b.id.clone(),
+                                    ts_ms: ts,
+                                    activity_type: "encrypted".to_string(),
+                                    direction: "info".to_string(),
+                                    amount: None,
+                                    asset_id: None,
+                                    counterparty: None,
+                                    ledger_id: ledger_tag.clone(),
+                                    payload: serde_json::json!({ "encrypted": true }),
+                                });
+                                continue;
+                            }
+                        },
+                        None => {
                             items.push(ActivityItem {
                                 block_id: b.id.clone(),
                                 ts_ms: ts,
@@ -189,49 +330,33 @@ pub async fn get_wallet_activity(
                             continue;
                         }
                     },
-                    None => {
-                        // No decryption key provided — show minimal encrypted entry
-                        items.push(ActivityItem {
-                            block_id: b.id.clone(),
-                            ts_ms: ts,
-                            activity_type: "encrypted".to_string(),
-                            direction: "info".to_string(),
-                            amount: None,
-                            asset_id: None,
-                            counterparty: None,
-                            ledger_id: ledger_tag.clone(),
-                            payload: serde_json::json!({ "encrypted": true }),
-                        });
-                        continue;
+                    PayloadEnvelope::Plain(plain) => {
+                        if !pms_wallet::history::involves_address(&plain, &address) {
+                            continue;
+                        }
+                        plain
                     }
-                },
-                PayloadEnvelope::Plain(plain) => {
-                    if !pms_wallet::history::involves_address(&plain, &address) {
-                        continue;
-                    }
-                    plain
-                }
-            };
+                };
 
-            let classified = classify_activity(&plain, &address, &*adapter).await;
-            for item in classified {
-                // Apply type filter
-                if !type_filters.is_empty() && !type_filters.contains(&item.activity_type.as_str())
-                {
-                    continue;
-                }
-                // Apply asset filter
-                if let Some(ref filter_asset) = q.asset_id {
-                    if item.asset_id.as_deref() != Some(filter_asset) {
+                let classified = classify_activity(&plain, &address, &*adapter).await;
+                for item in classified {
+                    if !type_filters.is_empty()
+                        && !type_filters.contains(&item.activity_type.as_str())
+                    {
                         continue;
                     }
+                    if let Some(ref filter_asset) = q.asset_id {
+                        if item.asset_id.as_deref() != Some(filter_asset) {
+                            continue;
+                        }
+                    }
+                    items.push(ActivityItem {
+                        block_id: b.id.clone(),
+                        ts_ms: ts,
+                        ledger_id: ledger_tag.clone(),
+                        ..item
+                    });
                 }
-                items.push(ActivityItem {
-                    block_id: b.id.clone(),
-                    ts_ms: ts,
-                    ledger_id: ledger_tag.clone(),
-                    ..item
-                });
             }
         }
 
@@ -273,14 +398,21 @@ pub async fn get_wallet_activity(
     };
 
     let count = items.len();
-    Ok(Json(ActivityResp {
+    let resp = ActivityResp {
         address,
         items,
         count,
         next_after_ts,
         next_after_id,
         has_more,
-    }))
+    };
+
+    // Store in cache (only for non-decryption requests)
+    if let Some(key) = cache_key {
+        app.activity_cache.put(key, resp.clone());
+    }
+
+    Ok(Json(resp))
 }
 
 // ═══════════════════════════════════════════════════════════════════
