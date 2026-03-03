@@ -32,11 +32,10 @@ pub struct UtxoValue {
 impl RocksStore {
     #[inline]
     fn k_utxo_key(out_txid: &str, out_index: u32) -> Vec<u8> {
-        // même schéma que Redis: "TXID:index"
-        // clé binaire = b"<txid>:<index>"
+        // Standardized on '#' separator (matches make_utxo_key in store.rs)
         let mut v = Vec::with_capacity(out_txid.len() + 1 + 10);
         v.extend_from_slice(out_txid.as_bytes());
-        v.push(b':');
+        v.push(b'#');
         v.extend_from_slice(index_to_ascii(out_index).as_bytes());
         v
     }
@@ -151,13 +150,15 @@ fn index_to_ascii(idx: u32) -> String {
     idx.to_string()
 }
 
-/// Parse a UTXO key in format "{txid}:{index}" into (txid, index).
+/// Parse a UTXO key in format "{txid}#{index}" (or legacy "{txid}:{index}") into (txid, index).
 fn parse_utxo_key(key: &str) -> Result<(String, u32)> {
-    let colon = key
-        .rfind(':')
-        .ok_or_else(|| anyhow::anyhow!("invalid utxo key format (no ':'): {key}"))?;
-    let txid = key[..colon].to_string();
-    let idx: u32 = key[colon + 1..]
+    // Try '#' first (standard format), then ':' (legacy) for backward compat
+    let sep_pos = key
+        .rfind('#')
+        .or_else(|| key.rfind(':'))
+        .ok_or_else(|| anyhow::anyhow!("invalid utxo key format (no ':' or '#'): {key}"))?;
+    let txid = key[..sep_pos].to_string();
+    let idx: u32 = key[sep_pos + 1..]
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid utxo key index: {e}"))?;
     Ok((txid, idx))

@@ -272,7 +272,7 @@ async fn legacy_utxo_without_asset_id_field() -> Result<()> {
     let cf_utxo = ts.store.cf("utxo");
     ts.store
         .db
-        .put_cf(&cf_utxo, b"old_tx:0", br#"{"addr":"Alice","amt":"42.0"}"#)?;
+        .put_cf(&cf_utxo, b"old_tx#0", br#"{"addr":"Alice","amt":"42.0"}"#)?;
 
     // get_utxo doit fonctionner et retourner asset_id = None
     let utxo = ts.store.get_utxo("old_tx", 0)?.unwrap();
@@ -300,7 +300,7 @@ async fn utxo_with_asset_id_serialized_correctly() -> Result<()> {
 
     // Lire le raw JSON pour vérifier le format
     let cf_utxo = ts.store.cf("utxo");
-    let raw = ts.store.db.get_cf(&cf_utxo, b"ast_tx:0")?.unwrap();
+    let raw = ts.store.db.get_cf(&cf_utxo, b"ast_tx#0")?.unwrap();
     let json_str = String::from_utf8(raw)?;
 
     assert!(
@@ -316,7 +316,7 @@ async fn utxo_with_asset_id_serialized_correctly() -> Result<()> {
     };
     assert!(ts.store.utxo_apply_tx_atomic(&mint_pms).await?);
 
-    let raw_pms = ts.store.db.get_cf(&cf_utxo, b"pms_tx:0")?.unwrap();
+    let raw_pms = ts.store.db.get_cf(&cf_utxo, b"pms_tx#0")?.unwrap();
     let json_pms = String::from_utf8(raw_pms)?;
     assert!(
         !json_pms.contains("ast"),

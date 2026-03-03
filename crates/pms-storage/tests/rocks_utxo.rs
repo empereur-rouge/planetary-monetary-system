@@ -40,7 +40,7 @@ async fn apply_tx_atomic_ok_then_conflict_rocks() -> Result<()> {
     let cf_utxo = ts.store.cf("utxo"); // cf("<prefix>:utxo")
     ts.store
         .db
-        .put_cf(&cf_utxo, b"coinbase1:0", br#"{"addr":"A","amt":"1.0"}"#)?;
+        .put_cf(&cf_utxo, b"coinbase1#0", br#"{"addr":"A","amt":"1.0"}"#)?;
 
     // 2) t1 consomme coinbase1:0 -> OK (retour true)
     let t1 = UtxoApply {
