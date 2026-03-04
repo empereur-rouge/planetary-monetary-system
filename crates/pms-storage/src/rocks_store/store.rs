@@ -72,9 +72,9 @@ impl RocksStore {
         db_opts.set_max_background_jobs(4);
         db_opts.set_level_compaction_dynamic_level_bytes(true);
 
-        // Tunings mémoire “raisonnables” pour dev/prod
-        db_opts.set_write_buffer_size(64 * 1024 * 1024); // 64 MB
-        db_opts.set_max_write_buffer_number(3);
+        // Tunings mémoire optimisés pour VPS (8 Go RAM) avec NVMe SSD
+        db_opts.set_write_buffer_size(32 * 1024 * 1024); // 32 MB (suffisant sur NVMe)
+        db_opts.set_max_write_buffer_number(2);
         db_opts.set_target_file_size_base(64 * 1024 * 1024); // 64 MB par sstable
 
         // ==============
@@ -138,16 +138,18 @@ impl RocksStore {
         // ==============
         // 4) Helper pour CF options (bloom pour index)
         // ==============
-        fn cf_opts_with_bloom() -> Options {
+        // Un seul cache LRU 256 MB partagé entre toutes les CFs au lieu
+        // d'un cache séparé par CF (économise ~1.2 GB de RAM).
+        let shared_cache = Cache::new_lru_cache(256 * 1024 * 1024);
+
+        fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
             opts.set_optimize_filters_for_hits(true);
 
             let mut table_opts = BlockBasedOptions::default();
             // ~10 bits / key → compromis entre mémoire et perf
             table_opts.set_bloom_filter(10.0, false);
-            // 256 MB LRU block cache — réduit les I/O disque pour les hot data
-            let cache = Cache::new_lru_cache(256 * 1024 * 1024);
-            table_opts.set_block_cache(&cache);
+            table_opts.set_block_cache(cache);
             table_opts.set_cache_index_and_filter_blocks(true);
             opts.set_block_based_table_factory(&table_opts);
             opts
@@ -172,7 +174,7 @@ impl RocksStore {
                 || name.ends_with(":utxo_spent")
                 || name.ends_with(":activity_items")
             {
-                cf_opts_with_bloom()
+                cf_opts_with_bloom(&shared_cache)
             } else {
                 Options::default()
             };
@@ -245,17 +247,19 @@ impl RocksStore {
         db_opts.increase_parallelism(num_cpus::get() as i32);
         db_opts.set_max_background_jobs(4);
         db_opts.set_level_compaction_dynamic_level_bytes(true);
-        db_opts.set_write_buffer_size(64 * 1024 * 1024);
-        db_opts.set_max_write_buffer_number(3);
+        db_opts.set_write_buffer_size(32 * 1024 * 1024);
+        db_opts.set_max_write_buffer_number(2);
         db_opts.set_target_file_size_base(64 * 1024 * 1024);
 
-        fn cf_opts_with_bloom() -> Options {
+        // Un seul cache LRU 256 MB partagé entre toutes les CFs
+        let shared_cache = Cache::new_lru_cache(256 * 1024 * 1024);
+
+        fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
             opts.set_optimize_filters_for_hits(true);
             let mut table_opts = BlockBasedOptions::default();
             table_opts.set_bloom_filter(10.0, false);
-            let cache = Cache::new_lru_cache(256 * 1024 * 1024);
-            table_opts.set_block_cache(&cache);
+            table_opts.set_block_cache(cache);
             table_opts.set_cache_index_and_filter_blocks(true);
             opts.set_block_based_table_factory(&table_opts);
             opts
@@ -278,7 +282,7 @@ impl RocksStore {
                     || cf_name == "utxo_spent"
                     || cf_name == "activity_items"
                 {
-                    cf_opts_with_bloom()
+                    cf_opts_with_bloom(&shared_cache)
                 } else {
                     Options::default()
                 };
