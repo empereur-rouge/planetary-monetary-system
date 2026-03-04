@@ -13,34 +13,17 @@ impl RocksStore {
     }
 
     /// Compacte toutes les column families connues.
-    /// On boucle sur la liste des CF qu’on utilise dans new().
+    /// Utilise Self::CF_NAMES (avec le préfixe du store) pour couvrir toutes les CF.
     pub async fn compact_all(&self) -> Result<()> {
-        // Même liste logique que dans new() / ensure_schema()
-        const CF_NAMES: &[&str] = &[
-            "default",
-            "blocks",
-            "idx_blocks",
-            "by_time",
-            "id2ts",
-            "final",
-            "last_ms",
-            "children_count",
-            "tips",
-            "children_set",
-            "ver",
-            "utxo",
-            "tx_applied",
-        ];
-
-        for name in CF_NAMES {
-            if let Some(cf) = self.db.cf_handle(name) {
-                // None/None = compacter toute la plage de la CF
+        for &name in Self::CF_NAMES {
+            let full_name = format!("{}:{}", self.prefix, name);
+            if let Some(cf) = self.db.cf_handle(&full_name) {
                 self.db
                     .compact_range_cf::<&[u8], &[u8]>(&cf, None::<&[u8]>, None::<&[u8]>);
             }
         }
 
-        eprintln!("[rocks] compact_all: compaction triggered on all CFs");
+        eprintln!("[rocks] compact_all: compaction triggered on all CFs (prefix={})", self.prefix);
         Ok(())
     }
 

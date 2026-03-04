@@ -170,6 +170,7 @@ impl RocksStore {
                 || name.ends_with(":tips")
                 || name.ends_with(":utxo")
                 || name.ends_with(":utxo_spent")
+                || name.ends_with(":activity_items")
             {
                 cf_opts_with_bloom()
             } else {
@@ -275,6 +276,7 @@ impl RocksStore {
                     || cf_name == "tips"
                     || cf_name == "utxo"
                     || cf_name == "utxo_spent"
+                    || cf_name == "activity_items"
                 {
                     cf_opts_with_bloom()
                 } else {
@@ -578,7 +580,8 @@ impl RocksStore {
             end_key
         };
 
-        let mut entries = Vec::with_capacity(limit + 1);
+        // Phase 1: Collect entries and their keys from the index iterator
+        let mut raw_entries: Vec<(String, i64, Vec<u8>)> = Vec::with_capacity(limit + 1);
         let iter = self
             .db
             .iterator_cf(&cf_aa, IteratorMode::From(&seek_key, Direction::Reverse));
@@ -603,30 +606,35 @@ impl RocksStore {
                 skipped_cursor = true;
             }
 
-            // Try to read pre-computed items from activity_items CF using the exact same key
-            let precomputed = self
-                .db
-                .get_cf(&cf_items, &k)
-                .ok()
-                .flatten()
-                .and_then(|v| serde_json::from_slice::<Vec<crate::activity_item::StoredActivityItem>>(&v).ok());
-
-            entries.push((block_id, ts, precomputed));
-            if entries.len() > limit {
+            raw_entries.push((block_id, ts, k.to_vec()));
+            if raw_entries.len() > limit {
                 break;
             }
         }
 
-        let has_more = entries.len() > limit;
+        let has_more = raw_entries.len() > limit;
         if has_more {
-            entries.pop();
+            raw_entries.pop();
         }
 
         let next_cursor = if has_more {
-            entries.last().map(|(id, ts, _)| (*ts, id.clone(), true))
+            raw_entries.last().map(|(id, ts, _)| (*ts, id.clone(), true))
         } else {
             None
         };
+
+        // Phase 2: Batch-fetch pre-computed items via multi_get_cf
+        let keys: Vec<_> = raw_entries.iter().map(|(_, _, k)| (&cf_items, k.as_slice())).collect();
+        let precomputed_results = self.db.multi_get_cf(keys);
+
+        // Phase 3: Zip results
+        let mut entries = Vec::with_capacity(raw_entries.len());
+        for ((block_id, ts, _), result) in raw_entries.into_iter().zip(precomputed_results) {
+            let precomputed = result.ok().flatten().and_then(|v| {
+                serde_json::from_slice::<Vec<crate::activity_item::StoredActivityItem>>(&v).ok()
+            });
+            entries.push((block_id, ts, precomputed));
+        }
 
         Ok((entries, next_cursor))
     }
@@ -645,9 +653,6 @@ impl RocksStore {
         Option<(i64, String, bool)>,
     )> {
         // Get IDs + timestamps from the typed scan.
-        // We use the _with_ts variant to get the timestamp from the
-        // addr_type_activity key, which matches the activity_items key
-        // (both written by write_addr_activity_entries_with_categories).
         let (ids, cursor) = self
             .recent_ids_with_ts_by_address_and_categories(
                 addr, categories, after_ts, after_id, limit,
@@ -658,24 +663,23 @@ impl RocksStore {
             return Ok((vec![], cursor));
         }
 
-        // Use the ts from the addr_type_activity key (same ts used when writing
-        // activity_items in write_addr_activity_entries_with_categories).
-        // This avoids relying on id2ts which may have a different timestamp
-        // (written by the background persist task).
+        // Build keys for batch lookup
         let cf_items = self.cf("activity_items");
+        let item_keys: Vec<Vec<u8>> = ids
+            .iter()
+            .map(|(id, ts)| crate::helpers::key_addr_activity(addr, *ts, id))
+            .collect();
+
+        // Batch-fetch all pre-computed items in one multi_get_cf call
+        let multi_keys: Vec<_> = item_keys.iter().map(|k| (&cf_items, k.as_slice())).collect();
+        let results = self.db.multi_get_cf(multi_keys);
+
         let mut entries = Vec::with_capacity(ids.len());
-
-        for (id, ts) in &ids {
-            // Try to read pre-computed items using the key timestamp
-            let item_key = crate::helpers::key_addr_activity(addr, *ts, id);
-            let precomputed = self
-                .db
-                .get_cf(&cf_items, &item_key)
-                .ok()
-                .flatten()
-                .and_then(|v| serde_json::from_slice::<Vec<crate::activity_item::StoredActivityItem>>(&v).ok());
-
-            entries.push((id.clone(), *ts, precomputed));
+        for ((id, ts), result) in ids.into_iter().zip(results) {
+            let precomputed = result.ok().flatten().and_then(|v| {
+                serde_json::from_slice::<Vec<crate::activity_item::StoredActivityItem>>(&v).ok()
+            });
+            entries.push((id, ts, precomputed));
         }
 
         Ok((entries, cursor))
@@ -862,6 +866,9 @@ impl RocksStore {
         let cf_items = self.cf("activity_items");
 
         let mut stats = ReindexStats::default();
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut batch_count = 0usize;
+        const FLUSH_EVERY: usize = 1000;
 
         for kv in iter_cf_all(&self.db, &cf_blocks) {
             let (_k, v) = kv?;
@@ -908,7 +915,6 @@ impl RocksStore {
             // Pre-compute items (sender=None for TxUtxo — UTXOs already spent)
             let items_map = crate::helpers::precompute_all_items(&plain, &addrs, None);
 
-            let mut batch = rocksdb::WriteBatch::default();
             for (addr, items) in &items_map {
                 if !items.is_empty() {
                     let key = crate::helpers::key_addr_activity(addr, ts, &sb.id);
@@ -917,8 +923,15 @@ impl RocksStore {
                 }
             }
 
-            self.db.write(batch)?;
             stats.indexed += 1;
+            batch_count += 1;
+
+            // Flush batch every N blocks to bound memory usage
+            if batch_count >= FLUSH_EVERY {
+                self.db.write(batch)?;
+                batch = rocksdb::WriteBatch::default();
+                batch_count = 0;
+            }
 
             if stats.indexed % 10_000 == 0 {
                 tracing::info!(
@@ -927,6 +940,11 @@ impl RocksStore {
                     stats.total_blocks,
                 );
             }
+        }
+
+        // Flush remaining
+        if batch_count > 0 {
+            self.db.write(batch)?;
         }
 
         tracing::info!(
@@ -1693,22 +1711,34 @@ impl DagStorage for RocksStore {
     }
 
     async fn get_blocks_by_ids(&self, ids: &[String]) -> Result<Vec<WireBlock>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
         let cf_blocks = self.cf("blocks");
+        let keys: Vec<_> = ids.iter().map(|id| (&cf_blocks, id.as_bytes())).collect();
+        let results = self.db.multi_get_cf(keys);
+
         let mut out = Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Some(v) = self.db.get_cf(&cf_blocks, id.as_bytes())? {
-                if let Ok(sb) = serde_json::from_slice::<StoredBlock>(&v) {
-                    out.push(WireBlock {
-                        id: sb.id,
-                        parents: sb.parents,
-                        payload_json: sb.payload_json,
-                        nonce: sb.nonce,
-                        network_id: sb.network_id,
-                        protocol_version: sb.protocol_version,
-                        signer_pk_hex: sb.signer_pk_hex,
-                        signature_hex: sb.signature_hex,
-                        metadata: sb.metadata,
-                    });
+        for result in results {
+            match result {
+                Ok(Some(v)) => {
+                    if let Ok(sb) = serde_json::from_slice::<StoredBlock>(&v) {
+                        out.push(WireBlock {
+                            id: sb.id,
+                            parents: sb.parents,
+                            payload_json: sb.payload_json,
+                            nonce: sb.nonce,
+                            network_id: sb.network_id,
+                            protocol_version: sb.protocol_version,
+                            signer_pk_hex: sb.signer_pk_hex,
+                            signature_hex: sb.signature_hex,
+                            metadata: sb.metadata,
+                        });
+                    }
+                }
+                Ok(None) => {} // block not found, skip
+                Err(e) => {
+                    tracing::warn!("multi_get_cf error reading block: {e}");
                 }
             }
         }
