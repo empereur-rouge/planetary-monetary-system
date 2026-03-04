@@ -202,6 +202,30 @@ async fn activity_transfer_in_encrypted() -> anyhow::Result<()> {
     assert_eq!(ti["direction"], "in");
     println!("  [OK] transfer_in: direction={}, amount={}", ti["direction"], ti["amount"]);
 
+    // ── Now test with type filter (the path used by Heshima Network server) ──
+    println!("\n=== [TRANSFER_IN_ENCRYPTED] With type=transfer_in filter ===");
+    let path_typed = format!(
+        "/v1/wallet/{}/activity?x25519_sk_hex={}&type=transfer_in,transfer_out,transfer_self",
+        to_addr,
+        w_to.x25519_sk_hex().unwrap()
+    );
+    let (status2, json2) = get_json(&ctx.app, &path_typed).await;
+    print_api("TRANSFER_IN typed query", status2, &json2);
+    print_activity("TRANSFER_IN_ENCRYPTED (typed)", &to_addr, &json2);
+    assert!(status2.is_success(), "typed activity failed: {status2} body={json2}");
+
+    let items2 = json2["items"].as_array().expect("items should be an array");
+    println!("  Typed items count: {}", items2.len());
+    for (i, item) in items2.iter().enumerate() {
+        println!("  [{i}] type={}, dir={}, amount={}", item["activity_type"], item["direction"], item["amount"]);
+    }
+    let transfer_in2 = items2.iter().find(|i| i["activity_type"] == "transfer_in");
+    assert!(
+        transfer_in2.is_some(),
+        "expected 'transfer_in' with type filter for receiver, got items={json2}"
+    );
+    println!("  [OK] transfer_in found with type filter");
+
     Ok(())
 }
 

@@ -301,6 +301,28 @@ pub async fn get_wallet_activity(
                         Some(sk) => match enc.decrypt_as_payload(sk) {
                             Ok(decrypted) => decrypted,
                             _ => {
+                                if type_filters.is_empty()
+                                    || type_filters.contains(&"encrypted")
+                                {
+                                    items.push(ActivityItem {
+                                        block_id: b.id.clone(),
+                                        ts_ms: ts,
+                                        activity_type: "encrypted".to_string(),
+                                        direction: "info".to_string(),
+                                        amount: None,
+                                        asset_id: None,
+                                        counterparty: None,
+                                        ledger_id: ledger_tag.clone(),
+                                        payload: serde_json::json!({ "encrypted": true }),
+                                    });
+                                }
+                                continue;
+                            }
+                        },
+                        None => {
+                            if type_filters.is_empty()
+                                || type_filters.contains(&"encrypted")
+                            {
                                 items.push(ActivityItem {
                                     block_id: b.id.clone(),
                                     ts_ms: ts,
@@ -312,21 +334,7 @@ pub async fn get_wallet_activity(
                                     ledger_id: ledger_tag.clone(),
                                     payload: serde_json::json!({ "encrypted": true }),
                                 });
-                                continue;
                             }
-                        },
-                        None => {
-                            items.push(ActivityItem {
-                                block_id: b.id.clone(),
-                                ts_ms: ts,
-                                activity_type: "encrypted".to_string(),
-                                direction: "info".to_string(),
-                                amount: None,
-                                asset_id: None,
-                                counterparty: None,
-                                ledger_id: ledger_tag.clone(),
-                                payload: serde_json::json!({ "encrypted": true }),
-                            });
                             continue;
                         }
                     },

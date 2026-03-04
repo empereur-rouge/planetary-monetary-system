@@ -644,38 +644,30 @@ impl RocksStore {
         Vec<(String, i64, Option<Vec<crate::activity_item::StoredActivityItem>>)>,
         Option<(i64, String, bool)>,
     )> {
-        // Get IDs + cursor from the existing typed scan
+        // Get IDs + timestamps from the typed scan.
+        // We use the _with_ts variant to get the timestamp from the
+        // addr_type_activity key, which matches the activity_items key
+        // (both written by write_addr_activity_entries_with_categories).
         let (ids, cursor) = self
-            .recent_ids_by_address_and_categories(addr, categories, after_ts, after_id, limit)
+            .recent_ids_with_ts_by_address_and_categories(
+                addr, categories, after_ts, after_id, limit,
+            )
             .await?;
 
         if ids.is_empty() {
             return Ok((vec![], cursor));
         }
 
-        // For each ID, look up ts from id2ts and items from activity_items
-        let cf_i2t = self.cf("id2ts");
+        // Use the ts from the addr_type_activity key (same ts used when writing
+        // activity_items in write_addr_activity_entries_with_categories).
+        // This avoids relying on id2ts which may have a different timestamp
+        // (written by the background persist task).
         let cf_items = self.cf("activity_items");
         let mut entries = Vec::with_capacity(ids.len());
 
-        for id in &ids {
-            // Get timestamp
-            let ts = self
-                .db
-                .get_cf(&cf_i2t, id.as_bytes())?
-                .and_then(|v| {
-                    if v.len() == 8 {
-                        let mut be = [0u8; 8];
-                        be.copy_from_slice(&v);
-                        Some(u64::from_be_bytes(be) as i64)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-
-            // Try to read pre-computed items
-            let item_key = crate::helpers::key_addr_activity(addr, ts, id);
+        for (id, ts) in &ids {
+            // Try to read pre-computed items using the key timestamp
+            let item_key = crate::helpers::key_addr_activity(addr, *ts, id);
             let precomputed = self
                 .db
                 .get_cf(&cf_items, &item_key)
@@ -683,7 +675,7 @@ impl RocksStore {
                 .flatten()
                 .and_then(|v| serde_json::from_slice::<Vec<crate::activity_item::StoredActivityItem>>(&v).ok());
 
-            entries.push((id.clone(), ts, precomputed));
+            entries.push((id.clone(), *ts, precomputed));
         }
 
         Ok((entries, cursor))
@@ -961,6 +953,27 @@ impl RocksStore {
         after_id: Option<String>,
         limit: usize,
     ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
+        let (ids_with_ts, cursor) = self
+            .recent_ids_with_ts_by_address_and_categories(
+                addr, categories, after_ts, after_id, limit,
+            )
+            .await?;
+        let ids = ids_with_ts.into_iter().map(|(id, _)| id).collect();
+        Ok((ids, cursor))
+    }
+
+    /// Like `recent_ids_by_address_and_categories` but also returns the
+    /// timestamp from the `addr_type_activity` key for each entry.
+    /// Used internally by `recent_activity_items_by_address_and_categories`
+    /// to look up pre-computed items with the correct key timestamp.
+    async fn recent_ids_with_ts_by_address_and_categories(
+        &self,
+        addr: &str,
+        categories: &[u8],
+        after_ts: Option<i64>,
+        after_id: Option<String>,
+        limit: usize,
+    ) -> Result<(Vec<(String, i64)>, Option<(i64, String, bool)>)> {
         use crate::helpers::{
             key_addr_type_activity, parse_addr_type_activity_key, prefix_addr_type_activity,
         };
@@ -1011,7 +1024,7 @@ impl RocksStore {
                     skipped_cursor = true;
                 }
 
-                ids.push(block_id);
+                ids.push((block_id, ts));
                 if ids.len() > limit {
                     break;
                 }
@@ -1108,8 +1121,8 @@ impl RocksStore {
                 .map(|(i, _)| i)
                 .unwrap();
 
-            let (_, block_id) = iters[best_idx].current.clone().unwrap();
-            ids.push(block_id);
+            let (ts, block_id) = iters[best_idx].current.clone().unwrap();
+            ids.push((block_id, ts));
 
             iters[best_idx].advance_next();
             if iters[best_idx].current.is_none() {
@@ -1121,33 +1134,18 @@ impl RocksStore {
     }
 
     /// Shared logic for building the pagination cursor from a collected ids vec.
+    /// Each entry is `(block_id, ts)` where ts comes from the `addr_type_activity` key.
     async fn finalize_ids_cursor(
         &self,
-        mut ids: Vec<String>,
+        mut ids: Vec<(String, i64)>,
         limit: usize,
-    ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
+    ) -> Result<(Vec<(String, i64)>, Option<(i64, String, bool)>)> {
         let has_more = ids.len() > limit;
         if has_more {
             ids.pop();
         }
         let next_cursor = if has_more {
-            ids.last().and_then(|last_id| {
-                let cf_i2t = self.cf("id2ts");
-                self.db
-                    .get_cf(&cf_i2t, last_id.as_bytes())
-                    .ok()
-                    .flatten()
-                    .and_then(|v| {
-                        if v.len() == 8 {
-                            let mut b = [0u8; 8];
-                            b.copy_from_slice(&v);
-                            let ts = u64::from_be_bytes(b) as i64;
-                            Some((ts, last_id.clone(), true))
-                        } else {
-                            None
-                        }
-                    })
-            })
+            ids.last().map(|(last_id, ts)| (*ts, last_id.clone(), true))
         } else {
             None
         };
@@ -1820,8 +1818,10 @@ impl DagStorage for RocksStore {
         after_id: Option<String>,
         limit: usize,
     ) -> Result<(Vec<String>, Option<(i64, String, bool)>)> {
-        self.recent_ids_by_address_and_categories(addr, categories, after_ts, after_id, limit)
-            .await
+        RocksStore::recent_ids_by_address_and_categories(
+            self, addr, categories, after_ts, after_id, limit,
+        )
+        .await
     }
 }
 
