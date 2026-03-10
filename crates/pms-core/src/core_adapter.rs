@@ -1,6 +1,6 @@
 use crate::background_persist::{PersistJob, spawn_background_persist};
 use crate::concurrent_dag::ConcurrentDag;
-use crate::utxo::ShardedUtxoSet;
+use crate::utxo::{ShardedUtxoSet, UtxoFetcher};
 use crate::{DagRef, ValidatePolicy};
 use pms_config::load_config;
 use pms_event::EventBus;
@@ -32,7 +32,12 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
     /// Étape 1/2 : construit l'adapter **sans** serveur attaché.
     ///
     /// On met `server` à `Weak::new()` ; il sera renseigné par `set_server` (étape 2/2).
-    pub fn new(dag: Arc<ConcurrentDag>, store: Arc<S>) -> Arc<Self> {
+    pub fn new(
+        dag: Arc<ConcurrentDag>,
+        store: Arc<S>,
+        max_utxos: usize,
+        utxo_fallback: Option<UtxoFetcher>,
+    ) -> Arc<Self> {
         let settings = load_config().expect("config"); // ou injecte depuis le main
         let mut p = ValidatePolicy::from_global_config();
         if settings.network.mode.is_non_prod() {
@@ -51,7 +56,7 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
             dag,
             store,
             policy: p,
-            utxos: Arc::new(ShardedUtxoSet::new()),
+            utxos: Arc::new(ShardedUtxoSet::new(max_utxos, utxo_fallback)),
             persist_tx,
             event_bus,
         })
@@ -61,6 +66,8 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
         dag: Arc<ConcurrentDag>,
         store: Arc<S>,
         mut policy: ValidatePolicy,
+        max_utxos: usize,
+        utxo_fallback: Option<UtxoFetcher>,
     ) -> Arc<Self> {
         eprintln!(
             "[ADAPTER] new_with_policy entry: enforce_parents={}",
@@ -82,7 +89,7 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
             dag,
             store,
             policy,
-            utxos: Arc::new(ShardedUtxoSet::new()),
+            utxos: Arc::new(ShardedUtxoSet::new(max_utxos, utxo_fallback)),
             persist_tx,
             event_bus,
         })

@@ -44,7 +44,7 @@ async fn signed_block_goes_through_full_pipeline() -> Result<()> {
     let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
 
     // 4) Adapter
-    let adapter = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // 5) Parents = genesis
     let parents = vec![genesis.id.clone()];

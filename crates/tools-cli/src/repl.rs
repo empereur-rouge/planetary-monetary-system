@@ -71,7 +71,7 @@ pub async fn run() -> Result<()> {
             let store = Arc::new(s);
             let dag_loaded = ConcurrentDag::bootstrap_from_store::<RocksStore>(&*store).await?;
             let dag = Arc::new(dag_loaded);
-            let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+            let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
             (Some(store), Some(dag), Some(adapter))
         }
         Err(e) => {

@@ -123,7 +123,7 @@ pub async fn spawn_node_generic_rocks_with_seed(
         enforce_parents, policy.enforce_parent_existence
     );
 
-    let adapter_concrete = CoreAdapter::new_with_policy(dag.clone(), store.clone(), policy);
+    let adapter_concrete = CoreAdapter::new_with_policy(dag.clone(), store.clone(), policy, 0, None);
     let adapter: Arc<dyn NetDagAdapter> = adapter_concrete.clone();
 
     let server = Server::new(

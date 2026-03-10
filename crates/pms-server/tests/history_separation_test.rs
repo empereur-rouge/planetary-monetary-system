@@ -36,7 +36,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
     // 3) Components
     let genesis = Block::genesis(compute_block_id);
     let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
     let wallet = Arc::new(Wallet::generate());
     let server = Server::new(
         adapter.clone(),

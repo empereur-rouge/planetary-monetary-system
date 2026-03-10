@@ -43,7 +43,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
     let dag = Arc::new(dag_loaded);
 
     // 4) Adapter
-    let adapter: Arc<dyn NetDagAdapter> = pms_core::CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = pms_core::CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // 5) Wallet de node pour les tests (en mémoire, pas de fichier)
     let node_wallet =
@@ -147,7 +147,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
     let dag = Arc::new(dag_loaded);
 
     // 4) Adapter
-    let adapter: Arc<dyn NetDagAdapter> = pms_core::CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = pms_core::CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // 5) Wallet node (en mémoire)
     let node_wallet = Arc::new(Wallet::from_seed(&[7u8; 32], None).unwrap());
@@ -256,7 +256,7 @@ pub async fn make_test_ctx_with_admin(
     let dag = Arc::new(dag_loaded);
 
     // 4) Adapter
-    let adapter: Arc<dyn NetDagAdapter> = pms_core::CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = pms_core::CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // 5) Wallet node (en mémoire) - use same seed as make_test_ctx
     let node_wallet = Arc::new(Wallet::from_seed(&[7u8; 32], None).unwrap());

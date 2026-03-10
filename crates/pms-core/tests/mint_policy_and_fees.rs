@@ -49,7 +49,7 @@ async fn mint_policy_enforced_on_admin_vs_non_admin() -> anyhow::Result<()> {
     let genesis = Block::genesis(compute_block_id);
     let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
 
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // 3) Wallet ADMIN
     let admin_wallet = Wallet::from_seed(&[7u8; 32], None)
@@ -186,7 +186,7 @@ async fn dev_mode_mint_signed_by_admin_is_accepted() -> anyhow::Result<()> {
     let meta = WireMeta::from(&settings);
     let genesis = Block::genesis(compute_block_id);
     let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // 3) Wallet ADMIN de test
     let admin_wallet = Wallet::from_seed(&[7u8; 32], None)
@@ -235,6 +235,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             tip_limit: 100,
             max_dag_blocks: 0,
             max_spent_outpoints: 0,
+            max_utxos: 0,
             checkpoint_interval_secs: None,
         },
         network: Network {
@@ -360,6 +361,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_testnet() {
             tip_limit: 100,
             max_dag_blocks: 0,
             max_spent_outpoints: 0,
+            max_utxos: 0,
             checkpoint_interval_secs: None,
         },
         network: Network {
@@ -490,6 +492,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_mainnet() {
             tip_limit: 100,
             max_dag_blocks: 0,
             max_spent_outpoints: 0,
+            max_utxos: 0,
             checkpoint_interval_secs: None,
         },
         network: Network {
@@ -620,6 +623,7 @@ fn mint_policy_allows_empty_signer_pubkeys_in_dev() {
             tip_limit: 100,
             max_dag_blocks: 0,
             max_spent_outpoints: 0,
+            max_utxos: 0,
             checkpoint_interval_secs: None,
         },
         network: Network {

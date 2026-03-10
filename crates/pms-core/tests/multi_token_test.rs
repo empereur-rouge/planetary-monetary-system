@@ -64,7 +64,7 @@ async fn seed_token(
 
 #[tokio::test]
 async fn valid_pms_only_transaction() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
     seed_pms(&utxos, "aa01", 0, "Alice", "10.00000000").await;
 
     let tx = Transaction {
@@ -85,7 +85,7 @@ async fn valid_pms_only_transaction() {
 
 #[tokio::test]
 async fn pms_transaction_unbalanced_rejected() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
     seed_pms(&utxos, "aa02", 0, "Alice", "10.00000000").await;
 
     // outputs > inputs
@@ -113,7 +113,7 @@ async fn pms_transaction_unbalanced_rejected() {
 
 #[tokio::test]
 async fn valid_edenite_transfer() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
 
     // Alice a 100 EDEN + 1 PMS (pour les fees)
     seed_token(&utxos, "bb01", 0, "Alice", "100.00000000", "edenite").await;
@@ -148,7 +148,7 @@ async fn valid_edenite_transfer() {
 
 #[tokio::test]
 async fn edenite_transfer_unbalanced_rejected() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
     seed_token(&utxos, "cc01", 0, "Alice", "50.00000000", "edenite").await;
 
     // Alice essaie d'envoyer plus d'EDEN qu'elle n'en a
@@ -169,7 +169,7 @@ async fn edenite_transfer_unbalanced_rejected() {
 
 #[tokio::test]
 async fn cannot_create_token_from_nothing() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
     // Alice n'a que du PMS
     seed_pms(&utxos, "dd01", 0, "Alice", "10.00000000").await;
 
@@ -198,7 +198,7 @@ async fn cannot_create_token_from_nothing() {
 
 #[tokio::test]
 async fn valid_multi_asset_transaction() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
 
     // Alice a PMS + EDEN + GOLD
     seed_pms(&utxos, "ee01", 0, "Alice", "5.00000000").await;
@@ -241,7 +241,7 @@ async fn valid_multi_asset_transaction() {
 
 #[tokio::test]
 async fn multi_asset_one_unbalanced_rejected() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
 
     seed_pms(&utxos, "ff01", 0, "Alice", "5.00000000").await;
     seed_token(&utxos, "ff02", 0, "Alice", "100.00000000", "edenite").await;
@@ -270,7 +270,7 @@ async fn multi_asset_one_unbalanced_rejected() {
 
 #[tokio::test]
 async fn cross_asset_mixing_rejected() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
 
     // Alice a 100 EDEN
     seed_token(&utxos, "1a01", 0, "Alice", "100.00000000", "edenite").await;
@@ -298,7 +298,7 @@ async fn cross_asset_mixing_rejected() {
 
 #[tokio::test]
 async fn duplicate_input_in_same_tx_rejected() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
     seed_token(&utxos, "2a01", 0, "Alice", "50.00000000", "edenite").await;
 
     // Même input 2 fois → double-spend
@@ -324,7 +324,7 @@ async fn duplicate_input_in_same_tx_rejected() {
 
 #[tokio::test]
 async fn missing_utxo_input_rejected() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
     // Pas de seed → input n'existe pas
 
     let tx = Transaction {
@@ -348,7 +348,7 @@ async fn missing_utxo_input_rejected() {
 
 #[tokio::test]
 async fn circulating_supply_native_pms_only() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
 
     seed_pms(&utxos, "aa01", 0, "Alice", "100.00000000").await;
     seed_pms(&utxos, "aa02", 0, "Bob", "50.00000000").await;
@@ -361,7 +361,7 @@ async fn circulating_supply_native_pms_only() {
 
 #[tokio::test]
 async fn circulating_supply_by_asset_edenite() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
 
     seed_pms(&utxos, "bb01", 0, "Alice", "100.00000000").await;
     seed_token(&utxos, "bb02", 0, "Alice", "500.00000000", "edenite").await;
@@ -395,7 +395,7 @@ async fn circulating_supply_by_asset_edenite() {
 
 #[tokio::test]
 async fn balance_by_address_pms_retrocompat() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
 
     seed_pms(&utxos, "cc01", 0, "Alice", "10.00000000").await;
     seed_pms(&utxos, "cc02", 0, "Alice", "20.00000000").await;
@@ -408,7 +408,7 @@ async fn balance_by_address_pms_retrocompat() {
 
 #[tokio::test]
 async fn balance_by_address_and_asset() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
 
     seed_pms(&utxos, "dd01", 0, "Alice", "10.00000000").await;
     seed_token(&utxos, "dd02", 0, "Alice", "500.00000000", "edenite").await;
@@ -444,7 +444,7 @@ async fn balance_by_address_and_asset() {
 
 #[tokio::test]
 async fn utxos_by_address_all_assets() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
 
     seed_pms(&utxos, "ee01", 0, "Alice", "5.00000000").await;
     seed_token(&utxos, "ee02", 0, "Alice", "100.00000000", "edenite").await;
@@ -480,7 +480,7 @@ async fn utxos_by_address_all_assets() {
 
 #[tokio::test]
 async fn apply_diff_multi_asset() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
 
     // Seed initial
     seed_token(&utxos, "ff01", 0, "Alice", "100.00000000", "edenite").await;

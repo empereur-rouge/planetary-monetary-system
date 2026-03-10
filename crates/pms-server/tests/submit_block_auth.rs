@@ -90,7 +90,7 @@ async fn unsigned_block_is_rejected() -> anyhow::Result<()> {
     let dag_loaded = ConcurrentDag::new_with_genesis(genesis);
     let dag: DagRef = Arc::new(dag_loaded);
 
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // 2) Forge un bloc simple (payload None) avec les fonctions existantes
     let block = dag.forge_block(
@@ -153,7 +153,7 @@ async fn signed_plain_block_is_accepted() -> Result<()> {
     let dag_loaded = ConcurrentDag::new_with_genesis(genesis);
     let dag: DagRef = Arc::new(dag_loaded);
 
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // 1) Forge bloc (payload None) via Dag
     let block = dag.forge_block(None, 0, compute_block_id)?;
@@ -200,7 +200,7 @@ async fn signed_encrypted_mint_is_accepted() -> Result<()> {
     let dag_loaded = ConcurrentDag::new_with_genesis(genesis);
     let dag: DagRef = Arc::new(dag_loaded);
 
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use pms_config::LedgerDef;
 use pms_core::CoreAdapter;
 use pms_core::concurrent_dag::ConcurrentDag;
-use pms_core::utxo::ShardedUtxoSet;
+use pms_core::utxo::{ShardedUtxoSet, UtxoFetcher};
 use pms_interface::NetDagAdapter;
 use pms_storage::DagStorage;
 use pms_storage::rocks_store::store::PmsDb;
@@ -38,6 +38,7 @@ impl LedgerInstance {
         global_tip_limit: usize,
         max_dag_blocks: usize,
         max_spent_outpoints: usize,
+        max_utxos: usize,
     ) -> Result<Self> {
         let tip_limit = def.tip_limit.unwrap_or(global_tip_limit);
 
@@ -55,8 +56,9 @@ impl LedgerInstance {
 
         // Genesis block si DB vide pour ce prefix
         let ids = store.all_block_ids().await.context("listing block IDs")?;
+        let is_fresh_db = ids.is_empty();
 
-        if ids.is_empty() {
+        if is_fresh_db {
             let genesis = Block::genesis(compute_block_id);
             let meta = WireMeta {
                 network_id: def.network_id.clone(),
@@ -67,6 +69,62 @@ impl LedgerInstance {
                 .await
                 .context("persisting genesis")?;
             tracing::info!(ledger = %def.id, "Genesis block created");
+        }
+
+        // ── DAG version check ──────────────────────────────────────────
+        {
+            use pms_storage::{DAG_VERSION, DagSemVer, VersionCheck, check_dag_compatibility};
+
+            if is_fresh_db {
+                // Nouvelle DB → écrire la version courante
+                store
+                    .set_dag_version(DAG_VERSION)
+                    .await
+                    .context("writing initial DAG version")?;
+                tracing::info!(ledger = %def.id, dag_version = DAG_VERSION, "DAG version set (fresh DB)");
+            } else {
+                let stored_str = store
+                    .get_dag_version()
+                    .await
+                    .context("reading DAG version")?;
+                let stored = DagSemVer::parse(&stored_str)
+                    .with_context(|| format!("invalid stored DAG version: '{stored_str}'"))?;
+                let current = DagSemVer::parse(DAG_VERSION)
+                    .expect("DAG_VERSION constant must be valid SemVer");
+
+                match check_dag_compatibility(&stored, &current) {
+                    VersionCheck::Compatible => {
+                        if stored != current {
+                            tracing::info!(
+                                ledger = %def.id,
+                                from = %stored,
+                                to = %current,
+                                "Auto-migrating DAG version (minor/patch)"
+                            );
+                            store
+                                .set_dag_version(DAG_VERSION)
+                                .await
+                                .context("updating DAG version")?;
+                        }
+                    }
+                    VersionCheck::Downgrade => {
+                        anyhow::bail!(
+                            "Ledger '{}': DAG version downgrade not supported. \
+                             Stored: {}, Binary: {}. \
+                             This data was created with a newer version. Please upgrade the software.",
+                            def.id, stored, current
+                        );
+                    }
+                    VersionCheck::MajorMismatch => {
+                        anyhow::bail!(
+                            "Ledger '{}': DAG version MAJOR mismatch. \
+                             Stored: {}, Binary: {}. \
+                             Breaking changes detected. Manual migration or fresh DB required.",
+                            def.id, stored, current
+                        );
+                    }
+                }
+            }
         }
 
         // Bootstrap DAG from store (with capacity limit for RAM pruning)
@@ -81,29 +139,72 @@ impl LedgerInstance {
         );
         tracing::info!(ledger = %def.id, blocks = dag.len(), max_dag_blocks, "DAG loaded");
 
+        // ── UTXO LRU fallback closure (reads from RocksDB on cache miss) ──
+        let store_for_fallback = store.clone();
+        let utxo_fallback: UtxoFetcher = Arc::new(move |txid: &str, index: u32| {
+            store_for_fallback
+                .get_utxo(txid, index)
+                .ok()
+                .flatten()
+                .map(|uv| pms_types::TxOutput {
+                    address: uv.address,
+                    amount: uv.amount,
+                    asset_id: uv.asset_id,
+                })
+        });
+
         // Adapter + UTXO bootstrap from RocksDB utxo CF (authoritative, never pruned)
-        let core_adapter = CoreAdapter::new(dag.clone(), store.clone());
+        let core_adapter = CoreAdapter::new(
+            dag.clone(),
+            store.clone(),
+            max_utxos,
+            Some(utxo_fallback),
+        );
         {
             let all_utxos = store
                 .iter_all_utxos()
                 .with_context(|| format!("iter_all_utxos for ledger '{}'", def.id))?;
-            for (txid, idx, uv) in &all_utxos {
-                let oid = pms_types::OutputId {
-                    txid: txid.clone(),
-                    index: *idx,
-                };
-                let txo = pms_types::TxOutput {
-                    address: uv.address.clone(),
-                    amount: uv.amount.clone(),
-                    asset_id: uv.asset_id.clone(),
-                };
-                core_adapter.utxos.add(oid, txo).await;
+
+            // Build (OutputId, TxOutput) pairs for bootstrap
+            let utxo_pairs: Vec<(pms_types::OutputId, pms_types::TxOutput)> = all_utxos
+                .iter()
+                .map(|(txid, idx, uv)| {
+                    let oid = pms_types::OutputId {
+                        txid: txid.clone(),
+                        index: *idx,
+                    };
+                    let txo = pms_types::TxOutput {
+                        address: uv.address.clone(),
+                        amount: uv.amount.clone(),
+                        asset_id: uv.asset_id.clone(),
+                    };
+                    (oid, txo)
+                })
+                .collect();
+
+            // Insert into LRU shards (some may be evicted if count > max_utxos)
+            for (oid, txo) in &utxo_pairs {
+                core_adapter.utxos.add(oid.clone(), txo.clone()).await;
             }
-            core_adapter.utxos.rebuild_indexes().await;
+
+            // Rebuild indexes from the FULL UTXO list (not just what's in cache)
+            // so supply_cache and native_balance_cache are always accurate.
+            if max_utxos > 0 && utxo_pairs.len() > max_utxos {
+                core_adapter
+                    .utxos
+                    .rebuild_indexes_from_utxos(&utxo_pairs)
+                    .await;
+            } else {
+                core_adapter.utxos.rebuild_indexes().await;
+            }
+
+            let cached = core_adapter.utxos.total_len().await;
             tracing::info!(
                 ledger = %def.id,
-                utxos = all_utxos.len(),
-                "UTXO set bootstrapped from RocksDB"
+                utxos_total = utxo_pairs.len(),
+                utxos_cached = cached,
+                max_utxos,
+                "UTXO set bootstrapped from RocksDB (LRU cache)"
             );
         }
 

@@ -49,7 +49,7 @@ fn token_output(address: &str, amount: &str, asset_id: &str) -> TxOutput {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_balance_query_during_apply_diff() {
-    let utxos = Arc::new(ShardedUtxoSet::new());
+    let utxos = Arc::new(ShardedUtxoSet::new(0, None));
 
     // Seed 100 UTXOs pour Alice avec des txids qui tombent sur différents shards
     for i in 0u32..100 {
@@ -125,7 +125,7 @@ async fn concurrent_balance_query_during_apply_diff() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_utxos_query_during_apply_diff() {
-    let utxos = Arc::new(ShardedUtxoSet::new());
+    let utxos = Arc::new(ShardedUtxoSet::new(0, None));
 
     for i in 0u32..50 {
         let txid = format!("{:02x}{:06x}", i % 256, i);
@@ -201,7 +201,7 @@ async fn concurrent_utxos_query_during_apply_diff() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_mixed_reads_during_add_remove() {
-    let utxos = Arc::new(ShardedUtxoSet::new());
+    let utxos = Arc::new(ShardedUtxoSet::new(0, None));
 
     // Seed initial
     for i in 0u32..20 {
@@ -275,7 +275,7 @@ async fn concurrent_mixed_reads_during_add_remove() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_same_shard_contention() {
-    let utxos = Arc::new(ShardedUtxoSet::new());
+    let utxos = Arc::new(ShardedUtxoSet::new(0, None));
 
     // Tous les txids sur le shard "aa" (170)
     for i in 0u32..50 {
@@ -344,7 +344,7 @@ async fn concurrent_same_shard_contention() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn consistency_after_concurrent_operations() {
-    let utxos = Arc::new(ShardedUtxoSet::new());
+    let utxos = Arc::new(ShardedUtxoSet::new(0, None));
 
     // Chaque adresse reçoit 10 PMS initiaux
     let addresses = ["Alpha", "Beta", "Gamma", "Delta"];
@@ -479,7 +479,7 @@ async fn consistency_after_concurrent_operations() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_multi_asset_balance_during_apply_diff() {
-    let utxos = Arc::new(ShardedUtxoSet::new());
+    let utxos = Arc::new(ShardedUtxoSet::new(0, None));
 
     // Seed : Alice a 100 PMS + 500 EDEN
     utxos
@@ -586,7 +586,7 @@ async fn concurrent_multi_asset_balance_during_apply_diff() {
 
 #[tokio::test]
 async fn rebuild_indexes_matches_incremental_state() {
-    let utxos = ShardedUtxoSet::new();
+    let utxos = ShardedUtxoSet::new(0, None);
 
     // Séquence réaliste d'opérations
     utxos
@@ -691,7 +691,7 @@ async fn rebuild_indexes_matches_incremental_state() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn stress_high_contention_no_deadlock() {
-    let utxos = Arc::new(ShardedUtxoSet::new());
+    let utxos = Arc::new(ShardedUtxoSet::new(0, None));
 
     // Seed : 100 adresses × 10 PMS chacune = 1000 PMS
     for i in 0u32..100 {

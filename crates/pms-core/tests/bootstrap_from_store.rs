@@ -40,7 +40,7 @@ async fn bootstrap_recovers_all_blocks_and_children_rocks() -> anyhow::Result<()
     let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
 
     // 6) Adapter concret (prod-like)
-    let adapter_concrete = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter_concrete = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
     let adapter: Arc<dyn NetDagAdapter> = adapter_concrete.clone();
 
     // 7) Wallet de test pour signer

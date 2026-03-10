@@ -25,7 +25,7 @@ async fn test_metadata_persistence_and_supply() {
     let dag = Arc::new(ConcurrentDag::new());
     dag.insert_block(genesis_block.clone());
 
-    let adapter = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // 0. Bootstrap UTXO
     adapter.bootstrap_utxos().await.unwrap();

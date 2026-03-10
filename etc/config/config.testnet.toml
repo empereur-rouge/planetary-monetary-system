@@ -9,6 +9,7 @@ path = "/home/pms/data/rocks"
 prefix = "pms:test"
 tip_limit = 256
 max_dag_blocks = 50000
+max_utxos = 500000
 checkpoint_interval_secs = 3600
 
 [network]
