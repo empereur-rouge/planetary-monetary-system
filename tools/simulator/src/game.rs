@@ -185,19 +185,18 @@ impl GameEngine {
     /// Burn a cube NFT and mint edenite reward on the game ledger
     /// Returns the edenite amount received
     pub async fn burn_cube_for_edenite(
-        &self,
+        &mut self,
         private_key_b64: &str,
         agent_addr: &str,
         token_id: &str,
     ) -> SimResult<String> {
-        // 1. Get cube attributes
+        // 1. Get cube attributes (remove from registry — it's being burned)
         let attrs = self
             .cube_registry
-            .get(token_id)
+            .remove(token_id)
             .ok_or_else(|| {
                 crate::error::SimError::Other(anyhow::anyhow!("Cube {} not found in registry", token_id))
-            })?
-            .clone();
+            })?;
 
         // 2. Burn the NFT via burn-simple
         self.main_client
@@ -233,7 +232,7 @@ impl GameEngine {
     /// Burn multiple cube NFTs in a single API call and mint total edenite reward.
     /// Returns (edenite_amount_str, count_burned).
     pub async fn burn_cubes_for_edenite(
-        &self,
+        &mut self,
         private_key_b64: &str,
         agent_addr: &str,
         token_ids: Vec<String>,
@@ -242,10 +241,10 @@ impl GameEngine {
             return Ok(("0".to_string(), 0));
         }
 
-        // 1. Calculate total edenite reward
+        // 1. Calculate total edenite reward (remove from registry — they're being burned)
         let mut total_edenite = 0.0f64;
         for tid in &token_ids {
-            if let Some(attrs) = self.cube_registry.get(tid) {
+            if let Some(attrs) = self.cube_registry.remove(tid) {
                 total_edenite += attrs.edenite_reward(self.divisor);
             }
         }
@@ -295,5 +294,92 @@ impl GameEngine {
             })
             .await?;
         Ok(())
+    }
+
+    /// Number of cubes currently tracked in the registry (for diagnostics).
+    pub fn registry_len(&self) -> usize {
+        self.cube_registry.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cube_registry_shrinks_after_remove() {
+        let mut registry = HashMap::new();
+
+        // Simulate minting 10 cubes
+        for i in 0..10 {
+            let token_id = format!("cube-{:04}", i);
+            let attrs = CubeAttributes {
+                weight: 500.0 + i as f64,
+                size: 250.0,
+                density: 10.0,
+            };
+            registry.insert(token_id, attrs);
+        }
+        println!("After minting 10 cubes: registry.len() = {}", registry.len());
+        assert_eq!(registry.len(), 10);
+
+        // Simulate burning 5 cubes (remove from registry)
+        let to_burn: Vec<String> = (0..5).map(|i| format!("cube-{:04}", i)).collect();
+        let mut total_reward = 0.0;
+        for tid in &to_burn {
+            if let Some(attrs) = registry.remove(tid) {
+                total_reward += attrs.edenite_reward(DEFAULT_DIVISOR);
+            }
+        }
+        println!(
+            "After burning 5 cubes: registry.len() = {}, total_reward = {:.10}",
+            registry.len(),
+            total_reward
+        );
+        assert_eq!(registry.len(), 5, "burned cubes must be removed from registry");
+        assert!(total_reward > 0.0, "reward must be positive");
+
+        // Burned cubes must no longer be in registry
+        for tid in &to_burn {
+            assert!(
+                !registry.contains_key(tid),
+                "burned cube {} still in registry",
+                tid
+            );
+        }
+        println!("All burned cubes confirmed absent from registry");
+
+        // Remaining cubes must still be present
+        for i in 5..10 {
+            let tid = format!("cube-{:04}", i);
+            assert!(
+                registry.contains_key(&tid),
+                "unburned cube {} missing from registry",
+                tid
+            );
+        }
+        println!("All 5 unburned cubes confirmed present in registry");
+    }
+
+    #[test]
+    fn edenite_reward_formula_correct() {
+        let attrs = CubeAttributes {
+            weight: 1000.0,
+            size: 500.0,
+            density: 19.3,
+        };
+        let reward = attrs.edenite_reward(DEFAULT_DIVISOR);
+        // Expected: (1000 * 500 * 19.3) / 19_300_000_000 = 9_650_000 / 19_300_000_000 = 0.0005
+        let expected = 0.0005;
+        println!(
+            "Reward for w=1000, s=500, d=19.3: {:.10} (expected {:.10})",
+            reward, expected
+        );
+        assert!(
+            (reward - expected).abs() < 1e-12,
+            "reward {} != expected {}",
+            reward,
+            expected
+        );
     }
 }

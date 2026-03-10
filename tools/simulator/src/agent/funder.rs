@@ -26,7 +26,7 @@ impl Funder {
         client: &DagClient,
         agents: &[(String, WalletInfo, usize)], // (name, wallet, cubes_per_agent)
         faucet_amount: &str,
-        metrics_tx: &mpsc::UnboundedSender<MetricEvent>,
+        metrics_tx: &mpsc::Sender<MetricEvent>,
         game_engine: Option<&Arc<RwLock<GameEngine>>>,
     ) -> SimResult<HashMap<String, Vec<String>>> {
         // ── Phase 1: Parallel faucet ──
@@ -52,7 +52,7 @@ impl Funder {
                     amount,
                     &block_id[..16.min(block_id.len())]
                 );
-                let _ = metrics_tx.send(MetricEvent::AgentFunded {
+                let _ = metrics_tx.try_send(MetricEvent::AgentFunded {
                     agent_name: name,
                     amount,
                 });

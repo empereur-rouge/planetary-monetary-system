@@ -24,7 +24,7 @@ const EDN_SEND_THRESHOLD: f64 = 0.000_000_01;
 pub struct RandomAgent {
     name: String,
     wallet: WalletInfo,
-    inbox: mpsc::UnboundedReceiver<AgentMessage>,
+    inbox: mpsc::Receiver<AgentMessage>,
     cached_balance: f64,
     tick_count: u32,
     min_amount: f64,
@@ -42,7 +42,7 @@ impl RandomAgent {
     pub fn new(
         name: String,
         wallet: WalletInfo,
-        inbox: mpsc::UnboundedReceiver<AgentMessage>,
+        inbox: mpsc::Receiver<AgentMessage>,
         min_amount: f64,
         max_amount: f64,
         send_probability: f64,
@@ -93,7 +93,7 @@ impl RandomAgent {
             &block_id[..16.min(block_id.len())]
         );
 
-        let _ = ctx.metrics_tx.send(MetricEvent::AgentFunded {
+        let _ = ctx.metrics_tx.try_send(MetricEvent::AgentFunded {
             agent_name: self.name.clone(),
             amount: REFUEL_AMOUNT.to_string(),
         });
@@ -118,7 +118,7 @@ impl RandomAgent {
             // ── Phase 1: BATCH BURN all cubes → earn EDN ──
             let cubes_to_burn: Vec<String> = self.cube_ids.drain(..).collect();
             let count = cubes_to_burn.len();
-            let ge = game_engine.read().await;
+            let mut ge = game_engine.write().await;
             match ge
                 .burn_cubes_for_edenite(
                     &self.wallet.private_key_b64,
@@ -137,7 +137,7 @@ impl RandomAgent {
                         edn_str,
                         self.edn_balance
                     );
-                    let _ = ctx.metrics_tx.send(MetricEvent::TransactionSent {
+                    let _ = ctx.metrics_tx.try_send(MetricEvent::TransactionSent {
                         agent_name: self.name.clone(),
                         block_id: format!("batch-burn:{}", burned),
                         amount: format!("{} EDN", edn_str),
@@ -205,7 +205,7 @@ impl RandomAgent {
                         target.name,
                         self.edn_balance
                     );
-                    let _ = ctx.metrics_tx.send(MetricEvent::TransactionSent {
+                    let _ = ctx.metrics_tx.try_send(MetricEvent::TransactionSent {
                         agent_name: self.name.clone(),
                         block_id: format!("edn-send:{}", &target.name),
                         amount: format!("{} EDN", amount_str),
@@ -315,7 +315,7 @@ impl Agent for RandomAgent {
 
             self.cached_balance = bal_str.parse::<f64>().unwrap_or(0.0);
 
-            let _ = ctx.metrics_tx.send(MetricEvent::BalanceUpdate {
+            let _ = ctx.metrics_tx.try_send(MetricEvent::BalanceUpdate {
                 agent_name: self.name.clone(),
                 balance: bal_str,
             });
@@ -340,7 +340,7 @@ impl Agent for RandomAgent {
                 }
                 Err(e) => {
                     tracing::warn!("[{}] Refuel failed: {:#}", self.name, e);
-                    let _ = ctx.metrics_tx.send(MetricEvent::AgentError {
+                    let _ = ctx.metrics_tx.try_send(MetricEvent::AgentError {
                         agent_name: self.name.clone(),
                         error: format!("refuel failed: {:#}", e),
                     });
@@ -400,7 +400,7 @@ impl Agent for RandomAgent {
                     )
                     .await;
 
-                let _ = ctx.metrics_tx.send(MetricEvent::TransactionSent {
+                let _ = ctx.metrics_tx.try_send(MetricEvent::TransactionSent {
                     agent_name: self.name.clone(),
                     block_id,
                     amount: amount_str,
@@ -408,7 +408,7 @@ impl Agent for RandomAgent {
                 });
             }
             Err(e) => {
-                let _ = ctx.metrics_tx.send(MetricEvent::AgentError {
+                let _ = ctx.metrics_tx.try_send(MetricEvent::AgentError {
                     agent_name: self.name.clone(),
                     error: format!("{:#}", e),
                 });

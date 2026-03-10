@@ -19,7 +19,7 @@ pub struct AgentContext {
     pub client: DagClient,
     pub gemini: Option<GeminiClient>,
     pub comms: CommsRouter,
-    pub metrics_tx: mpsc::UnboundedSender<MetricEvent>,
+    pub metrics_tx: mpsc::Sender<MetricEvent>,
     /// All agent names + addresses for peer discovery
     pub peer_registry: Arc<RwLock<Vec<PeerInfo>>>,
     pub cancel: CancellationToken,
@@ -81,7 +81,7 @@ pub fn spawn_agent(
                     match agent.tick(&ctx).await {
                         Ok(()) => {}
                         Err(e) => {
-                            let _ = ctx.metrics_tx.send(MetricEvent::AgentError {
+                            let _ = ctx.metrics_tx.try_send(MetricEvent::AgentError {
                                 agent_name: agent.name().to_string(),
                                 error: format!("{:#}", e),
                             });

@@ -20,7 +20,7 @@ pub struct SmartAgent {
     /// Call Gemini every N ticks
     ai_interval: u32,
     /// Inbox for P2P messages
-    inbox: mpsc::UnboundedReceiver<AgentMessage>,
+    inbox: mpsc::Receiver<AgentMessage>,
     /// Buffered messages received since last AI call
     pending_messages: Vec<AgentMessage>,
     /// Recent action history (for context)
@@ -35,7 +35,7 @@ impl SmartAgent {
         wallet: WalletInfo,
         system_prompt: String,
         ai_interval: u32,
-        inbox: mpsc::UnboundedReceiver<AgentMessage>,
+        inbox: mpsc::Receiver<AgentMessage>,
     ) -> Self {
         Self {
             name,
@@ -207,7 +207,7 @@ impl SmartAgent {
                             )
                             .await;
 
-                        let _ = ctx.metrics_tx.send(MetricEvent::TransactionSent {
+                        let _ = ctx.metrics_tx.try_send(MetricEvent::TransactionSent {
                             agent_name: self.name.clone(),
                             block_id: block_id.clone(),
                             amount: amount.clone(),
@@ -225,7 +225,7 @@ impl SmartAgent {
                             amount, to_agent, e
                         );
                         self.broadcast_error(ctx, &err_str).await;
-                        let _ = ctx.metrics_tx.send(MetricEvent::AgentError {
+                        let _ = ctx.metrics_tx.try_send(MetricEvent::AgentError {
                             agent_name: self.name.clone(),
                             error: err_str.clone(),
                         });
@@ -241,7 +241,7 @@ impl SmartAgent {
                     "tips" => {
                         match ctx.client.get_tips(5).await {
                             Ok(tips) => {
-                                let _ = ctx.metrics_tx.send(MetricEvent::TipsCount(tips.len()));
+                                let _ = ctx.metrics_tx.try_send(MetricEvent::TipsCount(tips.len()));
                                 self.log_action(&format!("Observed {} tips", tips.len()));
                                 Ok(())
                             }
@@ -251,7 +251,7 @@ impl SmartAgent {
                     "supply" => {
                         match ctx.client.get_supply().await {
                             Ok(supply) => {
-                                let _ = ctx.metrics_tx.send(MetricEvent::SupplyUpdate {
+                                let _ = ctx.metrics_tx.try_send(MetricEvent::SupplyUpdate {
                                     circulating: supply.circulating_supply.clone(),
                                     utxo_count: supply.utxo_count,
                                 });
@@ -268,7 +268,7 @@ impl SmartAgent {
                         match ctx.client.balance(&self.wallet.address).await {
                             Ok(bal) => {
                                 self.cached_balance = bal.clone();
-                                let _ = ctx.metrics_tx.send(MetricEvent::BalanceUpdate {
+                                let _ = ctx.metrics_tx.try_send(MetricEvent::BalanceUpdate {
                                     agent_name: self.name.clone(),
                                     balance: bal,
                                 });
@@ -282,7 +282,7 @@ impl SmartAgent {
 
                 if let Err(err_str) = result {
                     self.broadcast_error(ctx, &err_str).await;
-                    let _ = ctx.metrics_tx.send(MetricEvent::AgentError {
+                    let _ = ctx.metrics_tx.try_send(MetricEvent::AgentError {
                         agent_name: self.name.clone(),
                         error: err_str.clone(),
                     });
@@ -337,7 +337,7 @@ impl Agent for SmartAgent {
             };
             match gemini.decide(&self.system_prompt, &context).await {
                 Ok(directive) => {
-                    let _ = ctx.metrics_tx.send(MetricEvent::GeminiDecision {
+                    let _ = ctx.metrics_tx.try_send(MetricEvent::GeminiDecision {
                         agent_name: self.name.clone(),
                         directive: format!("{:?}", directive),
                     });
@@ -348,7 +348,7 @@ impl Agent for SmartAgent {
                     let err_str = format!("Gemini API error: {:#}", e);
                     tracing::warn!("[{}] {}", self.name, err_str);
                     self.broadcast_error(ctx, &err_str).await;
-                    let _ = ctx.metrics_tx.send(MetricEvent::AgentError {
+                    let _ = ctx.metrics_tx.try_send(MetricEvent::AgentError {
                         agent_name: self.name.clone(),
                         error: err_str,
                     });

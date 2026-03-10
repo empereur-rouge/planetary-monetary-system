@@ -89,16 +89,16 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // 5. Metrics pipeline
-    let (metrics_tx, metrics_rx) = mpsc::unbounded_channel();
+    // 5. Metrics pipeline (bounded to prevent OOM under backpressure)
+    let (metrics_tx, metrics_rx) = mpsc::channel(4096);
     let shared_metrics = create_shared_metrics();
     let shared_clone = shared_metrics.clone();
     tokio::spawn(async move {
         run_aggregator(metrics_rx, shared_clone).await;
     });
 
-    // 6. Comms router
-    let (chat_log_tx, chat_log_rx) = mpsc::unbounded_channel();
+    // 6. Comms router (bounded channel for global chat log)
+    let (chat_log_tx, chat_log_rx) = mpsc::channel(2048);
     let comms = CommsRouter::new(chat_log_tx);
 
     // 6b. Web dashboard (broadcast channel for WebSocket fan-out)
@@ -278,9 +278,37 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // 12b. Memory watchdog — log RSS every 30s, graceful shutdown at 400 MB
+    {
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            let max_rss_bytes: u64 = 400 * 1024 * 1024; // 400 MB
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    _ = cancel_clone.cancelled() => break,
+                    _ = interval.tick() => {
+                        if let Ok(rss) = read_rss_bytes() {
+                            let rss_mb = rss / (1024 * 1024);
+                            tracing::info!("Memory watchdog: RSS = {} MB", rss_mb);
+                            if rss > max_rss_bytes {
+                                tracing::error!(
+                                    "Memory watchdog: RSS {} MB exceeds limit {} MB — shutting down",
+                                    rss_mb, max_rss_bytes / (1024 * 1024)
+                                );
+                                cancel_clone.cancel();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // 13. Forward chat messages to WebSocket broadcast
     let ws_tx_clone = ws_tx.clone();
-    let (tui_chat_tx, tui_chat_rx) = mpsc::unbounded_channel();
+    let (tui_chat_tx, tui_chat_rx) = mpsc::channel(512);
     tokio::spawn(async move {
         let mut rx = chat_log_rx;
         while let Some(msg) = rx.recv().await {
@@ -288,8 +316,8 @@ async fn main() -> anyhow::Result<()> {
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = ws_tx_clone.send(json);
             }
-            // Forward summary to TUI channel
-            let _ = tui_chat_tx.send(msg);
+            // Forward summary to TUI channel (drop if TUI can't keep up)
+            let _ = tui_chat_tx.try_send(msg);
         }
     });
 
@@ -319,4 +347,52 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Simulation complete.");
     Ok(())
+}
+
+/// Read current process RSS from /proc/self/statm (Linux) or task_info (macOS).
+fn read_rss_bytes() -> Result<u64, ()> {
+    #[cfg(target_os = "linux")]
+    {
+        let statm = std::fs::read_to_string("/proc/self/statm").map_err(|_| ())?;
+        let rss_pages: u64 = statm
+            .split_whitespace()
+            .nth(1) // second field = RSS in pages
+            .and_then(|s| s.parse().ok())
+            .ok_or(())?;
+        Ok(rss_pages * 4096) // page size = 4 KB on Linux
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, use mach task_info
+        use std::mem;
+        extern "C" {
+            fn mach_task_self() -> u32;
+            fn task_info(
+                target_task: u32,
+                flavor: u32,
+                task_info_out: *mut u64,
+                task_info_count: *mut u32,
+            ) -> i32;
+        }
+        const MACH_TASK_BASIC_INFO: u32 = 20;
+        // struct mach_task_basic_info has 5 u64 fields (on 64-bit)
+        let mut info = [0u64; 5];
+        let mut count = (mem::size_of_val(&info) / mem::size_of::<u32>()) as u32;
+        let kr = unsafe {
+            task_info(
+                mach_task_self(),
+                MACH_TASK_BASIC_INFO,
+                info.as_mut_ptr(),
+                &mut count,
+            )
+        };
+        if kr != 0 {
+            return Err(());
+        }
+        Ok(info[1]) // resident_size is the second field
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(())
+    }
 }

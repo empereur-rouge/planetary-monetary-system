@@ -11,7 +11,7 @@ pub fn create_shared_metrics() -> SharedMetrics {
 }
 
 pub async fn run_aggregator(
-    mut rx: mpsc::UnboundedReceiver<MetricEvent>,
+    mut rx: mpsc::Receiver<MetricEvent>,
     shared: SharedMetrics,
 ) {
     let mut tx_timestamps: VecDeque<Instant> = VecDeque::new();

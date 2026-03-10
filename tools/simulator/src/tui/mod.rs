@@ -11,14 +11,14 @@ use tokio::sync::mpsc;
 pub struct TuiApp {
     metrics: SharedMetrics,
     start_time: Instant,
-    chat_rx: mpsc::UnboundedReceiver<AgentMessage>,
+    chat_rx: mpsc::Receiver<AgentMessage>,
     chat_log: Vec<String>,
 }
 
 impl TuiApp {
     pub fn new(
         metrics: SharedMetrics,
-        chat_rx: mpsc::UnboundedReceiver<AgentMessage>,
+        chat_rx: mpsc::Receiver<AgentMessage>,
     ) -> Self {
         Self {
             metrics,
