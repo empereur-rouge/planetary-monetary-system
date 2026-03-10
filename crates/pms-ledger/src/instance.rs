@@ -165,43 +165,37 @@ impl LedgerInstance {
                 .iter_all_utxos()
                 .with_context(|| format!("iter_all_utxos for ledger '{}'", def.id))?;
 
-            // Build (OutputId, TxOutput) pairs for bootstrap
-            let utxo_pairs: Vec<(pms_types::OutputId, pms_types::TxOutput)> = all_utxos
-                .iter()
-                .map(|(txid, idx, uv)| {
-                    let oid = pms_types::OutputId {
-                        txid: txid.clone(),
-                        index: *idx,
-                    };
-                    let txo = pms_types::TxOutput {
-                        address: uv.address.clone(),
-                        amount: uv.amount.clone(),
-                        asset_id: uv.asset_id.clone(),
-                    };
-                    (oid, txo)
-                })
-                .collect();
+            let utxo_count = all_utxos.len();
 
-            // Insert into LRU shards (some may be evicted if count > max_utxos)
-            for (oid, txo) in &utxo_pairs {
-                core_adapter.utxos.add(oid.clone(), txo.clone()).await;
+            // Insert into LRU shards directly from storage data (no intermediate Vec).
+            // add() maintains supply_cache, native_balance_cache, and address_index
+            // even when LRU eviction occurs (silent eviction = caches stay accurate).
+            for (txid, idx, uv) in &all_utxos {
+                let oid = pms_types::OutputId {
+                    txid: txid.clone(),
+                    index: *idx,
+                };
+                let txo = pms_types::TxOutput {
+                    address: uv.address.clone(),
+                    amount: uv.amount.clone(),
+                    asset_id: uv.asset_id.clone(),
+                };
+                core_adapter.utxos.add(oid, txo).await;
             }
 
-            // Rebuild indexes from the FULL UTXO list (not just what's in cache)
-            // so supply_cache and native_balance_cache are always accurate.
-            if max_utxos > 0 && utxo_pairs.len() > max_utxos {
-                core_adapter
-                    .utxos
-                    .rebuild_indexes_from_utxos(&utxo_pairs)
-                    .await;
-            } else {
+            // Free the storage Vec before any further processing
+            drop(all_utxos);
+
+            // When all UTXOs fit in cache, rebuild indexes from shard data (defensive).
+            // When eviction occurred, skip rebuild — add() already computed correct caches.
+            if max_utxos == 0 || utxo_count <= max_utxos {
                 core_adapter.utxos.rebuild_indexes().await;
             }
 
             let cached = core_adapter.utxos.total_len().await;
             tracing::info!(
                 ledger = %def.id,
-                utxos_total = utxo_pairs.len(),
+                utxos_total = utxo_count,
                 utxos_cached = cached,
                 max_utxos,
                 "UTXO set bootstrapped from RocksDB (LRU cache)"
