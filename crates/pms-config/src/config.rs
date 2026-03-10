@@ -23,6 +23,10 @@ fn default_max_spent_outpoints() -> usize {
     500_000
 }
 
+fn default_max_utxos() -> usize {
+    500_000
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Rocks {
     pub path: String,
@@ -39,6 +43,11 @@ pub struct Rocks {
     /// 0 = unlimited. Default: 500 000.
     #[serde(default = "default_max_spent_outpoints")]
     pub max_spent_outpoints: usize,
+    /// Maximum UTXOs kept in the in-memory LRU cache (ShardedUtxoSet).
+    /// On cache miss, falls back to RocksDB. 0 = unlimited (all UTXOs in RAM).
+    /// Default: 500 000 (~50 MB RAM).
+    #[serde(default = "default_max_utxos")]
+    pub max_utxos: usize,
     /// Intervalle entre chaque backup (checkpoint) en secondes.
     /// Défaut: 21600 (6 heures).
     #[serde(default)]

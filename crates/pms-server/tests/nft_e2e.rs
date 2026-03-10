@@ -46,7 +46,7 @@ async fn nft_mint_and_verify_ownership() -> Result<()> {
     let genesis = Block::genesis(compute_block_id);
     let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis));
 
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // 2) Wallet de test (sera le creator du NFT)
     let wallet = Wallet::from_seed(&[42u8; 32], None).expect("wallet");
@@ -126,7 +126,7 @@ async fn nft_transfer_changes_ownership() -> Result<()> {
     let genesis = Block::genesis(compute_block_id);
     let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis));
 
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // 2 wallets: owner initial et nouveau owner
     let wallet_a = Wallet::from_seed(&[43u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
@@ -227,7 +227,7 @@ async fn nft_burn_removes_token() -> Result<()> {
 
     let genesis = Block::genesis(compute_block_id);
     let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis));
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     let wallet = Wallet::from_seed(&[45u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
     let owner_pk = wallet.encoded_public_key();
@@ -301,7 +301,7 @@ async fn nft_unauthorized_transfer_rejected() -> Result<()> {
 
     let genesis = Block::genesis(compute_block_id);
     let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis));
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     let wallet_owner = Wallet::from_seed(&[50u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
     let wallet_attacker = Wallet::from_seed(&[51u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
@@ -387,7 +387,7 @@ async fn nft_get_by_owner_after_mint() -> Result<()> {
 
     let genesis = Block::genesis(compute_block_id);
     let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis));
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     let wallet = Wallet::from_seed(&[60u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
     let owner_pk = wallet.encoded_public_key();
@@ -448,7 +448,7 @@ async fn nft_get_by_owner_updates_on_transfer() -> Result<()> {
 
     let genesis = Block::genesis(compute_block_id);
     let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis));
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     let wallet_a = Wallet::from_seed(&[61u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
     let wallet_b = Wallet::from_seed(&[62u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
@@ -534,7 +534,7 @@ async fn nft_get_by_owner_clears_on_burn() -> Result<()> {
 
     let genesis = Block::genesis(compute_block_id);
     let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis));
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     let wallet = Wallet::from_seed(&[63u8; 32], None).map_err(|e| anyhow::anyhow!(e))?;
     let owner_pk = wallet.encoded_public_key();

@@ -2461,6 +2461,7 @@ dependencies = [
  "dashmap 6.1.0",
  "hex",
  "k256",
+ "lru",
  "num-traits",
  "pms-config",
  "pms-consensus",

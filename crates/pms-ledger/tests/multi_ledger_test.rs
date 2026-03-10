@@ -13,6 +13,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             tip_limit: 100,
             max_dag_blocks: 0,
             max_spent_outpoints: 0,
+            max_utxos: 0,
             checkpoint_interval_secs: None,
         },
         network: pms_config::Network {

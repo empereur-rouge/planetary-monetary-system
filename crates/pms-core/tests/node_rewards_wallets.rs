@@ -60,7 +60,7 @@ async fn test_node_rewards_e2e_with_wallets() -> Result<()> {
     policy.skip_utxo_checks = true; // Utilise ShardedUtxoSet
 
     // Créer l'adapter avec la policy configurée
-    let adapter = CoreAdapter::new_with_policy(dag.clone(), store.clone(), policy);
+    let adapter = CoreAdapter::new_with_policy(dag.clone(), store.clone(), policy, 0, None);
 
     println!("🎯 Coordinator pk: {}", &coordinator.public_key[..20]);
 

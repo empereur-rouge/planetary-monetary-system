@@ -15,6 +15,7 @@ pub struct LedgerManager {
     global_tip_limit: usize,
     global_max_dag_blocks: usize,
     global_max_spent_outpoints: usize,
+    global_max_utxos: usize,
 }
 
 impl LedgerManager {
@@ -45,6 +46,7 @@ impl LedgerManager {
             global_tip_limit: settings.rocks.tip_limit,
             global_max_dag_blocks: settings.rocks.max_dag_blocks,
             global_max_spent_outpoints: settings.rocks.max_spent_outpoints,
+            global_max_utxos: settings.rocks.max_utxos,
         };
 
         // Bootstrap each ledger
@@ -55,6 +57,7 @@ impl LedgerManager {
                 settings.rocks.tip_limit,
                 settings.rocks.max_dag_blocks,
                 settings.rocks.max_spent_outpoints,
+                settings.rocks.max_utxos,
             )
             .await
             .with_context(|| format!("bootstrapping ledger '{}'", def.id))?;
@@ -142,6 +145,7 @@ impl LedgerManager {
             self.global_tip_limit,
             self.global_max_dag_blocks,
             self.global_max_spent_outpoints,
+            self.global_max_utxos,
         )
         .await
         .with_context(|| format!("bootstrapping ledger '{}'", def.id))?;

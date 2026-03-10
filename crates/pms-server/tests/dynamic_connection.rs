@@ -38,7 +38,7 @@ async fn spawn_node(port: u16, seed: u8) -> Arc<Server> {
     }
 
     let dag = Arc::new(ConcurrentDag::bootstrap_from_store(&*store).await.unwrap());
-    let adapter: Arc<dyn NetDagAdapter> = pms_core::CoreAdapter::new(dag.clone(), store.clone());
+    let adapter: Arc<dyn NetDagAdapter> = pms_core::CoreAdapter::new(dag.clone(), store.clone(), 0, None);
 
     // UNIQUE WALLET PER NODE using seed
     // Using explicit seed ensures nodes have different IDs (prevent loopback detection)
