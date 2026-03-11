@@ -23,6 +23,10 @@ network_id = "eden-net"
 symbol = "EDN"
 divisor = 19300000000
 
+[coordinator]
+private_key_hex = "env:PMS_COORDINATOR_KEY"
+address = "env:PMS_COORDINATOR_ADDR"
+
 [tui]
 enabled = false
 

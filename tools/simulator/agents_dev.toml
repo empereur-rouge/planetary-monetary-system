@@ -131,3 +131,19 @@ name_prefix = "obs"
 
 [agents.behavior]
 type = "observer"
+
+# ─────────────────────────────────────────────────────────────────────────
+# COORDINATOR — Wallet du noeud, envoie 0.1-1 PMS chaque minute
+# 1 agent, 60s entre chaque tick, pas de faucet (financé par les fees)
+# Nécessite [coordinator] dans simulator.dev.toml (commenté par défaut)
+# ─────────────────────────────────────────────────────────────────────────
+[[agents]]
+count = 1
+interval_ms = 60000
+name_prefix = "coordinator"
+
+[agents.behavior]
+type = "coordinator"
+min_amount = 0.1
+max_amount = 1.0
+send_probability = 1.0

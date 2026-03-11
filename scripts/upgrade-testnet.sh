@@ -303,6 +303,18 @@ if [ -n "$API_KEY" ]; then
     echo -e "   ${GREEN}Simulator API key recovered: ${API_KEY:0:12}...${NC}"
 fi
 
+# Retrieve coordinator credentials for simulator
+COORD_KEY=$(ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" \
+    "python3 -c \"import json; print(json.load(open('$REMOTE_DIR/etc/pms/coordinator.json'))['private_key'])\" 2>/dev/null" || echo "")
+COORD_ADDR=$(ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" \
+    "python3 -c \"import json; print(json.load(open('$REMOTE_DIR/etc/pms/coordinator.json'))['address'])\" 2>/dev/null" || echo "")
+
+if [ -n "$COORD_KEY" ] && [ -n "$COORD_ADDR" ]; then
+    echo -e "   ${GREEN}Coordinator credentials recovered: ${COORD_ADDR:0:12}...${NC}"
+else
+    echo -e "   ${YELLOW}Could not retrieve coordinator credentials (coordinator agent won't start).${NC}"
+fi
+
 # Build list of services to recreate
 SERVICES_TO_RECREATE=""
 if [ "$BUILD_ENGINE" = "true" ]; then
@@ -348,6 +360,8 @@ echo -e "   \${BOLD}Volumes and data will NOT be deleted.\${NC}"
 
 export PMS_ADMIN_TOKEN="$ADMIN_TOKEN"
 export PMS_API_KEY="$API_KEY"
+export PMS_COORDINATOR_KEY="$COORD_KEY"
+export PMS_COORDINATOR_ADDR="$COORD_ADDR"
 
 docker compose -f $COMPOSE_FILE up -d --force-recreate $SERVICES_TO_RECREATE
 

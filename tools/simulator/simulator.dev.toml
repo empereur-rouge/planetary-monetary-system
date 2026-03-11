@@ -24,6 +24,10 @@ network_id = "eden-net"
 symbol = "EDN"
 divisor = 19300000000
 
+# [coordinator]
+# private_key_hex = "votre_cle_hex_64_chars"
+# address = "8e1..."
+
 [tui]
 refresh_ms = 250
 enabled = true

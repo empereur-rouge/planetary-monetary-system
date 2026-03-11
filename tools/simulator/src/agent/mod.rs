@@ -1,3 +1,4 @@
+pub mod coordinator;
 pub mod funder;
 pub mod observer;
 pub mod random;

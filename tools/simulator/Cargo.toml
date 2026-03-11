@@ -1,6 +1,6 @@
 [package]
 name = "pms-simulator"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [workspace]
@@ -30,3 +30,5 @@ axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 open = "5"
 dirs = "6"
+base64 = "0.22"
+hex = "0.4"
