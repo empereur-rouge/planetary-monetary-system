@@ -10,6 +10,43 @@
 - **CRITICAL: Show test output before validation.** Every test MUST include `println!`/`eprintln!` statements that display key values (API responses, computed results, state changes). After writing a test, run it with `cargo test <test_name> -- --nocapture` and show the full output to the user. The user validates the test based on the printed output, NOT just on whether it passes. A test that passes but produces wrong output is a bug.
 - Never remove debug prints from tests after validation — they serve as living documentation and help catch regressions.
 
+### Dual-Layer Consistency (RAM + RocksDB)
+- **CRITICAL: Tout fix appliqué sur une couche (RAM DAG) DOIT être vérifié et appliqué sur l'autre couche (RocksDB) si la même logique existe.**
+  - Exemple historique : `prune_oldest()` (RAM) a été corrigé pour protéger le dernier tip (commit `9e2922f`), mais `trim_tips()` et `remove_tip()` (RocksDB) n'ont pas reçu la même protection → bug silencieux en production (frais bloqués pendant des heures).
+- Quand un bug est corrigé dans `crates/pms-core/src/concurrent_dag.rs`, vérifier systématiquement `crates/pms-storage/src/rocks_store/store.rs` (et vice-versa).
+- **Tests de boundary/edge-case obligatoires** : toujours tester les scénarios limites (dernier élément, liste vide, overflow) — pas seulement le cas nominal. Les bugs critiques se cachent dans les edge cases que les tests "happy path" ne couvrent pas.
+
+## Versioning
+
+**CRITICAL: Ne jamais oublier de mettre à jour les versions concernées lors d'une modification du code.**
+
+Le projet utilise **4 systèmes de version** distincts. Lors de chaque changement, identifier lesquels sont impactés et les bumper :
+
+### 1. Software Version (`Cargo.toml`)
+- Fichier : `bin/Cargo.toml` et les workspace members concernés.
+- Suit le **Semantic Versioning** : MAJOR (breaking) / MINOR (feature) / PATCH (bugfix).
+- À incrémenter pour toute release ou changement fonctionnel significatif.
+
+### 2. DAG Protocol Version (`DAG_VERSION`)
+- Fichier : `crates/pms-storage/src/migrations.rs` → constante `DAG_VERSION`.
+- Suit le **Semantic Versioning**. Contrôle la compatibilité du protocole DAG.
+- À incrémenter quand la structure des blocs, le format des transactions, ou la logique de consensus change.
+- **MAJOR** = breaking (migration manuelle requise), **MINOR/PATCH** = auto-migrating.
+
+### 3. Schema DB Version (`CURRENT_VER`)
+- Fichier : `crates/pms-storage/src/migrations.rs` → constante `CURRENT_VER`.
+- Entier incrémental (actuellement `5`). Contrôle les migrations RocksDB.
+- À incrémenter **avec une nouvelle fonction `mig_X_to_Y()`** dans `crates/pms-storage/src/rocks_store/migration.rs` dès qu'un column family, un index, ou le schéma de stockage change.
+
+### 4. P2P Protocol Version (`protocol_version`)
+- Fichier : `crates/pms-config/src/config.rs` → champ `Network.protocol_version`.
+- Utilisé dans les messages `Hello` et `Block` du réseau P2P.
+- À incrémenter quand le format des messages réseau change.
+
+### Règles générales
+- Le bump de version doit être inclus dans le **même commit** que les changements associés.
+- En cas de doute, vérifier quel(s) système(s) de version sont impactés avant de commit.
+
 ## Code Quality
 - Never use placeholder code, TODO stubs, or incomplete implementations. Always write the full, working code immediately.
 
@@ -82,87 +119,8 @@ For collaborative projects:
 - Configuration file formats.
 - Build instructions for binaries.
 
-**For Data Science/ML Projects:**
-- Dataset sources and preprocessing steps.
-- Model architecture and hyperparameters.
-- Training pipeline (scripts, hardware requirements).
-- Inference/deployment methods.
-- Dependencies (CUDA, specific library versions).
-
 **For Infrastructure/DevOps:**
 - Terraform/CloudFormation configurations.
 - Service topology diagrams.
 - Secrets management approach.
 - Monitoring and alerting setup.
-
-**For Libraries/Packages:**
-- Public API documentation.
-- Installation from source.
-- Testing procedures.
-- Publishing workflow (npm, PyPI, crates.io).
-
-### Minimum Required Sections
-
-1. **Project Overview**
-   - Business/app name and description.
-   - Domain, hosting, repository URLs.
-   - Tech stack summary.
-   - Key stakeholder info (emails, accounts).
-
-2. **Version History**
-   - Date, version number (semantic versioning).
-   - What was accomplished.
-   - File count and total size.
-   - Deployment status.
-
-3. **Complete Project Structure**
-   - Full directory tree with comments.
-   - Line counts for each file.
-   - Purpose of each file/directory.
-
-4. **Technical Architecture**
-   - Frontend/backend stack details.
-   - Key features with implementation specifics.
-   - Configuration details (build settings, environment vars).
-   - API endpoints, database schema, or core functionality.
-
-5. **File Contents Summary**
-   - For config files: include actual content or detailed breakdown.
-   - For code files: list key functions/components with line numbers.
-   - For HTML/templates: list all sections and their purposes.
-
-6. **Deployment Workflow**
-   - Local development steps.
-   - Build/test commands.
-   - Deployment process (CI/CD, manual steps).
-   - Environment setup requirements.
-
-7. **Domain & Infrastructure Setup**
-   - DNS configuration.
-   - Hosting platform settings.
-   - Third-party integrations (analytics, forms, etc.).
-
-8. **Complete Rebuild Instructions**
-   - Step-by-step guide to recreate project from scratch.
-   - All commands needed (with explanations).
-   - All file creation steps.
-   - All configuration steps.
-   - Deployment and domain setup.
-
-9. **Contact/Business Information**
-   - Phone numbers, addresses, key contacts.
-   - Service details, licenses, certifications.
-
-10. **Maintenance Notes**
-    - Known issues or future enhancements.
-    - Update procedures.
-    - Monitoring and analytics.
-
-### When to Update PROJECT_LOG.md
-- After completing major phases or milestones.
-- When adding new features or components.
-- After significant refactoring.
-- When deployment configuration changes.
-- Before ending a work session.
-
-**Quality Standard:** Someone with basic technical knowledge should be able to rebuild the ENTIRE project (minus proprietary assets like images) using ONLY the `PROJECT_LOG.md` file.

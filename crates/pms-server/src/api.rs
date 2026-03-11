@@ -15,6 +15,7 @@ use crate::api_fn::compliance::{
     admin_shadow_balance, admin_unfreeze,
 };
 use crate::api_fn::coordinator::get_coordinator_info;
+use crate::api_fn::version::get_version;
 use crate::api_fn::dag::get_tips;
 use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
 use crate::api_fn::ledger::{
@@ -298,8 +299,8 @@ async fn require_api_key(
 }
 
 /// Construit les routes ledger-scoped (celles qui dépendent de l'adapter/store d'un ledger).
-/// Utilisé à la fois pour les routes par défaut et pour les routes `/l/{ledger_id}/`.
-fn build_ledger_scoped_routes() -> Router<AppState> {
+/// Retourne (public_routes, auth_routes) — les routes publiques n'exigent pas d'API key.
+fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState>) {
     // Endpoint: /submit/block (Main ingestion)
     let submit = Router::new().route("/submit/block", post(submit_block));
 
@@ -351,6 +352,8 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
 
     let coordinator_routes = Router::new().route("/v1/coordinator/info", get(get_coordinator_info));
 
+    let version_routes = Router::new().route("/v1/version", get(get_version));
+
     let activity_routes = Router::new()
         .route("/v1/wallet/{address}/activity", get(get_wallet_activity))
         .route(
@@ -358,17 +361,23 @@ fn build_ledger_scoped_routes() -> Router<AppState> {
             get(stream_wallet_activity),
         );
 
-    Router::new()
-        .merge(submit)
-        .merge(wallet)
-        .merge(blocks)
-        .merge(supply)
-        .merge(token_routes)
-        .merge(history)
-        .merge(dag_routes)
-        .merge(nft_routes)
-        .merge(coordinator_routes)
-        .merge(activity_routes)
+    (
+        // Public read-only routes (no API key required)
+        Router::new()
+            .merge(supply)
+            .merge(coordinator_routes)
+            .merge(version_routes)
+            .merge(dag_routes)
+            .merge(token_routes),
+        // Authenticated routes (require API key)
+        Router::new()
+            .merge(submit)
+            .merge(wallet)
+            .merge(blocks)
+            .merge(history)
+            .merge(nft_routes)
+            .merge(activity_routes),
+    )
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -468,7 +477,9 @@ async fn dynamic_ledger_handler(
     ));
 
     // Build a router with ledger-scoped routes + per-ledger admin routes
-    let router = build_ledger_scoped_routes()
+    let (public_routes, auth_routes) = build_ledger_scoped_routes();
+    let router = public_routes
+        .merge(auth_routes)
         .with_state(ledger_state.clone())
         .merge(build_ledger_admin_routes(ledger_state));
 
@@ -650,8 +661,10 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     // Endpoint: /dashboard (Static Files)
     let dashboard = Router::new().nest_service("/dashboard", ServeDir::new("pms-dashboard/dist"));
 
-    // Ledger-scoped routes (default ledger) — protégées par API key
-    let default_ledger_routes = build_ledger_scoped_routes().route_layer(
+    // Ledger-scoped routes (default ledger)
+    let (public_ledger_routes, auth_ledger_routes) = build_ledger_scoped_routes();
+    // Only authenticated routes require API key; public routes are open
+    let auth_ledger_routes = auth_ledger_routes.route_layer(
         middleware::from_fn_with_state(state.clone(), require_api_key),
     );
 
@@ -673,7 +686,8 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .merge(metrics)
         .merge(admin)
         .merge(internal_routes)
-        .merge(default_ledger_routes)
+        .merge(public_ledger_routes)
+        .merge(auth_ledger_routes)
         .merge(node_routes)
         .merge(ledger_routes)
         .merge(bridge_routes)
@@ -911,23 +925,36 @@ pub fn spawn_fee_distributor_task(state: AppState) {
             loop {
                 interval.tick().await; // Wait for next tick
 
+                // Log pool state BEFORE distribution attempt for diagnostics
+                let pool_total = state_distrib.fee_pool.read().await.total_fees;
+
                 match crate::fee_distribution::perform_fee_distribution(&state_distrib, None).await
                 {
                     Ok(res) => {
                         if res.success && res.total_distributed != "0" {
                             tracing::info!(
-                                "✅ Automated distribution success: {} PMS",
-                                res.total_distributed
+                                "✅ Automated distribution success: {} PMS to {} recipients",
+                                res.total_distributed,
+                                res.num_recipients
                             );
                         } else if !res.success {
                             tracing::warn!(
-                                "⚠️ Automated fee distribution returned success=false \
-                                 (no tips or not coordinator?)"
+                                pool_total = %pool_total,
+                                "⚠️ Fee distribution FAILED (success=false). \
+                                 Possible causes: empty tips (DAG over-pruned) or not coordinator. \
+                                 Fees are accumulating and NOT being distributed."
                             );
                         }
+                        // Note: success=true with total=0 means no fees to distribute (normal)
                     }
                     Err(e) => {
-                        tracing::error!("❌ Automated distribution failed: {}", e);
+                        tracing::error!(
+                            pool_total = %pool_total,
+                            error = %e,
+                            "❌ Fee distribution ERROR — fees blocked! \
+                             Pool has {} PMS waiting. Error: {}",
+                            pool_total, e
+                        );
                     }
                 }
             }

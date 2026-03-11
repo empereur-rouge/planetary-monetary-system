@@ -32,6 +32,25 @@ impl RocksStore {
         Ok(())
     }
 
+    // --- DAG version (SemVer) stockée dans CF "ver" -----------------------
+
+    /// Lit la version DAG depuis RocksDB. Retourne "1.0.0" si absente (DB existante).
+    pub async fn get_dag_version(&self) -> anyhow::Result<String> {
+        if let Some(v) = self.db.get_cf(&self.cf_ver(), b"dag_version")? {
+            let s = String::from_utf8(v)?;
+            Ok(s)
+        } else {
+            Ok("1.0.0".to_string())
+        }
+    }
+
+    /// Écrit la version DAG dans RocksDB.
+    pub async fn set_dag_version(&self, version: &str) -> anyhow::Result<()> {
+        self.db
+            .put_cf(&self.cf_ver(), b"dag_version", version.as_bytes())?;
+        Ok(())
+    }
+
     // --- API publique équivalente à RedisStore::ensure_schema  -----------
 
     pub async fn ensure_schema(&self) -> Result<(), MigError> {

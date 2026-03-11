@@ -1134,6 +1134,15 @@ where
 
         // 2) fallback RAM: DAG local (lock-free)
         let mut tips = self.dag.find_tips();
+        if tips.is_empty() {
+            tracing::error!(
+                dag_blocks = self.dag.len(),
+                "top_tips: ALL sources returned empty! \
+                 RAM DAG has {} blocks but 0 tips. \
+                 Fee distribution will be blocked.",
+                self.dag.len()
+            );
+        }
         if tips.len() > limit {
             tips.truncate(limit);
         }

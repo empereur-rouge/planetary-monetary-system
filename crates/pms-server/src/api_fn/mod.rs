@@ -15,5 +15,6 @@ pub mod supply;
 pub mod token;
 pub mod transaction;
 pub mod tx_helpers;
+pub mod version;
 pub mod wallet;
 pub mod wallet_factory;
