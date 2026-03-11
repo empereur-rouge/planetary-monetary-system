@@ -161,30 +161,50 @@ impl LedgerInstance {
             Some(utxo_fallback),
         );
         {
-            let all_utxos = store
-                .iter_all_utxos()
-                .with_context(|| format!("iter_all_utxos for ledger '{}'", def.id))?;
+            use std::sync::mpsc;
 
-            let utxo_count = all_utxos.len();
+            // Stream UTXOs from RocksDB through a bounded channel — O(buffer) memory
+            // instead of O(total_utxos). Avoids OOM on large UTXO sets.
+            const STREAM_BUFFER: usize = 10_000;
+            let (tx, rx) = mpsc::sync_channel(STREAM_BUFFER);
 
-            // Insert into LRU shards directly from storage data (no intermediate Vec).
-            // add() maintains supply_cache, native_balance_cache, and address_index
-            // even when LRU eviction occurs (silent eviction = caches stay accurate).
-            for (txid, idx, uv) in &all_utxos {
+            let store_for_stream = store.clone();
+            let ledger_id = def.id.clone();
+
+            let producer = std::thread::Builder::new()
+                .name(format!("utxo-stream-{}", def.id))
+                .spawn(move || -> anyhow::Result<usize> {
+                    store_for_stream
+                        .stream_all_utxos(tx)
+                        .with_context(|| format!("stream_all_utxos for ledger '{ledger_id}'"))
+                })
+                .with_context(|| format!("spawn UTXO stream thread for ledger '{}'", def.id))?;
+
+            // Consume UTXOs as they arrive. rx.recv() blocks the current task,
+            // which is acceptable during bootstrap: no concurrent async work,
+            // and add().await resolves immediately (no lock contention).
+            let mut utxo_count: usize = 0;
+            while let Ok((txid, idx, uv)) = rx.recv() {
                 let oid = pms_types::OutputId {
-                    txid: txid.clone(),
-                    index: *idx,
+                    txid,
+                    index: idx,
                 };
                 let txo = pms_types::TxOutput {
-                    address: uv.address.clone(),
-                    amount: uv.amount.clone(),
-                    asset_id: uv.asset_id.clone(),
+                    address: uv.address,
+                    amount: uv.amount,
+                    asset_id: uv.asset_id,
                 };
                 core_adapter.utxos.add(oid, txo).await;
+                utxo_count += 1;
             }
 
-            // Free the storage Vec before any further processing
-            drop(all_utxos);
+            // Join producer and propagate any RocksDB/parsing errors
+            producer
+                .join()
+                .map_err(|e| anyhow::anyhow!("UTXO stream thread panicked: {e:?}"))?
+                .with_context(|| {
+                    format!("UTXO stream iteration failed for ledger '{}'", def.id)
+                })?;
 
             // When all UTXOs fit in cache, rebuild indexes from shard data (defensive).
             // When eviction occurred, skip rebuild — add() already computed correct caches.
@@ -198,7 +218,7 @@ impl LedgerInstance {
                 utxos_total = utxo_count,
                 utxos_cached = cached,
                 max_utxos,
-                "UTXO set bootstrapped from RocksDB (LRU cache)"
+                "UTXO set bootstrapped from RocksDB (streaming)"
             );
         }
 

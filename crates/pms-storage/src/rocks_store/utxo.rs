@@ -127,6 +127,9 @@ impl RocksStore {
     /// Iterate all unspent UTXOs from the `utxo` CF.
     /// Returns (txid, index, UtxoValue) for each entry.
     /// This is the authoritative UTXO state (never pruned, unlike the in-memory DAG).
+    ///
+    /// **Warning**: loads ALL UTXOs into a Vec. For large UTXO sets, prefer
+    /// [`stream_all_utxos`] which uses O(buffer_size) memory.
     pub fn iter_all_utxos(&self) -> Result<Vec<(String, u32, UtxoValue)>> {
         let cf = self.cf_utxo();
         let mut out = Vec::new();
@@ -139,6 +142,34 @@ impl RocksStore {
             out.push((txid, idx, uv));
         }
         Ok(out)
+    }
+
+    /// Stream all unspent UTXOs from the `utxo` CF through a bounded channel.
+    ///
+    /// Unlike [`iter_all_utxos`], this uses O(buffer_size) memory instead of
+    /// O(total_utxos). Intended to be called from a dedicated OS thread
+    /// (not the tokio runtime) via `std::thread::spawn`.
+    ///
+    /// Returns the number of UTXOs sent. If the receiver is dropped,
+    /// iteration stops early and the count of items sent so far is returned.
+    pub fn stream_all_utxos(
+        &self,
+        tx: std::sync::mpsc::SyncSender<(String, u32, UtxoValue)>,
+    ) -> Result<usize> {
+        let cf = self.cf_utxo();
+        let mut count: usize = 0;
+        for item in self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
+            let (key, val) = item?;
+            let key_str =
+                std::str::from_utf8(&key).map_err(|e| anyhow::anyhow!("invalid utxo key: {e}"))?;
+            let (txid, idx) = parse_utxo_key(key_str)?;
+            let uv: UtxoValue = serde_json::from_slice(&val)?;
+            if tx.send((txid, idx, uv)).is_err() {
+                break; // receiver dropped
+            }
+            count += 1;
+        }
+        Ok(count)
     }
 }
 
