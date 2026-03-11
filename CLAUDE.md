@@ -25,7 +25,8 @@ Le projet utilise **4 systèmes de version** distincts. Lors de chaque changemen
 ### 1. Software Version (`Cargo.toml`)
 - Fichier : `bin/Cargo.toml` et les workspace members concernés.
 - Suit le **Semantic Versioning** : MAJOR (breaking) / MINOR (feature) / PATCH (bugfix).
-- À incrémenter pour toute release ou changement fonctionnel significatif.
+- **OBLIGATOIRE : Chaque commit/merge sur `main` DOIT incrémenter la version.** Cela permet d'identifier précisément quelle version du code tourne. Pas de commit sans bump de version.
+- Règle de bump : PATCH pour bugfix/refactor, MINOR pour nouvelle feature, MAJOR pour breaking change.
 
 ### 2. DAG Protocol Version (`DAG_VERSION`)
 - Fichier : `crates/pms-storage/src/migrations.rs` → constante `DAG_VERSION`.
