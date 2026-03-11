@@ -665,10 +665,17 @@ async fn classify_activity(
                     .filter(|o| o.address == addr)
                     .filter_map(|o| o.amount.parse::<rust_decimal::Decimal>().ok())
                     .sum();
+                // Detect fee outputs: if the address only receives exactly the
+                // fee amount, it is the fee collector — classify as fee_received.
+                let activity_type = if is_fee_output_only(tx, addr) {
+                    "fee_received"
+                } else {
+                    "transfer_in"
+                };
                 items.push(ActivityItem {
                     block_id: String::new(),
                     ts_ms: 0,
-                    activity_type: "transfer_in".to_string(),
+                    activity_type: activity_type.to_string(),
                     direction: "in".to_string(),
                     amount: Some(received.to_string()),
                     asset_id: tx
@@ -975,10 +982,15 @@ fn classify_activity_sync(plain: &PlainPayload, addr: &str) -> Vec<ActivityItem>
                     .filter(|o| o.address == addr)
                     .filter_map(|o| o.amount.parse::<rust_decimal::Decimal>().ok())
                     .sum();
+                let activity_type = if is_fee_output_only(tx, addr) {
+                    "fee_received"
+                } else {
+                    "transfer_in"
+                };
                 vec![ActivityItem {
                     block_id: String::new(),
                     ts_ms: 0,
-                    activity_type: "transfer_in".to_string(),
+                    activity_type: activity_type.to_string(),
                     direction: "in".to_string(),
                     amount: Some(received.to_string()),
                     asset_id: tx
@@ -1262,6 +1274,32 @@ fn parse_type_filter(filter: &Option<String>) -> Vec<&str> {
         Some(s) if !s.is_empty() => s.split(',').map(|s| s.trim()).collect(),
         _ => vec![],
     }
+}
+
+/// Check if an address is solely a fee recipient in a TxUtxo.
+///
+/// Returns `true` when **all** outputs addressed to `addr` account for exactly the
+/// transaction fee — i.e. the address only appears in the transaction as the fee
+/// collector, not as a regular transfer recipient.
+///
+/// This is the case when wallet_factory / prepare_tx add an explicit fee output
+/// (`amount == tx.fee`) to the admin/treasury wallet inside the TxUtxo.
+fn is_fee_output_only(tx: &pms_types::Transaction, addr: &str) -> bool {
+    let fee = match tx.fee.parse::<rust_decimal::Decimal>() {
+        Ok(f) if f > rust_decimal::Decimal::ZERO => f,
+        _ => return false,
+    };
+
+    let addr_total: rust_decimal::Decimal = tx
+        .outputs
+        .iter()
+        .filter(|o| o.address == addr)
+        .filter_map(|o| o.amount.parse::<rust_decimal::Decimal>().ok())
+        .sum();
+
+    // The address receives exactly the fee amount — it's a fee collector,
+    // not a regular transfer recipient.
+    addr_total == fee
 }
 
 /// Resolve the sender address from transaction inputs via UTXO cache.
@@ -1709,6 +1747,203 @@ mod tests {
         assert_eq!(items[0].activity_type, "bridge_mint");
         assert_eq!(items[0].direction, "in");
         assert_eq!(items[0].amount.as_deref(), Some("250"));
+    }
+
+    // ── is_fee_output_only ────────────────────────────────────────────
+
+    #[test]
+    fn fee_output_only_detects_fee_collector() {
+        // Typical TxUtxo: sender→receiver(90) + fee_collector(1), fee=1
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![out("receiver", "90"), out("fee_collector", "1")],
+            fee: "1".into(),
+            unlocks: vec![],
+        };
+        println!("tx.fee={}, outputs={:?}", tx.fee, tx.outputs.iter().map(|o| (&o.address, &o.amount)).collect::<Vec<_>>());
+        println!("is_fee_output_only(tx, 'fee_collector') = {}", is_fee_output_only(&tx, "fee_collector"));
+        println!("is_fee_output_only(tx, 'receiver') = {}", is_fee_output_only(&tx, "receiver"));
+
+        assert!(is_fee_output_only(&tx, "fee_collector"));
+        assert!(!is_fee_output_only(&tx, "receiver"));
+    }
+
+    #[test]
+    fn fee_output_only_false_when_zero_fee() {
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![out("alice", "100")],
+            fee: "0".into(),
+            unlocks: vec![],
+        };
+        println!("tx.fee={}, is_fee_output_only='alice': {}", tx.fee, is_fee_output_only(&tx, "alice"));
+        assert!(!is_fee_output_only(&tx, "alice"));
+    }
+
+    #[test]
+    fn fee_output_only_false_when_amount_differs() {
+        // Fee is 1, but fee_collector receives 2 — NOT a pure fee output
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![out("receiver", "90"), out("fee_collector", "2")],
+            fee: "1".into(),
+            unlocks: vec![],
+        };
+        println!("tx.fee={}, fee_collector.amount=2, result={}", tx.fee, is_fee_output_only(&tx, "fee_collector"));
+        assert!(!is_fee_output_only(&tx, "fee_collector"));
+    }
+
+    #[test]
+    fn fee_output_only_with_decimal_amounts() {
+        // Real-world scenario: fee=0.0003001, output to admin=0.0003001
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![out("bob", "9.9996999"), out("admin", "0.0003001")],
+            fee: "0.0003001".into(),
+            unlocks: vec![],
+        };
+        println!("tx.fee={}, admin.amount=0.0003001, result={}", tx.fee, is_fee_output_only(&tx, "admin"));
+        println!("bob result={}", is_fee_output_only(&tx, "bob"));
+        assert!(is_fee_output_only(&tx, "admin"));
+        assert!(!is_fee_output_only(&tx, "bob"));
+    }
+
+    #[test]
+    fn fee_output_only_multiple_outputs_same_addr() {
+        // Edge case: two outputs to fee_collector totalling exactly the fee
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![
+                out("receiver", "90"),
+                out("fee_collector", "0.5"),
+                out("fee_collector", "0.5"),
+            ],
+            fee: "1".into(),
+            unlocks: vec![],
+        };
+        println!("tx.fee=1, fee_collector has 2 outputs (0.5+0.5=1.0), result={}",
+            is_fee_output_only(&tx, "fee_collector"));
+        assert!(is_fee_output_only(&tx, "fee_collector"));
+    }
+
+    #[test]
+    fn fee_output_only_addr_receives_fee_plus_transfer() {
+        // Edge case: addr receives fee output (1) AND a real transfer (50) = 51 total ≠ 1
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![out("alice", "1"), out("alice", "50")],
+            fee: "1".into(),
+            unlocks: vec![],
+        };
+        println!("tx.fee=1, alice total=51, result={}", is_fee_output_only(&tx, "alice"));
+        assert!(!is_fee_output_only(&tx, "alice"));
+    }
+
+    // ── classify_activity_sync: TxUtxo fee output ─────────────────────
+
+    #[test]
+    fn classify_tx_fee_receiver_as_fee_received() {
+        // TxUtxo where "admin" receives exactly the fee amount → fee_received
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![out("bob", "99"), out("admin", "1")],
+            fee: "1".into(),
+            unlocks: vec![],
+        };
+        let items = classify_activity_sync(&PlainPayload::TxUtxo(tx), "admin");
+        println!("items for admin: {:?}", items.iter().map(|i| (&i.activity_type, &i.amount)).collect::<Vec<_>>());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].activity_type, "fee_received");
+        assert_eq!(items[0].direction, "in");
+        assert_eq!(items[0].amount.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn classify_tx_regular_receiver_not_fee() {
+        // TxUtxo where "bob" receives 99 (not equal to fee=1) → transfer_in
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![out("bob", "99"), out("admin", "1")],
+            fee: "1".into(),
+            unlocks: vec![],
+        };
+        let items = classify_activity_sync(&PlainPayload::TxUtxo(tx), "bob");
+        println!("items for bob: {:?}", items.iter().map(|i| (&i.activity_type, &i.amount)).collect::<Vec<_>>());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].activity_type, "transfer_in");
+        assert_eq!(items[0].amount.as_deref(), Some("99"));
+    }
+
+    #[test]
+    fn classify_tx_fee_received_with_real_amounts() {
+        // Simulates the real scenario: 160 nodes each getting micro-fees
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![
+                out("receiver", "9.9996999"),
+                out("treasury", "0.0003001"),
+            ],
+            fee: "0.0003001".into(),
+            unlocks: vec![],
+        };
+        let items_treasury = classify_activity_sync(&PlainPayload::TxUtxo(tx.clone()), "treasury");
+        let items_receiver = classify_activity_sync(&PlainPayload::TxUtxo(tx), "receiver");
+        println!("treasury: {:?}", items_treasury.iter().map(|i| (&i.activity_type, &i.amount)).collect::<Vec<_>>());
+        println!("receiver: {:?}", items_receiver.iter().map(|i| (&i.activity_type, &i.amount)).collect::<Vec<_>>());
+        assert_eq!(items_treasury[0].activity_type, "fee_received");
+        assert_eq!(items_receiver[0].activity_type, "transfer_in");
+    }
+
+    // ── classify_activity (async): fee detection ────────────────────────
+
+    #[tokio::test]
+    async fn classify_tx_fee_received_async() {
+        use async_trait::async_trait;
+        use pms_interface::NetDagAdapter;
+
+        struct MockAdapter;
+
+        #[async_trait]
+        impl NetDagAdapter for MockAdapter {
+            async fn have_block(&self, _id: &str) -> bool { false }
+            async fn persist_block(&self, _wb: &pms_wire::WireBlock) -> anyhow::Result<pms_storage::PutResult> { Ok(pms_storage::PutResult::Inserted) }
+            async fn broadcast_block(&self, _b: &pms_wire::WireBlock) -> anyhow::Result<()> { Ok(()) }
+            async fn top_tips(&self, _limit: usize) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
+            async fn get_block(&self, _id: &str) -> anyhow::Result<Option<pms_wire::WireBlock>> { Ok(None) }
+            async fn recent_ids(&self, _limit: usize) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
+            async fn get_blocks_by_ids(&self, _ids: &[String]) -> anyhow::Result<Vec<pms_wire::WireBlock>> { Ok(vec![]) }
+            fn min_pow_leading_zero_bits(&self) -> u8 { 0 }
+            async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) { (rust_decimal::Decimal::ZERO, 0) }
+            async fn circulating_supply_by_asset(&self, _asset_id: Option<&str>) -> (rust_decimal::Decimal, u64) { (rust_decimal::Decimal::ZERO, 0) }
+            async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal { rust_decimal::Decimal::ZERO }
+            async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> { vec![] }
+            async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {}
+            async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool { false }
+            async fn get_utxo(&self, _output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
+                Some(pms_types::TxOutput { address: "sender".into(), amount: "100".into(), asset_id: None })
+            }
+        }
+
+        let tx = Transaction {
+            inputs: vec![TxInput { out: OutputId { txid: "tx1".into(), index: 0 } }],
+            outputs: vec![out("receiver", "99"), out("admin", "1")],
+            fee: "1".into(),
+            unlocks: vec![],
+        };
+
+        let adapter = MockAdapter;
+
+        // admin receives exactly the fee → fee_received
+        let items_admin = classify_activity(&PlainPayload::TxUtxo(tx.clone()), "admin", &adapter).await;
+        println!("async admin: {:?}", items_admin.iter().map(|i| (&i.activity_type, &i.amount)).collect::<Vec<_>>());
+        assert_eq!(items_admin.len(), 1);
+        assert_eq!(items_admin[0].activity_type, "fee_received");
+
+        // receiver gets 99 ≠ fee(1) → transfer_in
+        let items_recv = classify_activity(&PlainPayload::TxUtxo(tx), "receiver", &adapter).await;
+        println!("async receiver: {:?}", items_recv.iter().map(|i| (&i.activity_type, &i.amount)).collect::<Vec<_>>());
+        assert_eq!(items_recv.len(), 1);
+        assert_eq!(items_recv[0].activity_type, "transfer_in");
     }
 
     // ── classify_activity_sync: irrelevant payloads ──────────────────

@@ -576,11 +576,12 @@ async fn activity_transfer_out_via_precompute() -> anyhow::Result<()> {
         ri.activity_type, ri.direction, ri.amount, ri.counterparty
     );
 
-    // === Admin (fee recipient) should get transfer_in ===
+    // === Admin (fee recipient) should get fee_received ===
+    // Since admin_fee receives exactly the tx fee (0.50), it is classified as fee_received
     let admin_items = precomputed.get(admin_addr).expect("admin should have items");
     assert_eq!(admin_items.len(), 1);
     let ai = &admin_items[0];
-    assert_eq!(ai.activity_type, "transfer_in");
+    assert_eq!(ai.activity_type, "fee_received");
     assert_eq!(ai.amount.as_deref(), Some("0.50"));
     println!(
         "  [OK] admin: type={}, dir={}, amount={:?}",

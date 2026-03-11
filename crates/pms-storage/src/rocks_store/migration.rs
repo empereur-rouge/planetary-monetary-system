@@ -64,6 +64,7 @@ impl RocksStore {
                 2 => self.mig_2_to_3().await?,
                 3 => self.mig_3_to_4().await?,
                 4 => self.mig_4_to_5().await?,
+                5 => self.mig_5_to_6().await?,
                 _ => return Err(MigError::Unexpected(v)),
             }
             v += 1;
@@ -393,6 +394,143 @@ impl RocksStore {
 
         tracing::info!(
             "Migration 4→5: completed — indexed {indexed} blocks with typed categories out of {total} total"
+        );
+        Ok(())
+    }
+
+    // Migration 5 -> 6 :
+    //
+    // Re-index TxUtxo blocks whose fee output was previously indexed under
+    // `ActivityCategory::Transfer` (byte 2) instead of `ActivityCategory::Fee` (byte 3).
+    //
+    // For each TxUtxo block, re-extract (address, category) pairs using the updated
+    // `extract_involved_with_category` which now detects fee outputs (output.amount == tx.fee).
+    // Also re-computes `activity_items` so pre-cached items reflect the corrected type.
+    //
+    // Idempotent: writing the same key with the same value is harmless.
+    async fn mig_5_to_6(&self) -> std::result::Result<(), MigError> {
+        let cf_time = self.cf("by_time");
+        let cf_blocks = self.cf("blocks");
+        let cf_i2t = self.cf("id2ts");
+        let cf_ata = self.cf("addr_type_activity");
+        let cf_items = self.cf("activity_items");
+
+        let mut total = 0usize;
+        let mut reindexed = 0usize;
+
+        tracing::info!("Migration 5→6: reindexing TxUtxo fee outputs (Transfer→Fee)...");
+
+        for kv in self.db.iterator_cf(&cf_time, rocksdb::IteratorMode::Start) {
+            let (time_key, _) = kv.map_err(|e| MigError::Any(anyhow!(e)))?;
+            total += 1;
+
+            let Some((_ts, block_id)) = crate::helpers::parse_time_index_key(&time_key) else {
+                continue;
+            };
+
+            let Some(block_bytes) = self
+                .db
+                .get_cf(&cf_blocks, block_id.as_bytes())
+                .map_err(|e| MigError::Any(anyhow!(e)))?
+            else {
+                continue;
+            };
+
+            let Ok(sb) = serde_json::from_slice::<StoredBlock>(&block_bytes) else {
+                continue;
+            };
+
+            let Some(pjson) = &sb.payload_json else {
+                continue;
+            };
+            let Ok(env) = serde_json::from_str::<PayloadEnvelope>(pjson) else {
+                continue;
+            };
+            let PayloadEnvelope::Plain(ref plain) = env else {
+                continue;
+            };
+
+            // Only process TxUtxo blocks with a positive fee
+            let pms_types_payload::PlainPayload::TxUtxo(tx) = plain else {
+                continue;
+            };
+            let fee = tx
+                .fee
+                .parse::<rust_decimal::Decimal>()
+                .unwrap_or_default();
+            if fee <= rust_decimal::Decimal::ZERO {
+                continue;
+            }
+
+            // Check if any output is a fee output — skip block if not
+            let has_fee_output = tx
+                .outputs
+                .iter()
+                .any(|o| crate::helpers::is_fee_output_only(tx, &o.address));
+            if !has_fee_output {
+                continue;
+            }
+
+            // Get timestamp
+            let ts = match self
+                .db
+                .get_cf(&cf_i2t, block_id.as_bytes())
+                .map_err(|e| MigError::Any(anyhow!(e)))?
+            {
+                Some(v) if v.len() == 8 => {
+                    let mut be = [0u8; 8];
+                    be.copy_from_slice(&v);
+                    u64::from_be_bytes(be) as i64
+                }
+                _ => continue,
+            };
+
+            // Re-write typed index entries with corrected categories
+            let typed = extract_involved_with_category(plain);
+            for (addr, cat) in &typed {
+                let key = key_addr_type_activity(addr, cat.as_byte(), ts, &block_id);
+                self.db
+                    .put_cf(&cf_ata, &key, b"")
+                    .map_err(|e| MigError::Any(anyhow!(e)))?;
+            }
+
+            // Delete stale Transfer entries for fee-output addresses
+            // (they now have Fee entries instead)
+            for o in &tx.outputs {
+                if crate::helpers::is_fee_output_only(tx, &o.address) {
+                    let old_key = key_addr_type_activity(
+                        &o.address,
+                        crate::helpers::ActivityCategory::Transfer as u8,
+                        ts,
+                        &block_id,
+                    );
+                    let _ = self.db.delete_cf(&cf_ata, &old_key);
+                }
+            }
+
+            // Re-compute activity_items for affected addresses
+            let addrs = crate::helpers::extract_involved_addresses(plain);
+            let items_map = crate::helpers::precompute_all_items(plain, &addrs, None);
+            for (addr, items) in &items_map {
+                if !items.is_empty() {
+                    let key = crate::helpers::key_addr_activity(addr, ts, &block_id);
+                    if let Ok(val) = serde_json::to_vec(items) {
+                        let _ = self.db.put_cf(&cf_items, &key, &val);
+                    }
+                }
+            }
+
+            reindexed += 1;
+
+            if reindexed > 0 && reindexed.is_multiple_of(10_000) {
+                tracing::info!(
+                    "Migration 5→6: reindexed {reindexed} TxUtxo blocks so far (scanned {total})..."
+                );
+            }
+        }
+
+        tracing::info!(
+            "Migration 5→6: completed — reindexed {reindexed} TxUtxo blocks with fee outputs out of {total} total"
         );
         Ok(())
     }
