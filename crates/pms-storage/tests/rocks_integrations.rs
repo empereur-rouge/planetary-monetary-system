@@ -248,3 +248,99 @@ async fn append_is_atomic_and_idempotent_rocks() -> Result<()> {
 
     Ok(())
 }
+
+/// Regression test: remove_tip() must NEVER remove the last remaining tip.
+/// Before fix, removing all tips caused top_tips() to return empty,
+/// silently blocking fee distribution (231k PMS blocked on testnet).
+/// See: commit 9e2922f (RAM DAG fix) — this tests the RocksDB layer.
+#[tokio::test]
+async fn remove_tip_protects_last_tip_rocks() -> Result<()> {
+    let ts = mk_store(64, &format!("it:rltp:{}", nanoid::nanoid!(6))).await?;
+    let (meta, _wallet) = test_meta_and_wallet();
+
+    // Add a single block as tip
+    let b = mk_block("ONLY_TIP", vec![], &meta);
+    ts.store.put_block(&b).await?;
+    ts.store.add_tip("ONLY_TIP").await?;
+
+    // Verify tip exists
+    let tips_before = ts.store.top_tips(10).await?;
+    println!("Tips before remove attempt: {:?}", tips_before);
+    assert_eq!(tips_before.len(), 1);
+    assert_eq!(tips_before[0], "ONLY_TIP");
+
+    // Try to remove the last tip — should be BLOCKED
+    ts.store.remove_tip("ONLY_TIP").await?;
+
+    // Verify the tip is STILL there (protection kicked in)
+    let tips_after = ts.store.top_tips(10).await?;
+    println!("Tips after remove attempt (should still have 1): {:?}", tips_after);
+    assert_eq!(
+        tips_after.len(),
+        1,
+        "CRITICAL: Last tip was removed! Fee distribution will be blocked."
+    );
+    assert_eq!(tips_after[0], "ONLY_TIP");
+
+    Ok(())
+}
+
+/// Regression test: remove_tip() allows removal when multiple tips exist.
+#[tokio::test]
+async fn remove_tip_allows_when_multiple_tips_exist_rocks() -> Result<()> {
+    let ts = mk_store(64, &format!("it:rmtp:{}", nanoid::nanoid!(6))).await?;
+    let (meta, _wallet) = test_meta_and_wallet();
+
+    // Add two tips
+    let b1 = mk_block("TIP_A", vec![], &meta);
+    let b2 = mk_block("TIP_B", vec![], &meta);
+    ts.store.put_block(&b1).await?;
+    ts.store.put_block(&b2).await?;
+    ts.store.add_tip("TIP_A").await?;
+    sleep(Duration::from_millis(2)).await;
+    ts.store.add_tip("TIP_B").await?;
+
+    let tips_before = ts.store.top_tips(10).await?;
+    println!("Tips before remove: {:?}", tips_before);
+    assert_eq!(tips_before.len(), 2);
+
+    // Remove one tip — should succeed (2 > 1)
+    ts.store.remove_tip("TIP_A").await?;
+
+    let tips_after = ts.store.top_tips(10).await?;
+    println!("Tips after removing TIP_A: {:?}", tips_after);
+    assert_eq!(tips_after.len(), 1);
+    assert_eq!(tips_after[0], "TIP_B");
+
+    Ok(())
+}
+
+/// Regression test: trim_tips() must always keep at least 1 tip even
+/// when tip_limit is configured (mirrors ConcurrentDag::prune_oldest fix).
+#[tokio::test]
+async fn trim_tips_always_keeps_at_least_one_rocks() -> Result<()> {
+    // tip_limit=1: only keep 1 tip after trimming
+    let ts = mk_store(1, &format!("it:trim1:{}", nanoid::nanoid!(6))).await?;
+    let (meta, _wallet) = test_meta_and_wallet();
+
+    // Add 5 tips rapidly
+    for i in 0..5 {
+        let id = format!("T{i}");
+        let b = mk_block(&id, vec![], &meta);
+        ts.store.put_block(&b).await?;
+        ts.store.add_tip(&id).await?;
+        sleep(Duration::from_millis(2)).await;
+    }
+
+    // With tip_limit=1, trim_tips should keep exactly 1 (the most recent)
+    let tips = ts.store.top_tips(10).await?;
+    println!("Tips after trim (tip_limit=1): {:?}", tips);
+    assert!(
+        !tips.is_empty(),
+        "CRITICAL: trim_tips removed ALL tips — fee distribution blocked!"
+    );
+    assert_eq!(tips.len(), 1, "Should keep exactly 1 tip (most recent)");
+    assert_eq!(tips[0], "T4", "Should keep the most recent tip");
+
+    Ok(())
+}

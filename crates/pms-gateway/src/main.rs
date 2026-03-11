@@ -179,9 +179,10 @@ async fn main() -> Result<()> {
         .route("/v1/balance", post(routes::proxy_post))
         // TX prepare (proxy) - Prepares unsigned transaction for client signing
         .route("/v1/tx/prepare", post(routes::proxy_post))
-        // Supply & Coordinator (proxy)
+        // Supply, Coordinator & Version (proxy)
         .route("/v1/supply", get(routes::proxy_get))
         .route("/v1/coordinator/info", get(routes::proxy_get))
+        .route("/v1/version", get(routes::proxy_get))
         // Custodial wallet API (proxy)
         .route("/v1/wallet/create", post(routes::proxy_post))
         .route("/v1/wallet/restore/mnemonic", post(routes::proxy_post))

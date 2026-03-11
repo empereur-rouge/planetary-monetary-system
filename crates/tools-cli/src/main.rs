@@ -10,6 +10,7 @@
 extern crate core;
 
 use anyhow::Result;
+use pms_storage::DagStorage;
 
 mod block_submission;
 mod helpers;
@@ -303,6 +304,51 @@ async fn main() -> Result<()> {
             "{}",
             hex::encode(verify_key.to_encoded_point(true).as_bytes())
         );
+        return Ok(());
+    }
+
+    // Commande pour afficher les versions (DAG, schema, logicielle)
+    // Ouvre RocksDB en mode secondary (lecture seule, ne bloque pas le serveur)
+    if args.len() > 1 && args[1] == "version" {
+        let settings = pms_config::load_config()?;
+        let tip_limit = pms_core::MAX_TIPS_CAP;
+        let secondary_dir = format!("{}/cli-version-view", &settings.rocks.path);
+
+        println!("PMS Version Info");
+        println!("  Software:  {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "  Protocol:  {}",
+            settings.network.protocol_version
+        );
+        println!("  Network:   {}", settings.network.network_id);
+        println!("  Mode:      {:?}", settings.network.mode);
+        println!();
+
+        let store_res = pms_storage::rocks_store::store::RocksStore::open_secondary(
+            &settings.rocks.path,
+            &secondary_dir,
+            tip_limit,
+            &settings.rocks.prefix,
+        )
+        .await;
+
+        match store_res {
+            Ok(store) => {
+                let dag_version = store.get_dag_version().await.unwrap_or_else(|_| "1.0.0".into());
+                let schema_version = store.get_version().await.unwrap_or(0);
+                let block_count = store.block_count().await.unwrap_or(0);
+
+                println!("Ledger (prefix '{}'):", settings.rocks.prefix);
+                println!("  DAG version:    {}", dag_version);
+                println!("  Schema version: {}", schema_version);
+                println!("  Blocks:         {}", block_count);
+            }
+            Err(e) => {
+                eprintln!("Could not open RocksDB ({}): {}", settings.rocks.path, e);
+                eprintln!("DAG/Schema versions unavailable (DB not found or locked).");
+            }
+        }
+
         return Ok(());
     }
 

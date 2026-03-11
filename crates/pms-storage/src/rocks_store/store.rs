@@ -416,7 +416,7 @@ impl RocksStore {
         for kv in self.db.iterator_cf(&cf_tips, rocksdb::IteratorMode::Start) {
             let (k, v) = kv?;
             let id = String::from_utf8(k.to_vec())?;
-            let ts = be_to_i64(&v)?; // on va écrire ce helper juste après
+            let ts = be_to_i64(&v)?;
             tips.push((id, ts));
         }
 
@@ -428,11 +428,23 @@ impl RocksStore {
             return Ok(());
         }
 
-        // 4. Construit un set des IDs qu'on garde.
+        // 4. SAFETY: Always keep at least 1 tip (most recent).
+        //    Mirrors the same protection applied in ConcurrentDag::prune_oldest()
+        //    (commit 9e2922f). Without this, an over-pruned tips CF causes
+        //    top_tips() to return empty, silently blocking fee distribution.
+        let keep = self.tip_limit.max(1);
 
-        // 5. Supprime les autres dans cf_tips.
-        for (id, _) in tips.into_iter().skip(self.tip_limit) {
-            self.db.delete_cf(&cf_tips, id.as_bytes())?;
+        // 5. Supprime les tips excédentaires (les plus anciennes).
+        let to_remove: Vec<_> = tips.into_iter().skip(keep).collect();
+        if !to_remove.is_empty() {
+            tracing::debug!(
+                kept = keep,
+                removed = to_remove.len(),
+                "trim_tips: pruning excess tips from RocksDB"
+            );
+            for (id, _) in to_remove {
+                self.db.delete_cf(&cf_tips, id.as_bytes())?;
+            }
         }
 
         Ok(())
@@ -1429,6 +1441,28 @@ impl DagStorage for RocksStore {
 
     async fn remove_tip(&self, id: &str) -> Result<()> {
         let cf_tips = self.cf("tips");
+
+        // SAFETY: Never remove the last tip. An empty tips CF causes
+        // top_tips() to return empty → fee distribution silently blocked.
+        // Count current tips; if this is the only one, keep it.
+        let tip_count = self
+            .db
+            .iterator_cf(&cf_tips, rocksdb::IteratorMode::Start)
+            .take(2) // only need to know if count <= 1
+            .count();
+        if tip_count <= 1 {
+            // Check if the only tip IS the one we want to remove
+            if let Some(raw) = self.db.get_cf(&cf_tips, id.as_bytes())? {
+                if !raw.is_empty() {
+                    tracing::warn!(
+                        tip_id = &id[..16.min(id.len())],
+                        "remove_tip: BLOCKED — refusing to remove last remaining tip"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         self.db.delete_cf(&cf_tips, id.as_bytes())?;
         Ok(())
     }

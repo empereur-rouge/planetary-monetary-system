@@ -31,3 +31,64 @@ async fn migrations_apply_and_version_is_current() -> Result<()> {
 
     Ok(())
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// DAG Version Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_dag_version_default() -> Result<()> {
+    let path = temp_db_path();
+    let prefix = format!("pms:test:{}", nanoid::nanoid!());
+    let store = RocksStore::new(path.to_str().unwrap(), 64, prefix, None).await?;
+
+    let version = store.get_dag_version().await?;
+    println!("Default DAG version (fresh DB): '{}'", version);
+    assert_eq!(version, "1.0.0", "Fresh DB should default to 1.0.0");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_dag_version_roundtrip() -> Result<()> {
+    let path = temp_db_path();
+    let prefix = format!("pms:test:{}", nanoid::nanoid!());
+    let store = RocksStore::new(path.to_str().unwrap(), 64, prefix, None).await?;
+
+    store.set_dag_version("1.2.3").await?;
+    let version = store.get_dag_version().await?;
+    println!("Set 1.2.3 -> got '{}'", version);
+    assert_eq!(version, "1.2.3");
+
+    store.set_dag_version("2.0.0").await?;
+    let version2 = store.get_dag_version().await?;
+    println!("Set 2.0.0 -> got '{}'", version2);
+    assert_eq!(version2, "2.0.0");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_dag_version_persistence() -> Result<()> {
+    let path = temp_db_path();
+    let prefix = format!("pms:test:{}", nanoid::nanoid!());
+
+    // Ouverture 1 : écrire la version
+    {
+        let store = RocksStore::new(path.to_str().unwrap(), 64, prefix.clone(), None).await?;
+        store.set_dag_version("3.1.4").await?;
+        let v = store.get_dag_version().await?;
+        println!("Before close: '{}'", v);
+        assert_eq!(v, "3.1.4");
+    }
+
+    // Ouverture 2 : vérifier que la version persiste
+    {
+        let store = RocksStore::new(path.to_str().unwrap(), 64, prefix, None).await?;
+        let v = store.get_dag_version().await?;
+        println!("After reopen: '{}'", v);
+        assert_eq!(v, "3.1.4", "DAG version should survive DB reopen");
+    }
+
+    Ok(())
+}

@@ -14,6 +14,7 @@ use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[derive(Parser, Debug)]
+#[command(version)]
 struct Args {
     /// Chemin (ex: config.dev.toml / config.prod.toml)
     #[arg(long)]
@@ -25,6 +26,11 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let _ = ring::default_provider().install_default();
     init_logging();
+
+    // Parse CLI args (handles --version via clap)
+    let _args = Args::parse();
+
+    eprintln!("PMS v{} starting...", env!("CARGO_PKG_VERSION"));
 
     // 1) Settings
     let settings = load_config()?;
@@ -96,6 +102,8 @@ async fn main() -> Result<()> {
     for instance in ledger_mgr.list_all() {
         let dag_size = instance.dag.len();
         let persisted = instance.store.block_count().await.unwrap_or(0);
+        let dag_ver = instance.store.get_dag_version().await.unwrap_or_else(|_| "?".into());
+        let schema_ver = instance.store.get_version().await.unwrap_or(0);
         pms_server::metrics::PMS_BLOCKS_TOTAL
             .with_label_values(&[&instance.id])
             .set(dag_size as i64);
@@ -105,8 +113,8 @@ async fn main() -> Result<()> {
             .with_label_values(&[&instance.id])
             .inc_by(persisted as u64);
         eprintln!(
-            "  ✅ Ledger '{}' ready (DAG: {}, persisted: {})",
-            instance.id, dag_size, persisted
+            "  Ledger '{}' ready (DAG: {}, persisted: {}) [DAG v{}, Schema v{}]",
+            instance.id, dag_size, persisted, dag_ver, schema_ver
         );
     }
 
