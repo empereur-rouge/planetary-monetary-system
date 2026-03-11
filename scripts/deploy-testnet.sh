@@ -520,10 +520,24 @@ if [ "\$DO_BUILD" = "true" ]; then
         fi
     fi
 
+    # Extract coordinator credentials for simulator
+    echo -e "\${YELLOW}   Extracting coordinator credentials for simulator...\${NC}"
+    COORD_PRIV_KEY=\$(python3 -c "import json; print(json.load(open('etc/pms/coordinator.json'))['private_key'])" 2>/dev/null || echo "")
+    if [ -z "\$COORD_ADDR" ]; then
+        COORD_ADDR=\$(python3 -c "import json; print(json.load(open('etc/pms/coordinator.json'))['address'])" 2>/dev/null || echo "")
+    fi
+    if [ -n "\$COORD_PRIV_KEY" ] && [ -n "\$COORD_ADDR" ]; then
+        echo -e "   \${GREEN}Coordinator: \${COORD_ADDR:0:12}...\${NC}"
+    else
+        echo -e "   \${YELLOW}WARNING: Could not extract coordinator credentials.\${NC}"
+    fi
+
     # Start all services
     echo ""
     echo -e "\${YELLOW}   Starting all services...\${NC}"
     export PMS_ADMIN_TOKEN="\$ADMIN_TOKEN"
+    export PMS_COORDINATOR_KEY="\$COORD_PRIV_KEY"
+    export PMS_COORDINATOR_ADDR="\$COORD_ADDR"
     docker compose -f \$COMPOSE_FILE up -d --force-recreate
 
     echo -e "\${GREEN}   Containers started.\${NC}"
@@ -580,9 +594,11 @@ if [ "\$DO_BUILD" = "true" ]; then
         echo -e "   \${GREEN}SDK API Key created: \${SDK_API_KEY:0:20}...\${NC}"
         echo -e "   \${YELLOW}Save this key! It is shown only ONCE.\${NC}"
 
-        # Restart simulator with the API key so it can authenticate
+        # Restart simulator with the API key + coordinator credentials
         echo -e "   \${YELLOW}Restarting simulator with API key...\${NC}"
         export PMS_API_KEY="\$SDK_API_KEY"
+        export PMS_COORDINATOR_KEY="\$COORD_PRIV_KEY"
+        export PMS_COORDINATOR_ADDR="\$COORD_ADDR"
         docker compose -f \$COMPOSE_FILE up -d --force-recreate pms-simulator
     else
         echo -e "   \${RED}Could not create API key. Response: \${API_KEY_RESPONSE}\${NC}"

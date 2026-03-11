@@ -17,6 +17,17 @@ pub struct SimConfig {
     /// External agent definition files (relative to config dir)
     #[serde(default)]
     pub agent_files: Vec<String>,
+    /// Coordinator wallet credentials (for coordinator agent)
+    #[serde(default)]
+    pub coordinator: Option<CoordinatorConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CoordinatorConfig {
+    /// Private key in hex (64 chars). Supports "env:VAR" syntax.
+    pub private_key_hex: String,
+    /// Coordinator address. Supports "env:VAR" syntax.
+    pub address: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -177,6 +188,14 @@ pub enum AgentBehavior {
         send_probability: f64,
     },
     Observer,
+    Coordinator {
+        #[serde(default = "default_coord_min_amount")]
+        min_amount: f64,
+        #[serde(default = "default_coord_max_amount")]
+        max_amount: f64,
+        #[serde(default = "default_coord_send_probability")]
+        send_probability: f64,
+    },
 }
 
 fn default_system_prompt() -> String {
@@ -190,6 +209,15 @@ fn default_max_amount() -> f64 {
 }
 fn default_send_probability() -> f64 {
     0.5
+}
+fn default_coord_min_amount() -> f64 {
+    0.1
+}
+fn default_coord_max_amount() -> f64 {
+    1.0
+}
+fn default_coord_send_probability() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -268,6 +296,10 @@ impl SimConfig {
             if let Some(stripped) = key.strip_prefix("env:") {
                 self.server.api_key = std::env::var(stripped).ok();
             }
+        }
+        if let Some(ref mut coord) = self.coordinator {
+            resolve_env(&mut coord.private_key_hex);
+            resolve_env(&mut coord.address);
         }
     }
 

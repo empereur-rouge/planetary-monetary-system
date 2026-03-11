@@ -11,6 +11,7 @@ mod types;
 mod web;
 
 use agent::{spawn_agent, AgentContext, AgentHandle, PeerInfo};
+use base64::Engine;
 use client::DagClient;
 use comms::CommsRouter;
 use config::{AgentBehavior, SimConfig};
@@ -110,19 +111,49 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(web::run_web_server(config.web.port, web_state));
     }
 
+    // 6c. Build coordinator wallet from config (hex → base64 conversion)
+    let coordinator_wallet: Option<types::WalletInfo> = if let Some(ref coord) = config.coordinator {
+        let hex_bytes = hex::decode(&coord.private_key_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid coordinator private_key_hex: {}", e))?;
+        let private_key_b64 = base64::engine::general_purpose::STANDARD.encode(&hex_bytes);
+        tracing::info!(
+            "Coordinator wallet configured: {}...{}",
+            &coord.address[..8.min(coord.address.len())],
+            &coord.address[coord.address.len().saturating_sub(4)..]
+        );
+        Some(types::WalletInfo {
+            address: coord.address.clone(),
+            private_key_b64,
+            private_key_hex: coord.private_key_hex.clone(),
+            public_key_hex: String::new(),
+            x25519_pub_hex: String::new(),
+            mnemonic_words: None,
+        })
+    } else {
+        None
+    };
+
     // 7. Create agent wallets via API (parallel, up to 50 concurrent)
     let cancel = CancellationToken::new();
     let peer_registry = Arc::new(RwLock::new(Vec::<PeerInfo>::new()));
 
+    // Separate coordinator agents from regular agents
     let mut agent_specs: Vec<(String, usize)> = Vec::new(); // (name, def_idx)
+    let mut coordinator_specs: Vec<(String, usize)> = Vec::new(); // coordinator agents
     let mut agent_idx = 0u32;
     for (def_idx, agent_def) in config.agents.iter().enumerate() {
         let prefix = agent_def
             .name_prefix
             .as_deref()
             .unwrap_or("agent");
+        let is_coordinator = matches!(agent_def.behavior, AgentBehavior::Coordinator { .. });
         for _ in 0..agent_def.count {
-            agent_specs.push((format!("{}-{}", prefix, agent_idx), def_idx));
+            let name = format!("{}-{}", prefix, agent_idx);
+            if is_coordinator {
+                coordinator_specs.push((name, def_idx));
+            } else {
+                agent_specs.push((name, def_idx));
+            }
             agent_idx += 1;
         }
     }
@@ -149,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!("All {} wallets created", all_agents.len());
 
-    // Register peers
+    // Register peers (regular agents + coordinator)
     {
         let mut reg = peer_registry.write().await;
         for (name, wallet, _) in &all_agents {
@@ -157,6 +188,15 @@ async fn main() -> anyhow::Result<()> {
                 name: name.clone(),
                 address: wallet.address.clone(),
             });
+        }
+        // Register coordinator agents as peers too
+        if let Some(ref coord_w) = coordinator_wallet {
+            for (name, _) in &coordinator_specs {
+                reg.push(PeerInfo {
+                    name: name.clone(),
+                    address: coord_w.address.clone(),
+                });
+            }
         }
     }
 
@@ -256,9 +296,48 @@ async fn main() -> anyhow::Result<()> {
                 let _inbox = comms.register(&name).await;
                 Box::new(agent::observer::ObserverAgent::new(name.clone(), wallet))
             }
+            AgentBehavior::Coordinator { .. } => {
+                // Coordinator agents are spawned separately below
+                continue;
+            }
         };
 
         handles.push(spawn_agent(agent_box, ctx.clone(), agent_def.interval_ms));
+    }
+
+    // 11b. Spawn coordinator agents (use coordinator wallet, no faucet)
+    for (name, def_idx) in coordinator_specs {
+        let agent_def = &config.agents[def_idx];
+        if let Some(ref coord_w) = coordinator_wallet {
+            if let AgentBehavior::Coordinator {
+                min_amount,
+                max_amount,
+                send_probability,
+            } = &agent_def.behavior
+            {
+                let agent_box: Box<dyn agent::Agent> =
+                    Box::new(agent::coordinator::CoordinatorAgent::new(
+                        name.clone(),
+                        coord_w.clone(),
+                        *min_amount,
+                        *max_amount,
+                        *send_probability,
+                    ));
+                handles.push(spawn_agent(agent_box, ctx.clone(), agent_def.interval_ms));
+                tracing::info!(
+                    "Spawned coordinator agent '{}' (interval: {}ms, {:.2}-{:.2} PMS)",
+                    name,
+                    agent_def.interval_ms,
+                    min_amount,
+                    max_amount
+                );
+            }
+        } else {
+            tracing::warn!(
+                "Coordinator agent '{}' defined but no [coordinator] config — skipping",
+                name
+            );
+        }
     }
 
     tracing::info!(
