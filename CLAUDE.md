@@ -1,5 +1,23 @@
 # Project Rules
 
+## Related Projects
+
+### PMS SDK (TypeScript)
+- **Chemin** : `/Volumes/Crutial X9 - Macbook Erwan/Documents/Programations/Rust/pms-sdk`
+- SDK TypeScript officiel pour interagir avec le réseau PMS (npm : `@empereur-rouge/pms-sdk`).
+- Gestion de wallets (BIP39, secp256k1), signature de transactions, communication réseau.
+- Quand l'utilisateur parle du "SDK", il s'agit de ce projet.
+
+### Dashboard Client — Heshima Network (React + Rust)
+- **Chemin** : `/Volumes/Crutial X9 - Macbook Erwan/Documents/Programations/Web/Heshima Network`
+- Frontend React 19 + Vite (`pms-network-client/`) et backend Rust/Axum (`pms-network-server/`).
+- Dashboard multi-utilisateur : wallets, transactions, NFTs, admin console.
+- Le backend sert de proxy entre le frontend et le PMS Engine (dag-pms).
+- Quand l'utilisateur parle du "dashboard" ou du "client", il s'agit de ce projet.
+
+### Règle d'exploration des projets externes
+- **OBLIGATOIRE : Toujours utiliser des sub-agents (Task tool) pour explorer ou chercher dans les dossiers du SDK ou du Dashboard.** Ne jamais lire/grep ces dossiers directement depuis le contexte principal — cela évite de polluer la fenêtre de contexte avec du code hors-scope.
+
 ## Git Workflow
 - At the start of each conversation, propose creating a new Git branch for the upcoming changes.
 - When the task is complete, propose to commit the changes and merge the branch into main.
@@ -20,7 +38,7 @@
 
 **CRITICAL: Ne jamais oublier de mettre à jour les versions concernées lors d'une modification du code.**
 
-Le projet utilise **4 systèmes de version** distincts. Lors de chaque changement, identifier lesquels sont impactés et les bumper :
+Le projet utilise **5 systèmes de version** distincts. Lors de chaque changement, identifier lesquels sont impactés et les bumper :
 
 ### 1. Software Version (`Cargo.toml`)
 - Fichier : `bin/Cargo.toml` et les workspace members concernés.
@@ -43,6 +61,13 @@ Le projet utilise **4 systèmes de version** distincts. Lors de chaque changemen
 - Fichier : `crates/pms-config/src/config.rs` → champ `Network.protocol_version`.
 - Utilisé dans les messages `Hello` et `Block` du réseau P2P.
 - À incrémenter quand le format des messages réseau change.
+
+### 5. API Version (`API_VERSION`)
+- Fichier : `crates/pms-server/src/api_fn/version.rs` → constante `API_VERSION`.
+- Entier incrémental (actuellement `1`). Contrôle la compatibilité de l'API REST.
+- À incrémenter quand : un endpoint est ajouté/supprimé/modifié, le format d'une requête/réponse change, ou un comportement d'endpoint change.
+- Exposé via `GET /v1/version` dans le champ `api_version`.
+- **OBLIGATOIRE : Chaque modification touchant les routes, handlers, ou formats de l'API DOIT bumper `API_VERSION`.**
 
 ### Règles générales
 - Le bump de version doit être inclus dans le **même commit** que les changements associés.

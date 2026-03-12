@@ -536,12 +536,31 @@ impl ConcurrentDag {
         S: pms_storage::DagStorage + Send + Sync,
     {
         let dag = Self::with_capacity_and_spent_limit(max_blocks, max_spent_outpoints);
-        let ids = store.all_block_ids().await?;
+        let mut ids = store.all_block_ids().await?;
+        let total_in_db = ids.len();
 
-        // Phase 1: Load all blocks WITHOUT pruning or insertion-order tracking.
+        // ── Selective loading ──────────────────────────────────────────────
+        // When the DB has more blocks than the RAM limit, only load the
+        // lexicographically last `max_blocks` IDs. This produces the SAME
+        // surviving block set as load-all + prune (which uses lexicographic
+        // insertion_order), but avoids reading and discarding the excess
+        // blocks from RocksDB. Historical blocks remain in DB for queries.
+        if max_blocks > 0 && ids.len() > max_blocks {
+            ids.sort(); // Defensive: ensure lex order (RocksDB already sorted)
+            let skip = ids.len() - max_blocks;
+            ids = ids.split_off(skip); // O(1) — reuses the tail allocation
+            tracing::info!(
+                total_in_db,
+                loading = ids.len(),
+                skipped = skip,
+                "Selective bootstrap: loading only newest blocks (full history preserved in RocksDB)"
+            );
+        }
+
+        // Phase 1: Load selected blocks WITHOUT pruning or insertion-order tracking.
         // This ensures children_counts are fully correct before any pruning.
-        for id in ids {
-            if let Some(sb) = store.get_block(&id).await? {
+        for (i, id) in ids.iter().enumerate() {
+            if let Some(sb) = store.get_block(id).await? {
                 let payload = if let Some(json) = &sb.payload_json {
                     match serde_json::from_str(json) {
                         Ok(p) => Some(p),
@@ -564,6 +583,9 @@ impl ConcurrentDag {
                     signature: Some(sb.signature_hex).filter(|s| !s.is_empty()),
                 };
                 dag.bootstrap_insert(block);
+            }
+            if (i + 1) % 10_000 == 0 {
+                tracing::info!(loaded = i + 1, total = ids.len(), "DAG bootstrap progress...");
             }
         }
 

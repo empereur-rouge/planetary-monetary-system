@@ -125,9 +125,9 @@ async fn main() -> Result<()> {
     let store = default_ledger.store.clone();
     let adapter = default_ledger.adapter.clone();
 
-    if let Err(e) = store.bootstrap_once_for_production() {
-        eprintln!("[BOOT] bootstrap_once_for_production skipped → {e}");
-    }
+    // NOTE: bootstrap_once_for_production() (flush + full compaction) removed from
+    // startup — too expensive on large DBs (971K+ blocks). Background maintenance
+    // in server.rs already handles periodic flush (10min) and compaction (1h).
 
     // 5) Server P2P (uses default ledger's adapter)
     let srv = Server::new(

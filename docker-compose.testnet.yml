@@ -45,7 +45,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 15
-      start_period: 10s
+      start_period: 120s
     networks:
       - pms-testnet-internal
     restart: unless-stopped

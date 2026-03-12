@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
 
+/// Version de l'API REST — à incrémenter à chaque modification des routes/formats.
+pub const API_VERSION: u32 = 1;
+
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VersionResponse {
@@ -16,6 +19,8 @@ pub struct VersionResponse {
     pub schema_version: i64,
     /// Version du protocole P2P
     pub protocol_version: u32,
+    /// Version de l'API REST (entier)
+    pub api_version: u32,
 }
 
 /// GET /v1/version
@@ -40,6 +45,7 @@ pub async fn get_version(
             dag_version,
             schema_version,
             protocol_version,
+            api_version: API_VERSION,
         }),
     )
 }
@@ -51,23 +57,25 @@ mod tests {
     #[test]
     fn test_version_response_serialization() {
         let response = VersionResponse {
-            software_version: "0.1.0".to_string(),
+            software_version: "0.1.3".to_string(),
             dag_version: "1.0.0".to_string(),
             schema_version: 5,
             protocol_version: 1,
+            api_version: API_VERSION,
         };
 
         let json = serde_json::to_string_pretty(&response).unwrap();
         println!("Version API response JSON:\n{json}");
 
         let parsed: VersionResponse = serde_json::from_str(&json).unwrap();
-        println!("Parsed back: software={}, dag={}, schema={}, protocol={}",
+        println!("Parsed back: software={}, dag={}, schema={}, protocol={}, api={}",
             parsed.software_version, parsed.dag_version,
-            parsed.schema_version, parsed.protocol_version);
+            parsed.schema_version, parsed.protocol_version, parsed.api_version);
 
-        assert_eq!(parsed.software_version, "0.1.0");
+        assert_eq!(parsed.software_version, "0.1.3");
         assert_eq!(parsed.dag_version, "1.0.0");
         assert_eq!(parsed.schema_version, 5);
         assert_eq!(parsed.protocol_version, 1);
+        assert_eq!(parsed.api_version, API_VERSION);
     }
 }
