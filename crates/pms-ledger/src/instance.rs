@@ -196,6 +196,9 @@ impl LedgerInstance {
                 };
                 core_adapter.utxos.add(oid, txo).await;
                 utxo_count += 1;
+                if utxo_count % 100_000 == 0 {
+                    tracing::info!(ledger = %def.id, utxo_count, "UTXO streaming progress...");
+                }
             }
 
             // Join producer and propagate any RocksDB/parsing errors
