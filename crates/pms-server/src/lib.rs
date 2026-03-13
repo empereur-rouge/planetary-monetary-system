@@ -7,6 +7,7 @@
 mod admin;
 pub mod api;
 pub mod api_fn;
+pub mod contract_engine;
 pub mod fee_distribution;
 pub mod fee_pool;
 pub mod node_registry;

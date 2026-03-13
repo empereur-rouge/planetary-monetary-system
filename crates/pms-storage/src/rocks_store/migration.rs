@@ -65,6 +65,7 @@ impl RocksStore {
                 3 => self.mig_3_to_4().await?,
                 4 => self.mig_4_to_5().await?,
                 5 => self.mig_5_to_6().await?,
+                6 => self.mig_6_to_7().await?,
                 _ => return Err(MigError::Unexpected(v)),
             }
             v += 1;
@@ -532,6 +533,27 @@ impl RocksStore {
         tracing::info!(
             "Migration 5→6: completed — reindexed {reindexed} TxUtxo blocks with fee outputs out of {total} total"
         );
+        Ok(())
+    }
+
+    // Migration 6 -> 7 :
+    // Ajout du Column Family "contracts" pour le système de smart contracts déclaratifs.
+    // Le CF est créé automatiquement par `create_missing_column_families(true)` dans open_db.
+    // Cette migration est un no-op — la CF existe déjà grâce à CF_NAMES.
+    // On écrit une clé factice pour vérifier que le CF est accessible.
+    async fn mig_6_to_7(&self) -> std::result::Result<(), MigError> {
+        let cf_contracts = self.cf("contracts");
+
+        // Vérification d'accès au CF : écriture + suppression d'une clé sentinelle
+        self.db
+            .put_cf(&cf_contracts, b"__init__", b"")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+
+        self.db
+            .delete_cf(&cf_contracts, b"__init__")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+
+        tracing::info!("Migration 6→7: contracts CF verified — smart contract system ready");
         Ok(())
     }
 }

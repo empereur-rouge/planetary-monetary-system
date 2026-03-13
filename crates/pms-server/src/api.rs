@@ -14,6 +14,9 @@ use crate::api_fn::compliance::{
     admin_compliance_log, admin_freeze, admin_list_frozen, admin_reverse, admin_seize,
     admin_shadow_balance, admin_unfreeze,
 };
+use crate::api_fn::contracts::{
+    get_contract, list_contracts, register_contract, toggle_contract,
+};
 use crate::api_fn::coordinator::get_coordinator_info;
 use crate::api_fn::version::get_version;
 use crate::api_fn::dag::get_tips;
@@ -634,6 +637,14 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route(
             "/admin/api-keys/{key_id}",
             axum::routing::delete(admin_revoke_api_key),
+        )
+        // Admin Contract API - Declarative smart contracts
+        .route("/admin/contracts", post(register_contract))
+        .route("/admin/contracts", get(list_contracts))
+        .route("/admin/contracts/{contract_id}", get(get_contract))
+        .route(
+            "/admin/contracts/{contract_id}/toggle",
+            post(toggle_contract),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

@@ -1,5 +1,34 @@
 # Project Rules
 
+## Nature du Projet — Crypto Banking Engine
+
+**CRITICAL: Ce projet est un moteur bancaire crypto dont l'objectif est l'indépendance vis-à-vis des banques traditionnelles. Toute contribution DOIT respecter les exigences suivantes :**
+
+### Performance
+- Le code doit être optimisé pour la production à grande échelle. Pas de compromis sur la performance.
+- Profiler et benchmarker les chemins critiques (consensus, validation de transactions, propagation réseau).
+- Préférer les structures de données et algorithmes les plus efficaces, même si plus complexes à implémenter.
+- Éviter les allocations inutiles, les copies superflues, et les locks non nécessaires.
+
+### Sécurité
+- **Niveau de sécurité : bancaire.** Chaque ligne de code touchant la cryptographie, les transactions, les balances, ou le consensus doit être traitée comme critique.
+- Jamais de raccourcis sur la validation des entrées, la vérification des signatures, ou la gestion des erreurs dans les chemins financiers.
+- Toute opération sur les fonds (transferts, frais, mint, burn) doit être auditée, testée exhaustivement, et vérifiée pour les race conditions et les double-spend.
+- Les dépendances cryptographiques doivent être des librairies éprouvées et maintenues. Pas de crypto "maison".
+- Revue systématique des edge cases de sécurité : overflow/underflow, integer truncation, timing attacks, replay attacks.
+
+### Rigueur et Exhaustivité
+- **Ne JAMAIS chercher à économiser des tokens ou prendre des raccourcis.** Ce projet gère de l'argent réel — la rigueur prime sur la rapidité.
+- Jamais de placeholder code, TODO stubs, ou implémentations incomplètes. Toujours écrire le code complet et fonctionnel immédiatement.
+- En cas de doute sur la sécurité, la performance, ou la correction d'une implémentation : **utiliser des sub-agents spécialisés** (Task tool) pour vérifier, auditer, ou valider. Ne pas hésiter à lancer une équipe d'agents en parallèle si la tâche le justifie.
+- Exemples de cas où les agents doivent être mobilisés :
+  - Revue de sécurité d'un changement touchant les transactions ou le consensus.
+  - Validation de la cohérence entre les couches RAM et RocksDB.
+  - Audit des dépendances pour des vulnérabilités connues.
+  - Vérification de la correction d'algorithmes cryptographiques ou financiers.
+- Chaque changement doit être complet, testé, et documenté. Pas de "on verra plus tard".
+- **OBLIGATOIRE : Avant de conclure une conversation qui a produit des changements de code, lancer `/simplify` pour détecter et corriger les problèmes de réutilisation, qualité et efficacité.**
+
 ## Related Projects
 
 ### PMS SDK (TypeScript)
@@ -18,11 +47,17 @@
 ### Règle d'exploration des projets externes
 - **OBLIGATOIRE : Toujours utiliser des sub-agents (Task tool) pour explorer ou chercher dans les dossiers du SDK ou du Dashboard.** Ne jamais lire/grep ces dossiers directement depuis le contexte principal — cela évite de polluer la fenêtre de contexte avec du code hors-scope.
 
-## Git Workflow
-- At the start of each conversation, propose creating a new Git branch for the upcoming changes.
-- When the task is complete, propose to commit the changes and merge the branch into main.
+## Git & GitHub
+
+- Au début de chaque conversation, proposer de créer une branche Git pour les changements à venir.
+- À la fin de la tâche, proposer de commit et merger dans `main`.
+- **NEVER commit secrets, API keys, or credentials.**
+- Branching : `main` (stable), `feature/<nom>`, `fix/<nom>`. Merger dans `main` quand terminé.
+- Commits atomiques avec messages clairs : description brève + contexte (1-2 phrases). Référencer les issues quand applicable.
+- Utiliser `gh` CLI pour les opérations GitHub.
 
 ## Tests
+
 - Always create new tests or update existing ones to cover the changes made.
 - Tests must validate the expected behavior independently of the implementation. Do not write tests that simply mirror the code you wrote — tests should verify correctness from the user's perspective, not confirm that your implementation runs without error.
 - **CRITICAL: Show test output before validation.** Every test MUST include `println!`/`eprintln!` statements that display key values (API responses, computed results, state changes). After writing a test, run it with `cargo test <test_name> -- --nocapture` and show the full output to the user. The user validates the test based on the printed output, NOT just on whether it passes. A test that passes but produces wrong output is a bug.
@@ -43,8 +78,7 @@ Le projet utilise **5 systèmes de version** distincts. Lors de chaque changemen
 ### 1. Software Version (`Cargo.toml`)
 - Fichier : `bin/Cargo.toml` et les workspace members concernés.
 - Suit le **Semantic Versioning** : MAJOR (breaking) / MINOR (feature) / PATCH (bugfix).
-- **OBLIGATOIRE : Chaque commit/merge sur `main` DOIT incrémenter la version.** Cela permet d'identifier précisément quelle version du code tourne. Pas de commit sans bump de version.
-- Règle de bump : PATCH pour bugfix/refactor, MINOR pour nouvelle feature, MAJOR pour breaking change.
+- **OBLIGATOIRE : Chaque commit/merge sur `main` DOIT incrémenter la version.** Pas de commit sans bump de version.
 
 ### 2. DAG Protocol Version (`DAG_VERSION`)
 - Fichier : `crates/pms-storage/src/migrations.rs` → constante `DAG_VERSION`.
@@ -73,80 +107,7 @@ Le projet utilise **5 systèmes de version** distincts. Lors de chaque changemen
 - Le bump de version doit être inclus dans le **même commit** que les changements associés.
 - En cas de doute, vérifier quel(s) système(s) de version sont impactés avant de commit.
 
-## Code Quality
-- Never use placeholder code, TODO stubs, or incomplete implementations. Always write the full, working code immediately.
+## Documentation
 
-## GitHub Integration and Version Control
-
-**CRITICAL: All projects must use Git and GitHub for version control.**
-
-### Initial Setup
-- Initialize Git repository for ALL new projects immediately.
-- Create `.gitignore` with common exclusions (`node_modules`, `__pycache__`, `.venv`, `.env`, etc.).
-- NEVER commit secrets, API keys, or credentials.
-- Always include `.env.example` for required environment variables.
-
-### Branching Strategy
-
-For solo projects:
-- `main` branch for stable code.
-- Feature branches: `feature/add-user-auth`
-- Fix branches: `fix/memory-leak`
-- Merge back to `main` when complete.
-
-For collaborative projects:
-- `main` — production-ready code.
-- `develop` — integration branch.
-- `feature/*` — new features.
-- `hotfix/*` — urgent production fixes.
-
-### Commit Best Practices
-- Atomic commits (one logical change per commit).
-- Clear messages: `"Add user authentication with JWT"`
-- Include context: `"Fixes rate limiting issue causing 429 errors"`
-- Reference issues when applicable: `"Closes #42"`
-- Commit message format: brief description + context (1-2 sentences).
-
-### When to Commit
-- After completing a discrete feature/fix.
-- Before risky refactoring (commit working state).
-- After CodeRabbit review and fixes.
-- Before ending work session.
-
-### Push Frequency
-- Make frequent, meaningful commits with clear messages.
-- Push to GitHub regularly to maintain backup.
-- After every completed and tested feature.
-- At least once per work session.
-- Before deployment.
-
-### GitHub Operations
-- Use `gh` CLI for GitHub operations when possible.
-- Create branches for major features/experiments.
-- Use GitHub Issues for tracking bugs and feature requests.
-
-## Update PROJECT_LOG.md with Rebuild-Level Detail
-
-**CRITICAL: `PROJECT_LOG.md` must contain sufficient detail to rebuild the entire project from the markdown alone.**
-
-### Project Type Templates
-
-**For Web Applications (Frontend/Backend):**
-- Tech stack (framework, runtime versions).
-- API endpoints with request/response schemas.
-- Database schema and migrations.
-- Authentication/authorization setup.
-- Environment variables (`.env.example`).
-- Deployment workflow (CI/CD, hosting platform).
-
-**For CLI Tools:**
-- Installation methods (`pip`, `cargo`, `go install`).
-- Command-line arguments and flags.
-- Configuration file formats.
-- Build instructions for binaries.
-
-**For Infrastructure/DevOps:**
-- Terraform/CloudFormation configurations.
-- Service topology diagrams.
-- Secrets management approach.
-- Monitoring and alerting setup.
+- **`PROJECT_LOG.md` doit contenir suffisamment de détails pour reconstruire le projet entier à partir du markdown seul.**
+- À maintenir à jour avec : architecture, décisions techniques, schéma DB, protocoles réseau, et endpoints API.

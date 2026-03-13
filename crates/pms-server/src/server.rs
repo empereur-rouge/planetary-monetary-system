@@ -407,30 +407,28 @@ impl Server {
         // Note: PMS_BLOCKS_TOTAL gauge is synced from dag.len() on each /metrics fetch.
         // No init needed here — the first metrics poll will set the correct value.
 
-        // 1) Logger périodique des stats (persist / gossip)
+        // 1) Background sync: orphan retry (2s) + periodic GetTips (5s) + stats
         {
             let stats = stats.clone();
             let srv_for_sync = self.clone();
             tokio::spawn(async move {
+                let mut tick: u64 = 0;
                 loop {
-                    sleep(Duration::from_millis(200)).await; // Super-Aggressive sync (200ms)
-                    // 1) Log stats (Throttle logs to every 2s to avoid spam)
-                    // ... actually we can just log every time or use a counter.
-                    // Let's keep it simple: log every iteration but the loop is fast.
-                    // Wait, logging every 200ms might spam. Let's use a counter.
+                    sleep(Duration::from_secs(2)).await;
+                    tick += 1;
 
-                    let (ok, dup, err, go, gr, ge) = stats.snapshot();
-                    if random::<u8>() < 25 {
-                        // Log roughly every ~8-10 iterations (~2s)
+                    // 1) Log stats (every ~10s)
+                    if tick % 5 == 0 {
+                        let (ok, dup, err, go, gr, ge) = stats.snapshot();
                         tracing::info!(
                             target="pms_stats",
                             ptr=?Arc::as_ptr(&stats),
-                            "📊 200ms: persist ok={} dup={} err={} | gossip ok={} reject={} err={}",
+                            "📊 stats: persist ok={} dup={} err={} | gossip ok={} reject={} err={}",
                             ok, dup, err, go, gr, ge
                         );
                     }
 
-                    // 2) Retry Missing Parents for Orphans
+                    // 2) Retry Missing Parents for Orphans (every 2s)
                     {
                         let parents_needed: Vec<String> = srv_for_sync
                             .parent_dependency
@@ -477,11 +475,13 @@ impl Server {
                         }
                     }
 
-                    // 3) Active Sync: Broadcast GetTips with higher limit
-                    // Limit 1024 covers extremely wide DAGs (stress tests)
-                    let _ = srv_for_sync
-                        .broadcast(&NetMsg::GetTips { limit: 1024 })
-                        .await;
+                    // 3) Active Sync: Broadcast GetTips every ~10s (tick%5 with 2s interval)
+                    // Reduced from 200ms/1024 to 10s/64 to avoid network amplification
+                    if tick % 5 == 0 {
+                        let _ = srv_for_sync
+                            .broadcast(&NetMsg::GetTips { limit: 64 })
+                            .await;
+                    }
                 }
             });
         }
@@ -510,15 +510,15 @@ impl Server {
             tokio::spawn(async move {
                 match api_handle.await {
                     Ok(Ok(())) => {
-                        eprintln!("[API] Server exited cleanly (unexpected)");
+                        tracing::error!("API server exited cleanly (unexpected)");
                         std::process::exit(1);
                     }
                     Ok(Err(e)) => {
-                        eprintln!("[API] FATAL error: {e}");
+                        tracing::error!(error = %e, "API server fatal error");
                         std::process::exit(1);
                     }
                     Err(join_err) => {
-                        eprintln!("[API] PANIC in API server task: {:?}", join_err);
+                        tracing::error!(error = ?join_err, "API server task panicked");
                         std::process::exit(1);
                     }
                 }
@@ -555,24 +555,21 @@ impl Server {
                         tls.key_pem
                     );
                 }
-                eprintln!("[P2P] {:?} + TLS → listen_tls({})", mode, bind_addr);
+                tracing::info!(?mode, %bind_addr, "P2P TLS listener starting");
                 self.listen_tls(&cfg.bind_addr, tls).await
             } else {
                 // 🧪 Dev / Testnet: on est tolérant
                 if !cert_exists || !key_exists {
-                    eprintln!(
-                        "[P2P] TLS configuré mais fichiers absents en mode {:?}, fallback TCP clair sur {}",
-                        mode, bind_addr
-                    );
+                    tracing::info!(?mode, %bind_addr, "TLS configured but cert/key files missing, falling back to plain TCP");
                     self.listen(&cfg.bind_addr).await
                 } else {
-                    eprintln!("[P2P] mode {:?} avec TLS → listen_tls({})", mode, bind_addr);
+                    tracing::info!(?mode, %bind_addr, "P2P TLS listener starting");
                     self.listen_tls(&cfg.bind_addr, tls).await
                 }
             }
         } else {
             // Pas de bloc [tls] → P2P en clair
-            eprintln!("[P2P] aucun TLS configuré → listen({})", bind_addr);
+            tracing::info!(%bind_addr, "no TLS configured, P2P listening on plain TCP");
             self.listen(&cfg.bind_addr).await
         };
 
@@ -617,10 +614,10 @@ impl Server {
                 match acceptor.accept(tcp).await {
                     Ok(tls_stream) => {
                         if let Err(e) = this.handle_new_peer_tls(tls_stream, sa).await {
-                            eprintln!("[P2P/TLS] {sa} error: {e}");
+                            tracing::error!(peer = %sa, error = %e, "TLS peer handler error");
                         }
                     }
-                    Err(e) => eprintln!("[P2P/TLS] accept failed from {sa}: {e}"),
+                    Err(e) => tracing::error!(peer = %sa, error = %e, "TLS accept failed"),
                 }
             });
         }
@@ -734,7 +731,7 @@ impl Server {
     pub async fn handle_new_peer_from_io<R, W>(
         self: &Arc<Self>,
         reader_io: R,
-        mut writer_io: W,
+        writer_io: W,
         sa: SocketAddr,
         is_inbound: bool,
     ) -> anyhow::Result<()>
@@ -765,21 +762,40 @@ impl Server {
 
         let this_w = Arc::clone(self);
         tokio::spawn(async move {
-            while let Some(m) = rx_out.recv().await {
-                if let Ok(s) = serde_json::to_string(&m) {
-                    if writer_io.write_all(s.as_bytes()).await.is_err() {
-                        break;
+            // Wrap in BufWriter to batch multiple messages before flushing.
+            // This reduces TLS record overhead from per-message to periodic (5ms).
+            let mut writer = tokio::io::BufWriter::new(writer_io);
+            let mut flush_interval =
+                tokio::time::interval(Duration::from_millis(5));
+            flush_interval
+                .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            loop {
+                tokio::select! {
+                    biased;
+                    msg = rx_out.recv() => {
+                        match msg {
+                            Some(m) => {
+                                if let Ok(s) = serde_json::to_string(&m) {
+                                    if writer.write_all(s.as_bytes()).await.is_err() {
+                                        break;
+                                    }
+                                    if writer.write_all(b"\n").await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            None => break,
+                        }
                     }
-                    if writer_io.write_all(b"\n").await.is_err() {
-                        break;
-                    }
-                    // CRITICAL: Flush the TLS buffer to actually send the data
-                    if writer_io.flush().await.is_err() {
-                        break;
+                    _ = flush_interval.tick() => {
+                        if writer.flush().await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
-            let _ = writer_io.shutdown().await;
+            let _ = writer.shutdown().await;
             this_w.peers.remove(&sa);
         });
 
@@ -834,7 +850,7 @@ impl Server {
                     let msg = parsed.unwrap();
 
                     // Add general log for incoming message type
-                    println!("[SRV] {} -> Recv Msg: {:?}", sa, msg);
+                    tracing::trace!(peer = %sa, ?msg, "recv msg");
 
                     if !handshaked {
                         match msg {
@@ -936,7 +952,7 @@ impl Server {
                             this.process_incoming_blocks(vec![wb], sa).await;
                         }
                         NetMsg::Inv { ids } => {
-                            eprintln!("[SRV] {} <- Inv({} ids)", sa, ids.len());
+                            tracing::debug!(peer = %sa, count = ids.len(), "recv Inv");
                             let mut to_fetch = Vec::with_capacity(ids.len());
                             for id in ids {
                                 // Check all ledgers (multi-ledger aware)
@@ -948,10 +964,7 @@ impl Server {
                                 // if this.seen_inv_recently_and_mark(&id).await {
                                 //     continue;
                                 // }
-                                eprintln!(
-                                    "[SRV] Processing Inv ID: {}",
-                                    id.get(..8).unwrap_or(&id)
-                                );
+                                tracing::trace!(id = %id.get(..8).unwrap_or(&id), "processing Inv ID");
                                 let mut inflight = this.inflight_fetch.lock().await;
                                 if let Some(ts) = inflight.get(&id) {
                                     if ts.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS {
@@ -961,7 +974,7 @@ impl Server {
                                 if inflight.len() < MAX_INFLIGHT_GETBLOCK {
                                     inflight.insert(id.clone(), Instant::now());
                                     to_fetch.push(id.clone()); // Log clone
-                                    eprintln!("[SRV] Requesting {} from {}", id, sa);
+                                    tracing::trace!(id = %id, peer = %sa, "requesting block from peer");
                                 } else {
                                     break;
                                 }
@@ -987,13 +1000,13 @@ impl Server {
                             }
                         }
                         NetMsg::GetBlocks { ids } => {
-                            eprintln!("[SRV] {sa} -> GetBlocks({} ids)", ids.len());
+                            tracing::debug!(peer = %sa, count = ids.len(), "recv GetBlocks");
                             let blocks = this.get_blocks_any(&ids).await;
                             if !blocks.is_empty() {
-                                eprintln!("[SRV] Sending {} blocks to {}", blocks.len(), sa);
+                                tracing::debug!(peer = %sa, count = blocks.len(), "sending blocks");
                                 let _ = this.unicast(&sa, NetMsg::Blocks { blocks }).await;
                             } else {
-                                eprintln!("[SRV] GetBlocks returned empty for {} ids", ids.len());
+                                tracing::debug!(requested = ids.len(), "GetBlocks returned empty");
                             }
                         }
                         NetMsg::Blocks { mut blocks } => {
@@ -1005,12 +1018,12 @@ impl Server {
                         NetMsg::GetTips { limit } => {
                             // Aggregate tips from all ledgers
                             let ids = this.all_tips(limit).await;
-                            println!("[SRV] Serving GetTips: {} tips", ids.len());
+                            tracing::debug!(count = ids.len(), "serving GetTips");
                             let _ = this.unicast(&sa, NetMsg::Tips { ids }).await;
                         }
                         NetMsg::Tips { ids } => {
                             let mut to_fetch = Vec::new();
-                            println!("[SRV] Processing Tips: {} ids", ids.len());
+                            tracing::debug!(count = ids.len(), "processing Tips");
                             for id in ids {
                                 // Check all ledgers
                                 if this.have_block_any(&id).await {
@@ -1022,10 +1035,10 @@ impl Server {
                                 // if this.seen_inv_recently_and_mark(&id).await { countinue; }
                                 let mut inflight = this.inflight_fetch.lock().await;
                                 let in_inflight = inflight.contains_key(&id);
-                                println!(
-                                    "[SRV] Tips {}: have=false, inflight={}",
-                                    id.get(..8).unwrap_or(&id),
-                                    in_inflight
+                                tracing::trace!(
+                                    id = %id.get(..8).unwrap_or(&id),
+                                    in_inflight,
+                                    "tip not held locally"
                                 );
 
                                 if let Some(ts) = inflight.get(&id) {
@@ -1039,7 +1052,7 @@ impl Server {
                                 }
                             }
                             if !to_fetch.is_empty() {
-                                println!("[SRV] Sending GetBlocks for {} items", to_fetch.len());
+                                tracing::debug!(count = to_fetch.len(), "sending GetBlocks for missing tips");
                                 let _ =
                                     this.unicast(&sa, NetMsg::GetBlocks { ids: to_fetch }).await;
                             }
@@ -1186,10 +1199,10 @@ impl Server {
                 continue; // déjà vu en gossip récemment et pas demandé explicitement
             }
             */
-            eprintln!(
-                "[SRV] Processing block {} (net={})",
-                wb.id.get(..8).unwrap_or(&wb.id),
-                &wb.network_id
+            tracing::debug!(
+                block_id = %wb.id.get(..8).unwrap_or(&wb.id),
+                network = %wb.network_id,
+                "processing incoming block"
             );
             if block_adapter.have_block(&wb.id).await {
                 continue;
@@ -1211,10 +1224,10 @@ impl Server {
 
                     // Register dependency: when 'p' arrives, re-process 'wb' (bounded)
                     if self.parent_dependency.len() < MAX_PARENT_DEPS {
-                        eprintln!(
-                            "[SRV] Add dep: parent={} child={}",
-                            p.get(..8).unwrap_or(p),
-                            wb.id.get(..8).unwrap_or(&wb.id)
+                        tracing::debug!(
+                            parent = %p.get(..8).unwrap_or(p),
+                            child = %wb.id.get(..8).unwrap_or(&wb.id),
+                            "adding parent dependency"
                         );
                         self.parent_dependency
                             .entry(p.clone())
@@ -1235,10 +1248,10 @@ impl Server {
                     continue;
                 }
 
-                eprintln!(
-                    "[SRV] Orphan {} missing {} parents",
-                    wb.id.get(..8).unwrap_or(&wb.id),
-                    missing_to_fetch.len()
+                tracing::debug!(
+                    block_id = %wb.id.get(..8).unwrap_or(&wb.id),
+                    missing_parents = missing_to_fetch.len(),
+                    "block orphaned, missing parents"
                 );
                 tracing::info!(
                     target = "pms_bench",
@@ -1266,13 +1279,13 @@ impl Server {
             let persist_start = tokio::time::Instant::now();
             // =======================================
 
-            println!(
-                "[SRV] Calling persist_block for {} (net={})",
-                wb.id.get(..8).unwrap_or(&wb.id),
-                &wb.network_id
+            tracing::debug!(
+                block_id = %wb.id.get(..8).unwrap_or(&wb.id),
+                network = %wb.network_id,
+                "calling persist_block"
             );
             let result = block_adapter.persist_block(&wb).await;
-            println!("[SRV] persist_block returned: {:?}", result);
+            tracing::debug!(?result, "persist_block returned");
 
             match result {
                 Ok(PutResult::Inserted) => {
@@ -1301,31 +1314,31 @@ impl Server {
 
                     // Unblock orphans
                     if let Some((_, children)) = self.parent_dependency.remove(&wb.id) {
-                        eprintln!(
-                            "[SRV] Unblocking parent={} -> {} children",
-                            wb.id.get(..8).unwrap_or(&wb.id),
-                            children.len()
+                        tracing::debug!(
+                            parent = %wb.id.get(..8).unwrap_or(&wb.id),
+                            children = children.len(),
+                            "unblocking orphan children"
                         );
                         for child_id in children {
                             if let Some((_, child_wb)) = self.orphans.remove(&child_id) {
-                                eprintln!(
-                                    "[SRV] Queueing unblocked child {}",
-                                    child_id.get(..8).unwrap_or(&child_id)
+                                tracing::trace!(
+                                    child = %child_id.get(..8).unwrap_or(&child_id),
+                                    "queueing unblocked child"
                                 );
                                 process_queue.push_back(child_wb);
                             } else {
-                                eprintln!(
-                                    "[SRV] Orphan {} missing from map!",
-                                    child_id.get(..8).unwrap_or(&child_id)
+                                tracing::warn!(
+                                    child = %child_id.get(..8).unwrap_or(&child_id),
+                                    "orphan missing from map"
                                 );
                             }
                         }
                     }
                 }
                 Ok(PutResult::AlreadyExists) => {
-                    eprintln!(
-                        "[SRV] Block {} already exists, skipping",
-                        wb.id.get(..8).unwrap_or(&wb.id)
+                    tracing::debug!(
+                        block_id = %wb.id.get(..8).unwrap_or(&wb.id),
+                        "block already exists, skipping"
                     );
                     // Check orphans just in case
                     if let Some((_, children)) = self.parent_dependency.remove(&wb.id) {
@@ -1346,12 +1359,12 @@ impl Server {
                         "Block rejected"
                     );
                     // ==================================
-                    eprintln!("[SRV] {sa} persist REJECT id={} reason={}", wb.id, reason);
+                    tracing::warn!(peer = %sa, block_id = %wb.id, %reason, "persist rejected");
 
                     // Extract missing parent ID from structured rejection messages
                     let missing_parent_id = extract_missing_parent_id(&reason);
                     if let Some(pid_clean) = missing_parent_id {
-                        eprintln!("[SRV] {sa} -> GetBlock(missing parent={})", pid_clean);
+                        tracing::debug!(peer = %sa, parent = %pid_clean, "fetching missing parent");
 
                         // Save orphan & dep (bounded)
                         if self.orphans.len() < MAX_ORPHANS {
@@ -1379,7 +1392,7 @@ impl Server {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[SRV] persist ERR id={} err={e}", wb.id);
+                    tracing::error!(block_id = %wb.id, error = %e, "persist error");
                 }
             }
         }

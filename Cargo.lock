@@ -333,7 +333,7 @@ checksum = "cf9ff0bbfd639f15c74af777d81383cf53efb7c93613f6cab67c6c11e05bbf8b"
 
 [[package]]
 name = "bin"
-version = "0.1.6"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2472,6 +2472,7 @@ dependencies = [
  "pms-storage",
  "pms-testkit",
  "pms-types",
+ "pms-types-contract",
  "pms-types-nft",
  "pms-utils",
  "pms-wallet",
@@ -2635,6 +2636,7 @@ dependencies = [
  "pms-token",
  "pms-types",
  "pms-types-block",
+ "pms-types-contract",
  "pms-types-nft",
  "pms-types-payload",
  "pms-utils",
@@ -2677,6 +2679,7 @@ dependencies = [
  "pms-errors",
  "pms-testkit",
  "pms-types",
+ "pms-types-contract",
  "pms-types-nft",
  "pms-types-payload",
  "pms-wire",
@@ -2746,6 +2749,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pms-types-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pms-types-dag"
 version = "0.1.0"
 dependencies = [
@@ -2779,6 +2790,7 @@ dependencies = [
  "hex",
  "hkdf",
  "pms-config",
+ "pms-types-contract",
  "pms-types-mint",
  "pms-types-nft",
  "pms-types-transaction",

@@ -40,6 +40,15 @@ pub struct RocksStore {
     pub prefix: String,
     /// Intervalle de checkpoint
     pub checkpoint_interval: Duration,
+    /// Approximate count of tips in the CF. Used to skip expensive `trim_tips`
+    /// full scans when we're clearly under the limit. Updated atomically on
+    /// every tip add/remove; the actual trim logic still does a full scan when
+    /// the estimate exceeds `tip_limit`.
+    pub(crate) tip_count_estimate: std::sync::atomic::AtomicUsize,
+    /// Cached result of `top_tips()` with a short TTL (100ms). Avoids repeated
+    /// full scans of the tips CF when called frequently (fee distribution, parent
+    /// selection). The Mutex critical section is very short (no I/O inside).
+    top_tips_cache: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
 }
 
 impl RocksStore {
@@ -55,7 +64,7 @@ impl RocksStore {
             Duration::from_secs(checkpoint_interval_secs.unwrap_or(24 * 3600));
 
         let path = PathBuf::from(path);
-        eprintln!("[rocks] init at {}", path.display());
+        tracing::info!(path = %path.display(), "RocksDB init");
 
         std::fs::create_dir_all(&path)
             .with_context(|| format!("create_dir_all({})", path.display()))?;
@@ -108,6 +117,7 @@ impl RocksStore {
             "addr_activity", // Per-address activity index: [addr][0x00][ts:8][block_id] -> ""
             "addr_type_activity", // Per-address-per-type index: [addr][0x00][cat:1][ts:8][block_id] -> ""
             "activity_items", // Pre-computed activity items: same key as addr_activity -> JSON(Vec<StoredActivityItem>)
+            "contracts",     // Declarative smart contracts: contract_id -> Contract (JSON)
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -194,6 +204,8 @@ impl RocksStore {
             tip_limit,
             prefix,
             checkpoint_interval,
+            tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
+            top_tips_cache: std::sync::Mutex::new(None),
         })
     }
 
@@ -232,6 +244,7 @@ impl RocksStore {
         "addr_activity",
         "addr_type_activity",
         "activity_items",
+        "contracts",
     ];
 
     /// Ouvre un RocksDB avec les column families de **plusieurs prefixes** à la fois.
@@ -334,6 +347,8 @@ impl RocksStore {
             tip_limit,
             prefix: prefix.into(),
             checkpoint_interval,
+            tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
+            top_tips_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -409,6 +424,16 @@ impl RocksStore {
             return Ok(());
         }
 
+        // Fast path: if our estimate says we're under the limit, skip the
+        // expensive full-scan + sort. The estimate may drift slightly but
+        // trim_tips is defensive (full scan when triggered).
+        let estimate = self
+            .tip_count_estimate
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if estimate <= self.tip_limit {
+            return Ok(());
+        }
+
         let cf_tips = self.cf("tips");
 
         // 1. Collecte toutes les tips : (id, ts)
@@ -419,6 +444,10 @@ impl RocksStore {
             let ts = be_to_i64(&v)?;
             tips.push((id, ts));
         }
+
+        // Correct the estimate to the actual count
+        self.tip_count_estimate
+            .store(tips.len(), std::sync::atomic::Ordering::Relaxed);
 
         // 2. Trie par ts DESC (plus récent d'abord).
         tips.sort_by_key(|(_, ts)| Reverse(*ts));
@@ -442,9 +471,12 @@ impl RocksStore {
                 removed = to_remove.len(),
                 "trim_tips: pruning excess tips from RocksDB"
             );
-            for (id, _) in to_remove {
+            for (id, _) in &to_remove {
                 self.db.delete_cf(&cf_tips, id.as_bytes())?;
             }
+            // Update estimate after trimming
+            self.tip_count_estimate
+                .store(keep, std::sync::atomic::Ordering::Relaxed);
         }
 
         Ok(())
@@ -1305,6 +1337,8 @@ impl RocksStore {
             tip_limit,
             prefix: "".to_string(),
             checkpoint_interval: Duration::from_secs(24 * 3600),
+            tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
+            top_tips_cache: std::sync::Mutex::new(None),
         })
     }
 
@@ -1375,6 +1409,8 @@ impl RocksStore {
             tip_limit,
             prefix,
             checkpoint_interval: Duration::from_secs(24 * 3600),
+            tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
+            top_tips_cache: std::sync::Mutex::new(None),
         })
     }
 }
@@ -1435,6 +1471,8 @@ impl DagStorage for RocksStore {
         let cf_tips = self.cf("tips");
         let ts = now_ms_i64();
         self.db.put_cf(&cf_tips, id.as_bytes(), ts_to_be(ts))?;
+        self.tip_count_estimate
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.trim_tips()?;
         Ok(())
     }
@@ -1464,10 +1502,25 @@ impl DagStorage for RocksStore {
         }
 
         self.db.delete_cf(&cf_tips, id.as_bytes())?;
+        self.tip_count_estimate
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
     async fn top_tips(&self, limit: usize) -> Result<Vec<String>> {
+        // Check cache (100ms TTL) — avoids repeated full scans
+        {
+            if let Ok(cache) = self.top_tips_cache.lock() {
+                if let Some((ts, ref tips)) = *cache {
+                    if ts.elapsed() < std::time::Duration::from_millis(100)
+                        && tips.len() >= limit
+                    {
+                        return Ok(tips[..limit].to_vec());
+                    }
+                }
+            }
+        }
+
         let cf_tips = self.cf("tips");
         // collect all tips
         let mut v: Vec<(String, i64)> = Vec::new();
@@ -1479,8 +1532,19 @@ impl DagStorage for RocksStore {
         }
         // sort desc by ts
         v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
-        // take limit
-        Ok(v.into_iter().take(limit).map(|(id, _)| id).collect())
+        // Cache the full sorted result (up to 64 entries for reuse at different limits)
+        let all: Vec<String> = v
+            .into_iter()
+            .take(limit.max(64))
+            .map(|(id, _)| id)
+            .collect();
+
+        // Update cache
+        if let Ok(mut cache) = self.top_tips_cache.lock() {
+            *cache = Some((std::time::Instant::now(), all.clone()));
+        }
+
+        Ok(all.into_iter().take(limit).collect())
     }
 
     async fn all_block_ids(&self) -> Result<Vec<String>> {

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::AppState;
 
 /// Version de l'API REST — à incrémenter à chaque modification des routes/formats.
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]

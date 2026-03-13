@@ -2,6 +2,7 @@ pub mod atomic;
 mod cf_operation;
 pub mod compliance_registry;
 pub mod config_storage;
+pub mod contract_storage;
 mod helpers;
 mod migration;
 pub mod nft_storage;

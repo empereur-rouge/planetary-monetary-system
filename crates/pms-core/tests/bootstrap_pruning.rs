@@ -181,7 +181,7 @@ fn build_chain_with_hash_ids(store: &MockStore, count: usize) -> String {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 /// Core test: bootstrap 5000 blocks from store, capacity 500.
-/// This is the exact production scenario that was failing.
+/// Selective loading loads only the lex-last 500 IDs, then prune is a no-op safety net.
 #[tokio::test]
 async fn bootstrap_from_store_prunes_to_capacity() -> Result<()> {
     let store = MockStore::new();
@@ -189,49 +189,78 @@ async fn bootstrap_from_store_prunes_to_capacity() -> Result<()> {
 
     let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
+    let dag_len = dag.len();
+    println!("[selective] DAG len = {}", dag_len);
+
     assert!(
-        dag.len() <= 510,
+        dag_len <= 510,
         "DAG should be pruned to ~500 after bootstrap, got {}",
-        dag.len()
+        dag_len
     );
     assert!(
-        dag.len() >= 490,
+        dag_len >= 490,
         "DAG should have ~500 blocks, not fewer (got {})",
-        dag.len()
+        dag_len
     );
 
     // Tip (last block) must survive
     assert!(dag.contains_block("b_00004999"), "tip must survive pruning");
 
-    // Old blocks should be gone
+    // Recent blocks must be loaded
+    assert!(
+        dag.contains_block("b_00004500"),
+        "b_00004500 (recent) must be loaded"
+    );
+
+    // Old blocks should NOT be loaded (selective loading skips them)
     assert!(
         !dag.contains_block("b_00000000"),
-        "genesis should be pruned"
+        "genesis should not be loaded"
     );
+    assert!(
+        !dag.contains_block("b_00004000"),
+        "b_00004000 should not be loaded"
+    );
+
+    // find_tips must be consistent
+    let tips = dag.find_tips();
+    println!("[selective] tips = {:?}", tips);
+    for tip in &tips {
+        assert!(
+            dag.contains_block(tip),
+            "find_tips returned '{}' which doesn't exist in DAG",
+            tip
+        );
+    }
+    assert_eq!(tips.len(), 1, "single chain should have 1 tip");
+    assert_eq!(tips[0], "b_00004999", "tip should be the last block");
 
     Ok(())
 }
 
 /// Same test but with hash-like IDs (truly random lexicographic order).
-/// This is the most realistic simulation of production RocksDB behavior
-/// where block IDs are SHA256 hashes.
-/// With hash IDs, the sorted insertion_order doesn't correlate with
-/// chronological order, so specific block survival is non-deterministic.
+/// With hash IDs, selective loading picks the lex-last 500 IDs, which
+/// don't correlate with chronological order — specific block survival
+/// is non-deterministic, but capacity constraint must hold.
 #[tokio::test]
 async fn bootstrap_from_store_hash_ids_prunes_correctly() -> Result<()> {
     let store = MockStore::new();
-    let _tip_id = build_chain_with_hash_ids(&store, 5000);
+    let tip_id = build_chain_with_hash_ids(&store, 5000);
 
     let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
+    let dag_len = dag.len();
+    println!("[selective-hash] DAG len = {}", dag_len);
+
     assert!(
-        dag.len() <= 510,
+        dag_len <= 510,
         "DAG with hash IDs should prune to ~500, got {}",
-        dag.len()
+        dag_len
     );
 
     // find_tips should only return blocks that exist in the DAG
     let tips = dag.find_tips();
+    println!("[selective-hash] tips = {:?}", tips);
     for tip in &tips {
         assert!(
             dag.contains_block(tip),
@@ -239,6 +268,12 @@ async fn bootstrap_from_store_hash_ids_prunes_correctly() -> Result<()> {
             tip
         );
     }
+
+    println!(
+        "[selective-hash] tip_id={}, in_dag={}",
+        tip_id,
+        dag.contains_block(&tip_id)
+    );
 
     Ok(())
 }
@@ -468,7 +503,8 @@ async fn bootstrap_prune_find_tips_consistent() -> Result<()> {
     Ok(())
 }
 
-/// Edge case: bootstrap with fewer blocks than capacity — no pruning needed.
+/// Edge case: bootstrap with fewer blocks than capacity — no selective filtering,
+/// no pruning needed. All blocks including genesis must be present.
 #[tokio::test]
 async fn bootstrap_under_capacity_no_pruning() -> Result<()> {
     let store = MockStore::new();
@@ -476,7 +512,15 @@ async fn bootstrap_under_capacity_no_pruning() -> Result<()> {
 
     let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
 
+    println!("[selective-under] DAG len = {}", dag.len());
+
     assert_eq!(dag.len(), 100, "under capacity, all blocks should be kept");
+
+    // Genesis must be present (no selective filtering happened)
+    assert!(
+        dag.contains_block("b_00000000"),
+        "genesis must be present when under capacity"
+    );
 
     Ok(())
 }
@@ -537,127 +581,3 @@ async fn bootstrap_prune_diamond_topology() -> Result<()> {
     Ok(())
 }
 
-/// Selective bootstrap: when store has 5000 blocks and max_blocks=500,
-/// only the lexicographically last 500 IDs should be loaded.
-/// This is the optimized code path that avoids loading and discarding blocks.
-#[tokio::test]
-async fn bootstrap_selective_loads_only_newest() -> Result<()> {
-    let store = MockStore::new();
-    build_chain(&store, 5000);
-
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
-
-    let dag_len = dag.len();
-    println!("[selective] DAG len = {}", dag_len);
-
-    // Must have exactly ~500 blocks (selective loading + prune safety net)
-    assert!(
-        dag_len <= 510,
-        "selective bootstrap should give ~500 blocks, got {}",
-        dag_len
-    );
-    assert!(
-        dag_len >= 490,
-        "selective bootstrap should give ~500 blocks, got {}",
-        dag_len
-    );
-
-    // The oldest blocks (lexicographically first) must NOT be in DAG
-    assert!(
-        !dag.contains_block("b_00000000"),
-        "b_00000000 (oldest) should not be loaded"
-    );
-    assert!(
-        !dag.contains_block("b_00004000"),
-        "b_00004000 should not be loaded"
-    );
-
-    // The newest blocks (lexicographically last) MUST be in DAG
-    assert!(
-        dag.contains_block("b_00004999"),
-        "b_00004999 (tip) must be loaded"
-    );
-    assert!(
-        dag.contains_block("b_00004500"),
-        "b_00004500 (recent) must be loaded"
-    );
-
-    // find_tips must be consistent
-    let tips = dag.find_tips();
-    println!("[selective] tips = {:?}", tips);
-    for tip in &tips {
-        assert!(
-            dag.contains_block(tip),
-            "find_tips returned '{}' which doesn't exist in DAG",
-            tip
-        );
-    }
-    assert_eq!(tips.len(), 1, "single chain should have 1 tip");
-    assert_eq!(tips[0], "b_00004999", "tip should be the last block");
-
-    Ok(())
-}
-
-/// Selective bootstrap with hash-like IDs: verify the optimization works
-/// correctly even when block IDs are non-sequential hashes.
-#[tokio::test]
-async fn bootstrap_selective_hash_ids() -> Result<()> {
-    let store = MockStore::new();
-    let tip_id = build_chain_with_hash_ids(&store, 5000);
-
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
-
-    let dag_len = dag.len();
-    println!("[selective-hash] DAG len = {}", dag_len);
-
-    assert!(
-        dag_len <= 510,
-        "selective bootstrap with hash IDs should give ~500, got {}",
-        dag_len
-    );
-
-    // find_tips must only return existing blocks
-    let tips = dag.find_tips();
-    println!("[selective-hash] tips = {:?}", tips);
-    for tip in &tips {
-        assert!(
-            dag.contains_block(tip),
-            "find_tips returned '{}' which doesn't exist in DAG",
-            tip
-        );
-    }
-
-    // Total blocks in store was 5000, DAG should have ~500
-    println!(
-        "[selective-hash] tip_id={}, in_dag={}",
-        tip_id,
-        dag.contains_block(&tip_id)
-    );
-
-    Ok(())
-}
-
-/// Selective bootstrap: under capacity — no selective filtering happens.
-#[tokio::test]
-async fn bootstrap_selective_under_capacity_loads_all() -> Result<()> {
-    let store = MockStore::new();
-    build_chain(&store, 100);
-
-    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
-
-    println!("[selective-under] DAG len = {}", dag.len());
-
-    assert_eq!(
-        dag.len(),
-        100,
-        "under capacity, selective loading should not filter — all 100 blocks loaded"
-    );
-
-    // Genesis must be present (no filtering happened)
-    assert!(
-        dag.contains_block("b_00000000"),
-        "genesis must be present when under capacity"
-    );
-
-    Ok(())
-}

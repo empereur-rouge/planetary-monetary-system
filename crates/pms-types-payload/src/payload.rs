@@ -1,5 +1,6 @@
 use crate::EncryptedPayload;
 use pms_config::ConfigUpdate;
+use pms_types_contract::Contract;
 use pms_types_nft::NftAction;
 use pms_types_transaction::{Transaction, TxInput, TxOutput};
 use serde::{Deserialize, Serialize};
@@ -112,6 +113,15 @@ pub enum PlainPayload {
         original_block_id: String,
         inputs: Vec<TxInput>,
         outputs: Vec<TxOutput>,
+        reason: String,
+    },
+    /// Enregistrement d'un contrat déclaratif. Coordinator seulement.
+    /// Le contrat est stocké dans RocksDB et évalué par le ContractEngine.
+    ContractRegister(Contract),
+    /// Activation/désactivation d'un contrat existant. Coordinator seulement.
+    ContractUpdate {
+        contract_id: String,
+        enabled: bool,
         reason: String,
     },
 }

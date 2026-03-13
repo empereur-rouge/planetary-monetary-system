@@ -3,6 +3,7 @@ pub mod blocks;
 pub mod bridge;
 pub mod compliance;
 pub mod config;
+pub mod contracts;
 pub mod coordinator;
 pub mod dag;
 pub mod history;

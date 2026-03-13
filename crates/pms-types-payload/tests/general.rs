@@ -44,6 +44,8 @@ fn mvp_encrypt_decrypt_confidential_type_only() {
         PlainPayload::Unfreeze { .. } => println!("Type = Unfreeze"),
         PlainPayload::Seize { .. } => println!("Type = Seize"),
         PlainPayload::Reverse { .. } => println!("Type = Reverse"),
+        PlainPayload::ContractRegister(_) => println!("Type = ContractRegister"),
+        PlainPayload::ContractUpdate { .. } => println!("Type = ContractUpdate"),
     }
 
     // Vérif : bien du bon type

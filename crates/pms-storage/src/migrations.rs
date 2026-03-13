@@ -15,13 +15,13 @@ use thiserror::Error;
 
 /// Version logique du schéma attendu par ce binaire.
 /// Incrémentez lorsqu'une nouvelle migration est introduite.
-pub const CURRENT_VER: i64 = 6;
+pub const CURRENT_VER: i64 = 7;
 
 /// Version du protocole DAG (SemVer).
 /// - MAJOR : changement incompatible (refus de démarrer, migration manuelle requise)
 /// - MINOR : nouvelles fonctionnalités backward-compatible (migration auto)
 /// - PATCH : correctifs (migration auto)
-pub const DAG_VERSION: &str = "1.0.0";
+pub const DAG_VERSION: &str = "1.1.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

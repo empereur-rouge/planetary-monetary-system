@@ -583,6 +583,32 @@ pub fn validate_block(
                     ));
                 }
             }
+            PlainPayload::ContractRegister(contract) => {
+                require_coordinator_signature(b, policy, "ContractRegister")?;
+                if contract.contract_id.trim().is_empty() {
+                    return Err(ValidationError::Other(
+                        "ContractRegister: contract_id cannot be empty",
+                    ));
+                }
+                if contract.name.trim().is_empty() {
+                    return Err(ValidationError::Other(
+                        "ContractRegister: name cannot be empty",
+                    ));
+                }
+                if contract.actions.is_empty() {
+                    return Err(ValidationError::Other(
+                        "ContractRegister: at least one action required",
+                    ));
+                }
+            }
+            PlainPayload::ContractUpdate { contract_id, .. } => {
+                require_coordinator_signature(b, policy, "ContractUpdate")?;
+                if contract_id.trim().is_empty() {
+                    return Err(ValidationError::Other(
+                        "ContractUpdate: contract_id cannot be empty",
+                    ));
+                }
+            }
         },
         Some(PayloadEnvelope::Encrypted(_ep)) => {
             // MVP privé : on ne peut pas valider le contenu → on se limite à la structure.

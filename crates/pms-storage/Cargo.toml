@@ -25,6 +25,7 @@ chrono = "0.4.42"
 pms-errors = { path = "../pms-errors" }
 pms-types = { path = "../pms-types" }
 pms-types-nft = { path = "../pms-types-nft" }
+pms-types-contract = { path = "../pms-types-contract" }
 pms-types-payload = { path = "../pms-types-payload" }
 pms-config = { path = "../pms-config" }
 rust_decimal = "1"

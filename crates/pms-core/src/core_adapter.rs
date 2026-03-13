@@ -2,9 +2,10 @@ use crate::background_persist::{PersistJob, spawn_background_persist};
 use crate::concurrent_dag::ConcurrentDag;
 use crate::utxo::{ShardedUtxoSet, UtxoFetcher};
 use crate::{DagRef, ValidatePolicy};
-use pms_config::load_config;
+use pms_config::{load_config, Settings};
 use pms_event::EventBus;
 use pms_storage::{ComplianceStorage, DagStorage, NftStorage};
+use pms_wire::WireMeta;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -26,6 +27,11 @@ pub struct CoreAdapter<S: DagStorage + NftStorage + ComplianceStorage + Send + S
     pub(crate) persist_tx: mpsc::Sender<PersistJob>,
     /// Event bus pour émettre les événements (NFT, Milestone, etc.)
     pub event_bus: EventBus,
+    /// Cached settings. Loaded once at construction to avoid re-reading the
+    /// config file from disk on every persist_block() call.
+    pub(crate) settings: Settings,
+    /// Cached wire metadata (derived from settings).
+    pub(crate) wire_meta: WireMeta,
 }
 
 impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> CoreAdapter<S> {
@@ -39,6 +45,7 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
         utxo_fallback: Option<UtxoFetcher>,
     ) -> Arc<Self> {
         let settings = load_config().expect("config"); // ou injecte depuis le main
+        let wire_meta = WireMeta::from(&settings);
         let mut p = ValidatePolicy::from_global_config();
         if settings.network.mode.is_non_prod() {
             p.min_parents_after_boot = 1;
@@ -59,6 +66,8 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
             utxos: Arc::new(ShardedUtxoSet::new(max_utxos, utxo_fallback)),
             persist_tx,
             event_bus,
+            settings,
+            wire_meta,
         })
     }
 
@@ -75,6 +84,7 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
         );
         // Garde ta logique actuelle de min_parents_after_boot, etc.
         let settings = load_config().expect("config");
+        let wire_meta = WireMeta::from(&settings);
         if settings.network.mode.is_non_prod() {
             policy.min_parents_after_boot = 1;
         }
@@ -92,6 +102,8 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
             utxos: Arc::new(ShardedUtxoSet::new(max_utxos, utxo_fallback)),
             persist_tx,
             event_bus,
+            settings,
+            wire_meta,
         })
     }
 

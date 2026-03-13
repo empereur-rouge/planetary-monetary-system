@@ -49,10 +49,14 @@ impl RocksStore {
 
         // tips: new block becomes tip
         batch.put_cf(&cf_tips, b.id.as_bytes(), ts_to_be(now_ts));
+        self.tip_count_estimate
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // tips: remove its parents from tips (they're no longer tips)
         for p in &b.parents {
             batch.delete_cf(&cf_tips, p.as_bytes());
+            self.tip_count_estimate
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // children_count[parent]++ ; children_set[parent|0x00|child] = ""
@@ -127,9 +131,13 @@ impl RocksStore {
         batch.put_cf(&cf_time, &time_key, b"");
         batch.put_cf(&cf_i2t, b.id.as_bytes(), ts_to_be(now_ts));
         batch.put_cf(&cf_tips, b.id.as_bytes(), ts_to_be(now_ts));
+        self.tip_count_estimate
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         for p in &b.parents {
             batch.delete_cf(&cf_tips, p.as_bytes());
+            self.tip_count_estimate
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         for p in &b.parents {

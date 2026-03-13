@@ -90,6 +90,11 @@ pub struct ConcurrentDag {
 
     /// Maximum spent outpoints to keep in RAM. 0 = unlimited.
     max_spent_outpoints: usize,
+
+    /// Live tips (blocks with children_count == 0). Maintained incrementally
+    /// by `insert_block` / `bootstrap_insert` / `prune_oldest` to avoid O(n)
+    /// full scans in `find_tips()`.
+    tips: DashSet<BlockId>,
 }
 
 impl ConcurrentDag {
@@ -118,6 +123,7 @@ impl ConcurrentDag {
             insert_counter: AtomicU64::new(0),
             spent_order: Mutex::new(VecDeque::new()),
             max_spent_outpoints,
+            tips: DashSet::new(),
         }
     }
 
@@ -126,6 +132,7 @@ impl ConcurrentDag {
         let dag = Self::new();
         dag.children_count
             .insert(genesis.id.clone(), AtomicU64::new(0));
+        dag.tips.insert(genesis.id.clone());
         dag.blocks.insert(genesis.id.clone(), genesis.clone());
         match dag.insertion_order.lock() {
             Ok(mut order) => order.push_back(genesis.id),
@@ -160,11 +167,17 @@ impl ConcurrentDag {
                 .entry(parent_id.clone())
                 .or_insert_with(Vec::new)
                 .push(block_id.clone());
+
+            // Parent now has a child → no longer a tip
+            self.tips.remove(parent_id);
         }
 
         self.children_count
             .entry(block_id.clone())
             .or_insert_with(|| AtomicU64::new(0));
+
+        // New block starts as a tip (no children yet)
+        self.tips.insert(block_id.clone());
 
         self.blocks.insert(block_id, block);
     }
@@ -181,8 +194,11 @@ impl ConcurrentDag {
             return false;
         }
 
+        // Capture parents before block is moved into DashMap
+        let parents: Vec<BlockId> = block.parents.clone();
+
         // Update children count for each parent
-        for parent_id in &block.parents {
+        for parent_id in &parents {
             // Increment parent's children count
             self.children_count
                 .entry(parent_id.clone())
@@ -194,6 +210,9 @@ impl ConcurrentDag {
                 .entry(parent_id.clone())
                 .or_insert_with(Vec::new)
                 .push(block_id.clone());
+
+            // Parent now has a child → no longer a tip
+            self.tips.remove(parent_id);
         }
 
         // Initialize children count for new block (only if not already tracked).
@@ -202,6 +221,9 @@ impl ConcurrentDag {
         self.children_count
             .entry(block_id.clone())
             .or_insert_with(|| AtomicU64::new(0));
+
+        // New block starts as a tip (no children yet)
+        self.tips.insert(block_id.clone());
 
         // Insert the block itself
         self.blocks.insert(block_id.clone(), block);
@@ -247,65 +269,86 @@ impl ConcurrentDag {
         }
 
         let to_remove = current_len - self.max_blocks;
-        let mut removed = 0;
         let mut tip_skips = 0usize;
 
-        let mut order = match self.insertion_order.lock() {
-            Ok(o) => o,
-            Err(poisoned) => {
-                tracing::error!(
-                    "insertion_order mutex POISONED — pruning disabled! \
-                     Recovering with into_inner()"
-                );
-                poisoned.into_inner()
-            }
-        };
+        // O(1) tip count via DashSet instead of O(n) children_count scan
+        let mut live_tips: usize = self.tips.len();
 
-        // Count current tips so we know when we're about to remove the last one.
-        let mut live_tips: usize = self
-            .children_count
-            .iter()
-            .filter(|e| e.value().load(Ordering::Relaxed) == 0)
-            .count();
-
-        // Safety cap: never iterate more than the deque length to avoid infinite loops
-        // when all remaining blocks are tips.
-        let max_iterations = order.len();
-        let mut iterations = 0;
-
-        while removed < to_remove && iterations < max_iterations {
-            let Some(old_id) = order.pop_front() else {
-                break;
+        // Phase 1: Collect IDs to remove while holding the lock.
+        // The actual DashMap removals happen outside the lock to minimize
+        // contention with concurrent insert_block() calls.
+        let mut ids_to_remove: Vec<BlockId> = Vec::with_capacity(to_remove);
+        {
+            let mut order = match self.insertion_order.lock() {
+                Ok(o) => o,
+                Err(poisoned) => {
+                    tracing::error!(
+                        "insertion_order mutex POISONED — pruning disabled! \
+                         Recovering with into_inner()"
+                    );
+                    poisoned.into_inner()
+                }
             };
-            iterations += 1;
 
-            // Skip ghost entries: blocks already removed by a previous prune cycle.
-            if !self.blocks.contains_key(&old_id) {
-                continue;
+            // Safety cap: never iterate more than the deque length to avoid infinite loops
+            // when all remaining blocks are tips.
+            let max_iterations = order.len();
+            let mut iterations = 0;
+
+            while ids_to_remove.len() < to_remove && iterations < max_iterations {
+                let Some(old_id) = order.pop_front() else {
+                    break;
+                };
+                iterations += 1;
+
+                // Skip ghost entries: blocks already removed by a previous prune cycle.
+                if !self.blocks.contains_key(&old_id) {
+                    continue;
+                }
+
+                // Protect the last tip: if this block is a tip and it's the only one
+                // remaining, push it to the back of the deque and skip it.
+                let is_tip = self.tips.contains(&old_id);
+
+                if is_tip && live_tips <= 1 {
+                    order.push_back(old_id);
+                    tip_skips += 1;
+                    continue;
+                }
+
+                ids_to_remove.push(old_id);
+
+                if is_tip {
+                    live_tips = live_tips.saturating_sub(1);
+                }
             }
+        } // Lock released here — insert_block() is unblocked
 
-            // Protect the last tip: if this block is a tip and it's the only one
-            // remaining, push it to the back of the deque and skip it.
-            let is_tip = self
-                .children_count
-                .get(&old_id)
-                .map(|c| c.value().load(Ordering::Relaxed) == 0)
-                .unwrap_or(false);
+        // Phase 2: Remove from DashMaps (lock-free, concurrent-safe)
+        for old_id in &ids_to_remove {
+            self.blocks.remove(old_id);
+            self.children_count.remove(old_id);
+            self.children_idx.remove(old_id);
+            self.tips.remove(old_id);
+        }
 
-            if is_tip && live_tips <= 1 {
-                order.push_back(old_id);
-                tip_skips += 1;
-                continue;
-            }
-
-            // Remove from blocks, children_count, children_idx
-            self.blocks.remove(&old_id);
-            self.children_count.remove(&old_id);
-            self.children_idx.remove(&old_id);
-            removed += 1;
-
-            if is_tip {
-                live_tips = live_tips.saturating_sub(1);
+        // Phase 3: Prune the finalized HashSet to prevent unbounded growth.
+        // Remove entries for blocks no longer in the RAM DAG. This bounds
+        // the finalized set to approximately max_blocks entries instead of
+        // growing to millions over the node's lifetime (~340MB saved).
+        if !ids_to_remove.is_empty() {
+            match self.finality.write() {
+                Ok(mut f) => {
+                    for old_id in &ids_to_remove {
+                        f.finalized.remove(old_id);
+                    }
+                }
+                Err(poisoned) => {
+                    let mut f = poisoned.into_inner();
+                    for old_id in &ids_to_remove {
+                        f.finalized.remove(old_id);
+                    }
+                }
             }
         }
 
@@ -319,9 +362,8 @@ impl ConcurrentDag {
 
         tracing::info!(
             target = to_remove,
-            removed,
+            removed = ids_to_remove.len(),
             remaining = self.blocks.len(),
-            deque_remaining = order.len(),
             max_blocks = self.max_blocks,
             "DAG prune_oldest completed"
         );
@@ -372,22 +414,12 @@ impl ConcurrentDag {
         self.spent_outpoints.contains(&(txid.to_string(), index))
     }
 
-    /// Find tips (blocks with no children or few children)
+    /// Find tips (blocks with no children).
     ///
-    /// A tip is a block that hasn't been referenced by many other blocks.
-    /// We use children_count to determine this efficiently.
+    /// Uses the incrementally-maintained `tips` DashSet for O(tips) instead
+    /// of the previous O(all_blocks) full scan of `children_count`.
     pub fn find_tips(&self) -> Vec<BlockId> {
-        let mut tips = Vec::new();
-
-        for entry in self.children_count.iter() {
-            let id = entry.key();
-            let count = entry.value().load(Ordering::Relaxed);
-
-            // A tip has 0 children (or few children for weighted selection)
-            if count == 0 {
-                tips.push(id.clone());
-            }
-        }
+        let mut tips: Vec<BlockId> = self.tips.iter().map(|r| r.key().clone()).collect();
 
         // Cap the number of tips
         if tips.len() > MAX_TIPS_CAP {
@@ -478,6 +510,55 @@ impl ConcurrentDag {
         seen.len()
     }
 
+    /// Collect ancestors of a block up to `max_depth` levels by walking parents.
+    ///
+    /// Used by incremental k-depth finalization: instead of scanning ALL blocks
+    /// in the DAG, we only check ancestors of the newly inserted block (the ones
+    /// that may have gained enough descendants to become final).
+    ///
+    /// Returns at most `max_depth` unique ancestor BlockIds.
+    pub fn ancestors_within_depth(&self, id: &str, max_depth: usize) -> Vec<BlockId> {
+        use std::collections::{HashSet, VecDeque};
+
+        if max_depth == 0 {
+            return vec![];
+        }
+
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+        // Queue holds (block_id, depth_from_start)
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+
+        // Seed: parents of the starting block
+        if let Some(block) = self.blocks.get(id) {
+            for parent_id in &block.parents {
+                if seen.insert(parent_id.clone()) {
+                    queue.push_back((parent_id.clone(), 1));
+                }
+            }
+        }
+
+        while let Some((ancestor_id, depth)) = queue.pop_front() {
+            result.push(ancestor_id.clone());
+
+            // Don't go deeper than max_depth
+            if depth >= max_depth {
+                continue;
+            }
+
+            // Walk further up: parents of this ancestor
+            if let Some(block) = self.blocks.get(&ancestor_id) {
+                for parent_id in &block.parents {
+                    if seen.insert(parent_id.clone()) {
+                        queue.push_back((parent_id.clone(), depth + 1));
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
     /// Forge a block locally (select parents, build, insert)
     /// This replaces the legacy `Dag::add_payload_auto_parents_mined`
     pub fn forge_block(
@@ -537,7 +618,6 @@ impl ConcurrentDag {
     {
         let dag = Self::with_capacity_and_spent_limit(max_blocks, max_spent_outpoints);
         let mut ids = store.all_block_ids().await?;
-        let total_in_db = ids.len();
 
         // ── Selective loading ──────────────────────────────────────────────
         // When the DB has more blocks than the RAM limit, only load the
@@ -545,8 +625,9 @@ impl ConcurrentDag {
         // surviving block set as load-all + prune (which uses lexicographic
         // insertion_order), but avoids reading and discarding the excess
         // blocks from RocksDB. Historical blocks remain in DB for queries.
+        // Note: all_block_ids() returns keys in RocksDB lex order (ascending).
         if max_blocks > 0 && ids.len() > max_blocks {
-            ids.sort(); // Defensive: ensure lex order (RocksDB already sorted)
+            let total_in_db = ids.len();
             let skip = ids.len() - max_blocks;
             ids = ids.split_off(skip); // O(1) — reuses the tail allocation
             tracing::info!(
@@ -557,7 +638,8 @@ impl ConcurrentDag {
             );
         }
 
-        // Phase 1: Load selected blocks WITHOUT pruning or insertion-order tracking.
+        // Phase 1: Load blocks WITHOUT pruning or insertion-order tracking.
+        // When selective loading is active, only the newest max_blocks are loaded.
         // This ensures children_counts are fully correct before any pruning.
         for (i, id) in ids.iter().enumerate() {
             if let Some(sb) = store.get_block(id).await? {
@@ -611,13 +693,7 @@ impl ConcurrentDag {
         // Diagnostic: count tips and parentless blocks before pruning
         {
             let total = dag.blocks.len();
-            let tips_count = dag
-                .children_count
-                .iter()
-                .filter(|e| {
-                    dag.blocks.contains_key(e.key()) && e.value().load(Ordering::Relaxed) == 0
-                })
-                .count();
+            let tips_count = dag.tips.len();
             let parentless = dag
                 .blocks
                 .iter()
@@ -1527,5 +1603,158 @@ mod tests {
         assert_eq!(dag.len(), 1, "capacity 1 should keep exactly 1 block");
         let tips = dag.find_tips();
         assert!(!tips.is_empty(), "the surviving block must be a tip");
+    }
+
+    // ─── Tips DashSet consistency tests ────────────────────────────────
+
+    #[test]
+    fn test_tips_set_consistency_chain() {
+        // Chain: g -> b1 -> b2 -> b3
+        // At each step, only the latest block should be a tip.
+        let dag = ConcurrentDag::new();
+
+        dag.insert_block(make_block("g", vec![]));
+        let tips = dag.find_tips();
+        println!("[tips_chain] after g: tips={:?}, tips_set_len={}", tips, dag.tips.len());
+        assert_eq!(tips.len(), 1);
+        assert!(tips.contains(&"g".to_string()));
+        assert_eq!(dag.tips.len(), 1);
+
+        dag.insert_block(make_block("b1", vec!["g"]));
+        let tips = dag.find_tips();
+        println!("[tips_chain] after b1: tips={:?}, tips_set_len={}", tips, dag.tips.len());
+        assert_eq!(tips.len(), 1);
+        assert!(tips.contains(&"b1".to_string()));
+        assert!(!dag.tips.contains("g"), "g should no longer be a tip");
+
+        dag.insert_block(make_block("b2", vec!["b1"]));
+        let tips = dag.find_tips();
+        println!("[tips_chain] after b2: tips={:?}, tips_set_len={}", tips, dag.tips.len());
+        assert_eq!(tips.len(), 1);
+        assert!(tips.contains(&"b2".to_string()));
+
+        dag.insert_block(make_block("b3", vec!["b2"]));
+        let tips = dag.find_tips();
+        println!("[tips_chain] after b3: tips={:?}, tips_set_len={}", tips, dag.tips.len());
+        assert_eq!(tips.len(), 1);
+        assert!(tips.contains(&"b3".to_string()));
+    }
+
+    #[test]
+    fn test_tips_set_fan_out_and_merge() {
+        // Fan-out: g -> [t1, t2, t3, t4]
+        // Then merge: m(t1, t2)
+        // Tips should be: [t3, t4, m]
+        let dag = ConcurrentDag::new();
+
+        dag.insert_block(make_block("g", vec![]));
+        dag.insert_block(make_block("t1", vec!["g"]));
+        dag.insert_block(make_block("t2", vec!["g"]));
+        dag.insert_block(make_block("t3", vec!["g"]));
+        dag.insert_block(make_block("t4", vec!["g"]));
+
+        let tips = dag.find_tips();
+        println!("[tips_fanout] after fan-out: tips={:?}", tips);
+        assert_eq!(tips.len(), 4, "4 branches = 4 tips");
+        assert!(!dag.tips.contains("g"), "g has 4 children, not a tip");
+
+        // Merge t1 + t2
+        dag.insert_block(make_block("m", vec!["t1", "t2"]));
+        let tips = dag.find_tips();
+        println!("[tips_fanout] after merge: tips={:?}", tips);
+        assert_eq!(tips.len(), 3, "merge consumed 2 tips, added 1 = 3 total");
+        assert!(tips.contains(&"t3".to_string()));
+        assert!(tips.contains(&"t4".to_string()));
+        assert!(tips.contains(&"m".to_string()));
+        assert!(!tips.contains(&"t1".to_string()), "t1 now has a child");
+        assert!(!tips.contains(&"t2".to_string()), "t2 now has a child");
+    }
+
+    #[test]
+    fn test_tips_set_after_pruning() {
+        // With capacity=5, insert 10 blocks (chain).
+        // After pruning, tips should be consistent with blocks in DAG.
+        let dag = ConcurrentDag::with_capacity(5);
+
+        let mut parent = "g".to_string();
+        dag.insert_block(make_block("g", vec![]));
+        for i in 1..10 {
+            let id = format!("b{}", i);
+            dag.insert_block(make_block(&id, vec![&parent]));
+            parent = id;
+        }
+
+        // Force pruning
+        dag.prune_oldest();
+
+        let tips = dag.find_tips();
+        println!(
+            "[tips_prune] dag_len={}, tips={:?}, tips_set_len={}",
+            dag.len(), tips, dag.tips.len()
+        );
+
+        // Every tip must exist in the DAG
+        for tip in &tips {
+            assert!(
+                dag.contains_block(tip),
+                "tip {} not in DAG after pruning",
+                tip
+            );
+        }
+
+        // Every block in tips DashSet must be in the DAG
+        for entry in dag.tips.iter() {
+            assert!(
+                dag.blocks.contains_key(entry.key()),
+                "tips set contains {} which is not in blocks",
+                entry.key()
+            );
+        }
+
+        // At least 1 tip must exist
+        assert!(!tips.is_empty(), "at least 1 tip must survive pruning");
+    }
+
+    #[test]
+    fn test_tips_set_matches_children_count() {
+        // Verify that the tips DashSet exactly matches children_count == 0
+        // for all blocks in the DAG. This validates incremental maintenance.
+        let dag = ConcurrentDag::new();
+
+        // Build a complex topology
+        dag.insert_block(make_block("g", vec![]));
+        dag.insert_block(make_block("a", vec!["g"]));
+        dag.insert_block(make_block("b", vec!["g"]));
+        dag.insert_block(make_block("c", vec!["a", "b"]));
+        dag.insert_block(make_block("d", vec!["a"]));
+        dag.insert_block(make_block("e", vec!["c"]));
+
+        // Compute expected tips from children_count (ground truth)
+        let expected_tips: Vec<String> = dag
+            .children_count
+            .iter()
+            .filter(|e| {
+                dag.blocks.contains_key(e.key())
+                    && e.value().load(Ordering::Relaxed) == 0
+            })
+            .map(|e| e.key().clone())
+            .collect();
+
+        let actual_tips: Vec<String> = dag.tips.iter().map(|r| r.key().clone()).collect();
+
+        println!(
+            "[tips_match] expected={:?}, actual={:?}",
+            expected_tips, actual_tips
+        );
+
+        let mut expected_sorted = expected_tips.clone();
+        expected_sorted.sort();
+        let mut actual_sorted = actual_tips.clone();
+        actual_sorted.sort();
+
+        assert_eq!(
+            expected_sorted, actual_sorted,
+            "tips DashSet must exactly match children_count==0 blocks"
+        );
     }
 }

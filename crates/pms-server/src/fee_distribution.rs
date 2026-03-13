@@ -488,6 +488,9 @@ pub async fn perform_fee_distribution(
             let _ = state.srv.enqueue_broadcast(reward_wb.id.clone()).await;
 
             // 5. UPDATE UTXOS DIRECTLY
+            // Note: persist_block already handles UTXO creation via the Reward
+            // payload delta. This loop is a defensive redundancy that ensures
+            // UTXOs are visible in RAM even if persist_block's delta path missed them.
             for (idx, output) in all_outputs.iter().enumerate() {
                 state
                     .srv

@@ -25,6 +25,7 @@ members = [
     "crates/pms-consensus",
     "crates/pms-event",
     "crates/pms-types-nft",
+    "crates/pms-types-contract",
     "crates/pms-gateway",
     "crates/pms-bridge",
 ]

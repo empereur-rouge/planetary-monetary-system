@@ -8,7 +8,6 @@ use crate::validations::policy::validate_mint_policy;
 use anyhow::Result;
 use async_trait::async_trait;
 use num_traits::ToPrimitive;
-use pms_config::load_config;
 use pms_event::PmsEvent;
 use pms_interface::NetDagAdapter;
 use pms_storage::store::PutResult;
@@ -63,12 +62,10 @@ where
     #[allow(clippy::too_many_lines)]
     async fn persist_block(&self, wb: &WireBlock) -> Result<PutResult> {
         // ============================================================
-        // 0) Charger la config réseau (network_id + protocol_version)
-        //    et construire la meta attendue côté serveur.
-        //    → Cela fige le "contrat" réseau pour ce node.
+        // 0) Use cached wire metadata (network_id + protocol_version).
+        //    Avoids re-reading the config file on every block insertion.
         // ============================================================
-        let settings = load_config()?;
-        let meta = pms_wire::WireMeta::from(&settings);
+        let meta = self.wire_meta.clone();
         let mut policy = self.policy.clone();
 
         // Charger la RuntimeConfig depuis le store (Hot-Swap)
@@ -170,19 +167,19 @@ where
         //   la politique de mint ne peut pas être appliquée dessus.
         if let Some(PayloadEnvelope::Plain(PlainPayload::Mint { outputs })) = &payload {
             // Vérification 1: Montant et politique générale
-            if let Err(e) = validate_mint_policy(outputs, wb, &settings) {
+            if let Err(e) = validate_mint_policy(outputs, wb, &self.settings) {
                 return Ok(PutResult::Rejected(format!("mint policy violated: {e}")));
             }
 
             // Vérification 2: SÉCURITÉ COORDINATEUR
             // Seul le Coordinateur peut minter (Mainnet/Testnet)
-            let policy = ValidatePolicy::from_settings(&settings.validation);
+            let policy = ValidatePolicy::from_settings(&self.settings.validation);
             // Override coordinator key from config if specified, else use hardcoded
             let mut policy = policy;
-            if let Some(ref custom_key) = settings.validation.coordinator_public_key {
+            if let Some(ref custom_key) = self.settings.validation.coordinator_public_key {
                 policy.coordinator_public_key = Some(custom_key.clone());
             } else {
-                match settings.network.mode {
+                match self.settings.network.mode {
                     pms_config::NetworkMode::Mainnet => {
                         policy.coordinator_public_key =
                             Some(pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET.to_string());
@@ -425,7 +422,7 @@ where
         //
         // En mode Single Writer, on impose exactement 1 parent par bloc.
         // Cela garantit une chaîne linéaire au lieu d'un DAG.
-        if settings.validation.enforce_single_writer {
+        if self.settings.validation.enforce_single_writer {
             let is_genesis = payload
                 .as_ref()
                 .is_some_and(|p| matches!(p, PayloadEnvelope::Plain(PlainPayload::Genesis)));
@@ -821,18 +818,23 @@ where
         let t0 = std::time::Instant::now();
 
         // 5.a) UTXO RAM Update FIRST (essential for preventing double-spend)
+        //
+        // Uses apply_diff() which groups operations by shard for minimal lock
+        // acquisitions instead of sequential per-UTXO awaits.
         if let Some(d) = &delta {
-            for (txid, idx) in &d.spend {
-                self.utxos
-                    .remove(&pms_types::OutputId {
-                        txid: txid.clone(),
-                        index: *idx,
-                    })
-                    .await;
-            }
-            for (txid, idx, addr, amount, asset_id) in &d.create {
-                self.utxos
-                    .add(
+            let spends: Vec<pms_types::OutputId> = d
+                .spend
+                .iter()
+                .map(|(txid, idx)| pms_types::OutputId {
+                    txid: txid.clone(),
+                    index: *idx,
+                })
+                .collect();
+            let creates: Vec<(pms_types::OutputId, pms_types::TxOutput)> = d
+                .create
+                .iter()
+                .map(|(txid, idx, addr, amount, asset_id)| {
+                    (
                         pms_types::OutputId {
                             txid: txid.clone(),
                             index: *idx,
@@ -843,8 +845,9 @@ where
                             asset_id: asset_id.clone(),
                         },
                     )
-                    .await;
-            }
+                })
+                .collect();
+            self.utxos.apply_diff(&spends, &creates).await;
         }
 
         let t_utxo = t0.elapsed();
@@ -964,28 +967,25 @@ where
                 }
             }
 
-            // b) K-depth finalization
-            // Mark blocks with enough confirmations as final
+            // b) K-depth finalization (INCREMENTAL)
+            //
+            // Instead of scanning ALL blocks in the DAG (O(N * BFS) per insert),
+            // we only check ancestors of the newly inserted block. These are the
+            // only blocks that could have gained a new descendant (the new block
+            // itself or its subtree). This reduces the cost from O(N * k) to O(k²).
             let depth_k = finality.depth_k;
             if depth_k > 0 {
-                // Collect block IDs to check (avoid borrowing issues)
-                let block_ids: Vec<String> = self
-                    .dag
-                    .blocks
-                    .iter()
-                    .map(|entry| entry.key().clone())
-                    .collect();
+                let ancestors = self.dag.ancestors_within_depth(&block.id, depth_k);
 
-                for bid in block_ids {
-                    if finality.finalized.contains(&bid) {
+                for ancestor_id in ancestors {
+                    if finality.finalized.contains(&ancestor_id) {
                         continue;
                     }
 
-                    // Count descendants (confirmations) via BFS
-                    let confirmations = self.dag.count_descendants(&bid, depth_k);
+                    let confirmations = self.dag.count_descendants(&ancestor_id, depth_k);
                     if confirmations >= depth_k {
-                        finality.finalized.insert(bid.clone());
-                        newly_finalized.push(bid);
+                        finality.finalized.insert(ancestor_id.clone());
+                        newly_finalized.push(ancestor_id);
                     }
                 }
             }
@@ -1108,10 +1108,10 @@ where
             if !dag_tips.is_empty() {
                 // Return latest tip from RAM (most up-to-date)
                 // In linear chain mode, find_tips() returns 1 tip (the chain head)
-                println!(
-                    "[ADAPTER] top_tips (RAM): found {} tips. Last: {:?}",
-                    dag_tips.len(),
-                    dag_tips.last()
+                tracing::debug!(
+                    count = dag_tips.len(),
+                    last = ?dag_tips.last(),
+                    "top_tips from RAM DAG"
                 );
                 return Ok(vec![dag_tips[dag_tips.len() - 1].clone()]);
             }
@@ -1127,7 +1127,7 @@ where
         // 1) essaye le store s’il l’expose
         if let Ok(v) = self.store.top_tips(limit).await {
             if !v.is_empty() {
-                eprintln!("[ADAPTER] top_tips (store): {} tips", v.len());
+                tracing::debug!(count = v.len(), "top_tips from store");
                 return Ok(v);
             }
         }
@@ -1255,5 +1255,7 @@ fn plain_payload_type_str(p: &PlainPayload) -> &'static str {
         PlainPayload::Unfreeze { .. } => "Unfreeze",
         PlainPayload::Seize { .. } => "Seize",
         PlainPayload::Reverse { .. } => "Reverse",
+        PlainPayload::ContractRegister(_) => "ContractRegister",
+        PlainPayload::ContractUpdate { .. } => "ContractUpdate",
     }
 }

@@ -52,6 +52,8 @@ pub fn compute_block_id(
                 PlainPayload::Unfreeze { .. } => "Unfreeze",
                 PlainPayload::Seize { .. } => "Seize",
                 PlainPayload::Reverse { .. } => "Reverse",
+                PlainPayload::ContractRegister(_) => "ContractRegister",
+                PlainPayload::ContractUpdate { .. } => "ContractUpdate",
             }
             .to_string();
 
