@@ -218,21 +218,10 @@ impl RocksStore {
         ));
 
         for name in &required {
-            // On met un bloom sur les CF typées index / lookup
-            let mut opts = if name.ends_with(":blocks")
-                || name.ends_with(":id2ts")
-                || name.ends_with(":idx_blocks")
-                || name.ends_with(":tips")
-                || name.ends_with(":utxo")
-                || name.ends_with(":utxo_spent")
-                || name.ends_with(":activity_items")
-            {
-                cf_opts_with_bloom(&shared_cache)
-            } else {
-                Options::default()
-            };
-
-            // Ces CF doivent aussi être créées si manquantes
+            // Bloom filter + shared block cache on ALL CFs.
+            // Without bloom, point lookups degrade as LSM levels grow
+            // (was only 7/31 CFs → progressive TPS decline over time).
+            let mut opts = cf_opts_with_bloom(&shared_cache);
             opts.create_if_missing(true);
 
             cf_descs.push(ColumnFamilyDescriptor::new(name.clone(), opts));
@@ -328,18 +317,9 @@ impl RocksStore {
         for prefix in prefixes {
             for &cf_name in Self::CF_NAMES {
                 let full = format!("{prefix}:{cf_name}");
-                let mut opts = if cf_name == "blocks"
-                    || cf_name == "id2ts"
-                    || cf_name == "idx_blocks"
-                    || cf_name == "tips"
-                    || cf_name == "utxo"
-                    || cf_name == "utxo_spent"
-                    || cf_name == "activity_items"
-                {
-                    cf_opts_with_bloom(&shared_cache)
-                } else {
-                    Options::default()
-                };
+                // Bloom filter + shared block cache on ALL CFs.
+                // Without bloom, point lookups degrade as LSM levels grow.
+                let mut opts = cf_opts_with_bloom(&shared_cache);
                 opts.create_if_missing(true);
                 cf_descs.push(ColumnFamilyDescriptor::new(full, opts));
             }
@@ -360,7 +340,7 @@ impl RocksStore {
 
             for cf in existing {
                 if cf != "default" && !declared_names.contains(&cf) {
-                    let mut opts = Options::default();
+                    let mut opts = cf_opts_with_bloom(&shared_cache);
                     opts.create_if_missing(true);
                     cf_descs.push(ColumnFamilyDescriptor::new(cf, opts));
                 }
