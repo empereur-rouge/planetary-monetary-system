@@ -60,20 +60,27 @@ impl RocksStore {
         }
 
         // children_count[parent]++ ; children_set[parent|0x00|child] = ""
-        for p in &b.parents {
-            // read old count
-            let old = self.db.get_cf(&cf_count, p.as_bytes())?;
-            let newcount = match old {
-                Some(v) if v.len() == 8 => le_to_u64(&v) + 1,
-                _ => 1u64,
-            };
-            batch.put_cf(&cf_count, p.as_bytes(), u64_to_le(newcount));
+        // Batch all parent count reads in one multi_get_cf call (O(1) I/O instead of O(parents))
+        {
+            let keys: Vec<_> = b
+                .parents
+                .iter()
+                .map(|p| (&cf_count, p.as_bytes()))
+                .collect();
+            let results = self.db.multi_get_cf(keys);
+            for (i, p) in b.parents.iter().enumerate() {
+                let newcount = match &results[i] {
+                    Ok(Some(v)) if v.len() == 8 => le_to_u64(v) + 1,
+                    _ => 1u64,
+                };
+                batch.put_cf(&cf_count, p.as_bytes(), u64_to_le(newcount));
 
-            let mut edge_key = Vec::with_capacity(p.len() + 1 + b.id.len());
-            edge_key.extend_from_slice(p.as_bytes());
-            edge_key.push(0);
-            edge_key.extend_from_slice(b.id.as_bytes());
-            batch.put_cf(&cf_childset, edge_key, b"");
+                let mut edge_key = Vec::with_capacity(p.len() + 1 + b.id.len());
+                edge_key.extend_from_slice(p.as_bytes());
+                edge_key.push(0);
+                edge_key.extend_from_slice(b.id.as_bytes());
+                batch.put_cf(&cf_childset, edge_key, b"");
+            }
         }
 
         // Per-address activity indexes (addr_activity + addr_type_activity + activity_items)
@@ -140,19 +147,27 @@ impl RocksStore {
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        for p in &b.parents {
-            let old = self.db.get_cf(&cf_count, p.as_bytes())?;
-            let newcount = match old {
-                Some(v) if v.len() == 8 => le_to_u64(&v) + 1,
-                _ => 1u64,
-            };
-            batch.put_cf(&cf_count, p.as_bytes(), u64_to_le(newcount));
+        // Batch all parent count reads in one multi_get_cf call
+        {
+            let keys: Vec<_> = b
+                .parents
+                .iter()
+                .map(|p| (&cf_count, p.as_bytes()))
+                .collect();
+            let results = self.db.multi_get_cf(keys);
+            for (i, p) in b.parents.iter().enumerate() {
+                let newcount = match &results[i] {
+                    Ok(Some(v)) if v.len() == 8 => le_to_u64(v) + 1,
+                    _ => 1u64,
+                };
+                batch.put_cf(&cf_count, p.as_bytes(), u64_to_le(newcount));
 
-            let mut edge_key = Vec::with_capacity(p.len() + 1 + b.id.len());
-            edge_key.extend_from_slice(p.as_bytes());
-            edge_key.push(0);
-            edge_key.extend_from_slice(b.id.as_bytes());
-            batch.put_cf(&cf_childset, edge_key, b"");
+                let mut edge_key = Vec::with_capacity(p.len() + 1 + b.id.len());
+                edge_key.extend_from_slice(p.as_bytes());
+                edge_key.push(0);
+                edge_key.extend_from_slice(b.id.as_bytes());
+                batch.put_cf(&cf_childset, edge_key, b"");
+            }
         }
 
         Ok(())

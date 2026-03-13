@@ -419,14 +419,12 @@ impl ConcurrentDag {
     /// Uses the incrementally-maintained `tips` DashSet for O(tips) instead
     /// of the previous O(all_blocks) full scan of `children_count`.
     pub fn find_tips(&self) -> Vec<BlockId> {
-        let mut tips: Vec<BlockId> = self.tips.iter().map(|r| r.key().clone()).collect();
-
-        // Cap the number of tips
-        if tips.len() > MAX_TIPS_CAP {
-            tips.truncate(MAX_TIPS_CAP);
-        }
-
-        tips
+        // Cap collection at MAX_TIPS_CAP to avoid allocating for all tips
+        self.tips
+            .iter()
+            .take(MAX_TIPS_CAP)
+            .map(|r| r.key().clone())
+            .collect()
     }
 
     /// Select parents for a new block
@@ -480,8 +478,8 @@ impl ConcurrentDag {
     pub fn count_descendants(&self, id: &str, max_count: usize) -> usize {
         use std::collections::{HashSet, VecDeque as Vdq};
 
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut queue = Vdq::new();
+        let mut seen: HashSet<String> = HashSet::with_capacity(max_count.min(256));
+        let mut queue = Vdq::with_capacity(64);
 
         // Seed with direct children
         if let Some(children) = self.children_idx.get(id) {

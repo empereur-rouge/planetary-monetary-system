@@ -23,13 +23,12 @@ use pms_storage::store::PutResult;
 use pms_wallet::{SignerBackend, Wallet};
 use pms_wire::WireBlock;
 use rand::random;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt},
@@ -52,8 +51,8 @@ pub struct Server {
     peers: DashMap<SocketAddr, PeerState>,
     pong_waiters: DashMap<SocketAddr, oneshot::Sender<()>>,
     node_id: String,                             // ident local
-    seen_invs: Mutex<LruCache<String, Instant>>, // LRU pour les Inv (gossip)
-    inflight_fetch: Mutex<HashMap<String, Instant>>,
+    seen_invs: std::sync::Mutex<LruCache<String, Instant>>, // LRU pour les Inv (gossip)
+    inflight_fetch: DashMap<String, Instant>,
     orphans: DashMap<String, WireBlock>,
     parent_dependency: DashMap<String, Vec<String>>, // ParentID -> Vec<ChildID>
     network_id: String,
@@ -70,8 +69,8 @@ pub struct Server {
 
 #[derive(Debug)]
 struct PeerState {
-    /// File de sortie vers ce pair (messages que NOUS lui envoyons)
-    tx: mpsc::Sender<NetMsg>,
+    /// File de sortie vers ce pair (pre-serialized JSON lines)
+    tx: mpsc::Sender<Arc<str>>,
     /// Seau à jetons par pair pour limiter le débit (anti-flood)
     bucket: TokenBucket,
     /// Compteur d’erreurs de parsing JSON successives
@@ -101,8 +100,8 @@ impl Server {
             peers: DashMap::new(),
             pong_waiters: DashMap::new(),
             node_id: node_id.clone(),
-            seen_invs: Mutex::new(LruCache::new(SEEN_CAPACITY.try_into().unwrap())),
-            inflight_fetch: Mutex::new(HashMap::new()),
+            seen_invs: std::sync::Mutex::new(LruCache::new(SEEN_CAPACITY.try_into().unwrap())),
+            inflight_fetch: DashMap::new(),
             orphans: DashMap::new(),
             parent_dependency: DashMap::new(),
             network_id: network_id.into(),
@@ -193,8 +192,8 @@ impl Server {
             peers: DashMap::new(),
             pong_waiters: DashMap::new(),
             node_id,
-            seen_invs: Mutex::new(LruCache::new(SEEN_CAPACITY.try_into().unwrap())),
-            inflight_fetch: Mutex::new(HashMap::new()),
+            seen_invs: std::sync::Mutex::new(LruCache::new(SEEN_CAPACITY.try_into().unwrap())),
+            inflight_fetch: DashMap::new(),
             orphans: DashMap::new(),
             parent_dependency: DashMap::new(),
             network_id: network_id.into(),
@@ -443,19 +442,16 @@ impl Server {
                             );
 
                             let mut to_fetch = Vec::new();
-                            {
-                                let mut inflight = srv_for_sync.inflight_fetch.lock().await;
-                                for pid in parents_needed {
-                                    if let Some(ts) = inflight.get(&pid) {
-                                        if ts.elapsed().as_millis() < 2000 {
-                                            continue;
-                                        }
+                            for pid in parents_needed {
+                                if let Some(ts) = srv_for_sync.inflight_fetch.get(&pid) {
+                                    if ts.elapsed().as_millis() < 2000 {
+                                        continue;
                                     }
-                                    inflight.insert(pid.clone(), Instant::now());
-                                    to_fetch.push(pid);
-                                    if to_fetch.len() >= 100 {
-                                        break;
-                                    }
+                                }
+                                srv_for_sync.inflight_fetch.insert(pid.clone(), Instant::now());
+                                to_fetch.push(pid);
+                                if to_fetch.len() >= 100 {
+                                    break;
                                 }
                             }
 
@@ -740,7 +736,7 @@ impl Server {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         // On encapsule le reader dans un BufReader pour faire des `read_line` efficaces.
-        let (tx_out, mut rx_out) = mpsc::channel::<NetMsg>(PER_PEER_Q_CAP);
+        let (tx_out, mut rx_out) = mpsc::channel::<Arc<str>>(PER_PEER_Q_CAP);
 
         self.peers.insert(
             sa,
@@ -775,14 +771,12 @@ impl Server {
                     biased;
                     msg = rx_out.recv() => {
                         match msg {
-                            Some(m) => {
-                                if let Ok(s) = serde_json::to_string(&m) {
-                                    if writer.write_all(s.as_bytes()).await.is_err() {
-                                        break;
-                                    }
-                                    if writer.write_all(b"\n").await.is_err() {
-                                        break;
-                                    }
+                            Some(line) => {
+                                if writer.write_all(line.as_bytes()).await.is_err() {
+                                    break;
+                                }
+                                if writer.write_all(b"\n").await.is_err() {
+                                    break;
                                 }
                             }
                             None => break,
@@ -965,15 +959,14 @@ impl Server {
                                 //     continue;
                                 // }
                                 tracing::trace!(id = %id.get(..8).unwrap_or(&id), "processing Inv ID");
-                                let mut inflight = this.inflight_fetch.lock().await;
-                                if let Some(ts) = inflight.get(&id) {
+                                if let Some(ts) = this.inflight_fetch.get(&id) {
                                     if ts.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS {
                                         continue;
                                     }
                                 }
-                                if inflight.len() < MAX_INFLIGHT_GETBLOCK {
-                                    inflight.insert(id.clone(), Instant::now());
-                                    to_fetch.push(id.clone()); // Log clone
+                                if this.inflight_fetch.len() < MAX_INFLIGHT_GETBLOCK {
+                                    this.inflight_fetch.insert(id.clone(), Instant::now());
+                                    to_fetch.push(id.clone());
                                     tracing::trace!(id = %id, peer = %sa, "requesting block from peer");
                                 } else {
                                     break;
@@ -1033,21 +1026,20 @@ impl Server {
                                 // Tips are authoritative sync info. If we don't have the block and it's not inflight,
                                 // we must fetch it, even if we saw an Inv recently (e.g. failed fetch).
                                 // if this.seen_inv_recently_and_mark(&id).await { countinue; }
-                                let mut inflight = this.inflight_fetch.lock().await;
-                                let in_inflight = inflight.contains_key(&id);
+                                let in_inflight = this.inflight_fetch.contains_key(&id);
                                 tracing::trace!(
                                     id = %id.get(..8).unwrap_or(&id),
                                     in_inflight,
                                     "tip not held locally"
                                 );
 
-                                if let Some(ts) = inflight.get(&id) {
+                                if let Some(ts) = this.inflight_fetch.get(&id) {
                                     if ts.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS {
                                         continue;
                                     }
                                 }
-                                if inflight.len() < MAX_INFLIGHT_GETBLOCK {
-                                    inflight.insert(id.clone(), Instant::now());
+                                if this.inflight_fetch.len() < MAX_INFLIGHT_GETBLOCK {
+                                    this.inflight_fetch.insert(id.clone(), Instant::now());
                                     to_fetch.push(id);
                                 }
                             }
@@ -1074,7 +1066,8 @@ impl Server {
     /// - Si la file est pleine ou le pair déjà parti, on ignore l’erreur (best effort).
     pub async fn unicast(&self, sa: &SocketAddr, msg: NetMsg) -> anyhow::Result<()> {
         if let Some(pe) = self.peers.get(sa) {
-            let _ = pe.tx.send(msg).await; // <-- pe.tx (plus .value().tx)
+            let line: Arc<str> = serde_json::to_string(&msg)?.into();
+            let _ = pe.tx.send(line).await;
         }
         Ok(())
     }
@@ -1085,14 +1078,17 @@ impl Server {
     /// - En cas d’erreur (pair lent/parti), on ignore.
     pub async fn broadcast(&self, msg: &NetMsg) -> anyhow::Result<()> {
         if let NetMsg::Block { id, .. } = msg {
-            self.mark_inv_seen(id).await;
+            self.mark_inv_seen(id);
         }
+
+        // Serialize once, share Arc<str> to all peers (O(1) clone per peer)
+        let line: Arc<str> = serde_json::to_string(msg)?.into();
 
         // Send only to INBOUND peers - those are the connections where remotes are reading
         // Outbound connections are where WE read from, sending there would go nowhere
         for pe in self.peers.iter() {
             if pe.is_inbound {
-                let _ = pe.tx.send(msg.clone()).await;
+                let _ = pe.tx.send(line.clone()).await;
             }
         }
 
@@ -1102,13 +1098,17 @@ impl Server {
     /// Variante : broadcast sauf `skip`, only to inbound peers.
     pub async fn broadcast_except(&self, skip: &SocketAddr, msg: &NetMsg) -> anyhow::Result<()> {
         if let NetMsg::Block { id, .. } = msg {
-            self.mark_inv_seen(id).await;
+            self.mark_inv_seen(id);
         }
+
+        // Serialize once, share Arc<str> to all peers (O(1) clone per peer)
+        let line: Arc<str> = serde_json::to_string(msg)?.into();
+
         for pe in self.peers.iter() {
             if pe.key() == skip || !pe.is_inbound {
                 continue;
             }
-            let _ = pe.tx.send(msg.clone()).await;
+            let _ = pe.tx.send(line.clone()).await;
         }
         Ok(())
     }
@@ -1126,9 +1126,8 @@ impl Server {
     /// Nettoie les requêtes inflight expirées.
     /// Cela permet de relancer des demandes si un pair n'a pas répondu.
     async fn cleanup_inflight(&self) {
-        let mut inflight = self.inflight_fetch.lock().await;
-        // Keep only requests younger than INFLIGHT_TTL_MS
-        inflight.retain(|_, start_time| {
+        // DashMap::retain is lock-free per shard — no global lock needed
+        self.inflight_fetch.retain(|_, start_time| {
             start_time.elapsed().as_millis() < crate::limits::INFLIGHT_TTL_MS
         });
     }
@@ -1189,10 +1188,7 @@ impl Server {
             // Resolve the correct adapter for this block's network
             let block_adapter = self.adapter_for_network(&wb.network_id);
 
-            let was_inflight = {
-                let mut inflight = self.inflight_fetch.lock().await;
-                inflight.remove(&wb.id).is_some()
-            };
+            let was_inflight = self.inflight_fetch.remove(&wb.id).is_some();
 
             /*
             if !was_inflight && self.seen_inv_recently_and_mark(&wb.id).await {
@@ -1263,12 +1259,10 @@ impl Server {
                 self.orphans.insert(wb.id.clone(), wb.clone());
 
                 for pid in missing_to_fetch {
-                    let mut inflight = self.inflight_fetch.lock().await;
-                    if inflight.len() < crate::limits::MAX_INFLIGHT_GETBLOCK
-                        || inflight.contains_key(&pid)
+                    if self.inflight_fetch.len() < crate::limits::MAX_INFLIGHT_GETBLOCK
+                        || self.inflight_fetch.contains_key(&pid)
                     {
-                        inflight.insert(pid.clone(), Instant::now());
-                        drop(inflight);
+                        self.inflight_fetch.insert(pid.clone(), Instant::now());
                         let _ = self.unicast(&sa, NetMsg::GetBlock { id: pid }).await;
                     }
                 }
@@ -1378,11 +1372,10 @@ impl Server {
                         }
 
                         // Request parent
-                        let mut inflight = self.inflight_fetch.lock().await;
-                        if inflight.len() < crate::limits::MAX_INFLIGHT_GETBLOCK
-                            || inflight.contains_key(&pid_clean)
+                        if self.inflight_fetch.len() < crate::limits::MAX_INFLIGHT_GETBLOCK
+                            || self.inflight_fetch.contains_key(&pid_clean)
                         {
-                            inflight.insert(pid_clean.clone(), Instant::now());
+                            self.inflight_fetch.insert(pid_clean.clone(), Instant::now());
                             let _ = self.broadcast(&NetMsg::GetBlock { id: pid_clean }).await;
                         }
                     } else {
@@ -1398,8 +1391,8 @@ impl Server {
         }
     }
 
-    async fn mark_inv_seen(&self, id: &str) {
-        let mut cache = self.seen_invs.lock().await;
+    fn mark_inv_seen(&self, id: &str) {
+        let mut cache = self.seen_invs.lock().unwrap_or_else(|p| p.into_inner());
         cache.put(id.to_string(), Instant::now());
         while cache.len() > SEEN_CAPACITY {
             cache.pop_lru();

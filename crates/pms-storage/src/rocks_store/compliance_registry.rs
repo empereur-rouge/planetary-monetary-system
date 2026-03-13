@@ -39,8 +39,9 @@ impl RocksStore {
     }
 
     pub fn is_frozen(&self, address: &str) -> Result<bool> {
-        let cf = self.cf_compliance_frozen();
-        Ok(self.db.get_cf(&cf, address.as_bytes())?.is_some())
+        // Fast path: in-memory DashSet lookup (no RocksDB I/O).
+        // The frozen_set is populated at bootstrap and maintained on freeze/unfreeze.
+        Ok(self.frozen_set.contains(address))
     }
 
     pub fn get_freeze_entry(&self, address: &str) -> Result<Option<FrozenEntry>> {
@@ -66,6 +67,8 @@ impl RocksStore {
         let cf = self.cf_compliance_frozen();
         let json = serde_json::to_vec(&entry)?;
         self.db.put_cf(&cf, address.as_bytes(), json)?;
+        // Keep in-memory cache in sync
+        self.frozen_set.insert(address.to_string());
         self.log_compliance_action(
             "freeze",
             block_id,
@@ -76,11 +79,13 @@ impl RocksStore {
     }
 
     pub fn unfreeze_address(&self, address: &str) -> Result<()> {
-        if !self.is_frozen(address)? {
+        if !self.frozen_set.contains(address) {
             anyhow::bail!("address is not frozen: {}", address);
         }
         let cf = self.cf_compliance_frozen();
         self.db.delete_cf(&cf, address.as_bytes())?;
+        // Keep in-memory cache in sync
+        self.frozen_set.remove(address);
         Ok(())
     }
 

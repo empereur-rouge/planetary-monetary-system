@@ -3,12 +3,16 @@ use rocksdb::BoundColumnFamily;
 use std::sync::Arc;
 
 impl RocksStore {
-    /// Récupère un handle de colonne "prefix:<name>"
+    /// Récupère un handle de colonne "prefix:<name>" via pre-computed name cache.
+    /// No `format!()` allocation — just a HashMap lookup.
     pub fn cf(&self, short: &str) -> Arc<BoundColumnFamily<'_>> {
-        let full = format!("{}:{}", self.prefix, short);
+        let full = self
+            .cf_names
+            .get(short)
+            .unwrap_or_else(|| panic!("unknown column family short name: {short}"));
         self.db
-            .cf_handle(&full)
-            .unwrap_or_else(|| panic!("missing column family {}", full))
+            .cf_handle(full)
+            .unwrap_or_else(|| panic!("missing column family {full}"))
     }
 
     /// Colonnes pratiques (doivent exister dans `new()`):

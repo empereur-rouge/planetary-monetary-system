@@ -333,7 +333,7 @@ checksum = "cf9ff0bbfd639f15c74af777d81383cf53efb7c93613f6cab67c6c11e05bbf8b"
 
 [[package]]
 name = "bin"
-version = "0.2.1"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2672,6 +2672,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "dashmap 6.1.0",
+ "itoa",
  "nanoid",
  "num_cpus",
  "pms-config",

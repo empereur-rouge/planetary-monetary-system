@@ -45,13 +45,33 @@ pub struct RocksStore {
     /// every tip add/remove; the actual trim logic still does a full scan when
     /// the estimate exceeds `tip_limit`.
     pub(crate) tip_count_estimate: std::sync::atomic::AtomicUsize,
-    /// Cached result of `top_tips()` with a short TTL (100ms). Avoids repeated
+    /// Cached result of `top_tips()` with a short TTL (500ms). Avoids repeated
     /// full scans of the tips CF when called frequently (fee distribution, parent
     /// selection). The Mutex critical section is very short (no I/O inside).
     top_tips_cache: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
+    /// Pre-computed "prefix:cf_short_name" strings. Eliminates `format!()`
+    /// allocation on every `cf()` call (~11 calls per block in hot path).
+    pub(crate) cf_names: HashMap<String, String>,
+    /// Cached RuntimeConfig with 500ms TTL. Avoids RocksDB read + JSON deser
+    /// on every `persist_block()` call. Write-through on `set_runtime_config()`.
+    pub(crate) runtime_config_cache: std::sync::Mutex<Option<(std::time::Instant, pms_config::RuntimeConfig)>>,
+    /// In-memory set of frozen addresses. Populated at bootstrap from the
+    /// `compliance_frozen` CF. Updated on freeze/unfreeze. Turns O(N) RocksDB
+    /// reads per TxUtxo into O(N) DashSet lookups (lock-free, no I/O).
+    pub(crate) frozen_set: dashmap::DashSet<String>,
 }
 
 impl RocksStore {
+    /// Build a map of short CF name → full "prefix:name" string.
+    /// Called once at construction to eliminate `format!()` on every `cf()` call.
+    fn build_cf_names(prefix: &str) -> HashMap<String, String> {
+        let mut map = HashMap::with_capacity(Self::CF_NAMES.len() + 8);
+        for &name in Self::CF_NAMES {
+            map.insert(name.to_string(), format!("{prefix}:{name}"));
+        }
+        map
+    }
+
     pub async fn new(
         path: &str,
         tip_limit: usize,
@@ -82,8 +102,8 @@ impl RocksStore {
         db_opts.set_level_compaction_dynamic_level_bytes(true);
 
         // Tunings mémoire optimisés pour VPS (8 Go RAM) avec NVMe SSD
-        db_opts.set_write_buffer_size(32 * 1024 * 1024); // 32 MB (suffisant sur NVMe)
-        db_opts.set_max_write_buffer_number(2);
+        db_opts.set_write_buffer_size(128 * 1024 * 1024); // 128 MB — reduces flush frequency at high TPS
+        db_opts.set_max_write_buffer_number(3); // 384 MB ceiling before write stall
         db_opts.set_target_file_size_base(64 * 1024 * 1024); // 64 MB par sstable
 
         // ==============
@@ -199,6 +219,7 @@ impl RocksStore {
         let db = PmsDb::open_cf_descriptors(&db_opts, &path, cf_descs)
             .with_context(|| format!("open RocksDB at {}", path.display()))?;
 
+        let cf_names = Self::build_cf_names(&prefix);
         Ok(Self {
             db: Arc::new(db),
             tip_limit,
@@ -206,6 +227,9 @@ impl RocksStore {
             checkpoint_interval,
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
             top_tips_cache: std::sync::Mutex::new(None),
+            cf_names,
+            runtime_config_cache: std::sync::Mutex::new(None),
+            frozen_set: dashmap::DashSet::new(),
         })
     }
 
@@ -260,8 +284,8 @@ impl RocksStore {
         db_opts.increase_parallelism(num_cpus::get() as i32);
         db_opts.set_max_background_jobs(4);
         db_opts.set_level_compaction_dynamic_level_bytes(true);
-        db_opts.set_write_buffer_size(32 * 1024 * 1024);
-        db_opts.set_max_write_buffer_number(2);
+        db_opts.set_write_buffer_size(128 * 1024 * 1024); // 128 MB
+        db_opts.set_max_write_buffer_number(3);
         db_opts.set_target_file_size_base(64 * 1024 * 1024);
 
         // Un seul cache LRU 256 MB partagé entre toutes les CFs
@@ -342,13 +366,18 @@ impl RocksStore {
     ) -> Self {
         let checkpoint_interval =
             Duration::from_secs(checkpoint_interval_secs.unwrap_or(24 * 3600));
+        let prefix = prefix.into();
+        let cf_names = Self::build_cf_names(&prefix);
         Self {
             db,
             tip_limit,
-            prefix: prefix.into(),
+            prefix,
             checkpoint_interval,
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
             top_tips_cache: std::sync::Mutex::new(None),
+            cf_names,
+            runtime_config_cache: std::sync::Mutex::new(None),
+            frozen_set: dashmap::DashSet::new(),
         }
     }
 
@@ -471,9 +500,11 @@ impl RocksStore {
                 removed = to_remove.len(),
                 "trim_tips: pruning excess tips from RocksDB"
             );
+            let mut batch = rocksdb::WriteBatch::default();
             for (id, _) in &to_remove {
-                self.db.delete_cf(&cf_tips, id.as_bytes())?;
+                batch.delete_cf(&cf_tips, id.as_bytes());
             }
+            self.db.write(batch)?;
             // Update estimate after trimming
             self.tip_count_estimate
                 .store(keep, std::sync::atomic::Ordering::Relaxed);
@@ -1332,13 +1363,18 @@ impl RocksStore {
         let db = PmsDb::open_for_read_only(&opts, path, false)
             .map_err(|e| anyhow::anyhow!("open_read_only: {e}"))?;
 
+        let prefix = "".to_string();
+        let cf_names = Self::build_cf_names(&prefix);
         Ok(Self {
             db: std::sync::Arc::new(db),
             tip_limit,
-            prefix: "".to_string(),
+            prefix,
             checkpoint_interval: Duration::from_secs(24 * 3600),
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
             top_tips_cache: std::sync::Mutex::new(None),
+            cf_names,
+            runtime_config_cache: std::sync::Mutex::new(None),
+            frozen_set: dashmap::DashSet::new(),
         })
     }
 
@@ -1404,6 +1440,7 @@ impl RocksStore {
                 )
             })?;
 
+        let cf_names = Self::build_cf_names(&prefix);
         Ok(Self {
             db: Arc::new(db),
             tip_limit,
@@ -1411,7 +1448,27 @@ impl RocksStore {
             checkpoint_interval: Duration::from_secs(24 * 3600),
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
             top_tips_cache: std::sync::Mutex::new(None),
+            cf_names,
+            runtime_config_cache: std::sync::Mutex::new(None),
+            frozen_set: dashmap::DashSet::new(),
         })
+    }
+
+    /// Load frozen addresses from RocksDB into the in-memory DashSet.
+    /// Called once at bootstrap. After this, `is_frozen()` never hits RocksDB.
+    pub fn load_frozen_cache(&self) -> anyhow::Result<()> {
+        let cf = self.cf("compliance_frozen");
+        let mut count = 0usize;
+        for kv in self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
+            let (k, _) = kv?;
+            let address = String::from_utf8(k.to_vec())?;
+            self.frozen_set.insert(address);
+            count += 1;
+        }
+        if count > 0 {
+            tracing::info!("Frozen address cache loaded: {} addresses", count);
+        }
+        Ok(())
     }
 }
 
@@ -1512,7 +1569,7 @@ impl DagStorage for RocksStore {
         {
             if let Ok(cache) = self.top_tips_cache.lock() {
                 if let Some((ts, ref tips)) = *cache {
-                    if ts.elapsed() < std::time::Duration::from_millis(100)
+                    if ts.elapsed() < std::time::Duration::from_millis(500)
                         && tips.len() >= limit
                     {
                         return Ok(tips[..limit].to_vec());
@@ -1852,9 +1909,11 @@ impl DagStorage for RocksStore {
             return Ok(());
         }
         let cf_final = self.cf("final");
+        let mut batch = rocksdb::WriteBatch::default();
         for id in ids {
-            self.db.put_cf(&cf_final, id.as_bytes(), b"")?;
+            batch.put_cf(&cf_final, id.as_bytes(), b"");
         }
+        self.db.write(batch)?;
         Ok(())
     }
 
@@ -1958,7 +2017,14 @@ impl DagStorage for RocksStore {
 }
 
 fn make_utxo_key(txid: &str, index: u32) -> Vec<u8> {
-    format!("{txid}#{index}").into_bytes()
+    // Pre-allocate: txid (64 hex chars typical) + '#' + index (up to 10 digits)
+    let mut key = Vec::with_capacity(txid.len() + 1 + 10);
+    key.extend_from_slice(txid.as_bytes());
+    key.push(b'#');
+    // itoa is faster than .to_string() for integer formatting
+    let mut buf = itoa::Buffer::new();
+    key.extend_from_slice(buf.format(index).as_bytes());
+    key
 }
 
 fn iter_cf_all<'a>(

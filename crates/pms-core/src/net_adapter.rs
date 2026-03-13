@@ -139,11 +139,8 @@ where
         //    (taille JSON, parents uniques, self-parent, min parents après bootstrap)
         // ============================================================
 
-        // 2.a) On garde la String intacte pour le storage
-        let payload_json_opt = wb.payload_json.clone();
-
         // 2.b) Taille maximale du payload brut (anti-spam)
-        if let Some(s) = &payload_json_opt {
+        if let Some(s) = &wb.payload_json {
             if s.len() > policy.max_payload_bytes {
                 return Ok(PutResult::Rejected(format!(
                     "payload too large: {} > {}",
@@ -154,7 +151,7 @@ where
         }
 
         // 2.c) Désérialisation en PayloadEnvelope (si non-null)
-        let payload: Option<PayloadEnvelope> = match &payload_json_opt {
+        let payload: Option<PayloadEnvelope> = match &wb.payload_json {
             None => None,
             Some(s) if s.trim().is_empty() || s == "null" => None,
             Some(s) => Some(serde_json::from_str::<PayloadEnvelope>(s)?),
@@ -591,7 +588,7 @@ where
         let sb = StoredBlock {
             id: wb.id.clone(),
             parents: wb.parents.clone(),
-            payload_json: payload_json_opt, // on réutilise la même String
+            payload_json: wb.payload_json.clone(), // deferred clone — rejected blocks skip this
             nonce: wb.nonce,
             network_id: wb.network_id.clone(),
             protocol_version: wb.protocol_version,

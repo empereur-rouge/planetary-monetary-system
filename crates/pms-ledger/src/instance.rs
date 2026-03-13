@@ -54,6 +54,11 @@ impl LedgerInstance {
             tracing::warn!(ledger = %def.id, "ensure_schema: {e}");
         }
 
+        // Load frozen addresses into in-memory cache (O(1) lookups on hot path)
+        if let Err(e) = store.load_frozen_cache() {
+            tracing::warn!(ledger = %def.id, "load_frozen_cache: {e}");
+        }
+
         // Genesis block si DB vide pour ce prefix
         let ids = store.all_block_ids().await.context("listing block IDs")?;
         let is_fresh_db = ids.is_empty();
