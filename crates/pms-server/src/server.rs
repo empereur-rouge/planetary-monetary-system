@@ -525,7 +525,7 @@ impl Server {
         let cancel = CancellationToken::new();
         let maint_handle = store.spawn_background_maintenance(
             cancel.clone(),
-            Duration::from_secs(3600), // compact toutes les 1h
+            Duration::from_secs(21600), // compact toutes les 6h (L0 drain handled by sub-compactions)
             Duration::from_secs(600),  // flush WAL toutes les 10 min
             Duration::from_secs(1800), // stats toutes les 30 min
         );

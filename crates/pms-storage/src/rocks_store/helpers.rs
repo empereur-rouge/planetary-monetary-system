@@ -12,18 +12,24 @@ impl RocksStore {
         Ok(())
     }
 
-    /// Compacte toutes les column families connues.
-    /// Utilise Self::CF_NAMES (avec le préfixe du store) pour couvrir toutes les CF.
+    /// Compacte toutes les column families connues avec rate-limiting.
+    /// Yields 200ms between each CF to avoid a sustained write stall
+    /// (200ms × 31 CFs = ~6.2s total spread vs a single multi-second wall).
     pub async fn compact_all(&self) -> Result<()> {
         for &name in Self::CF_NAMES {
             let full_name = format!("{}:{}", self.prefix, name);
             if let Some(cf) = self.db.cf_handle(&full_name) {
                 self.db
                     .compact_range_cf::<&[u8], &[u8]>(&cf, None::<&[u8]>, None::<&[u8]>);
+                // Yield between CFs so concurrent writes are not starved
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         }
 
-        eprintln!("[rocks] compact_all: compaction triggered on all CFs (prefix={})", self.prefix);
+        tracing::info!(
+            "[rocks] compact_all: rate-limited compaction complete (prefix={})",
+            self.prefix
+        );
         Ok(())
     }
 
@@ -35,6 +41,22 @@ impl RocksStore {
         if let Ok(Some(ldb)) = self.db.property_value("rocksdb.levelstats") {
             eprintln!("[rocks][levelstats]\n{}", ldb);
         }
+
+        // L0 file count monitoring (write stall diagnostics)
+        if let Ok(Some(l0)) = self.db.property_value("rocksdb.num-files-at-level0") {
+            tracing::info!("[rocks][l0] L0 file count: {}", l0.trim());
+        }
+        if let Ok(Some(stall)) = self.db.property_value("rocksdb.is-write-stopped") {
+            if stall.trim() == "1" {
+                tracing::warn!("[rocks][STALL] RocksDB write STOPPED — L0 file limit reached!");
+            }
+        }
+        if let Ok(Some(pending)) = self.db.property_value("rocksdb.compaction-pending") {
+            if pending.trim() == "1" {
+                tracing::info!("[rocks][compaction] compaction pending");
+            }
+        }
+
         Ok(())
     }
 

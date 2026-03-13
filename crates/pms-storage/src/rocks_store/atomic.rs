@@ -89,10 +89,9 @@ impl RocksStore {
         // write atomiquement
         self.db.write(batch)?;
 
-        // trim_tips: keep bounded tips for DAG parent selection (consensus-critical).
-        // NOTE: by_time/id2ts are NOT trimmed — they must grow unbounded
-        // for the activity/history API to scan full DAG history.
-        self.trim_tips()?;
+        // trim_tips (amortized every 64 blocks): keep bounded tips for DAG
+        // parent selection. by_time/id2ts grow unbounded for activity API.
+        self.maybe_trim_tips()?;
 
         Ok(true)
     }
