@@ -50,6 +50,11 @@ impl LedgerInstance {
             None,
         ));
 
+        // Ensure all column families exist (handles schema upgrades adding new CFs)
+        store
+            .ensure_column_families()
+            .with_context(|| format!("ensure_column_families for ledger '{}'", def.id))?;
+
         if let Err(e) = store.ensure_schema().await {
             tracing::warn!(ledger = %def.id, "ensure_schema: {e}");
         }

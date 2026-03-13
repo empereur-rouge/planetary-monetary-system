@@ -59,9 +59,43 @@ pub struct RocksStore {
     /// `compliance_frozen` CF. Updated on freeze/unfreeze. Turns O(N) RocksDB
     /// reads per TxUtxo into O(N) DashSet lookups (lock-free, no I/O).
     pub(crate) frozen_set: dashmap::DashSet<String>,
+    /// Counter of block persists. Used to amortize `trim_tips()` calls —
+    /// only runs every 64 blocks instead of on every single persist.
+    pub(crate) persist_counter: std::sync::atomic::AtomicU64,
 }
 
 impl RocksStore {
+    /// Common DB-level tuning applied to BOTH `new()` and `open_db_multi_prefix()`.
+    /// Centralised here to guarantee identical settings on every code path.
+    fn apply_db_tuning(db_opts: &mut Options) {
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+
+        // Parallelism: one background thread per CPU core
+        db_opts.increase_parallelism(num_cpus::get() as i32);
+
+        // Background jobs: 6 for better flush+compaction overlap on 4-core VPS
+        db_opts.set_max_background_jobs(6);
+
+        db_opts.set_level_compaction_dynamic_level_bytes(true);
+
+        // Memory tuning (8 GB VPS with NVMe SSD)
+        db_opts.set_write_buffer_size(128 * 1024 * 1024); // 128 MB
+        db_opts.set_max_write_buffer_number(3); // 384 MB ceiling
+        db_opts.set_target_file_size_base(64 * 1024 * 1024); // 64 MB per SSTable
+
+        // === WRITE STALL PREVENTION ===
+        //
+        // At 120 TPS sustained with 31 CFs, L0 files accumulate ~1 every 2-3 min.
+        // Default slowdown trigger (20) was hit after ~40-60 min → TPS cliff to ~20.
+        // Raise thresholds + enable sub-compactions so background threads can
+        // drain L0 faster than it fills:
+        db_opts.set_level_zero_file_num_compaction_trigger(4); // start compaction early (default)
+        db_opts.set_level_zero_slowdown_writes_trigger(40); // 20→40: doubles headroom
+        db_opts.set_level_zero_stop_writes_trigger(56); // 24→56: hard stop raised proportionally
+        db_opts.set_max_subcompactions(3); // parallelize each compaction job
+    }
+
     /// Build a map of short CF name → full "prefix:name" string.
     /// Called once at construction to eliminate `format!()` on every `cf()` call.
     fn build_cf_names(prefix: &str) -> HashMap<String, String> {
@@ -90,21 +124,10 @@ impl RocksStore {
             .with_context(|| format!("create_dir_all({})", path.display()))?;
 
         // ==============
-        // 1) Options DB globales (SSD-friendly)
+        // 1) Options DB globales (SSD-friendly, write-stall prevention)
         // ==============
         let mut db_opts = Options::default();
-        db_opts.create_if_missing(true);
-        db_opts.create_missing_column_families(true);
-
-        // Un peu d’optimisation générique
-        db_opts.increase_parallelism(num_cpus::get() as i32);
-        db_opts.set_max_background_jobs(4);
-        db_opts.set_level_compaction_dynamic_level_bytes(true);
-
-        // Tunings mémoire optimisés pour VPS (8 Go RAM) avec NVMe SSD
-        db_opts.set_write_buffer_size(128 * 1024 * 1024); // 128 MB — reduces flush frequency at high TPS
-        db_opts.set_max_write_buffer_number(3); // 384 MB ceiling before write stall
-        db_opts.set_target_file_size_base(64 * 1024 * 1024); // 64 MB par sstable
+        Self::apply_db_tuning(&mut db_opts);
 
         // ==============
         // 2) CF attendues (préfixées)
@@ -230,6 +253,7 @@ impl RocksStore {
             cf_names,
             runtime_config_cache: std::sync::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
+            persist_counter: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -279,14 +303,7 @@ impl RocksStore {
             .with_context(|| format!("create_dir_all({})", path.display()))?;
 
         let mut db_opts = Options::default();
-        db_opts.create_if_missing(true);
-        db_opts.create_missing_column_families(true);
-        db_opts.increase_parallelism(num_cpus::get() as i32);
-        db_opts.set_max_background_jobs(4);
-        db_opts.set_level_compaction_dynamic_level_bytes(true);
-        db_opts.set_write_buffer_size(128 * 1024 * 1024); // 128 MB
-        db_opts.set_max_write_buffer_number(3);
-        db_opts.set_target_file_size_base(64 * 1024 * 1024);
+        Self::apply_db_tuning(&mut db_opts);
 
         // Un seul cache LRU 256 MB partagé entre toutes les CFs
         let shared_cache = Cache::new_lru_cache(256 * 1024 * 1024);
@@ -378,6 +395,7 @@ impl RocksStore {
             cf_names,
             runtime_config_cache: std::sync::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
+            persist_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -445,6 +463,24 @@ impl RocksStore {
             }
         }
 
+        Ok(())
+    }
+
+    /// Amortized trim_tips: only runs the actual trim every 64 block persists.
+    /// At 120 TPS in coordinator mode the tip count stays at ~1-3, so the
+    /// fast-path estimate check in `trim_tips()` returns instantly almost always.
+    /// But even the atomic load has measurable cost at high TPS. Amortizing
+    /// every 64 blocks keeps tips bounded (max overshoot = 64) while removing
+    /// the per-block overhead entirely.
+    const TRIM_TIPS_INTERVAL: u64 = 64;
+
+    pub(crate) fn maybe_trim_tips(&self) -> anyhow::Result<()> {
+        let count = self
+            .persist_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count % Self::TRIM_TIPS_INTERVAL == 0 {
+            self.trim_tips()?;
+        }
         Ok(())
     }
 
@@ -1375,6 +1411,7 @@ impl RocksStore {
             cf_names,
             runtime_config_cache: std::sync::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
+            persist_counter: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -1451,7 +1488,36 @@ impl RocksStore {
             cf_names,
             runtime_config_cache: std::sync::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
+            persist_counter: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Ensure all column families from `CF_NAMES` exist for this store's prefix.
+    /// Creates any missing CFs at runtime (MultiThreaded mode supports this).
+    /// Called at bootstrap to handle schema upgrades where new CFs were added.
+    pub fn ensure_column_families(&self) -> anyhow::Result<()> {
+        let mut created = 0usize;
+        for &cf_name in Self::CF_NAMES {
+            let full_name = self
+                .cf_names
+                .get(cf_name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}:{}", self.prefix, cf_name));
+            if self.db.cf_handle(&full_name).is_none() {
+                self.db
+                    .create_cf(&full_name, &rocksdb::Options::default())
+                    .with_context(|| format!("creating missing CF '{full_name}'"))?;
+                created += 1;
+            }
+        }
+        if created > 0 {
+            tracing::info!(
+                prefix = %self.prefix,
+                created,
+                "Created missing column families during bootstrap"
+            );
+        }
+        Ok(())
     }
 
     /// Load frozen addresses from RocksDB into the in-memory DashSet.
@@ -1565,21 +1631,26 @@ impl DagStorage for RocksStore {
     }
 
     async fn top_tips(&self, limit: usize) -> Result<Vec<String>> {
-        // Check cache (100ms TTL) — avoids repeated full scans
+        // Stale-while-revalidate cache:
+        // - < 500ms  → fresh, serve directly
+        // - 500ms-5s → stale but usable, serve immediately (eliminates stampede)
+        // - > 5s     → force refresh
         {
             if let Ok(cache) = self.top_tips_cache.lock() {
                 if let Some((ts, ref tips)) = *cache {
-                    if ts.elapsed() < std::time::Duration::from_millis(500)
-                        && tips.len() >= limit
-                    {
-                        return Ok(tips[..limit].to_vec());
+                    if tips.len() >= limit {
+                        let age = ts.elapsed();
+                        if age < std::time::Duration::from_secs(5) {
+                            return Ok(tips[..limit].to_vec());
+                        }
                     }
                 }
             }
         }
 
+        // Refresh: scan tips CF (only one caller gets here at a time in practice
+        // because the stale window serves concurrent callers immediately)
         let cf_tips = self.cf("tips");
-        // collect all tips
         let mut v: Vec<(String, i64)> = Vec::new();
         for kv in self.db.iterator_cf(&cf_tips, rocksdb::IteratorMode::Start) {
             let (k, val) = kv?;
@@ -1983,8 +2054,8 @@ impl DagStorage for RocksStore {
         // 2) write atomique
         self.db.write(batch)?;
 
-        // 3) trim tips only (by_time/id2ts grow unbounded for activity API)
-        self.trim_tips()?;
+        // 3) trim tips (amortized every 64 blocks; by_time/id2ts grow unbounded for activity API)
+        self.maybe_trim_tips()?;
 
         Ok(true)
     }

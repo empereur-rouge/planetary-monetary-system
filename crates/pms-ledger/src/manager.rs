@@ -121,21 +121,26 @@ impl LedgerManager {
             bail!("Ledger '{}' already exists", def.id);
         }
 
-        // Créer les CFs pour ce prefix si elles n'existent pas encore
-        let test_cf = format!("{}:blocks", def.prefix);
-        if self.shared_db.cf_handle(&test_cf).is_none() {
-            tracing::info!(
-                ledger = %def.id,
-                prefix = %def.prefix,
-                "Creating column families for new ledger"
-            );
+        // Ensure ALL CFs exist for this prefix (handles both new ledgers
+        // and existing ledgers that predate newly-added CFs like "contracts")
+        {
+            let mut created = 0usize;
             for &cf_name in RocksStore::CF_NAMES {
                 let full_name = format!("{}:{}", def.prefix, cf_name);
                 if self.shared_db.cf_handle(&full_name).is_none() {
                     self.shared_db
                         .create_cf(&full_name, &Options::default())
                         .with_context(|| format!("creating CF '{}'", full_name))?;
+                    created += 1;
                 }
+            }
+            if created > 0 {
+                tracing::info!(
+                    ledger = %def.id,
+                    prefix = %def.prefix,
+                    created,
+                    "Created column families for ledger"
+                );
             }
         }
 
