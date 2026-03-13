@@ -191,19 +191,23 @@ impl RocksStore {
         // ==============
         // 4) Helper pour CF options (bloom pour index)
         // ==============
-        // Un seul cache LRU 256 MB partagé entre toutes les CFs au lieu
-        // d'un cache séparé par CF (économise ~1.2 GB de RAM).
-        let shared_cache = Cache::new_lru_cache(256 * 1024 * 1024);
+        // Shared LRU block cache: 512 MB across all CFs.
+        // Must be large enough to hold index+filter blocks for 31 CFs
+        // without evicting hot data blocks (256 MB caused thrashing).
+        let shared_cache = Cache::new_lru_cache(512 * 1024 * 1024);
 
         fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
             opts.set_optimize_filters_for_hits(true);
 
             let mut table_opts = BlockBasedOptions::default();
-            // ~10 bits / key → compromis entre mémoire et perf
             table_opts.set_bloom_filter(10.0, false);
             table_opts.set_block_cache(cache);
             table_opts.set_cache_index_and_filter_blocks(true);
+            // Pin L0 index+filter blocks so they're never evicted from cache.
+            // Without this, 31 CFs compete for cache space and L0 blocks
+            // get evicted → every point lookup needs 2+ disk reads → TPS→0.
+            table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
             opts.set_block_based_table_factory(&table_opts);
             opts
         }
@@ -294,8 +298,8 @@ impl RocksStore {
         let mut db_opts = Options::default();
         Self::apply_db_tuning(&mut db_opts);
 
-        // Un seul cache LRU 256 MB partagé entre toutes les CFs
-        let shared_cache = Cache::new_lru_cache(256 * 1024 * 1024);
+        // Shared LRU block cache: 512 MB across all CFs.
+        let shared_cache = Cache::new_lru_cache(512 * 1024 * 1024);
 
         fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
@@ -304,6 +308,7 @@ impl RocksStore {
             table_opts.set_bloom_filter(10.0, false);
             table_opts.set_block_cache(cache);
             table_opts.set_cache_index_and_filter_blocks(true);
+            table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
             opts.set_block_based_table_factory(&table_opts);
             opts
         }
