@@ -136,6 +136,28 @@ pub struct RuntimeConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nft_fee_exempt_types: Vec<String>,
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Economics — Fee Burn, Contract Fee, Storage Fee, Dynamic Fee
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Percentage of tx fees permanently burned (basis points). 3000 = 30%. Default: 0.
+    #[serde(default)]
+    pub burn_rate_bps: u32,
+    /// Fee for deploying/registering a smart contract (ex: "10.0" PMS). None = no fee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_deployment_fee: Option<String>,
+    /// Storage fee per KB of payload data (ex: "0.01" PMS). None = disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_fee_per_kb: Option<String>,
+    /// Enable congestion-based dynamic fee multiplier. Default: false.
+    #[serde(default)]
+    pub dynamic_fee_enabled: bool,
+    /// Target TPS for dynamic fee calculation. Default: 100.
+    #[serde(default)]
+    pub target_tps: u32,
+    /// Maximum fee multiplier under congestion. Default: 5.0.
+    #[serde(default)]
+    pub max_fee_multiplier: f64,
+
     /// Block ID où cette config a été appliquée (vide = config initiale)
     pub updated_at_block: String,
 
@@ -160,6 +182,12 @@ impl Default for RuntimeConfig {
             token_creation_fee: None,
             nft_mint_fee: None,
             nft_fee_exempt_types: Vec::new(),
+            burn_rate_bps: 0,
+            contract_deployment_fee: None,
+            storage_fee_per_kb: None,
+            dynamic_fee_enabled: false,
+            target_tps: 100,
+            max_fee_multiplier: 5.0,
             updated_at_block: String::new(),
             updated_at_timestamp: 0,
         }
@@ -246,6 +274,34 @@ impl RuntimeConfig {
             }
             ConfigUpdate::SetNftFeeExemptTypes { types } => {
                 new_config.nft_fee_exempt_types = types.clone();
+            }
+            ConfigUpdate::SetBurnRate { bps } => {
+                if *bps > 10_000 {
+                    return Err(format!("burn_rate_bps must be <= 10000, got {}", bps));
+                }
+                new_config.burn_rate_bps = *bps;
+            }
+            ConfigUpdate::SetContractDeploymentFee { fee } => {
+                new_config.contract_deployment_fee = fee.clone();
+            }
+            ConfigUpdate::SetStorageFeePerKb { fee } => {
+                new_config.storage_fee_per_kb = fee.clone();
+            }
+            ConfigUpdate::SetDynamicFee {
+                enabled,
+                target_tps,
+                max_multiplier,
+            } => {
+                new_config.dynamic_fee_enabled = *enabled;
+                if let Some(tps) = target_tps {
+                    new_config.target_tps = *tps;
+                }
+                if let Some(mult_str) = max_multiplier {
+                    let mult: f64 = mult_str
+                        .parse()
+                        .map_err(|_| format!("invalid max_multiplier: {}", mult_str))?;
+                    new_config.max_fee_multiplier = mult;
+                }
             }
             ConfigUpdate::BatchUpdate(updates) => {
                 for u in updates {
@@ -339,6 +395,23 @@ pub enum ConfigUpdate {
     /// Modifier les types de NFT exemptés de fee
     SetNftFeeExemptTypes { types: Vec<String> },
 
+    /// Modifier le taux de burn des fees (basis points, 3000 = 30%)
+    SetBurnRate { bps: u32 },
+
+    /// Modifier le fee de déploiement de contrat
+    SetContractDeploymentFee { fee: Option<String> },
+
+    /// Modifier le fee de stockage par KB
+    SetStorageFeePerKb { fee: Option<String> },
+
+    /// Activer/désactiver les fees dynamiques (congestion)
+    SetDynamicFee {
+        enabled: bool,
+        target_tps: Option<u32>,
+        /// Max multiplier as string (ex: "5.0") since f64 can't impl Eq
+        max_multiplier: Option<String>,
+    },
+
     /// Appliquer plusieurs updates en une transaction
     BatchUpdate(Vec<ConfigUpdate>),
 }
@@ -366,6 +439,21 @@ impl ConfigUpdate {
             Self::SetNftMintFee { fee } => format!("SetNftMintFee({:?})", fee),
             Self::SetNftFeeExemptTypes { types } => {
                 format!("SetNftFeeExemptTypes({:?})", types)
+            }
+            Self::SetBurnRate { bps } => format!("SetBurnRate({}bps)", bps),
+            Self::SetContractDeploymentFee { fee } => {
+                format!("SetContractDeploymentFee({:?})", fee)
+            }
+            Self::SetStorageFeePerKb { fee } => format!("SetStorageFeePerKb({:?})", fee),
+            Self::SetDynamicFee {
+                enabled,
+                target_tps,
+                max_multiplier,
+            } => {
+                format!(
+                    "SetDynamicFee(enabled={}, target_tps={:?}, max={:?})",
+                    enabled, target_tps, max_multiplier
+                )
             }
             Self::BatchUpdate(updates) => {
                 format!("BatchUpdate({} items)", updates.len())

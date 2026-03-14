@@ -66,6 +66,7 @@ impl RocksStore {
                 4 => self.mig_4_to_5().await?,
                 5 => self.mig_5_to_6().await?,
                 6 => self.mig_6_to_7().await?,
+                7 => self.mig_7_to_8().await?,
                 _ => return Err(MigError::Unexpected(v)),
             }
             v += 1;
@@ -554,6 +555,34 @@ impl RocksStore {
             .map_err(|e| MigError::Any(anyhow!(e)))?;
 
         tracing::info!("Migration 6→7: contracts CF verified — smart contract system ready");
+        Ok(())
+    }
+
+    // Migration 7 -> 8 :
+    // Ajout des Column Families "gas_pools" et "ledger_subscriptions"
+    // pour le système économique (gas pool anti-spam + abonnements de ledgers).
+    // Les CFs sont créés automatiquement par `create_missing_column_families(true)`.
+    // Cette migration vérifie l'accessibilité des CFs avec une clé sentinelle.
+    async fn mig_7_to_8(&self) -> std::result::Result<(), MigError> {
+        // Verify gas_pools CF
+        let cf_gas = self.cf("gas_pools");
+        self.db
+            .put_cf(&cf_gas, b"__init__", b"")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+        self.db
+            .delete_cf(&cf_gas, b"__init__")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+
+        // Verify ledger_subscriptions CF
+        let cf_subs = self.cf("ledger_subscriptions");
+        self.db
+            .put_cf(&cf_subs, b"__init__", b"")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+        self.db
+            .delete_cf(&cf_subs, b"__init__")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+
+        tracing::info!("Migration 7→8: gas_pools + ledger_subscriptions CFs verified — economics system ready");
         Ok(())
     }
 }

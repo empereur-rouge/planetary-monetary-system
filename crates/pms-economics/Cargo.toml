@@ -1,0 +1,13 @@
+[package]
+name = "pms-economics"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pms-types-economics = { path = "../pms-types-economics" }
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

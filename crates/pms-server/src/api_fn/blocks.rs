@@ -52,6 +52,11 @@ pub async fn submit_block(
         }
     }
 
+    // 0c-bis) Gas pool check for custom ledgers
+    if let Err(e) = crate::api_fn::tx_helpers::try_consume_gas(&st) {
+        return (StatusCode::PAYMENT_REQUIRED, e).into_response();
+    }
+
     // 0c) Coordinator Filter: Reject regular TXs if configured (force use of Worker Nodes)
     if st.settings.validation.coordinator_tx_only {
         let is_privileged = wb

@@ -25,6 +25,13 @@ pub async fn wallet_send_tx(
     Json(body): Json<WalletSendTxRequest>,
 ) -> impl IntoResponse {
     // ============================================================
+    // 0a) Gas pool check (custom ledgers only)
+    // ============================================================
+    if let Err(e) = tx_helpers::try_consume_gas(&state) {
+        return (StatusCode::PAYMENT_REQUIRED, Json(json!({ "error": e })));
+    }
+
+    // ============================================================
     // 0) Use settings from AppState (configured at startup/test time)
     // ============================================================
     let settings = &*state.settings;

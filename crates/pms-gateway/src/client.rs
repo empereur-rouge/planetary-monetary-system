@@ -37,53 +37,31 @@ impl EngineClient {
         self.http.post(&url).json(body).send().await?.json().await
     }
 
-    /// Proxy POST request - forwards raw body to Engine
-    pub async fn proxy_post(
+    /// Generic proxy — forwards any HTTP method to Engine.
+    /// Body is only attached (with Content-Type: application/json) when non-empty.
+    pub async fn proxy_request(
         &self,
+        method: http::Method,
         path: &str,
         headers: http::HeaderMap,
         body: axum::body::Bytes,
     ) -> Result<(StatusCode, String, Option<String>), anyhow::Error> {
         let url = format!("{}{}", self.base_url, path);
 
-        let mut req = self.http.post(&url);
+        let mut req = self.http.request(method, &url);
 
-        // Forward Authorization + API Key headers if present
+        // Forward auth headers
         if let Some(auth) = headers.get("authorization") {
             req = req.header("Authorization", auth);
         }
         if let Some(api_key) = headers.get("x-api-key") {
             req = req.header("X-API-Key", api_key);
         }
-        req = req.header("Content-Type", "application/json");
 
-        let resp = req.body(body.to_vec()).send().await?;
-        let status = StatusCode::from_u16(resp.status().as_u16())?;
-        let content_type = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let body = resp.text().await?;
-        Ok((status, body, content_type))
-    }
-
-    /// Proxy GET request - forwards to Engine
-    pub async fn proxy_get(
-        &self,
-        path: &str,
-        headers: http::HeaderMap,
-    ) -> Result<(StatusCode, String, Option<String>), anyhow::Error> {
-        let url = format!("{}{}", self.base_url, path);
-
-        let mut req = self.http.get(&url);
-
-        // Forward Authorization + API Key headers if present
-        if let Some(auth) = headers.get("authorization") {
-            req = req.header("Authorization", auth);
-        }
-        if let Some(api_key) = headers.get("x-api-key") {
-            req = req.header("X-API-Key", api_key);
+        if !body.is_empty() {
+            req = req
+                .header("Content-Type", "application/json")
+                .body(body.to_vec());
         }
 
         let resp = req.send().await?;

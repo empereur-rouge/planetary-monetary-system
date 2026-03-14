@@ -107,7 +107,99 @@ Le projet utilise **5 systèmes de version** distincts. Lors de chaque changemen
 - Le bump de version doit être inclus dans le **même commit** que les changements associés.
 - En cas de doute, vérifier quel(s) système(s) de version sont impactés avant de commit.
 
-## Documentation
+## Changelog
 
-- **`PROJECT_LOG.md` doit contenir suffisamment de détails pour reconstruire le projet entier à partir du markdown seul.**
-- À maintenir à jour avec : architecture, décisions techniques, schéma DB, protocoles réseau, et endpoints API.
+**OBLIGATOIRE : À la fin de chaque conversation ayant produit des changements de code, mettre à jour `CHANGELOG.md`.**
+
+- Ajouter les changements dans la section de la version en cours (la plus haute dans le fichier).
+- Si la version est en développement (branche feature), utiliser `[X.Y.Z] - Unreleased`.
+- Catégoriser les entrées : `### Added`, `### Fixed`, `### Performance`, `### Changed`, `### Removed`, `### Infrastructure`.
+- Chaque entrée doit être concise mais suffisamment détaillée pour comprendre le changement sans lire le code.
+- Inclure le scope entre parenthèses quand pertinent : `- **fix(storage)**: description`.
+- Mettre à jour le tableau `Version History` en bas du fichier quand une nouvelle version est finalisée.
+
+## Documentation — Manuel d'Instruction du Projet
+
+**CRITIQUE : Ce projet est construit par IA. L'utilisateur ne peut pas suivre tous les changements. La documentation sert de manuel d'instruction et DOIT être maintenue à jour.**
+
+Le projet utilise **deux systèmes de documentation complémentaires** :
+
+### 1. Obsidian Vault — Documentation fonctionnelle (`documentation/`)
+
+Le dossier `documentation/` est un **vault Obsidian**. Il contient la documentation haut-niveau : architecture, fonctionnalités, références, et API.
+
+**Conventions Obsidian obligatoires :**
+- Utiliser les **wikilinks** `[[nom-du-fichier]]` pour les liens internes entre fiches.
+- Ajouter des **tags** en haut de chaque fiche : `#feature`, `#architecture`, `#reference`, `#api`.
+- Le fichier `documentation/MOC.md` (Map of Content) est l'index principal — le mettre à jour quand une fiche est ajoutée.
+- Les fiches de fonctionnalités vont dans `documentation/features/`.
+- Les fiches d'architecture vont dans `documentation/architecture/`.
+- Les références techniques vont dans `documentation/reference/`.
+- La doc API reste dans `documentation/api/`.
+
+**Structure obligatoire de chaque fiche fonctionnalité :**
+
+```markdown
+---
+tags: [feature]
+created: YYYY-MM-DD
+updated: YYYY-MM-DD
+version: vX.Y.Z
+---
+
+# Nom de la Fonctionnalité
+
+## Résumé
+Description concise : ce que fait la fonctionnalité et pourquoi elle existe.
+
+## Configuration
+Comment activer/configurer (TOML, env vars, runtime hot-swap).
+
+## Crates et Fichiers
+
+| Crate | Fichier | Rôle |
+|-------|---------|------|
+| `pms-server` | `src/api_fn/compliance.rs` | Endpoints API REST |
+| ... | ... | ... |
+
+## Fonctions Clés
+
+| Fonction | Fichier | Description |
+|----------|---------|-------------|
+| ... | ... | ... |
+
+## Endpoints API (si applicable)
+
+| Méthode | Path | Description |
+|---------|------|-------------|
+| ... | ... | ... |
+
+## Interactions
+Liens vers les fonctionnalités liées : [[fee-distribution]], [[multi-ledger]], etc.
+```
+
+**Fiches obligatoires :**
+
+| Catégorie | Fiches |
+|-----------|--------|
+| **Infrastructure** | Server/Engine, Gateway, Storage/RocksDB, Config System, P2P Network, Event System, Metrics & Monitoring, Deployment & Operations |
+| **Données** | UTXO System, Wallet & Encryption, Token System, Block Payloads |
+| **Protocole & Consensus** | Validation & Consensus, Milestones & Finality |
+| **Fonctionnalités** | Compliance, Smart Contracts, Economics, Bridge, Activity System, Fee Distribution, NFT System, Multi-Ledger, Wallet Factory, API Key Authentication, DAG Pruning, Simulator/Game Engine, Node Rewards, Streaming API (SSE) |
+
+### 2. rustdoc — Documentation technique du code
+
+Chaque crate, module, struct, enum, trait, et fonction publique DOIT avoir une doc-comment (`///` ou `//!`).
+
+**Règles rustdoc :**
+- `//!` en haut de chaque `lib.rs` et `mod.rs` : description du crate/module, son rôle dans l'architecture.
+- `///` sur chaque item public : structs, enums, traits, fonctions, constantes.
+- Inclure des `# Examples` dans les doc-comments quand c'est pertinent.
+- Les types financiers (Amount, FeePolicy, etc.) doivent documenter les invariants et précisions.
+- Générer avec `cargo doc --no-deps --open` pour vérifier.
+
+### Règle de mise à jour
+- **OBLIGATOIRE : À la fin de chaque conversation ayant produit des changements de code :**
+  1. Mettre à jour les fiches Obsidian des fonctionnalités impactées (date `updated`, crates, fonctions).
+  2. Mettre à jour `[[MOC]]` si une nouvelle fiche a été créée.
+  3. Ajouter/mettre à jour les doc-comments rustdoc sur le code modifié.

@@ -232,6 +232,16 @@ async fn test_automated_fee_distribution() {
             distribution_interval_sec: 1, // 1 second interval for test
             daily_inflation_enabled: false,
             daily_inflation_interval_sec: 86400,
+            burn_rate_bps: 0,
+            gas_per_tx: None,
+            gas_pool_min_balance: None,
+            contract_deployment_fee: None,
+            storage_fee_per_kb: None,
+            dynamic_fee_enabled: false,
+            target_tps: 100,
+            max_fee_multiplier: 5.0,
+            cross_ledger_fee_multiplier: 2.0,
+            ledger_annual_fee_pms: None,
         },
         p2p: P2pConfig {
             known_peers: "".into(),
@@ -323,6 +333,7 @@ async fn test_automated_fee_distribution() {
             None,
         )),
         activity_cache: Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
+        tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
     };
 
     // 8. Spawn Distributor

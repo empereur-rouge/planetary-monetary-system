@@ -39,6 +39,9 @@ pub struct CirculatingSupplyResponse {
     #[serde(default)]
     pub treasury_details: Vec<TreasuryWalletDetail>,
 
+    /// Cumulative total of fees permanently burned (deflationary mechanism)
+    pub total_burned: String,
+
     /// Asset ID queried (None = PMS natif)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_id: Option<String>,
@@ -143,6 +146,12 @@ pub async fn get_circulating_supply(
         .or_else(|| settings.network.symbol.clone())
         .unwrap_or_else(|| "PMS".to_string());
 
+    let total_burned = state
+        .store
+        .get_total_burned()
+        .unwrap_or(Decimal::ZERO)
+        .to_string();
+
     Json(CirculatingSupplyResponse {
         circulating_supply: total.to_string(),
         utxo_count: count as u64,
@@ -150,6 +159,7 @@ pub async fn get_circulating_supply(
         node_balance: node_bal.to_string(),
         treasury_balance: treasury_bal.to_string(),
         treasury_details,
+        total_burned,
         asset_id: resolved_asset,
         symbol,
     })

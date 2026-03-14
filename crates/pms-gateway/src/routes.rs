@@ -153,63 +153,43 @@ pub async fn get_config(State(state): State<GatewayState>) -> impl IntoResponse 
     }
 }
 
-/// Generic proxy handler for POST requests - forwards to Engine
-pub async fn proxy_post(
+/// Catch-all fallback: proxies any unmatched request to Engine.
+/// Supports all HTTP methods (GET, POST, PUT, PATCH, DELETE).
+/// The Engine's response (status, headers, body) is forwarded as-is.
+pub async fn proxy_fallback(
     State(state): State<GatewayState>,
+    method: http::Method,
     axum::extract::OriginalUri(original_uri): axum::extract::OriginalUri,
     headers: http::HeaderMap,
     body: axum::body::Bytes,
-) -> impl IntoResponse {
-    // Forward to Engine with query params preserved
+) -> axum::response::Response {
     let path = original_uri
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or(original_uri.path());
 
-    match state.engine_client.proxy_post(path, headers, body).await {
+    match state
+        .engine_client
+        .proxy_request(method.clone(), path, headers, body)
+        .await
+    {
         Ok((status, resp_body, content_type)) => {
             let ct = content_type.unwrap_or_else(|| "application/json".to_string());
-            (status, [(http::header::CONTENT_TYPE, ct)], resp_body)
+            (status, [(http::header::CONTENT_TYPE, ct)], resp_body).into_response()
         }
         Err(e) => {
-            tracing::warn!("Proxy POST {} failed: {}", path, e);
+            tracing::warn!("Proxy {method} {path} failed: {e}");
             (
                 StatusCode::BAD_GATEWAY,
                 [(http::header::CONTENT_TYPE, "text/plain".to_string())],
-                format!("Gateway error: {}", e),
+                format!("Gateway error: {e}"),
             )
+                .into_response()
         }
     }
 }
 
-/// Generic proxy handler for GET requests - forwards to Engine
-pub async fn proxy_get(
-    State(state): State<GatewayState>,
-    axum::extract::OriginalUri(original_uri): axum::extract::OriginalUri,
-    headers: http::HeaderMap,
-) -> impl IntoResponse {
-    let path = original_uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or(original_uri.path());
-
-    match state.engine_client.proxy_get(path, headers).await {
-        Ok((status, resp_body, content_type)) => {
-            let ct = content_type.unwrap_or_else(|| "application/json".to_string());
-            (status, [(http::header::CONTENT_TYPE, ct)], resp_body)
-        }
-        Err(e) => {
-            tracing::warn!("Proxy GET {} failed: {}", path, e);
-            (
-                StatusCode::BAD_GATEWAY,
-                [(http::header::CONTENT_TYPE, "text/plain".to_string())],
-                format!("Gateway error: {}", e),
-            )
-        }
-    }
-}
-
-/// Generic proxy handler for streaming GET requests - forwards to Engine
+/// Proxy handler for streaming GET requests - forwards to Engine
 pub async fn proxy_stream(
     State(state): State<GatewayState>,
     axum::extract::OriginalUri(original_uri): axum::extract::OriginalUri,

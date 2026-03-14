@@ -233,6 +233,11 @@ pub async fn mint_nft(
     State(state): State<AppState>,
     Json(req): Json<MintNftRequest>,
 ) -> impl IntoResponse {
+    // 0. Gas pool check (custom ledgers only)
+    if let Err(e) = crate::api_fn::tx_helpers::try_consume_gas(&state) {
+        return (StatusCode::PAYMENT_REQUIRED, e).into_response();
+    }
+
     // 1. Vérif basique
     if req.token_id.len() != 64 {
         return (
@@ -256,6 +261,18 @@ pub async fn mint_nft(
                 .unwrap_or(rust_decimal::Decimal::ZERO)
         }
     };
+
+    // 1c. Compute storage fee (if configured) — charged on metadata payload size
+    let metadata_bytes = serde_json::to_vec(&req.metadata)
+        .map(|b| b.len())
+        .unwrap_or(0);
+    let storage_fee = crate::api_fn::tx_helpers::load_storage_fee_per_kb(
+        &state.store,
+        Some(&state.effective_fees),
+    )
+    .map(|fee_per_kb| pms_economics::storage_fee::calculate_storage_fee(metadata_bytes, fee_per_kb))
+    .unwrap_or(rust_decimal::Decimal::ZERO);
+    let nft_fee = nft_fee + storage_fee;
 
     // 2. Chiffrer les métadonnées (Privacy)
     let coord_x25519 = state.node_wallet.x25519_pub_hex();
@@ -518,6 +535,11 @@ pub async fn burn_nft(
     State(state): State<AppState>,
     Json(wb): Json<WireBlock>,
 ) -> impl IntoResponse {
+    // Gas pool check (custom ledgers only)
+    if let Err(e) = crate::api_fn::tx_helpers::try_consume_gas(&state) {
+        return (StatusCode::PAYMENT_REQUIRED, e).into_response();
+    }
+
     use pms_storage::NftStorage;
 
     let payload_json = match &wb.payload_json {
@@ -821,6 +843,11 @@ pub async fn burn_nft_simple(
     State(state): State<AppState>,
     Json(req): Json<BurnNftSimpleRequest>,
 ) -> impl IntoResponse {
+    // Gas pool check (custom ledgers only)
+    if let Err(e) = crate::api_fn::tx_helpers::try_consume_gas(&state) {
+        return (StatusCode::PAYMENT_REQUIRED, e).into_response();
+    }
+
     use crate::api_fn::tx_helpers;
     use crate::api_fn::wallet_factory::wallet_from_b64;
     use pms_types_nft::NftAction;
@@ -989,6 +1016,11 @@ pub async fn burn_nft_batch_simple(
     State(state): State<AppState>,
     Json(req): Json<BurnNftBatchSimpleRequest>,
 ) -> impl IntoResponse {
+    // Gas pool check (custom ledgers only)
+    if let Err(e) = crate::api_fn::tx_helpers::try_consume_gas(&state) {
+        return (StatusCode::PAYMENT_REQUIRED, e).into_response();
+    }
+
     use crate::api_fn::tx_helpers;
     use crate::api_fn::wallet_factory::wallet_from_b64;
     use pms_types_nft::NftAction;

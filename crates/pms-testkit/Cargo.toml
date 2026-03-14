@@ -15,6 +15,7 @@ pms-utils = {path = "../pms-utils"}
 pms-types = {path = "../pms-types"}
 pms-wire = {path = "../pms-wire"}
 pms-wallet = {path = "../pms-wallet"}
+pms-economics = {path = "../pms-economics"}
 nanoid = "0.4.0"
 tokio = "1.47.1"
 serde_json = "1.0.145"

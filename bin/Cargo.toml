@@ -1,6 +1,6 @@
 [package]
 name = "bin"
-version = "0.2.7"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -17,6 +17,7 @@ pms-config = { path = "../crates/pms-config" }
 pms-wire = { path = "../crates/pms-wire" }
 pms-wallet = { path = "../crates/pms-wallet" }
 pms-ledger = { path = "../crates/pms-ledger" }
+pms-economics = { path = "../crates/pms-economics" }
 tokio = "1.47.1"
 owo-colors = "4"
 tracing-log = "0.2.0"

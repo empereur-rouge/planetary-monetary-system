@@ -118,3 +118,43 @@ impl NodeRewardsStorage for RocksStore {
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Fee Burn Tracking (cumulative total burned)
+// ═══════════════════════════════════════════════════════════════════════
+
+impl RocksStore {
+    /// Atomically increment the cumulative total of burned fees.
+    /// Stored as Decimal string in `node_fee_pool` CF under key `"total_burned"`.
+    pub fn increment_total_burned(&self, amount: rust_decimal::Decimal) -> Result<()> {
+        use rust_decimal::Decimal;
+        if amount <= Decimal::ZERO {
+            return Ok(());
+        }
+        let cf = self.cf("node_fee_pool");
+        let current = match self.db.get_cf(&cf, b"total_burned")? {
+            Some(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                Decimal::from_str_exact(&s).unwrap_or(Decimal::ZERO)
+            }
+            None => Decimal::ZERO,
+        };
+        let new_total = current + amount;
+        self.db
+            .put_cf(&cf, b"total_burned", new_total.to_string().as_bytes())?;
+        Ok(())
+    }
+
+    /// Get the cumulative total of burned fees.
+    pub fn get_total_burned(&self) -> Result<rust_decimal::Decimal> {
+        use rust_decimal::Decimal;
+        let cf = self.cf("node_fee_pool");
+        match self.db.get_cf(&cf, b"total_burned")? {
+            Some(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                Ok(Decimal::from_str_exact(&s).unwrap_or(Decimal::ZERO))
+            }
+            None => Ok(Decimal::ZERO),
+        }
+    }
+}

@@ -7,6 +7,7 @@ use axum::response::IntoResponse;
 use pms_bridge::engine::BridgeEngine;
 use pms_bridge::store::BridgeStore;
 use pms_bridge::types::{BridgeDisableRequest, BridgeEnableRequest, BridgeTransferRequest};
+use rust_decimal::Decimal;
 use serde_json::json;
 
 /// Helper: construit un BridgeEngine depuis l'AppState.
@@ -108,7 +109,42 @@ pub async fn admin_bridge_transfer(
     };
 
     match engine.execute_transfer(&req).await {
-        Ok(resp) => (StatusCode::CREATED, Json(json!(resp))).into_response(),
+        Ok(resp) => {
+            // Charge cross-ledger fee (base_fee * cross_ledger_multiplier)
+            let multiplier = state.settings.fees.cross_ledger_fee_multiplier;
+            if multiplier > 0.0 {
+                let (fee_policy, _ratio) =
+                    crate::api_fn::tx_helpers::load_fee_policy(&state.store);
+                let base_fee = fee_policy
+                    .compute_fee(&req.amount)
+                    .map(|a| a.inner())
+                    .unwrap_or(Decimal::ZERO);
+                let cross_fee = (base_fee
+                    * Decimal::from_f64_retain(multiplier).unwrap_or(Decimal::from(2)))
+                .round_dp(8);
+
+                if cross_fee > Decimal::ZERO {
+                    if let Ok(tips) = state.srv.adapter_arc().top_tips(1).await {
+                        if let Some(tip) = tips.first() {
+                            let reward_id = crate::api_fn::tx_helpers::create_reward_block(
+                                &state, cross_fee, tip,
+                            )
+                            .await;
+                            if reward_id.is_some() {
+                                tracing::info!(
+                                    "Cross-ledger fee: {} PMS (x{} multiplier) for bridge {} -> {}",
+                                    cross_fee,
+                                    multiplier,
+                                    req.from_ledger,
+                                    req.to_ledger
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            (StatusCode::CREATED, Json(json!(resp))).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),

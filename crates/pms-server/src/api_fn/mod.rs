@@ -5,6 +5,7 @@ pub mod compliance;
 pub mod config;
 pub mod contracts;
 pub mod coordinator;
+pub mod gas_pool;
 pub mod dag;
 pub mod history;
 pub mod ledger;

@@ -39,6 +39,12 @@ pub struct EffectiveFees {
     pub fee_distribution: Option<FeeDistributionConfig>,
     pub treasury_fee_percent: u8,
     pub coordinator_fee_percent: u8,
+    // Economics
+    pub burn_rate_bps: u32,
+    pub gas_per_tx: Option<String>,
+    pub gas_pool_min_balance: Option<String>,
+    pub contract_deployment_fee: Option<String>,
+    pub storage_fee_per_kb: Option<String>,
 }
 
 /// Resolve effective fees by merging global FeesSettings with optional per-ledger overrides.
@@ -62,6 +68,11 @@ pub fn resolve_effective_fees(
             fee_distribution: global.fee_distribution.clone(),
             treasury_fee_percent: global.treasury_fee_percent,
             coordinator_fee_percent: global.coordinator_fee_percent,
+            burn_rate_bps: global.burn_rate_bps,
+            gas_per_tx: global.gas_per_tx.clone(),
+            gas_pool_min_balance: global.gas_pool_min_balance.clone(),
+            contract_deployment_fee: global.contract_deployment_fee.clone(),
+            storage_fee_per_kb: global.storage_fee_per_kb.clone(),
         },
         Some(ov) => EffectiveFees {
             ratio: ov.ratio.clone().unwrap_or_else(|| global.ratio.clone()),
@@ -113,6 +124,23 @@ pub fn resolve_effective_fees(
             coordinator_fee_percent: ov
                 .coordinator_fee_percent
                 .unwrap_or(global.coordinator_fee_percent),
+            burn_rate_bps: ov.burn_rate_bps.unwrap_or(global.burn_rate_bps),
+            gas_per_tx: ov
+                .gas_per_tx
+                .clone()
+                .or_else(|| global.gas_per_tx.clone()),
+            gas_pool_min_balance: ov
+                .gas_pool_min_balance
+                .clone()
+                .or_else(|| global.gas_pool_min_balance.clone()),
+            contract_deployment_fee: ov
+                .contract_deployment_fee
+                .clone()
+                .or_else(|| global.contract_deployment_fee.clone()),
+            storage_fee_per_kb: ov
+                .storage_fee_per_kb
+                .clone()
+                .or_else(|| global.storage_fee_per_kb.clone()),
         },
     }
 }
@@ -131,6 +159,23 @@ pub fn load_fee_policy(store: &Arc<RocksStore>) -> (FeePolicy, Decimal) {
         FeePolicy::tiered(&runtime_config.base_fee, runtime_config.fee_tiers.clone())
     };
     (fee_policy, ratio_dec)
+}
+
+/// Compute the dynamic fee multiplier based on current TPS.
+/// Returns 1.0 if dynamic fees are disabled.
+/// Otherwise returns max(1.0, current_tps / target_tps) capped at max_multiplier.
+pub fn dynamic_fee_multiplier(
+    store: &Arc<RocksStore>,
+    tps_tracker: &pms_economics::dynamic_fee::TpsTracker,
+) -> Decimal {
+    let rc = store
+        .get_runtime_config()
+        .unwrap_or_else(|_| RuntimeConfig::default());
+    if !rc.dynamic_fee_enabled || rc.target_tps == 0 {
+        return Decimal::ONE;
+    }
+    let mult = tps_tracker.fee_multiplier(rc.target_tps, rc.max_fee_multiplier);
+    Decimal::from_f64_retain(mult).unwrap_or(Decimal::ONE)
 }
 
 /// Load mint fee policy.
@@ -192,6 +237,87 @@ pub fn load_nft_mint_fee(store: &Arc<RocksStore>, eff: Option<&EffectiveFees>) -
         .or_else(|| eff.and_then(|e| e.nft_mint_fee.as_ref()))
         .and_then(|f| Decimal::from_str_exact(f).ok())
         .filter(|d| *d > Decimal::ZERO)
+}
+
+/// Load contract deployment fee.
+/// Priority: RuntimeConfig > EffectiveFees (per-ledger).
+/// Returns None if not configured.
+pub fn load_contract_deployment_fee(
+    store: &Arc<RocksStore>,
+    eff: Option<&EffectiveFees>,
+) -> Option<Decimal> {
+    let rc = store
+        .get_runtime_config()
+        .unwrap_or_else(|_| RuntimeConfig::default());
+    rc.contract_deployment_fee
+        .as_ref()
+        .or_else(|| eff.and_then(|e| e.contract_deployment_fee.as_ref()))
+        .and_then(|f| Decimal::from_str_exact(f).ok())
+        .filter(|d| *d > Decimal::ZERO)
+}
+
+/// Load storage fee per KB.
+/// Priority: RuntimeConfig > EffectiveFees (per-ledger).
+/// Returns None if not configured.
+pub fn load_storage_fee_per_kb(
+    store: &Arc<RocksStore>,
+    eff: Option<&EffectiveFees>,
+) -> Option<Decimal> {
+    let rc = store
+        .get_runtime_config()
+        .unwrap_or_else(|_| RuntimeConfig::default());
+    rc.storage_fee_per_kb
+        .as_ref()
+        .or_else(|| eff.and_then(|e| e.storage_fee_per_kb.as_ref()))
+        .and_then(|f| Decimal::from_str_exact(f).ok())
+        .filter(|d| *d > Decimal::ZERO)
+}
+
+/// Load burn rate (basis points).
+/// Priority: RuntimeConfig > EffectiveFees (per-ledger) > global FeesSettings.
+pub fn load_burn_rate_bps(store: &Arc<RocksStore>, eff: Option<&EffectiveFees>) -> u32 {
+    let rc = store
+        .get_runtime_config()
+        .unwrap_or_else(|_| RuntimeConfig::default());
+    if rc.burn_rate_bps > 0 {
+        return rc.burn_rate_bps;
+    }
+    eff.map(|e| e.burn_rate_bps).unwrap_or(0)
+}
+
+/// Consume gas from a ledger's gas pool.
+/// Only applies to non-"main" ledgers when gas_per_tx is configured.
+/// Returns Ok(()) if consumption succeeded or gas pool is not required.
+/// Returns Err(message) with a user-friendly error when pool is depleted.
+pub fn try_consume_gas(state: &AppState) -> Result<(), String> {
+    // Main ledger never requires gas pool
+    if state.ledger_id == "main" {
+        return Ok(());
+    }
+
+    let eff = &state.effective_fees;
+    let gas_per_tx: Decimal = eff
+        .gas_per_tx
+        .as_ref()
+        .and_then(|s| Decimal::from_str_exact(s).ok())
+        .unwrap_or(Decimal::ZERO);
+
+    if gas_per_tx.is_zero() {
+        return Ok(());
+    }
+
+    let min_balance: Decimal = eff
+        .gas_pool_min_balance
+        .as_ref()
+        .and_then(|s| Decimal::from_str_exact(s).ok())
+        .unwrap_or(Decimal::ZERO);
+
+    use pms_storage::GasPoolStorage;
+    state
+        .store
+        .consume_gas(&state.ledger_id, gas_per_tx, min_balance)
+        .map(|_| ())
+        .map_err(|e| format!("Gas pool depleted for ledger '{}': {e}", state.ledger_id))
 }
 
 /// Check if an NFT type is exempt from mint fees.
@@ -338,6 +464,8 @@ pub async fn persist_and_broadcast(state: &AppState, wb: &WireBlock) -> Result<P
             .with_label_values(&[&state.ledger_id])
             .inc();
         let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
+        // Record block for TPS tracker (dynamic fee calculation)
+        state.tps_tracker.record_block();
     }
 
     Ok(res)
@@ -547,6 +675,16 @@ mod tests {
             distribution_interval_sec: 600,
             daily_inflation_enabled: false,
             daily_inflation_interval_sec: 86400,
+            burn_rate_bps: 0,
+            gas_per_tx: None,
+            gas_pool_min_balance: None,
+            contract_deployment_fee: None,
+            storage_fee_per_kb: None,
+            dynamic_fee_enabled: false,
+            target_tps: 100,
+            max_fee_multiplier: 5.0,
+            cross_ledger_fee_multiplier: 2.0,
+            ledger_annual_fee_pms: None,
         }
     }
 
@@ -587,6 +725,11 @@ mod tests {
             fee_distribution: Some(FeeDistributionConfig::new(8000, 2000)),
             treasury_fee_percent: Some(20),
             coordinator_fee_percent: Some(80),
+            burn_rate_bps: Some(3000),
+            gas_per_tx: Some("0.002".into()),
+            gas_pool_min_balance: Some("20.0".into()),
+            contract_deployment_fee: Some("50.0".into()),
+            storage_fee_per_kb: Some("0.05".into()),
         };
 
         let eff = resolve_effective_fees(&global, Some(&ov));
@@ -605,6 +748,12 @@ mod tests {
         assert!(eff.fee_distribution.is_some());
         assert_eq!(eff.treasury_fee_percent, 20);
         assert_eq!(eff.coordinator_fee_percent, 80);
+        // Economics overrides
+        assert_eq!(eff.burn_rate_bps, 3000);
+        assert_eq!(eff.gas_per_tx, Some("0.002".into()));
+        assert_eq!(eff.gas_pool_min_balance, Some("20.0".into()));
+        assert_eq!(eff.contract_deployment_fee, Some("50.0".into()));
+        assert_eq!(eff.storage_fee_per_kb, Some("0.05".into()));
     }
 
     #[test]

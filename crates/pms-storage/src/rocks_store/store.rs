@@ -161,6 +161,8 @@ impl RocksStore {
             "addr_type_activity", // Per-address-per-type index: [addr][0x00][cat:1][ts:8][block_id] -> ""
             "activity_items", // Pre-computed activity items: same key as addr_activity -> JSON(Vec<StoredActivityItem>)
             "contracts",     // Declarative smart contracts: contract_id -> Contract (JSON)
+            "gas_pools",     // Gas pools per ledger: ledger_id -> GasPool (JSON)
+            "ledger_subscriptions", // Ledger annual subscriptions: ledger_id -> LedgerSubscription (JSON)
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -286,6 +288,8 @@ impl RocksStore {
         "addr_type_activity",
         "activity_items",
         "contracts",
+        "gas_pools",
+        "ledger_subscriptions",
     ];
 
     /// Ouvre un RocksDB avec les column families de **plusieurs prefixes** à la fois.

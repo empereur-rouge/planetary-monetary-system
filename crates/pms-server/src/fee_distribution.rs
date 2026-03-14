@@ -12,6 +12,7 @@
 use crate::api::AppState;
 use anyhow::Result;
 use pms_config::FeeDistributionConfig;
+use pms_economics::fee_burn::calculate_fee_burn;
 use pms_storage::PutResult;
 use pms_types::TxOutput;
 use pms_types_block::Block;
@@ -268,6 +269,26 @@ pub async fn perform_fee_distribution(
             pool.total_burn_refunds(),
         )
     };
+
+    // 1b. FEE BURN — remove burned portion from distributable fees
+    let burn_rate_bps =
+        crate::api_fn::tx_helpers::load_burn_rate_bps(&state.store, Some(&state.effective_fees));
+    let burn_result = calculate_fee_burn(total_node_fees, burn_rate_bps);
+    let fee_burned = burn_result.burned;
+    let total_node_fees = burn_result.distributable; // shadow with distributable amount
+
+    if fee_burned > Decimal::ZERO {
+        tracing::info!(
+            "🔥 Fee burn: {} PMS burned ({}bps), {} PMS distributable",
+            fee_burned,
+            burn_rate_bps,
+            total_node_fees
+        );
+        // Track cumulative burn in RocksDB
+        if let Err(e) = state.store.increment_total_burned(fee_burned) {
+            tracing::error!("Failed to persist total_burned: {}", e);
+        }
+    }
 
     // 2. BUILD OUTPUTS
     let coordinator_x25519 = state.node_wallet.x25519_pub_hex().to_string();

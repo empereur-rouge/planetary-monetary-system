@@ -18,6 +18,7 @@ use crate::api_fn::contracts::{
     get_contract, list_contracts, register_contract, toggle_contract,
 };
 use crate::api_fn::coordinator::get_coordinator_info;
+use crate::api_fn::gas_pool::{admin_gas_pool_deposit, admin_gas_pool_withdraw, get_gas_pool};
 use crate::api_fn::version::get_version;
 use crate::api_fn::dag::get_tips;
 use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
@@ -115,6 +116,8 @@ pub struct AppState {
     pub api_key_store: SharedApiKeyStore,
     /// In-memory cache for activity endpoint responses.
     pub activity_cache: Arc<crate::api_fn::activity::ActivityCache>,
+    /// TPS tracker for dynamic fee calculation (congestion-based multiplier).
+    pub tps_tracker: Arc<pms_economics::dynamic_fee::TpsTracker>,
 }
 
 /// Sync the PMS_BLOCKS_TOTAL gauge with the actual in-memory DAG size for the default ledger.
@@ -646,6 +649,9 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
             "/admin/contracts/{contract_id}/toggle",
             post(toggle_contract),
         )
+        // Admin Gas Pool API - Per-ledger gas pool management
+        .route("/admin/gas-pool/deposit", post(admin_gas_pool_deposit))
+        .route("/admin/gas-pool/withdraw", post(admin_gas_pool_withdraw))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_local_or_admin,
@@ -661,6 +667,10 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
 
     // Multi-ledger endpoints (global)
     let ledger_routes = Router::new().route("/v1/ledgers", get(list_ledgers));
+
+    // Gas pool endpoints (public, read-only)
+    let gas_pool_routes = Router::new()
+        .route("/v1/gas-pool/{ledger_id}", get(get_gas_pool));
 
     // Bridge endpoints (public, read-only)
     let bridge_routes = Router::new()
@@ -702,6 +712,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .merge(node_routes)
         .merge(ledger_routes)
         .merge(bridge_routes)
+        .merge(gas_pool_routes)
         .merge(per_ledger_router)
         .merge(debug)
         .merge(dashboard)
@@ -836,6 +847,7 @@ pub async fn serve_api(
             None,
         )),
         activity_cache: Arc::new(crate::api_fn::activity::ActivityCache::new(10_000, 30)),
+        tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
     };
 
     // ═══════════════════════════════════════════════════════════════════════

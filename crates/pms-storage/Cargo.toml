@@ -28,6 +28,8 @@ pms-types-nft = { path = "../pms-types-nft" }
 pms-types-contract = { path = "../pms-types-contract" }
 pms-types-payload = { path = "../pms-types-payload" }
 pms-config = { path = "../pms-config" }
+pms-types-economics = { path = "../pms-types-economics" }
+pms-economics = { path = "../pms-economics" }
 rust_decimal = "1"
 tracing = "0.1"
 dashmap = "6.1.0"

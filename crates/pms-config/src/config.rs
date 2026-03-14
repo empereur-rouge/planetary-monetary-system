@@ -361,6 +361,40 @@ pub struct FeesSettings {
     pub burn_percent: u8,
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Economics — Fee Burn, Gas Pool, Dynamic Fees, Storage Fees
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Percentage of tx fees permanently burned (basis points). 3000 = 30%. Default: 0 (disabled).
+    #[serde(default)]
+    pub burn_rate_bps: u32,
+    /// Gas cost per transaction on custom ledgers (deducted from ledger's gas pool). Default: None (disabled).
+    #[serde(default)]
+    pub gas_per_tx: Option<String>,
+    /// Minimum gas pool balance before ledger goes read-only. Default: None.
+    #[serde(default)]
+    pub gas_pool_min_balance: Option<String>,
+    /// Fee for deploying/registering a smart contract. Default: None.
+    #[serde(default)]
+    pub contract_deployment_fee: Option<String>,
+    /// Storage fee per KB of payload data. Default: None (disabled).
+    #[serde(default)]
+    pub storage_fee_per_kb: Option<String>,
+    /// Enable congestion-based dynamic fee multiplier. Default: false.
+    #[serde(default)]
+    pub dynamic_fee_enabled: bool,
+    /// Target TPS for dynamic fee calculation. Fees increase above this. Default: 100.
+    #[serde(default = "default_target_tps")]
+    pub target_tps: u32,
+    /// Maximum fee multiplier under congestion. Default: 5.0.
+    #[serde(default = "default_max_fee_multiplier")]
+    pub max_fee_multiplier: f64,
+    /// Fee multiplier for cross-ledger bridge transfers. Default: 2.0.
+    #[serde(default = "default_cross_ledger_fee_multiplier")]
+    pub cross_ledger_fee_multiplier: f64,
+    /// Annual subscription fee (PMS) for custom ledgers. Default: None.
+    #[serde(default)]
+    pub ledger_annual_fee_pms: Option<String>,
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Automated Distribution
     // ═══════════════════════════════════════════════════════════════════════
     /// Interval in seconds for automated fee distribution. Default: 600 (10 minutes).
@@ -422,6 +456,17 @@ fn default_burn_percent() -> u8 {
 // Single Writer Mode default (Private DAG)
 fn default_enforce_single_writer() -> bool {
     true // Par défaut, seul le Coordinator peut écrire des blocs
+}
+
+// Economics defaults
+fn default_target_tps() -> u32 {
+    100
+}
+fn default_max_fee_multiplier() -> f64 {
+    5.0
+}
+fn default_cross_ledger_fee_multiplier() -> f64 {
+    2.0
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -493,6 +538,18 @@ pub struct LedgerFeesOverride {
     pub treasury_fee_percent: Option<u8>,
     #[serde(default)]
     pub coordinator_fee_percent: Option<u8>,
+
+    // Economics overrides
+    #[serde(default)]
+    pub burn_rate_bps: Option<u32>,
+    #[serde(default)]
+    pub gas_per_tx: Option<String>,
+    #[serde(default)]
+    pub gas_pool_min_balance: Option<String>,
+    #[serde(default)]
+    pub contract_deployment_fee: Option<String>,
+    #[serde(default)]
+    pub storage_fee_per_kb: Option<String>,
 }
 
 /// Overrides de validation pour un ledger spécifique.

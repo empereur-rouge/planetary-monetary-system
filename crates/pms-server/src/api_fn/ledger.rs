@@ -251,21 +251,33 @@ pub async fn admin_create_ledger(
     };
 
     match mgr.add_ledger(def).await {
-        Ok(instance) => (
-            StatusCode::CREATED,
-            Json(json!({
-                "status": "ok",
-                "ledger": {
-                    "id": instance.id,
-                    "network_id": instance.def.network_id,
-                    "prefix": instance.def.prefix,
-                    "protocol_version": instance.def.protocol_version,
-                    "block_count": instance.dag.len(),
-                },
-                "message": "Ledger created. API routes available at /l/{id}/..., P2P routing active immediately."
-            })),
-        )
-            .into_response(),
+        Ok(instance) => {
+            // Auto-create gas pool (balance=0) for the new ledger
+            {
+                use pms_storage::GasPoolStorage;
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let pool = pms_types_economics::GasPool::new(req.id.clone(), now_ms);
+                if let Err(e) = state.store.put_gas_pool(&pool) {
+                    tracing::warn!("Failed to create gas pool for ledger '{}': {e}", req.id);
+                }
+            }
+
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "status": "ok",
+                    "ledger": {
+                        "id": instance.id,
+                        "network_id": instance.def.network_id,
+                        "prefix": instance.def.prefix,
+                        "protocol_version": instance.def.protocol_version,
+                        "block_count": instance.dag.len(),
+                    },
+                    "message": "Ledger created. API routes available at /l/{id}/..., P2P routing active immediately."
+                })),
+            )
+                .into_response()
+        }
         Err(e) => {
             let msg = e.to_string();
             // If CFs don't exist, suggest adding to config and restarting

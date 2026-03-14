@@ -57,6 +57,8 @@ pms-types-nft = { path = "../pms-types-nft" }
 pms-bridge = { path = "../pms-bridge" }
 pms-event = { path = "../pms-event" }
 pms-types-contract = { path = "../pms-types-contract" }
+pms-economics = { path = "../pms-economics" }
+pms-types-economics = { path = "../pms-types-economics" }
 chrono = "0.4.42"
 async-stream = "0.3"
 tokio-stream = "0.1"

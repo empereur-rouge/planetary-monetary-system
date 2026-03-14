@@ -333,7 +333,7 @@ checksum = "cf9ff0bbfd639f15c74af777d81383cf53efb7c93613f6cab67c6c11e05bbf8b"
 
 [[package]]
 name = "bin"
-version = "0.2.7"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -342,6 +342,7 @@ dependencies = [
  "owo-colors",
  "pms-config",
  "pms-core",
+ "pms-economics",
  "pms-interface",
  "pms-ledger",
  "pms-server",
@@ -2502,6 +2503,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pms-economics"
+version = "0.1.0"
+dependencies = [
+ "pms-types-economics",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pms-errors"
 version = "0.1.0"
 dependencies = [
@@ -2627,6 +2639,7 @@ dependencies = [
  "pms-bridge",
  "pms-config",
  "pms-core",
+ "pms-economics",
  "pms-event",
  "pms-interface",
  "pms-ledger",
@@ -2637,6 +2650,7 @@ dependencies = [
  "pms-types",
  "pms-types-block",
  "pms-types-contract",
+ "pms-types-economics",
  "pms-types-nft",
  "pms-types-payload",
  "pms-utils",
@@ -2678,10 +2692,12 @@ dependencies = [
  "num_cpus",
  "pms-config",
  "pms-core",
+ "pms-economics",
  "pms-errors",
  "pms-testkit",
  "pms-types",
  "pms-types-contract",
+ "pms-types-economics",
  "pms-types-nft",
  "pms-types-payload",
  "pms-wire",
@@ -2706,6 +2722,7 @@ dependencies = [
  "nanoid",
  "pms-config",
  "pms-core",
+ "pms-economics",
  "pms-interface",
  "pms-server",
  "pms-storage",
@@ -2765,6 +2782,15 @@ dependencies = [
  "pms-network",
  "pms-types-block",
  "tokio",
+]
+
+[[package]]
+name = "pms-types-economics"
+version = "0.1.0"
+dependencies = [
+ "rust_decimal",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

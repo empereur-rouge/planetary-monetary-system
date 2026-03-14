@@ -101,6 +101,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
             None,
         )),
         activity_cache: Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
+        tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
     };
 
     // 10) Router axum
@@ -202,6 +203,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
             None,
         )),
         activity_cache: Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
+        tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
     };
 
     // 10) Router
@@ -312,6 +314,7 @@ pub async fn make_test_ctx_with_admin(
             None,
         )),
         activity_cache: Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
+        tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
     };
 
     // 10) Router

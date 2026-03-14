@@ -338,6 +338,13 @@ pub async fn wallet_send_simple(
     Json(req): Json<SendSimpleRequest>,
 ) -> impl IntoResponse {
     // ════════════════════════════════════════════════════════════════════
+    // 0) Gas pool check (custom ledgers only)
+    // ════════════════════════════════════════════════════════════════════
+    if let Err(e) = crate::api_fn::tx_helpers::try_consume_gas(&state) {
+        return (StatusCode::PAYMENT_REQUIRED, Json(json!({ "error": e })));
+    }
+
+    // ════════════════════════════════════════════════════════════════════
     // 1) Reconstruire le wallet depuis la clé privée
     // ════════════════════════════════════════════════════════════════════
     let sender_wallet = match wallet_from_b64(&req.private_key_b64) {

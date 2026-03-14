@@ -84,6 +84,16 @@ fn base_fees_settings() -> FeesSettings {
         distribution_interval_sec: 600,
         daily_inflation_enabled: false,
         daily_inflation_interval_sec: 86400,
+        burn_rate_bps: 0,
+        gas_per_tx: None,
+        gas_pool_min_balance: None,
+        contract_deployment_fee: None,
+        storage_fee_per_kb: None,
+        dynamic_fee_enabled: false,
+        target_tps: 100,
+        max_fee_multiplier: 5.0,
+        cross_ledger_fee_multiplier: 2.0,
+        ledger_annual_fee_pms: None,
     }
 }
 

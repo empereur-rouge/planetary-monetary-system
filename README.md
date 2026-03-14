@@ -110,6 +110,36 @@ L'architecture repose sur des variables d'environnement et des fichiers de confi
 *   Validation centralisée.
 *   Stockage RocksDB.
 
+### Economics (`[fees]` section)
+
+Toutes les fonctionnalités economics sont **opt-in et desactivees par defaut**. Aucun changement de config requis pour un fonctionnement standard.
+
+```toml
+[fees]
+# Fee burn (deflationary): % de fees brulees. 3000 = 30%. Default: 0 (desactive).
+burn_rate_bps = 0
+
+# Storage fee par KB de payload. Default: absent (desactive).
+# storage_fee_per_kb = "0.01"
+
+# Dynamic fees (congestion). Default: false (desactive).
+dynamic_fee_enabled = false
+target_tps = 100          # seuil TPS au-dela duquel les fees augmentent
+max_fee_multiplier = 5.0  # multiplicateur max sous congestion
+
+# Gas pool par ledger custom. Default: absent (desactive).
+# gas_per_tx = "0.001"
+# gas_pool_min_balance = "10.0"
+
+# Fee de deploiement de contrat. Default: absent (gratuit).
+# contract_deployment_fee = "10.0"
+
+# Multiplicateur cross-ledger (bridge). Default: 2.0.
+cross_ledger_fee_multiplier = 2.0
+```
+
+Tous les parametres economics sont modifiables a chaud via `POST /admin/config` (sans redemarrage).
+
 ---
 
 ## 🧪 Tests E2E
