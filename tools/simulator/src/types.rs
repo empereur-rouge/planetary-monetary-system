@@ -192,3 +192,110 @@ pub struct BurnNftBatchSimpleResponse {
 pub struct TipsRequest {
     pub limit: usize,
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Smart Contract API (mirrors pms-types-contract)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Request for POST /admin/contracts
+#[derive(Debug, Serialize)]
+pub struct RegisterContractRequest {
+    pub name: String,
+    pub scope: ContractScopeSim,
+    pub trigger: ContractTriggerSim,
+    pub actions: Vec<ContractActionSim>,
+    pub enabled: bool,
+}
+
+/// Contract scope — which ledgers it applies to
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ContractScopeSim {
+    Global,
+    Ledger(Vec<String>),
+}
+
+/// Contract trigger — what event fires the contract
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ContractTriggerSim {
+    OnNftBurn {
+        nft_type: Option<String>,
+    },
+    OnTokenBurn {
+        asset_id: String,
+    },
+}
+
+/// Contract action — what happens when the trigger fires
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ContractActionSim {
+    AccumulateRefund {
+        asset_id: Option<String>,
+        formula: MintFormulaSim,
+    },
+    EmitEvent {
+        event_type: String,
+    },
+}
+
+/// Formula for calculating refund amounts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MintFormulaSim {
+    FixedRate {
+        rate_numerator: u64,
+        rate_denominator: u64,
+    },
+    AttributeFormula {
+        attribute_names: Vec<String>,
+        divisor: u64,
+    },
+    FixedAmount {
+        amount: String,
+    },
+}
+
+/// Response from POST /admin/contracts
+#[derive(Debug, Deserialize)]
+pub struct RegisterContractResponse {
+    pub contract_id: Option<String>,
+    pub status: Option<String>,
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// UTXO Query API
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Single UTXO entry from GET /v1/wallet/{address}/utxos
+#[derive(Debug, Deserialize)]
+pub struct UtxoEntry {
+    pub txid: String,
+    pub index: u32,
+    pub amount: String,
+    #[serde(default)]
+    pub asset_id: Option<String>,
+}
+
+/// Response from GET /v1/wallet/{address}/utxos
+#[derive(Debug, Deserialize)]
+pub struct UtxosResponse {
+    pub utxos: Vec<UtxoEntry>,
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Gas Pool API
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Request for POST /admin/gas-pool/deposit
+#[derive(Debug, Serialize)]
+pub struct GasPoolDepositRequest {
+    pub ledger_id: String,
+    pub amount: String,
+}
+
+/// Response from POST /admin/gas-pool/deposit
+#[derive(Debug, Deserialize)]
+pub struct GasPoolDepositResponse {
+    pub status: Option<String>,
+    pub ledger_id: Option<String>,
+    pub deposited: Option<String>,
+    pub new_balance: Option<String>,
+}

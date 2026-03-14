@@ -210,10 +210,16 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // 9. Fund all agents via faucet + optional cube NFT minting
-    // cubes_per_agent is now per-agent-def from AgentGameConfig
+    // 9. Fund all agents via coordinator distribution + optional cube NFT minting
+    let coord_w = coordinator_wallet.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "No [coordinator] config — required for PMS distribution to agents. \
+             Add [coordinator] section with address + private_key_hex."
+        )
+    })?;
+
     tracing::info!(
-        "Funding {} agents via faucet ({} PMS each)...",
+        "Funding {} agents via coordinator ({} PMS each)...",
         all_agents.len(),
         config.simulation.faucet_amount
     );
@@ -239,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
             &config.simulation.faucet_amount,
             &metrics_tx,
             game_engine.as_ref(),
+            coord_w,
         )
         .await?;
 
@@ -253,6 +260,7 @@ async fn main() -> anyhow::Result<()> {
         peer_registry,
         cancel: cancel.clone(),
         game_engine,
+        coordinator_wallet: coordinator_wallet.clone(),
     });
 
     // 11. Spawn agents

@@ -295,21 +295,26 @@ pub async fn perform_fee_distribution(
     let mut all_outputs: Vec<TxOutput> = Vec::new();
     let mut total_distributed = Decimal::ZERO;
 
-    // 2a. BURN REFUNDS
-    for (wallet_address, amount) in &burn_refunds {
+    // 2a. BURN REFUNDS (multi-asset: PMS native + custom tokens like Edenite)
+    for (wallet_address, asset_id, amount) in &burn_refunds {
         if *amount <= Decimal::ZERO {
             continue;
         }
         all_outputs.push(TxOutput {
             address: wallet_address.clone(),
             amount: amount.to_string(),
-            asset_id: None,
+            asset_id: asset_id.clone(),
         });
-        total_distributed += *amount;
+        // Only count PMS-native refunds towards total_distributed (for stats)
+        if asset_id.is_none() {
+            total_distributed += *amount;
+        }
+        let asset_label = asset_id.as_deref().unwrap_or("PMS");
         tracing::info!(
-            "💰 Burn refund output: {} -> {} PMS",
+            "💰 Burn refund output: {} -> {} {}",
             &wallet_address[..20.min(wallet_address.len())],
-            amount
+            amount,
+            asset_label,
         );
     }
 
@@ -521,7 +526,7 @@ pub async fn perform_fee_distribution(
                         idx as u32,
                         output.address.clone(),
                         output.amount.clone(),
-                        None, // rewards always PMS
+                        output.asset_id.clone(), // multi-asset support (PMS or custom token)
                     )
                     .await;
             }

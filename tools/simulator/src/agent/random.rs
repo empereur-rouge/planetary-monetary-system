@@ -7,18 +7,18 @@ use crate::types::{SendSimpleRequest, WalletInfo};
 use rand::Rng;
 use tokio::sync::mpsc;
 
-/// Seuil PMS en-dessous duquel l'agent refuel via faucet
+/// Seuil PMS en-dessous duquel l'agent demande un refuel au coordinator
 const LOW_BALANCE_THRESHOLD: f64 = 10.0;
-/// Amount to faucet during refuel
+/// Amount the coordinator sends during refuel
 const REFUEL_AMOUNT: &str = "50.00";
 /// Minimum EDN balance to attempt a send
 const EDN_SEND_THRESHOLD: f64 = 0.000_000_01;
 
 /// Agent that sends random amounts to random peers — no AI needed.
-/// Auto-refuels via faucet when balance drops below threshold.
+/// Auto-refuels via coordinator wallet when balance drops below threshold.
 ///
 /// Game loop (when game engine is active, every tick):
-///   1. Has cubes → batch burn all (earn EDN)
+///   1. Has cubes → batch burn all (earn EDN via smart contract)
 ///   2. Has EDN, no cubes → send EDN to random peer
 ///   3. No cubes, no EDN → re-mint cubes
 pub struct RandomAgent {
@@ -32,8 +32,6 @@ pub struct RandomAgent {
     send_probability: f64,
     /// Cube token IDs owned by this agent
     cube_ids: Vec<String>,
-    /// Locally tracked EDN balance (earned from burns, decreased by sends)
-    edn_balance: f64,
     /// Per-agent game configuration
     game_config: Option<AgentGameConfig>,
 }
@@ -58,7 +56,6 @@ impl RandomAgent {
             max_amount,
             send_probability,
             cube_ids: Vec::new(),
-            edn_balance: 0.0,
             game_config,
         }
     }
@@ -77,17 +74,24 @@ impl RandomAgent {
         self.game_config.as_ref().map_or(false, |gc| gc.enabled)
     }
 
-    /// Refuel PMS via faucet (main ledger)
+    /// Refuel PMS via coordinator wallet (coordinator sends to this agent)
     async fn refuel(&self, ctx: &AgentContext) -> SimResult<()> {
-        let addr = &self.wallet.address;
+        let coord = ctx.coordinator_wallet.as_ref().ok_or_else(|| {
+            crate::error::SimError::Other(anyhow::anyhow!("No coordinator wallet configured for refuel"))
+        })?;
 
-        let faucet_resp = ctx.client.faucet(addr, REFUEL_AMOUNT).await?;
-        let block_id = faucet_resp
-            .data
-            .block_id
-            .unwrap_or_default();
+        let resp = ctx
+            .client
+            .send_simple(&SendSimpleRequest {
+                private_key_b64: coord.private_key_b64.clone(),
+                to: self.wallet.address.clone(),
+                amount: REFUEL_AMOUNT.to_string(),
+                asset_id: None,
+            })
+            .await?;
+        let block_id = resp.data.block_id.unwrap_or_default();
         tracing::info!(
-            "[{}] Refuel: faucet {} PMS (block {})",
+            "[{}] Refuel: coordinator → {} PMS (block {})",
             self.name,
             REFUEL_AMOUNT,
             &block_id[..16.min(block_id.len())]
@@ -101,7 +105,9 @@ impl RandomAgent {
         Ok(())
     }
 
-    /// Game tick: burn all cubes (batch) → send EDN → re-mint when depleted
+    /// Game tick: burn all cubes (batch) → send EDN → re-mint when depleted.
+    /// EDN is distributed asynchronously via fee_distribution after burn.
+    /// The agent queries its real EDN balance from the game ledger UTXOs.
     async fn game_tick(&mut self, ctx: &AgentContext) -> SimResult<()> {
         let game_engine = match ctx.game_engine {
             Some(ref ge) => ge,
@@ -115,7 +121,9 @@ impl RandomAgent {
         let gc = self.game_config.as_ref().unwrap();
 
         if !self.cube_ids.is_empty() {
-            // ── Phase 1: BATCH BURN all cubes → earn EDN ──
+            // ── Phase 1: BATCH BURN all cubes → EDN via smart contract ──
+            // The contract accumulates EDN in the FeePool. Actual EDN UTXO
+            // arrives asynchronously at the next fee_distribution cycle.
             let cubes_to_burn: Vec<String> = self.cube_ids.drain(..).collect();
             let count = cubes_to_burn.len();
             let mut ge = game_engine.write().await;
@@ -128,19 +136,16 @@ impl RandomAgent {
                 .await
             {
                 Ok((edn_str, burned)) => {
-                    let edn: f64 = edn_str.parse().unwrap_or(0.0);
-                    self.edn_balance += edn;
                     tracing::info!(
-                        "[{}] Batch burned {} cubes → +{} EDN (balance: {:.10})",
+                        "[{}] Batch burned {} cubes → expected ~{} EDN (via contract, async)",
                         self.name,
                         burned,
                         edn_str,
-                        self.edn_balance
                     );
                     let _ = ctx.metrics_tx.try_send(MetricEvent::TransactionSent {
                         agent_name: self.name.clone(),
                         block_id: format!("batch-burn:{}", burned),
-                        amount: format!("{} EDN", edn_str),
+                        amount: format!("{} EDN (expected)", edn_str),
                         latency: std::time::Duration::from_millis(0),
                     });
                     // Broadcast to web dashboard
@@ -152,8 +157,7 @@ impl RandomAgent {
                                 data: serde_json::json!({
                                     "action": "batch_burn",
                                     "cubes": burned,
-                                    "edn_earned": edn_str,
-                                    "edn_balance": format!("{:.10}", self.edn_balance),
+                                    "edn_expected": edn_str,
                                 }),
                             },
                         )
@@ -170,120 +174,123 @@ impl RandomAgent {
                     self.cube_ids = cubes_to_burn;
                 }
             }
-        } else if self.edn_balance >= EDN_SEND_THRESHOLD {
-            // ── Phase 2: SEND EDN to a random peer ──
-            let peers = ctx.peer_registry.read().await;
-            let others: Vec<_> = peers.iter().filter(|p| p.name != self.name).collect();
-            if others.is_empty() {
-                return Ok(());
-            }
-            let target = {
-                let mut rng = rand::rng();
-                let idx: usize = rng.random_range(0..others.len());
-                others[idx].clone()
-            };
-            drop(peers);
-
-            // Send edn_send_min_pct..edn_send_max_pct % of current EDN balance
-            let min_frac = gc.edn_send_min_pct / 100.0;
-            let max_frac = gc.edn_send_max_pct / 100.0;
-            let fraction = {
-                let mut rng = rand::rng();
-                rng.random_range(min_frac..max_frac)
-            };
-            let send_amount = self.edn_balance * fraction;
-            let amount_str = format!("{:.10}", send_amount);
-
-            let ge = game_engine.read().await;
-            match ge.send_edenite(&target.address, &amount_str).await {
-                Ok(()) => {
-                    self.edn_balance -= send_amount;
-                    tracing::info!(
-                        "[{}] Sent {} EDN → {} (remaining: {:.10})",
-                        self.name,
-                        amount_str,
-                        target.name,
-                        self.edn_balance
-                    );
-                    let _ = ctx.metrics_tx.try_send(MetricEvent::TransactionSent {
-                        agent_name: self.name.clone(),
-                        block_id: format!("edn-send:{}", &target.name),
-                        amount: format!("{} EDN", amount_str),
-                        latency: std::time::Duration::from_millis(0),
-                    });
-                    // Notify web dashboard
-                    ctx.comms
-                        .send_to(
-                            &target.name,
-                            AgentMessage::TxNotification {
-                                from: self.name.clone(),
-                                to: target.name.clone(),
-                                amount: format!("{} EDN", amount_str),
-                                block_id: "edn-transfer".to_string(),
-                            },
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "[{}] Failed to send EDN to {}: {:#}",
-                        self.name,
-                        target.name,
-                        e
-                    );
-                }
-            }
         } else {
-            // ── Phase 3: RE-MINT cubes (out of cubes + out of EDN) ──
-            let cubes_to_mint = gc.cubes_per_remint;
-            tracing::info!(
-                "[{}] No cubes, EDN {:.10} < threshold → re-minting {} cubes",
-                self.name,
-                self.edn_balance,
-                cubes_to_mint
-            );
-            let mut ge = game_engine.write().await;
-            for i in 0..cubes_to_mint {
+            // No cubes — check real EDN balance from game ledger UTXOs
+            let edn_balance = {
+                let ge = game_engine.read().await;
+                ge.get_edn_balance(&self.wallet.address).await.unwrap_or(0.0)
+            };
+
+            if edn_balance >= EDN_SEND_THRESHOLD {
+                // ── Phase 2: SEND EDN to a random peer (real UTXO transfer) ──
+                let peers = ctx.peer_registry.read().await;
+                let others: Vec<_> = peers.iter().filter(|p| p.name != self.name).collect();
+                if others.is_empty() {
+                    return Ok(());
+                }
+                let target = {
+                    let mut rng = rand::rng();
+                    let idx: usize = rng.random_range(0..others.len());
+                    others[idx].clone()
+                };
+                drop(peers);
+
+                // Send edn_send_min_pct..edn_send_max_pct % of current EDN balance
+                let min_frac = gc.edn_send_min_pct / 100.0;
+                let max_frac = gc.edn_send_max_pct / 100.0;
+                let fraction = {
+                    let mut rng = rand::rng();
+                    rng.random_range(min_frac..max_frac)
+                };
+                let send_amount = edn_balance * fraction;
+                let amount_str = format!("{:.10}", send_amount);
+
+                let ge = game_engine.read().await;
                 match ge
-                    .mint_cube(&self.wallet.address, &self.wallet.x25519_pub_hex)
+                    .send_edenite(&self.wallet.private_key_b64, &target.address, &amount_str)
                     .await
                 {
-                    Ok(token_id) => {
+                    Ok(()) => {
                         tracing::info!(
-                            "[{}] Re-minted cube {}/{} → {}",
+                            "[{}] Sent {} EDN → {} (balance was {:.10})",
                             self.name,
-                            i + 1,
-                            cubes_to_mint,
-                            &token_id[..16]
+                            amount_str,
+                            target.name,
+                            edn_balance
                         );
-                        self.cube_ids.push(token_id);
+                        let _ = ctx.metrics_tx.try_send(MetricEvent::TransactionSent {
+                            agent_name: self.name.clone(),
+                            block_id: format!("edn-send:{}", &target.name),
+                            amount: format!("{} EDN", amount_str),
+                            latency: std::time::Duration::from_millis(0),
+                        });
+                        // Notify web dashboard
+                        ctx.comms
+                            .send_to(
+                                &target.name,
+                                AgentMessage::TxNotification {
+                                    from: self.name.clone(),
+                                    to: target.name.clone(),
+                                    amount: format!("{} EDN", amount_str),
+                                    block_id: "edn-transfer".to_string(),
+                                },
+                            )
+                            .await;
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "[{}] Failed to re-mint cube {}: {:#}",
+                            "[{}] Failed to send EDN to {}: {:#}",
                             self.name,
-                            i + 1,
+                            target.name,
                             e
                         );
                     }
                 }
-                // Small delay between mints to avoid contention
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            // Notify dashboard
-            if !self.cube_ids.is_empty() {
-                ctx.comms
-                    .broadcast(
-                        &self.name,
-                        AgentMessage::Info {
-                            from: self.name.clone(),
-                            data: serde_json::json!({
-                                "action": "remint",
-                                "cubes_minted": self.cube_ids.len(),
-                            }),
-                        },
+            } else {
+                // ── Phase 3: RE-MINT cubes in parallel (out of cubes + out of EDN) ──
+                let cubes_to_mint = {
+                    let mut rng = rand::rng();
+                    rng.random_range(gc.cubes_remint_min..=gc.cubes_remint_max)
+                };
+                tracing::info!(
+                    "[{}] No cubes, EDN {:.10} < threshold → parallel minting {} cubes",
+                    self.name,
+                    edn_balance,
+                    cubes_to_mint
+                );
+                let mut ge = game_engine.write().await;
+                let minted = ge
+                    .mint_cubes_parallel(
+                        &self.wallet.address,
+                        &self.wallet.x25519_pub_hex,
+                        cubes_to_mint,
                     )
                     .await;
+                let minted_count = minted.len();
+                self.cube_ids.extend(minted);
+                drop(ge);
+
+                tracing::info!(
+                    "[{}] Parallel mint done: {}/{} cubes",
+                    self.name,
+                    minted_count,
+                    cubes_to_mint
+                );
+                // Notify dashboard
+                if minted_count > 0 {
+                    ctx.comms
+                        .broadcast(
+                            &self.name,
+                            AgentMessage::Info {
+                                from: self.name.clone(),
+                                data: serde_json::json!({
+                                    "action": "remint",
+                                    "cubes_minted": minted_count,
+                                }),
+                            },
+                        )
+                        .await;
+                }
             }
         }
 

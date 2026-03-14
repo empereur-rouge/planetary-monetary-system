@@ -498,7 +498,7 @@ async fn evaluate_contracts_after_burn(
     if !results.is_empty() {
         let mut pool = state.fee_pool.write().await;
         for r in &results {
-            pool.add_burn_refund(&r.refund_address, r.refund_amount);
+            pool.add_burn_refund(&r.refund_address, r.refund_amount, r.asset_id.clone());
             tracing::info!(
                 "Contract '{}': burn refund {} {} for {}",
                 r.contract_name,

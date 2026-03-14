@@ -346,7 +346,7 @@ async fn test_automated_fee_distribution() {
     println!("💰 Injecting fees...");
     {
         let mut pool = state.fee_pool.write().await;
-        pool.add_burn_refund("test_address_123", "100.0".parse().unwrap());
+        pool.add_burn_refund("test_address_123", "100.0".parse().unwrap(), None);
         assert!(pool.has_fees(), "Pool should have fees");
     }
 

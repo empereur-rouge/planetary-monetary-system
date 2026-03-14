@@ -20,9 +20,10 @@ pub struct FeePool {
     pub node_contributions: HashMap<String, u64>,
     /// Compteur total de transactions traitées (pour stats)
     pub tx_count: u64,
-    /// Refunds de burn en attente: wallet_address -> montant total
+    /// Refunds de burn en attente: (wallet_address, asset_id) -> montant total
+    /// asset_id = None pour PMS natif, Some("edenite") pour custom token
     /// Ces refunds sont distribués directement aux wallets utilisateurs
-    pub burn_refunds: HashMap<String, Decimal>,
+    pub burn_refunds: HashMap<(String, Option<String>), Decimal>,
 }
 
 impl FeePool {
@@ -48,25 +49,35 @@ impl FeePool {
 
     /// Ajoute un refund de burn pour un wallet utilisateur
     /// Ces refunds sont séparés des fees de nœuds et vont directement aux wallets
-    pub fn add_burn_refund(&mut self, wallet_address: &str, amount: Decimal) {
+    /// `asset_id`: None = PMS natif, Some("edenite") = custom token
+    pub fn add_burn_refund(
+        &mut self,
+        wallet_address: &str,
+        amount: Decimal,
+        asset_id: Option<String>,
+    ) {
         *self
             .burn_refunds
-            .entry(wallet_address.to_string())
+            .entry((wallet_address.to_string(), asset_id))
             .or_insert(Decimal::ZERO) += amount;
     }
 
-    /// Retourne les refunds de burn en attente: Vec<(wallet_address, amount)>
-    pub fn get_burn_refunds(&self) -> Vec<(String, Decimal)> {
+    /// Retourne les refunds de burn en attente: Vec<(wallet_address, asset_id, amount)>
+    pub fn get_burn_refunds(&self) -> Vec<(String, Option<String>, Decimal)> {
         self.burn_refunds
             .iter()
             .filter(|(_, amount)| **amount > Decimal::ZERO)
-            .map(|(addr, amount)| (addr.clone(), *amount))
+            .map(|((addr, asset_id), amount)| (addr.clone(), asset_id.clone(), *amount))
             .collect()
     }
 
-    /// Total des refunds de burn en attente
+    /// Total des refunds de burn PMS natif en attente (pour stats/logs)
     pub fn total_burn_refunds(&self) -> Decimal {
-        self.burn_refunds.values().copied().sum()
+        self.burn_refunds
+            .iter()
+            .filter(|((_, asset_id), _)| asset_id.is_none())
+            .map(|(_, amount)| *amount)
+            .sum()
     }
 
     /// Calcule les parts proportionnelles de chaque nœud
@@ -135,6 +146,79 @@ mod tests {
 
         assert_eq!(node1.2, Decimal::from(30)); // 75% of 40
         assert_eq!(node2.2, Decimal::from(10)); // 25% of 40
+    }
+
+    #[test]
+    fn test_burn_refund_pms_native() {
+        let mut pool = FeePool::new();
+        pool.add_burn_refund("wallet_a", Decimal::from(5), None);
+        pool.add_burn_refund("wallet_a", Decimal::from(3), None);
+
+        let refunds = pool.get_burn_refunds();
+        assert_eq!(refunds.len(), 1);
+        let (addr, asset_id, amount) = &refunds[0];
+        assert_eq!(addr, "wallet_a");
+        assert_eq!(*asset_id, None);
+        assert_eq!(*amount, Decimal::from(8));
+        assert_eq!(pool.total_burn_refunds(), Decimal::from(8));
+        println!("PMS native refund: addr={}, asset={:?}, amount={}", addr, asset_id, amount);
+    }
+
+    #[test]
+    fn test_burn_refund_custom_asset() {
+        let mut pool = FeePool::new();
+        pool.add_burn_refund("wallet_b", Decimal::from(10), Some("edenite".into()));
+        pool.add_burn_refund("wallet_b", Decimal::from(7), Some("edenite".into()));
+
+        let refunds = pool.get_burn_refunds();
+        assert_eq!(refunds.len(), 1);
+        let (addr, asset_id, amount) = &refunds[0];
+        assert_eq!(addr, "wallet_b");
+        assert_eq!(*asset_id, Some("edenite".into()));
+        assert_eq!(*amount, Decimal::from(17));
+        // Custom assets should NOT count towards total_burn_refunds (PMS stats)
+        assert_eq!(pool.total_burn_refunds(), Decimal::ZERO);
+        println!("Custom asset refund: addr={}, asset={:?}, amount={}", addr, asset_id, amount);
+    }
+
+    #[test]
+    fn test_burn_refund_same_address_different_assets() {
+        let mut pool = FeePool::new();
+        pool.add_burn_refund("wallet_c", Decimal::from(5), None);
+        pool.add_burn_refund("wallet_c", Decimal::from(100), Some("edenite".into()));
+
+        let refunds = pool.get_burn_refunds();
+        assert_eq!(refunds.len(), 2, "Same address, different assets = separate entries");
+
+        let pms_entry = refunds.iter().find(|(_, a, _)| a.is_none()).unwrap();
+        let edn_entry = refunds
+            .iter()
+            .find(|(_, a, _)| a.as_deref() == Some("edenite"))
+            .unwrap();
+
+        assert_eq!(pms_entry.0, "wallet_c");
+        assert_eq!(pms_entry.2, Decimal::from(5));
+        assert_eq!(edn_entry.0, "wallet_c");
+        assert_eq!(edn_entry.2, Decimal::from(100));
+
+        // Only PMS native counts
+        assert_eq!(pool.total_burn_refunds(), Decimal::from(5));
+
+        println!(
+            "Multi-asset: PMS={}, EDN={}, total_pms={}",
+            pms_entry.2, edn_entry.2, pool.total_burn_refunds()
+        );
+    }
+
+    #[test]
+    fn test_burn_refund_has_fees_with_custom_asset_only() {
+        let mut pool = FeePool::new();
+        assert!(!pool.has_fees());
+
+        pool.add_burn_refund("wallet_d", Decimal::from(50), Some("edenite".into()));
+        assert!(pool.has_fees(), "Pool should have fees even with only custom-asset refunds");
+        assert_eq!(pool.total_burn_refunds(), Decimal::ZERO, "PMS total should be 0");
+        println!("has_fees={} with custom asset only, total_pms={}", pool.has_fees(), pool.total_burn_refunds());
     }
 
     #[test]

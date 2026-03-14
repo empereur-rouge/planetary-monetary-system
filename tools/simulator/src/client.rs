@@ -357,10 +357,76 @@ impl DagClient {
     }
 
     // ════════════════════════════════════════════════════════════════
+    // Admin API — Contracts
+    // ════════════════════════════════════════════════════════════════
+
+    /// POST /admin/contracts — Register a smart contract (global admin)
+    pub async fn register_contract(
+        &self,
+        req: &RegisterContractRequest,
+    ) -> SimResult<RegisterContractResponse> {
+        let mut builder = self
+            .http
+            .post(self.admin_url("/admin/contracts"))
+            .json(req);
+
+        if let Some(auth) = self.auth_header() {
+            builder = builder.header("Authorization", auth);
+        }
+
+        let resp = self.send_with_retry(builder).await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SimError::ServerError {
+                status,
+                message: body,
+            });
+        }
+
+        let data: RegisterContractResponse = resp.json().await?;
+        Ok(data)
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Admin API — Gas Pool
+    // ════════════════════════════════════════════════════════════════
+
+    /// POST /admin/gas-pool/deposit — Fund a ledger's gas pool (admin auth)
+    pub async fn deposit_gas(
+        &self,
+        req: &GasPoolDepositRequest,
+    ) -> SimResult<GasPoolDepositResponse> {
+        let mut builder = self
+            .http
+            .post(self.admin_url("/admin/gas-pool/deposit"))
+            .json(req);
+
+        if let Some(auth) = self.auth_header() {
+            builder = builder.header("Authorization", auth);
+        }
+
+        let resp = self.send_with_retry(builder).await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SimError::ServerError {
+                status,
+                message: body,
+            });
+        }
+
+        let data: GasPoolDepositResponse = resp.json().await?;
+        Ok(data)
+    }
+
+    // ════════════════════════════════════════════════════════════════
     // NFT API
     // ════════════════════════════════════════════════════════════════
 
-    /// POST /v1/nft/mint — Mint an NFT (coordinator signs)
+    /// POST /v1/nft/mint — Mint an NFT on main ledger (API key auth)
     pub async fn mint_nft(
         &self,
         req: &MintNftRequest,
@@ -384,6 +450,71 @@ impl DagClient {
 
         let data: MintNftResponse = resp.json().await?;
         Ok(data)
+    }
+
+    /// POST /admin/nft/mint — Mint an NFT on custom ledger (admin auth required)
+    /// Security: NFT minting on custom ledgers is admin-only to prevent
+    /// unauthorized NFT creation that could exploit smart contracts.
+    pub async fn admin_mint_nft(
+        &self,
+        req: &MintNftRequest,
+    ) -> SimResult<MintNftResponse> {
+        let mut builder = self
+            .http
+            .post(self.url("/admin/nft/mint"))
+            .json(req);
+
+        if let Some(auth) = self.auth_header() {
+            builder = builder.header("Authorization", auth);
+        }
+
+        let resp = self.send_with_retry(builder).await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SimError::ServerError {
+                status,
+                message: body,
+            });
+        }
+
+        let data: MintNftResponse = resp.json().await?;
+        Ok(data)
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // UTXO / Token Balance API
+    // ════════════════════════════════════════════════════════════════
+
+    /// GET /v1/wallet/{address}/utxos — Query all UTXOs for an address
+    pub async fn get_utxos(&self, address: &str) -> SimResult<UtxosResponse> {
+        let builder = self.with_api_key(
+            self.http
+                .get(self.url(&format!("/v1/wallet/{}/utxos", address))),
+        );
+
+        let resp = self.send_with_retry(builder).await?;
+
+        if !resp.status().is_success() {
+            return Ok(UtxosResponse { utxos: vec![] });
+        }
+
+        let data: UtxosResponse = resp.json().await?;
+        Ok(data)
+    }
+
+    /// Query the balance for a specific asset_id by summing matching UTXOs.
+    /// Returns the total balance as a string (for precision).
+    pub async fn token_balance(&self, address: &str, asset_id: &str) -> SimResult<String> {
+        let utxos = self.get_utxos(address).await?;
+        let total: f64 = utxos
+            .utxos
+            .iter()
+            .filter(|u| u.asset_id.as_deref() == Some(asset_id))
+            .filter_map(|u| u.amount.parse::<f64>().ok())
+            .sum();
+        Ok(format!("{:.10}", total))
     }
 
     /// POST /v1/nft/burn-batch-simple — Burn multiple NFTs in one block

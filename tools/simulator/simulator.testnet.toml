@@ -22,6 +22,7 @@ ledger_id = "eden"
 network_id = "eden-net"
 symbol = "EDN"
 divisor = 19300000000
+gas_pool_deposit = "50000"             # PMS deposited into Edenite gas pool (anti-spam, testnet charge)
 
 [coordinator]
 private_key_hex = "env:PMS_COORDINATOR_KEY"

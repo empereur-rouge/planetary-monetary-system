@@ -2,7 +2,9 @@ use crate::client::DagClient;
 use crate::error::SimResult;
 use crate::game::{CubeAttributes, GameEngine};
 use crate::metrics::MetricEvent;
-use crate::types::*;
+use crate::types::{
+    MintNftRequest, NftMetadataSim, SendSimpleRequest, WalletInfo,
+};
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,7 +13,12 @@ use tokio::sync::{mpsc, RwLock, Semaphore};
 /// Max concurrent API calls during bootstrap
 const BOOTSTRAP_CONCURRENCY: usize = 30;
 
-/// Bootstrap funder: faucets PMS to agents and optionally mints cube NFTs
+/// Bootstrap funder: coordinator-based PMS distribution + optional cube NFT minting.
+///
+/// Flow:
+/// 1. Faucet a large sum to the coordinator wallet
+/// 2. Coordinator sends `faucet_amount` PMS to each agent via send_simple
+/// 3. Optionally mint cube NFTs for game-enabled agents
 pub struct Funder;
 
 impl Funder {
@@ -19,7 +26,7 @@ impl Funder {
         Self
     }
 
-    /// Fund all agents in parallel via faucet, then mint cube NFTs in parallel.
+    /// Fund all agents via coordinator distribution, then mint cube NFTs in parallel.
     /// Returns a map of agent_name → Vec<cube_token_id>.
     pub async fn fund_all_with_cubes(
         &self,
@@ -28,26 +35,58 @@ impl Funder {
         faucet_amount: &str,
         metrics_tx: &mpsc::Sender<MetricEvent>,
         game_engine: Option<&Arc<RwLock<GameEngine>>>,
+        coordinator_wallet: &WalletInfo,
     ) -> SimResult<HashMap<String, Vec<String>>> {
-        // ── Phase 1: Parallel faucet ──
-        tracing::info!("Phase 1/2: Fauceting {} agents ({}x concurrent)...", agents.len(), BOOTSTRAP_CONCURRENCY);
+        let per_agent: f64 = faucet_amount.parse().unwrap_or(50.0);
+        // Faucet enough for all agents + buffer for fees and future refuels
+        let total_needed = per_agent * agents.len() as f64 * 3.0; // 3x buffer
+        let total_str = format!("{:.2}", total_needed);
+
+        // ── Phase 1a: Faucet to coordinator wallet ──
+        tracing::info!(
+            "Phase 1/2: Fauceting {} PMS to coordinator ({} agents × {} PMS × 3x buffer)...",
+            total_str,
+            agents.len(),
+            faucet_amount
+        );
+        let faucet_resp = client.faucet(&coordinator_wallet.address, &total_str).await?;
+        let block_id = faucet_resp.data.block_id.unwrap_or_default();
+        tracing::info!(
+            "[coordinator] Faucet {} PMS → block {}",
+            total_str,
+            &block_id[..16.min(block_id.len())]
+        );
+
+        // ── Phase 1b: Coordinator distributes to each agent via send_simple ──
+        tracing::info!(
+            "Phase 1/2: Coordinator distributing {} PMS to {} agents ({}x concurrent)...",
+            faucet_amount,
+            agents.len(),
+            BOOTSTRAP_CONCURRENCY
+        );
         let sem = Arc::new(Semaphore::new(BOOTSTRAP_CONCURRENCY));
-        let mut faucet_tasks = Vec::with_capacity(agents.len());
+        let mut send_tasks = Vec::with_capacity(agents.len());
 
         for (name, wallet, _) in agents {
             let client = client.clone();
-            let addr = wallet.address.clone();
+            let to_addr = wallet.address.clone();
             let amount = faucet_amount.to_string();
             let name = name.clone();
             let metrics_tx = metrics_tx.clone();
             let sem = sem.clone();
+            let coord_key = coordinator_wallet.private_key_b64.clone();
 
-            faucet_tasks.push(tokio::spawn(async move {
+            send_tasks.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
-                let faucet_resp = client.faucet(&addr, &amount).await?;
-                let block_id = faucet_resp.data.block_id.unwrap_or_default();
+                let resp = client.send_simple(&SendSimpleRequest {
+                    private_key_b64: coord_key,
+                    to: to_addr.clone(),
+                    amount: amount.clone(),
+                    asset_id: None,
+                }).await?;
+                let block_id = resp.data.block_id.unwrap_or_default();
                 tracing::info!(
-                    "[{}] Faucet {} PMS -> block {}",
+                    "[coordinator → {}] Sent {} PMS (block {})",
                     name,
                     amount,
                     &block_id[..16.min(block_id.len())]
@@ -60,23 +99,23 @@ impl Funder {
             }));
         }
 
-        // Await all faucet tasks
-        let mut faucet_errors = 0usize;
-        for task in faucet_tasks {
+        // Await all send tasks
+        let mut send_errors = 0usize;
+        for task in send_tasks {
             match task.await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    tracing::warn!("Faucet error: {:#}", e);
-                    faucet_errors += 1;
+                    tracing::warn!("Coordinator send error: {:#}", e);
+                    send_errors += 1;
                 }
                 Err(e) => {
-                    tracing::warn!("Faucet task panic: {:#}", e);
-                    faucet_errors += 1;
+                    tracing::warn!("Coordinator send task panic: {:#}", e);
+                    send_errors += 1;
                 }
             }
         }
-        if faucet_errors > 0 {
-            tracing::warn!("{} faucet errors (continuing with cube minting)", faucet_errors);
+        if send_errors > 0 {
+            tracing::warn!("{} coordinator send errors (continuing with cube minting)", send_errors);
         }
 
         // ── Phase 2: Parallel cube minting ──
@@ -118,9 +157,9 @@ impl Funder {
                 BOOTSTRAP_CONCURRENCY
             );
 
-            // Get the main_client from game engine (read lock, quick)
+            // Get the game_client from game engine (admin auth for custom ledger minting)
             let ge = engine.read().await;
-            let main_client = ge.main_client().clone();
+            let game_client = ge.game_client().clone();
             let divisor = ge.divisor;
             drop(ge);
 
@@ -129,7 +168,7 @@ impl Funder {
             let mut mint_tasks = Vec::with_capacity(total_cubes);
 
             for (agent_name, owner_addr, owner_x25519, token_id, attrs) in &cube_specs {
-                let client = main_client.clone();
+                let client = game_client.clone();
                 let token_id = token_id.clone();
                 let owner_addr = owner_addr.clone();
                 let owner_x25519 = owner_x25519.clone();
@@ -140,7 +179,7 @@ impl Funder {
                 mint_tasks.push(tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
                     let extra = serde_json::to_string(&attrs).unwrap_or_default();
-                    client.mint_nft(&MintNftRequest {
+                    client.admin_mint_nft(&MintNftRequest {
                         token_id: token_id.clone(),
                         owner_address: owner_addr,
                         owner_x25519_pubkey: owner_x25519,

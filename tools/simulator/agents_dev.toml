@@ -20,7 +20,8 @@ send_probability = 0.3
 [agents.game]
 enabled = true
 cubes_per_agent = 5
-cubes_per_remint = 3
+cubes_remint_min = 80
+cubes_remint_max = 120
 edn_send_min_pct = 10.0
 edn_send_max_pct = 50.0
 
@@ -57,7 +58,8 @@ send_probability = 0.0
 [agents.game]
 enabled = true
 cubes_per_agent = 10
-cubes_per_remint = 5
+cubes_remint_min = 80
+cubes_remint_max = 120
 edn_send_min_pct = 5.0
 edn_send_max_pct = 20.0
 
@@ -79,7 +81,8 @@ send_probability = 0.8
 [agents.game]
 enabled = true
 cubes_per_agent = 20
-cubes_per_remint = 10
+cubes_remint_min = 80
+cubes_remint_max = 120
 edn_send_min_pct = 30.0
 edn_send_max_pct = 80.0
 
@@ -116,7 +119,8 @@ send_probability = 0.4
 [agents.game]
 enabled = true
 cubes_per_agent = 3
-cubes_per_remint = 2
+cubes_remint_min = 80
+cubes_remint_max = 120
 edn_send_min_pct = 40.0
 edn_send_max_pct = 90.0
 

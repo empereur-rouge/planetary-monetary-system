@@ -346,7 +346,7 @@ fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState>) {
     let nft_routes = Router::new()
         .route("/v1/nft/{token_id}", get(get_nft))
         .route("/v1/wallet/{address}/nfts", get(get_nfts_by_owner))
-        .route("/v1/nft/mint", post(mint_nft))
+        .route("/v1/nft/mint", post(mint_nft)) // Main ledger: API-key auth
         .route("/v1/nft/burn", post(burn_nft))
         .route("/v1/nft/burn-simple", post(burn_nft_simple))
         .route("/v1/nft/burn-batch-simple", post(burn_nft_batch_simple))
@@ -421,13 +421,18 @@ async fn admin_revoke_api_key(
     }
 }
 
-/// Builds per-ledger admin routes (token management, faucet).
+/// Builds per-ledger admin routes (token management, faucet, NFT mint).
 /// Uses admin-token-only middleware (no ConnectInfo needed inside oneshot).
+///
+/// **Security**: NFT minting on custom ledgers requires admin auth to prevent
+/// unauthorized NFT creation that could exploit smart contracts (e.g. spoofing
+/// nft_type to trigger contract refunds).
 fn build_ledger_admin_routes(state: AppState) -> Router {
     Router::new()
         .route("/admin/tokens/create", post(admin_create_token))
         .route("/admin/tokens/mint", post(admin_mint_token))
         .route("/admin/faucet", post(faucet_mint))
+        .route("/admin/nft/mint", post(mint_nft)) // NFT mint admin-only on custom ledgers
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_admin_token,
@@ -483,7 +488,13 @@ async fn dynamic_ledger_handler(
     ));
 
     // Build a router with ledger-scoped routes + per-ledger admin routes
+    // **Security fix**: Apply require_api_key to auth routes on custom ledgers
+    // (was missing — auth routes were previously unprotected on per-ledger handler)
     let (public_routes, auth_routes) = build_ledger_scoped_routes();
+    let auth_routes = auth_routes.route_layer(middleware::from_fn_with_state(
+        ledger_state.clone(),
+        require_api_key,
+    ));
     let router = public_routes
         .merge(auth_routes)
         .with_state(ledger_state.clone())

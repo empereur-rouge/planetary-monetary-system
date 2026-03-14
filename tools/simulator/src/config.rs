@@ -89,6 +89,14 @@ pub struct GameConfig {
     /// Divisor for the edenite reward formula (default: 19_300_000_000)
     #[serde(default)]
     pub divisor: Option<f64>,
+    /// PMS amount to deposit into the ledger's gas pool at setup (anti-spam).
+    /// Default: "10000" PMS — enough for ~10M transactions at 0.001 gas/tx.
+    #[serde(default = "default_gas_pool_deposit")]
+    pub gas_pool_deposit: String,
+}
+
+fn default_gas_pool_deposit() -> String {
+    "10000".to_string()
 }
 
 fn default_faucet_amount() -> String {
@@ -129,9 +137,12 @@ pub struct AgentGameConfig {
     /// Number of cubes to mint per agent at startup (default: 5)
     #[serde(default = "default_cubes_per_agent")]
     pub cubes_per_agent: usize,
-    /// Number of cubes to re-mint when depleted (default: 3)
-    #[serde(default = "default_cubes_per_remint")]
-    pub cubes_per_remint: usize,
+    /// Min cubes to re-mint when depleted (default: 80)
+    #[serde(default = "default_cubes_remint_min")]
+    pub cubes_remint_min: usize,
+    /// Max cubes to re-mint when depleted (default: 120)
+    #[serde(default = "default_cubes_remint_max")]
+    pub cubes_remint_max: usize,
     /// Min % of EDN balance to send (default: 10.0)
     #[serde(default = "default_edn_send_min_pct")]
     pub edn_send_min_pct: f64,
@@ -145,7 +156,8 @@ impl Default for AgentGameConfig {
         Self {
             enabled: true,
             cubes_per_agent: 5,
-            cubes_per_remint: 3,
+            cubes_remint_min: 80,
+            cubes_remint_max: 120,
             edn_send_min_pct: 10.0,
             edn_send_max_pct: 50.0,
         }
@@ -155,8 +167,11 @@ impl Default for AgentGameConfig {
 fn default_cubes_per_agent() -> usize {
     5
 }
-fn default_cubes_per_remint() -> usize {
-    3
+fn default_cubes_remint_min() -> usize {
+    80
+}
+fn default_cubes_remint_max() -> usize {
+    120
 }
 fn default_edn_send_min_pct() -> f64 {
     10.0

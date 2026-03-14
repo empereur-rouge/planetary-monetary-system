@@ -26,6 +26,8 @@ pub struct AgentContext {
     pub cancel: CancellationToken,
     /// Optional game engine for Edenite cube NFTs
     pub game_engine: Option<Arc<RwLock<GameEngine>>>,
+    /// Coordinator wallet for PMS distribution (agents request refuel from coordinator)
+    pub coordinator_wallet: Option<WalletInfo>,
 }
 
 #[derive(Debug, Clone)]
