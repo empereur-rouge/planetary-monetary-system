@@ -16,6 +16,9 @@ Thumbs.db
 .vscode/
 *.swp
 
+# Obsidian (user-specific workspace/appearance settings)
+.obsidian/
+
 # Fichiers sensibles et Configuration
 backups/
 secrets/

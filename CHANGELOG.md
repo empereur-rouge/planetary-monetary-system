@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] - 2026-03-14 — Documentation Obsidian Vault
+
+### Added
+- **docs**: Obsidian vault with 28 feature documentation files in `documentation/features/`.
+- **docs**: Map of Content (`documentation/MOC.md`) indexing all fiches by category (Infrastructure, Données, Protocole & Consensus, Fonctionnalités).
+- **docs**: API reference docs in `documentation/api/` (15 endpoint category files).
+- **docs**: Added `.obsidian/` to `.gitignore` (user-specific workspace settings).
+- **rules**: Documentation rules in CLAUDE.md — mandatory Obsidian fiches and rustdoc on all public items.
+- **rules**: Changelog update rule in CLAUDE.md — mandatory update after every conversation with code changes.
+
+---
+
 ## [0.3.0] - Unreleased — Economics System
 
 ### Economics Features
