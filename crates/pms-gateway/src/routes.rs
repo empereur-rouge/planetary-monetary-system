@@ -1,3 +1,4 @@
+use crate::health_checker::ServicesSnapshot;
 use crate::GatewayState;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
@@ -151,6 +152,13 @@ pub async fn get_config(State(state): State<GatewayState>) -> impl IntoResponse 
             }),
         ),
     }
+}
+
+/// Returns the cached snapshot of all monitored infrastructure services.
+/// The snapshot is updated by the background health checker every ~20s.
+pub async fn services_status(State(state): State<GatewayState>) -> Json<ServicesSnapshot> {
+    let snapshot = state.services_cache.read().await;
+    Json(snapshot.clone())
 }
 
 /// Catch-all fallback: proxies any unmatched request to Engine.

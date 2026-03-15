@@ -3,6 +3,7 @@
     import { apiCall, ledgerApiCall } from "./api";
     import { nodeStatus, networkPeers, adminToken, ledgerList, selectedLedgerId, tokenList, type LedgerSummary, type TokenInfo } from "./stores";
     import PerformanceChart from "./PerformanceChart.svelte";
+    import ServiceStatusBar from "./ServiceStatusBar.svelte";
     import { fade, fly } from "svelte/transition";
 
     let interval: any;
@@ -218,6 +219,7 @@
                     >{nodeInfo.role || "Node"}</span
                 >
             {/if}
+            <ServiceStatusBar />
         </div>
 
         {#if ledgers.length > 1}

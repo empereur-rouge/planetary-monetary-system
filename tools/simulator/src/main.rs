@@ -33,20 +33,61 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli: Cli = clap::Parser::parse();
 
-    // 1. Load config + external agent files
-    let config_str = std::fs::read_to_string(&cli.config)
-        .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", cli.config, e))?;
-    let mut config: SimConfig = toml::from_str(&config_str)?;
-    config.resolve_secrets();
-    config
-        .load_all_agents(&cli.config)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    // 2. Init tracing (stderr to not interfere with TUI)
+    // 1. Init tracing first (so retry logs are visible)
     tracing_subscriber::fmt()
         .with_env_filter("pms_simulator=info")
         .with_writer(std::io::stderr)
         .init();
+
+    // 2. Load config + validate credentials with backoff retry
+    //    If required env vars (PMS_API_KEY, PMS_COORDINATOR_KEY, PMS_COORDINATOR_ADDR,
+    //    PMS_ADMIN_TOKEN) are missing, the simulator retries with increasing delay
+    //    instead of crash-looping (which fills the disk with containerd snapshots).
+    //    Schedule: 30s, 45s, 60s, 75s, ... (+15s per attempt), max 10 attempts.
+    let mut config: SimConfig;
+    let mut attempt: u64 = 0;
+    loop {
+        let config_str = std::fs::read_to_string(&cli.config)
+            .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", cli.config, e))?;
+        config = toml::from_str(&config_str)?;
+        config.resolve_secrets();
+        config
+            .load_all_agents(&cli.config)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let errors = config.validate_credentials();
+        if errors.is_empty() {
+            if attempt > 0 {
+                tracing::info!("Credentials resolved on attempt {}/{}", attempt + 1, config::MAX_STARTUP_ATTEMPTS);
+            }
+            break;
+        }
+
+        attempt += 1;
+        if attempt >= config::MAX_STARTUP_ATTEMPTS {
+            tracing::error!(
+                "FATAL: Required credentials still missing after {} attempts. Giving up.\n  {}",
+                config::MAX_STARTUP_ATTEMPTS,
+                errors.join("\n  ")
+            );
+            tracing::error!(
+                "Fix the environment variables and restart the simulator manually:\n  \
+                 docker compose -f docker-compose.testnet.yml up -d --force-recreate pms-simulator"
+            );
+            // Exit 0 so `restart: on-failure` does NOT restart the container.
+            std::process::exit(0);
+        }
+
+        let delay = config::RETRY_BASE_DELAY_SECS + config::RETRY_INCREMENT_SECS * (attempt - 1);
+        tracing::warn!(
+            "Missing required credentials (attempt {}/{}): {}. Retrying in {}s...",
+            attempt,
+            config::MAX_STARTUP_ATTEMPTS,
+            errors.join(", "),
+            delay
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+    }
 
     tracing::info!(
         "Loaded {} agent definitions ({} from inline, {} from agent_files)",

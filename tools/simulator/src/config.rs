@@ -347,12 +347,69 @@ impl SimConfig {
     pub fn needs_gemini(&self) -> bool {
         self.agents.iter().any(|a| matches!(a.behavior, AgentBehavior::Smart { .. }))
     }
+
+    /// Validate that all required credentials are present and non-empty.
+    /// Returns a list of error messages for each missing credential.
+    /// Call this after [`resolve_secrets()`] to catch unresolved `env:` values.
+    pub fn validate_credentials(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        // API key is required for gateway authentication
+        match &self.server.api_key {
+            None => errors.push("server.api_key is not set".to_string()),
+            Some(key) if key.is_empty() || key.starts_with("env:") => {
+                let var = key.strip_prefix("env:").unwrap_or("PMS_API_KEY");
+                errors.push(format!("server.api_key: env var {var} is not set or empty"));
+            }
+            _ => {}
+        }
+
+        // Admin token is required for coordinator operations
+        match &self.server.admin_token {
+            None => errors.push("server.admin_token is not set".to_string()),
+            Some(tok) if tok.is_empty() || tok.starts_with("env:") => {
+                let var = tok.strip_prefix("env:").unwrap_or("PMS_ADMIN_TOKEN");
+                errors.push(format!("server.admin_token: env var {var} is not set or empty"));
+            }
+            _ => {}
+        }
+
+        // Coordinator credentials are required for PMS distribution to agents
+        match &self.coordinator {
+            None => errors.push("[coordinator] section is missing from config".to_string()),
+            Some(coord) => {
+                if coord.private_key_hex.is_empty() || coord.private_key_hex.starts_with("env:") {
+                    let var = coord.private_key_hex.strip_prefix("env:").unwrap_or("PMS_COORDINATOR_KEY");
+                    errors.push(format!("coordinator.private_key_hex: env var {var} is not set or empty"));
+                }
+                if coord.address.is_empty() || coord.address.starts_with("env:") {
+                    let var = coord.address.strip_prefix("env:").unwrap_or("PMS_COORDINATOR_ADDR");
+                    errors.push(format!("coordinator.address: env var {var} is not set or empty"));
+                }
+            }
+        }
+
+        errors
+    }
 }
 
+/// Resolve `env:VAR_NAME` syntax from environment variables.
+/// Silently keeps the original value if env var is not found (non-env: values pass through).
+/// Use [`SimConfig::validate_credentials`] after resolving to check for missing required values.
 fn resolve_env(val: &mut String) {
     if let Some(stripped) = val.strip_prefix("env:") {
-        if let Ok(env_val) = std::env::var(stripped) {
-            *val = env_val;
+        match std::env::var(stripped) {
+            Ok(env_val) if !env_val.is_empty() => *val = env_val,
+            _ => {
+                // Keep the "env:VAR" string so validate_credentials() can detect it
+            }
         }
     }
 }
+
+/// Maximum number of startup attempts before giving up.
+pub const MAX_STARTUP_ATTEMPTS: u64 = 10;
+/// Base delay between startup attempts (seconds). Increases by RETRY_INCREMENT each attempt.
+pub const RETRY_BASE_DELAY_SECS: u64 = 30;
+/// Seconds added to delay on each successive attempt.
+pub const RETRY_INCREMENT_SECS: u64 = 15;

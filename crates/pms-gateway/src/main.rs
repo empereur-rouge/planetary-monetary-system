@@ -14,6 +14,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{fmt, EnvFilter};
 
 mod client;
+mod health_checker;
 mod routes;
 
 /// Construit le layer CORS en fonction des origines configurées.
@@ -97,6 +98,8 @@ impl GatewaySettings {
 pub struct GatewayState {
     pub engine_client: Arc<client::EngineClient>,
     pub settings: Arc<GatewaySettings>,
+    /// Cached snapshot of infrastructure service health statuses.
+    pub services_cache: health_checker::SharedServicesCache,
 }
 
 #[tokio::main]
@@ -124,9 +127,19 @@ async fn main() -> Result<()> {
     );
 
     let engine_client = Arc::new(client::EngineClient::new(&settings.engine_url));
+
+    // Initialize the services health cache and spawn the background checker
+    let services_cache: health_checker::SharedServicesCache =
+        Arc::new(tokio::sync::RwLock::new(health_checker::ServicesSnapshot {
+            services: vec![],
+            checked_at: 0,
+        }));
+    health_checker::spawn_health_checker(services_cache.clone());
+
     let state = GatewayState {
         engine_client,
         settings: Arc::new(settings.clone()),
+        services_cache,
     };
 
     // NOTE: per_second(N) in tower-governor 0.8 means "period of N seconds"
@@ -141,10 +154,11 @@ async fn main() -> Result<()> {
             .unwrap(),
     );
 
-    // Health routes (no rate limiting)
+    // Health routes (no rate limiting, no auth — cached data, not sensitive)
     let health_routes = Router::new()
         .route("/livez", get(|| async { "ok" }))
         .route("/healthz", get(routes::healthz))
+        .route("/services/status", get(routes::services_status))
         .with_state(state.clone());
 
     // API routes (with rate limiting)

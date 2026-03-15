@@ -58,6 +58,7 @@ updated: 2026-03-15
 | [[simulator]] | Simulateur 252 agents, game engine Edenite, stress test |
 | [[node-rewards]] | Distribution des récompenses aux nœuds, fee pool, block counts |
 | [[streaming-api]] | Endpoints SSE, broadcast channels, streaming temps réel |
+| [[service-monitoring]] | Health checker background, status bar dashboard, polling services |
 
 ## API
 
@@ -85,7 +86,7 @@ Voir le dossier [[api/README|documentation/api/]] pour la référence complète 
 
 | Système | Fichier | Valeur actuelle |
 |---------|---------|-----------------|
-| Software | `bin/Cargo.toml` | `0.4.3` |
+| Software | `bin/Cargo.toml` | `0.5.0` |
 | Schema DB | `crates/pms-storage/src/migrations.rs` → `CURRENT_VER` | `8` |
 | DAG Protocol | `crates/pms-storage/src/migrations.rs` → `DAG_VERSION` | `1.2.0` |
 | P2P Protocol | `crates/pms-config/src/config.rs` → `protocol_version` | `1` |

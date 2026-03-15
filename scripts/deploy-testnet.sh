@@ -190,6 +190,19 @@ fi
 echo ""
 echo -e "${YELLOW}[4/7] Transferring files to VPS...${NC}"
 
+# Stop services BEFORE uploading to free disk space and prevent crash-loop
+# from filling the disk during SCP transfer (containerd snapshots grow with each restart).
+if [ "$DO_BUILD" = "true" ]; then
+    echo -e "   Stopping services before upload (prevents disk fill during transfer)..."
+    ssh -T $SSH_OPTS "$VPS_USER@$VPS_IP" "
+        cd $REMOTE_DIR 2>/dev/null || true
+        PMS_ADMIN_TOKEN='placeholder' docker compose -f $COMPOSE_FILE down --remove-orphans 2>/dev/null || true
+        docker rm -f pms-engine-testnet pms-gateway-testnet pms-caddy-testnet pms-prometheus-testnet pms-simulator-testnet 2>/dev/null || true
+        docker image prune -f 2>/dev/null || true
+    "
+    echo -e "   ${GREEN}Services stopped, disk cleaned.${NC}"
+fi
+
 # Ensure remote directories exist
 ssh -T $SSH_OPTS "$VPS_USER@$VPS_IP" "mkdir -p $REMOTE_DIR/etc/config $REMOTE_DIR/etc/pms $REMOTE_DIR/secrets/tls $REMOTE_DIR/etc/prometheus $REMOTE_DIR/tools/simulator"
 
@@ -214,37 +227,43 @@ fi
 
 scp -q $SSH_OPTS "$CONFIG_FILE" "$VPS_USER@$VPS_IP:$REMOTE_DIR/$CONFIG_FILE"
 
-# Restore VPS-specific config values if we saved them
+# Restore VPS-specific config values if we saved them.
+# IMPORTANT: Use heredocs (<< EOF) instead of ssh "..." for the sed commands.
+# TOML values contain double quotes (e.g. coordinator_public_key = "02abc...").
+# In ssh "...", those inner " break the shell quoting and get stripped,
+# producing invalid TOML (key = 02abc... without quotes) → engine crash on restart.
+# In heredocs, " is always a literal character — no quoting conflict.
 if [ "$DO_INIT_COORD" = "false" ] && [ -n "$SAVED_COORD_KEY" ]; then
     echo -e "   Preserving VPS config values..."
-    ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" "
-        sed -i 's|^coordinator_public_key = .*|${SAVED_COORD_KEY}|' $REMOTE_DIR/$CONFIG_FILE
-        sed -i 's|^coordinator_x25519_public_key = .*|${SAVED_X25519_KEY}|' $REMOTE_DIR/$CONFIG_FILE
-    "
+    ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" << RESTORE_KEYS_EOF
+sed -i 's|^coordinator_public_key = .*|$SAVED_COORD_KEY|' $REMOTE_DIR/$CONFIG_FILE
+sed -i 's|^coordinator_x25519_public_key = .*|$SAVED_X25519_KEY|' $REMOTE_DIR/$CONFIG_FILE
+RESTORE_KEYS_EOF
     # Restore wallet_addresses (fee recipient)
     if [ -n "$SAVED_WALLET_ADDRS" ]; then
-        ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" \
-            "sed -i 's|^wallet_addresses = .*|${SAVED_WALLET_ADDRS}|' $REMOTE_DIR/$CONFIG_FILE"
+        ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" << RESTORE_WALLET_EOF
+sed -i 's|^wallet_addresses = .*|$SAVED_WALLET_ADDRS|' $REMOTE_DIR/$CONFIG_FILE
+RESTORE_WALLET_EOF
     fi
     # Restore treasury_addresses (fee distribution)
     if [ -n "$SAVED_TREASURY_ADDRS" ]; then
-        ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" "
-            if grep -q '^treasury_addresses' $REMOTE_DIR/$CONFIG_FILE; then
-                sed -i 's|^treasury_addresses = .*|${SAVED_TREASURY_ADDRS}|' $REMOTE_DIR/$CONFIG_FILE
-            else
-                sed -i '/^\[fees\]/a ${SAVED_TREASURY_ADDRS}' $REMOTE_DIR/$CONFIG_FILE
-            fi
-        "
+        ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" << RESTORE_TREASURY_EOF
+if grep -q '^treasury_addresses' $REMOTE_DIR/$CONFIG_FILE; then
+    sed -i 's|^treasury_addresses = .*|$SAVED_TREASURY_ADDRS|' $REMOTE_DIR/$CONFIG_FILE
+else
+    sed -i '/^\[fees\]/a $SAVED_TREASURY_ADDRS' $REMOTE_DIR/$CONFIG_FILE
+fi
+RESTORE_TREASURY_EOF
     fi
     # Restore signer_pubkeys (mint policy authorization)
     if [ -n "$SAVED_SIGNER_PUBKEYS" ]; then
-        ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" "
-            if grep -q '^signer_pubkeys' $REMOTE_DIR/$CONFIG_FILE; then
-                sed -i 's|^signer_pubkeys = .*|${SAVED_SIGNER_PUBKEYS}|' $REMOTE_DIR/$CONFIG_FILE
-            else
-                sed -i '/^\[admin\]/a ${SAVED_SIGNER_PUBKEYS}' $REMOTE_DIR/$CONFIG_FILE
-            fi
-        "
+        ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" << RESTORE_SIGNER_EOF
+if grep -q '^signer_pubkeys' $REMOTE_DIR/$CONFIG_FILE; then
+    sed -i 's|^signer_pubkeys = .*|$SAVED_SIGNER_PUBKEYS|' $REMOTE_DIR/$CONFIG_FILE
+else
+    sed -i '/^\[admin\]/a $SAVED_SIGNER_PUBKEYS' $REMOTE_DIR/$CONFIG_FILE
+fi
+RESTORE_SIGNER_EOF
     fi
     echo -e "   ${GREEN}VPS config values preserved.${NC}"
 fi
@@ -444,16 +463,12 @@ echo ""
 # --- Deploy ---
 if [ "\$DO_BUILD" = "true" ]; then
 
-    # Clean reset if requested
+    # Services already stopped in step 4 (before upload to free disk space).
+    # Clean reset removes Docker VOLUMES (RocksDB data, Caddy certs, Prometheus).
     if [ "\$DO_CLEAN_RESET" = "true" ]; then
-        echo -e "\${RED}   Cleaning ALL testnet data...\${NC}"
+        echo -e "\${RED}   Cleaning ALL testnet data (volumes)...\${NC}"
         PMS_ADMIN_TOKEN="\$ADMIN_TOKEN" docker compose -f \$COMPOSE_FILE down -v --remove-orphans 2>/dev/null || true
-    else
-        PMS_ADMIN_TOKEN="\$ADMIN_TOKEN" docker compose -f \$COMPOSE_FILE down --remove-orphans 2>/dev/null || true
     fi
-
-    # Remove old containers
-    docker rm -f pms-engine-testnet pms-gateway-testnet pms-caddy-testnet pms-prometheus-testnet pms-simulator-testnet 2>/dev/null || true
 
     # --- Coordinator Init ---
     if [ "\$DO_INIT_COORD" = "true" ]; then
@@ -542,15 +557,18 @@ if [ "\$DO_BUILD" = "true" ]; then
         echo -e "   \${YELLOW}WARNING: Could not extract coordinator credentials.\${NC}"
     fi
 
-    # Start all services
+    # Start core services FIRST (without simulator).
+    # The simulator requires PMS_API_KEY which doesn't exist yet —
+    # it's created via the Engine API below. Starting the simulator now
+    # would cause it to enter its retry/backoff loop unnecessarily.
     echo ""
-    echo -e "\${YELLOW}   Starting all services...\${NC}"
+    echo -e "\${YELLOW}   Starting core services (Engine, Gateway, Caddy, Prometheus)...\${NC}"
     export PMS_ADMIN_TOKEN="\$ADMIN_TOKEN"
     export PMS_COORDINATOR_KEY="\$COORD_PRIV_KEY"
     export PMS_COORDINATOR_ADDR="\$COORD_ADDR"
-    docker compose -f \$COMPOSE_FILE up -d --force-recreate
+    docker compose -f \$COMPOSE_FILE up -d --force-recreate pms-engine pms-gateway caddy prometheus
 
-    echo -e "\${GREEN}   Containers started.\${NC}"
+    echo -e "\${GREEN}   Core services started.\${NC}"
 
     # Wait for Engine
     echo "   Waiting for Engine..."
@@ -622,29 +640,36 @@ if [ "\$DO_BUILD" = "true" ]; then
         fi
     fi
 
-    if [ -n "\$SDK_API_KEY" ]; then
-        # Restart simulator with the API key + coordinator credentials
-        echo -e "   \${YELLOW}Restarting simulator with API key...\${NC}"
+    # Start simulator ONLY if all required credentials are available
+    if [ -n "\$SDK_API_KEY" ] && [ -n "\$COORD_PRIV_KEY" ] && [ -n "\$COORD_ADDR" ]; then
+        echo -e "   \${YELLOW}Starting simulator with credentials...\${NC}"
         export PMS_API_KEY="\$SDK_API_KEY"
         export PMS_COORDINATOR_KEY="\$COORD_PRIV_KEY"
         export PMS_COORDINATOR_ADDR="\$COORD_ADDR"
         docker compose -f \$COMPOSE_FILE up -d --force-recreate pms-simulator
-    fi
 
-    # Wait for Simulator (now has API key)
-    echo "   Waiting for Simulator..."
-    for i in \$(seq 1 30); do
-        if curl -sf http://127.0.0.1:9090/ > /dev/null 2>&1; then
-            echo -e "   \${GREEN}Simulator is UP\${NC}"
-            break
-        fi
-        if [ \$i -eq 30 ]; then
-            echo -e "   \${YELLOW}Simulator not responding yet.\${NC}"
-            echo "   Check logs: docker logs -f pms-simulator-testnet"
-        fi
-        echo -n "."
-        sleep 1
-    done
+        # Wait for Simulator
+        echo "   Waiting for Simulator..."
+        for i in \$(seq 1 30); do
+            if curl -sf http://127.0.0.1:9090/ > /dev/null 2>&1; then
+                echo -e "   \${GREEN}Simulator is UP\${NC}"
+                break
+            fi
+            if [ \$i -eq 30 ]; then
+                echo -e "   \${YELLOW}Simulator not responding yet.\${NC}"
+                echo "   Check logs: docker logs -f pms-simulator-testnet"
+            fi
+            echo -n "."
+            sleep 1
+        done
+    else
+        echo -e "   \${RED}Simulator NOT started — missing required credentials:\${NC}"
+        [ -z "\$SDK_API_KEY" ] && echo -e "   \${RED}  - PMS_API_KEY (SDK API key creation failed)\${NC}"
+        [ -z "\$COORD_PRIV_KEY" ] && echo -e "   \${RED}  - PMS_COORDINATOR_KEY (coordinator.json missing/invalid)\${NC}"
+        [ -z "\$COORD_ADDR" ] && echo -e "   \${RED}  - PMS_COORDINATOR_ADDR (coordinator.json missing/invalid)\${NC}"
+        echo -e "   \${YELLOW}Fix the issue then start manually:\${NC}"
+        echo "   PMS_ADMIN_TOKEN=xxx PMS_API_KEY=xxx PMS_COORDINATOR_KEY=xxx PMS_COORDINATOR_ADDR=xxx docker compose -f \$COMPOSE_FILE up -d pms-simulator"
+    fi
     echo ""
 
     # --- Containerd snapshot cleanup ---

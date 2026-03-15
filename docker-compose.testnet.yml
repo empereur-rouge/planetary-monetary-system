@@ -82,6 +82,8 @@ services:
       DASHBOARD_PATH: /app/dashboard
       RATE_LIMIT_RPS: 50000
       BURST_SIZE: 100000
+      SERVICES_MONITOR: "Engine|https://pms-engine:8080/internal/health|ok,Prometheus|http://prometheus:9090/-/healthy|,Simulator|http://pms-simulator:9090/|,Caddy|http://caddy:80|"
+      SERVICES_CHECK_INTERVAL: "20"
     volumes:
       - ./secrets/tls:/app/tls:ro
     expose:
@@ -184,7 +186,10 @@ services:
       retries: 5
     networks:
       - pms-testnet-public
-    restart: unless-stopped
+    # on-failure: only restart on non-zero exit. The simulator exits with code 0
+    # after exhausting 10 startup attempts (missing credentials), so Docker won't
+    # restart it endlessly. Operational crashes (exit 1) still get restarted.
+    restart: on-failure
 
 # ---------------------------------------------------------------------------
 # Networks

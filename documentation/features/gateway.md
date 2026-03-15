@@ -2,7 +2,7 @@
 tags: [feature, infrastructure]
 created: 2026-03-14
 updated: 2026-03-15
-version: v0.4.3
+version: v0.5.0
 ---
 
 # Gateway (Proxy Public)
@@ -16,6 +16,7 @@ Le Gateway est le point d'entree public unique du reseau PMS. C'est un reverse p
 3. **Streaming SSE** : deux endpoints de streaming temps reel (`/blocks/stream` et `/v1/wallet/{address}/activity/stream`) sont proxifies en mode streaming (non buffered) pour maintenir la connexion SSE ouverte.
 4. **Forward d'authentification** : les headers `Authorization` et `X-API-Key` sont transmis au Engine qui applique la validation (le Gateway ne valide pas lui-meme les cles).
 5. **TLS termination** : support natif HTTPS via `axum-server` + `rustls` (certificats PEM configurables). En production, un Caddy en amont gere Let's Encrypt et proxifie vers le Gateway en TLS interne.
+6. **Health monitoring** (v0.5.0) : background health checker qui poll tous les services d'infrastructure (Engine, Prometheus, Simulator, Caddy) toutes les 20s et cache le resultat. Endpoint `GET /services/status` pour le dashboard. Voir [[service-monitoring]].
 
 Le Gateway sert egalement le dashboard admin en fichiers statiques (SPA React) quand `DASHBOARD_PATH` est configure.
 

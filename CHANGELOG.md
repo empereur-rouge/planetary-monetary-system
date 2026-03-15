@@ -7,15 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.0] - 2026-03-15 — Service Status Monitoring + Deploy Fixes
+
+### Added
+- **feat(gateway)**: Background infrastructure health checker. Polls Engine, Prometheus, Simulator, and Caddy every 20s with concurrent requests and caches the results. New endpoint `GET /services/status` returns a JSON snapshot with service name, status (`up`/`down`/`degraded`), latency, and optional detail (e.g. block count for Engine). Configurable via `SERVICES_MONITOR` and `SERVICES_CHECK_INTERVAL` env vars.
+- **feat(dashboard)**: Service status bar in pms-dashboard (Svelte). Displays colored dots (green/red/orange) with service names in the header top-left area. Self-contained component with 30s polling to `/services/status`. Responsive: hides names on mobile, shows only dots.
+- **feat(simulator)**: Credential validation with backoff retry. `SimConfig::validate_credentials()` checks all required secrets (API key, admin token, coordinator key/address). Startup loop retries up to 10 times with increasing delays (30s, 45s, 60s, ... +15s per attempt). Exits with code 0 after exhaustion so `on-failure` restart policy stops.
+
+### Fixed
+- **fix(deploy)**: Fix TOML config corruption in `deploy-testnet.sh` and `upgrade-testnet.sh`. SSH `sed` commands with double-quoted TOML values stripped the `"` chars. Fixed by switching to heredocs.
+- **fix(deploy)**: Fix deploy starting simulator before API key exists. Core services start first, then API key is created, then simulator starts only if all credentials are present.
+- **fix(deploy)**: Fix SCP "No space left on device" — services are now stopped before uploading images to free disk space.
+
+### Infrastructure
+- **docker-compose**: Added `SERVICES_MONITOR` and `SERVICES_CHECK_INTERVAL` env vars to gateway service.
+- **docker-compose**: Changed simulator restart policy from `unless-stopped` to `on-failure`.
+- **dashboard**: Added Vite dev proxy `/services` → gateway (8443) for local development.
+
+---
+
 ## [0.4.4] - 2026-03-15 — OOM Fix + Containerd Cleanup
 
 ### Fixed
 - **infra(critical)**: Fix engine OOM-kill at 4GB container limit. With 632K accumulated blocks, 500K UTXO cache, and 512MB RocksDB block cache, the engine exceeded the 4GB memory cap — triggering 108 container restarts and generating 200GB+ of containerd snapshots.
+- **deploy(critical)**: Fix TOML config corruption in `deploy-testnet.sh` and `upgrade-testnet.sh`. Config value restoration used `ssh "sed ..."` where double quotes from TOML values (e.g. `key = "02abc..."`) broke SSH shell quoting — the `"` were stripped, producing invalid TOML (`key = 02abc...`). Engine crashed on restart with a parse error. Fixed by switching all SSH `sed` commands to heredocs (`<< EOF`) where `"` is always literal.
+- **simulator(critical)**: Fix crash-loop when `PMS_API_KEY`, `PMS_COORDINATOR_KEY`, or `PMS_COORDINATOR_ADDR` are missing. Simulator now validates all required credentials at startup with a backoff retry loop (30s, 45s, 60s, ... +15s per attempt, max 10 attempts ~16 min). After 10 failed attempts, exits gracefully (code 0) so Docker `on-failure` restart policy does NOT restart it. Previously, the simulator crash-looped indefinitely on missing env vars, filling the disk with containerd snapshots.
+- **deploy**: Fix deploy script starting simulator before API key exists. Core services (Engine, Gateway, Caddy, Prometheus) are now started first, then the SDK API key is created, then the simulator is started with all credentials. The simulator is not started at all if any credential is missing.
 
 ### Infrastructure
 - **docker-compose**: Bumped engine `mem_limit` from 4GB to 6GB (`memswap_limit` too) to prevent OOM kills with large block histories.
+- **docker-compose**: Changed simulator restart policy from `unless-stopped` to `on-failure`. The simulator exits with code 0 after exhausting startup retries (missing credentials), so Docker won't restart it endlessly. Operational crashes (exit 1) still trigger restarts.
 - **config**: Reduced `max_utxos` from 500,000 to 250,000 in testnet config to lower memory footprint.
 - **deploy**: Added containerd snapshot prune documentation and `docker image prune` to deploy script.
+- **deploy**: Deploy script now stops all services BEFORE uploading images (prevents crash-loop from filling disk during SCP transfer).
 - **systemd**: Added `pms-containerd-cleanup.timer` (daily at 4 AM) to prevent containerd snapshot accumulation from container restarts.
 
 ---

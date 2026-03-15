@@ -220,39 +220,44 @@ if [ "$UPDATE_CONFIG" = "true" ]; then
     scp -q $SSH_OPTS tools/simulator/simulator.testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/simulator.testnet.toml"
     scp -q $SSH_OPTS tools/simulator/agents_testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/agents_testnet.toml"
 
-    # Restore VPS-specific values
+    # Restore VPS-specific values.
+    # IMPORTANT: Use heredocs (<< EOF) instead of ssh "..." for sed commands.
+    # TOML values contain double quotes (e.g. key = "02abc..."). In ssh "...",
+    # those inner " break shell quoting and get stripped → invalid TOML → engine crash.
+    # In heredocs, " is always literal — no quoting conflict.
     echo -e "   Restoring VPS config values..."
     if [ -n "$SAVED_COORD_KEY" ]; then
-        ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" "
-            sed -i 's|^coordinator_public_key = .*|${SAVED_COORD_KEY}|' $REMOTE_DIR/$CONFIG_FILE
-        "
+        ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" << RESTORE_COORD_EOF
+sed -i 's|^coordinator_public_key = .*|$SAVED_COORD_KEY|' $REMOTE_DIR/$CONFIG_FILE
+RESTORE_COORD_EOF
     fi
     if [ -n "$SAVED_X25519_KEY" ]; then
-        ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" "
-            sed -i 's|^coordinator_x25519_public_key = .*|${SAVED_X25519_KEY}|' $REMOTE_DIR/$CONFIG_FILE
-        "
+        ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" << RESTORE_X25519_EOF
+sed -i 's|^coordinator_x25519_public_key = .*|$SAVED_X25519_KEY|' $REMOTE_DIR/$CONFIG_FILE
+RESTORE_X25519_EOF
     fi
     if [ -n "$SAVED_WALLET_ADDRS" ]; then
-        ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" \
-            "sed -i 's|^wallet_addresses = .*|${SAVED_WALLET_ADDRS}|' $REMOTE_DIR/$CONFIG_FILE"
+        ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" << RESTORE_WALLET_EOF
+sed -i 's|^wallet_addresses = .*|$SAVED_WALLET_ADDRS|' $REMOTE_DIR/$CONFIG_FILE
+RESTORE_WALLET_EOF
     fi
     if [ -n "$SAVED_TREASURY_ADDRS" ]; then
-        ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" "
-            if grep -q '^treasury_addresses' $REMOTE_DIR/$CONFIG_FILE; then
-                sed -i 's|^treasury_addresses = .*|${SAVED_TREASURY_ADDRS}|' $REMOTE_DIR/$CONFIG_FILE
-            else
-                sed -i '/^\[fees\]/a ${SAVED_TREASURY_ADDRS}' $REMOTE_DIR/$CONFIG_FILE
-            fi
-        "
+        ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" << RESTORE_TREASURY_EOF
+if grep -q '^treasury_addresses' $REMOTE_DIR/$CONFIG_FILE; then
+    sed -i 's|^treasury_addresses = .*|$SAVED_TREASURY_ADDRS|' $REMOTE_DIR/$CONFIG_FILE
+else
+    sed -i '/^\[fees\]/a $SAVED_TREASURY_ADDRS' $REMOTE_DIR/$CONFIG_FILE
+fi
+RESTORE_TREASURY_EOF
     fi
     if [ -n "$SAVED_SIGNER_PUBKEYS" ]; then
-        ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" "
-            if grep -q '^signer_pubkeys' $REMOTE_DIR/$CONFIG_FILE; then
-                sed -i 's|^signer_pubkeys = .*|${SAVED_SIGNER_PUBKEYS}|' $REMOTE_DIR/$CONFIG_FILE
-            else
-                sed -i '/^\[admin\]/a ${SAVED_SIGNER_PUBKEYS}' $REMOTE_DIR/$CONFIG_FILE
-            fi
-        "
+        ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" << RESTORE_SIGNER_EOF
+if grep -q '^signer_pubkeys' $REMOTE_DIR/$CONFIG_FILE; then
+    sed -i 's|^signer_pubkeys = .*|$SAVED_SIGNER_PUBKEYS|' $REMOTE_DIR/$CONFIG_FILE
+else
+    sed -i '/^\[admin\]/a $SAVED_SIGNER_PUBKEYS' $REMOTE_DIR/$CONFIG_FILE
+fi
+RESTORE_SIGNER_EOF
     fi
     echo -e "   ${GREEN}Config files uploaded and VPS values restored.${NC}"
 fi
