@@ -647,6 +647,13 @@ if [ "\$DO_BUILD" = "true" ]; then
     done
     echo ""
 
+    # --- Containerd snapshot cleanup ---
+    # docker rmi before docker load (done above) handles most bloat.
+    # For leaked orphan snapshots, a root cron is needed (ctr requires root).
+    # Install once manually as root on the VPS:
+    #   (crontab -l 2>/dev/null; echo '# PMS: containerd snapshot cleanup (prevents overlayfs bloat)'; echo '0 4 * * * /usr/bin/docker image prune -f && /usr/bin/ctr -n moby snapshots ls -q 2>/dev/null | while read s; do /usr/bin/ctr -n moby snapshots rm "$s" 2>/dev/null; done') | crontab -
+    docker image prune -f 2>/dev/null || true
+
     # Final status
     echo -e "\${YELLOW}   Service Status:\${NC}"
     docker compose -f \$COMPOSE_FILE ps
