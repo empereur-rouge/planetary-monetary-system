@@ -11,6 +11,10 @@ pub enum LoadError {
     Cfg(#[from] config::ConfigError),
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_tip_limit() -> usize {
     200
 }
@@ -107,6 +111,13 @@ pub struct Client {
     pub allow_insecure_tls: bool, // true en dev/testnet, false en mainnet
     #[serde(default)]
     pub internal_api_addr: Option<String>, // Internal API for Gateway (ex: "0.0.0.0:3000")
+    /// Controls whether the HTTP API (port 8080) uses TLS.
+    /// When `false`, the API serves plain HTTP even if `[tls]` is configured.
+    /// P2P always uses its own TLS from `[tls]` section independently.
+    /// Default: `true` (backward compatible — API uses TLS if `[tls]` is present).
+    /// Set to `false` when the engine runs behind a gateway on an internal Docker network.
+    #[serde(default = "default_true")]
+    pub api_tls_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -161,11 +172,20 @@ pub struct SecretSettings {
     pub admin_wallet_file: Option<String>,
 }
 
+/// Runtime configuration passed to the P2P server and API server.
+///
+/// `tls` controls P2P TLS. `api_tls_enabled` controls whether the HTTP API
+/// also uses TLS (from the same `[tls]` section). When `api_tls_enabled` is
+/// `false`, the API serves plain HTTP even if `[tls]` is configured — useful
+/// when the engine runs behind a gateway on an internal Docker network.
 #[derive(Clone)]
 pub struct ServerConfig {
     pub bind_addr: String,
     pub api_addr: String, // ex "127.0.0.1:8080"
     pub tls: Option<TlsConfig>,
+    /// When `false`, API serves plain HTTP regardless of `[tls]`.
+    /// P2P TLS is unaffected. Default: `true`.
+    pub api_tls_enabled: bool,
     pub network: Network,
     pub auth: Auth,
 }

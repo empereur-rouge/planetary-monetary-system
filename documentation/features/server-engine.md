@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure]
 created: 2026-03-14
-updated: 2026-03-14
-version: v0.3.0
+updated: 2026-03-15
+version: v0.4.3
 ---
 
 # Server / Engine (Serveur Axum)
@@ -107,7 +107,7 @@ Les taches de fond incluent : distribution periodique des fees, inflation mint p
 
 | Fonction | Description |
 |----------|-------------|
-| `serve_api()` | Initialise l'AppState complet, spawn les taches de fond (fee distributor, inflation mint), construit le router, bind HTTP ou HTTPS |
+| `serve_api()` | Initialise l'AppState complet, spawn les taches de fond (fee distributor, inflation mint), construit le router, bind HTTP ou HTTPS (conditionne par `api_tls_enabled`) |
 | `build_api_router()` | Assemble toutes les routes (public, auth, admin, internal, per-ledger, debug, dashboard) avec les layers globaux |
 | `build_ledger_scoped_routes()` | Construit les routes qui dependent du contexte ledger (wallet, blocks, NFT, supply, etc.). Retourne (public, auth) |
 | `build_ledger_admin_routes()` | Routes admin per-ledger (token create/mint, faucet) avec middleware admin-token-only |
@@ -355,6 +355,7 @@ Le broadcast est batche par le `spawn_broadcast_worker()` : les IDs sont accumul
 | `bind_addr` | `String` | Adresse du listener P2P (ex: `"0.0.0.0:8050"`) |
 | `api_addr` | `String` | Adresse de l'API HTTP (ex: `"0.0.0.0:8080"`) |
 | `allow_insecure_tls` | `bool` | Autorise TLS insecure en dev/testnet (defaut: false) |
+| `api_tls_enabled` | `bool` | Active/desactive TLS sur l'API HTTP independamment du P2P (defaut: true). Voir [[config-system#Separation TLS API / P2P (v0.4.3)]] |
 | `internal_api_addr` | `Option<String>` | Adresse de l'API interne pour Gateway (ex: `"0.0.0.0:3000"`) |
 
 ### Section `[auth]`
@@ -429,6 +430,7 @@ Les routes publiques authentifiees sont protegees par le middleware `require_api
 - **Dev/Testnet** : Fallback en HTTP/TCP clair si les fichiers TLS manquent
 - **ALPN** : Supporte h2 (HTTP/2) et http/1.1
 - **Mutual TLS** : Support pour le P2P client avec CA custom
+- **Separation API / P2P (v0.4.3)** : le champ `api_tls_enabled` (defaut: `true`) dans `[client]` permet de desactiver TLS sur l'API HTTP tout en gardant le P2P en TLS. Utile en deploiement Docker ou le Gateway communique avec l'Engine via un reseau interne non expose (`pms-internal`). `serve_api()` dans `api.rs` verifie `api_tls_enabled` avant d'appliquer TLS sur le listener HTTP
 
 ## Metriques Prometheus
 

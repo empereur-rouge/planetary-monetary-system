@@ -178,7 +178,10 @@ pub async fn proxy_fallback(
             (status, [(http::header::CONTENT_TYPE, ct)], resp_body).into_response()
         }
         Err(e) => {
-            tracing::warn!("Proxy {method} {path} failed: {e}");
+            // Use {:?} (Debug) to show the full error chain — reqwest's Display
+            // only shows the top-level "error sending request for url" without
+            // the underlying cause (TLS failure, DNS error, connection refused…).
+            tracing::warn!("Proxy {method} {path} failed: {e:?}");
             (
                 StatusCode::BAD_GATEWAY,
                 [(http::header::CONTENT_TYPE, "text/plain".to_string())],
@@ -206,8 +209,7 @@ pub async fn proxy_stream(
             (status, [(http::header::CONTENT_TYPE, ct)], body)
         }
         Err(e) => {
-            tracing::warn!("Proxy STREAM {} failed: {}", path, e);
-            // Convert simple string to axum body for error response
+            tracing::warn!("Proxy STREAM {} failed: {:?}", path, e);
             let body = axum::body::Body::from(format!("Gateway error: {}", e));
             (
                 StatusCode::BAD_GATEWAY,

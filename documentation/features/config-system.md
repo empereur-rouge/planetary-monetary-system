@@ -1,8 +1,8 @@
 ---
 tags: [feature, config, governance]
 created: 2026-01-08
-updated: 2026-03-14
-version: v0.3.0
+updated: 2026-03-15
+version: v0.4.3
 ---
 
 # Config System
@@ -61,7 +61,7 @@ Le systeme Hot-Swap permet au Coordinator de modifier les parametres reseau sans
 | `[network]` | `Network` | Mode (dev/testnet/mainnet), network_id, protocol_version, symbole natif |
 | `[address]` | `Address` | HRP Bech32m (ex: `"8e"`) |
 | `[admin]` | `Admin` | Wallet addresses (obsolete), signer_pubkeys, treasury_wallets_file |
-| `[client]` | `Client` | Adresses bind P2P et API, TLS insecure, internal API |
+| `[client]` | `Client` | Adresses bind P2P et API, TLS insecure, `api_tls_enabled`, internal API |
 | `[tls]` | `TlsConfig` | Chemins cert/key/CA PEM, whitelist empreintes SHA-256 |
 | `[limits]` | `Limits` | max_body_bytes, request_timeout_ms, rate_limit_rps, burst |
 | `[auth]` | `Auth` | Signature obligatoire, admin_api_token, IPs autorisees, fichier API keys |
@@ -86,6 +86,18 @@ La validation (`Settings::validate()`) verifie :
 - TLS obligatoire en mainnet, insecure interdit en prod
 - Existence des fichiers secrets en prod
 - PoW bits <= 32
+
+### Separation TLS API / P2P (v0.4.3)
+
+Le champ `api_tls_enabled` (defaut: `true`) dans `[client]` permet de desactiver TLS sur l'API HTTP sans affecter le P2P. Cas d'usage : deploiements ou l'Engine est derriere un reverse-proxy sur un reseau interne. Par defaut (`true`), l'API utilise le TLS de la section `[tls]` — le testnet simule la config prod avec HTTPS de bout en bout.
+
+```toml
+[client]
+# api_tls_enabled = true   # defaut: API HTTPS (memes certs que P2P)
+# api_tls_enabled = false   # optionnel: API HTTP sans TLS (P2P reste en TLS)
+```
+
+Voir [[deployment-operations]] et [[gateway]] pour l'impact sur l'architecture Docker.
 
 ### Multi-Ledger
 

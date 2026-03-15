@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure, ops]
 created: 2026-03-14
-updated: 2026-03-14
-version: v0.3.0
+updated: 2026-03-15
+version: v0.4.3
 ---
 
 # Deployment & Operations
@@ -38,18 +38,21 @@ Caddy (ports 80/443, Let's Encrypt automatique)
    |  reverse_proxy HTTPS
    v
 Gateway (port 8443, TLS auto-signe interne)
-   |  proxy HTTPS
+   |  proxy HTTPS (danger_accept_invalid_certs pour cert auto-signe)
    v
-Engine (port 8080, TLS auto-signe interne, reseau interne uniquement)
-   |
+Engine (port 8080, reseau interne uniquement, HTTPS auto-signe)
+   |  API : HTTPS (default, configurable via api_tls_enabled)
+   |  P2P : toujours TLS (independant de api_tls_enabled)
    v
 RocksDB (volume Docker persistant)
 
 Prometheus (port 9091, localhost uniquement)
-   |  scrape HTTPS (insecure_skip_verify)
+   |  scrape HTTP ou HTTPS (insecure_skip_verify)
    +---> Engine :8080/metrics
    +---> Gateway :8443/metrics
 ```
+
+> **Note (v0.4.3)** : Le champ `api_tls_enabled` (defaut: `true`) dans `[client]` de la config TOML permet de desactiver TLS sur l'API HTTP de l'Engine tout en gardant le P2P en TLS. Quand desactive, le Gateway doit utiliser `http://` dans `UPSTREAM_URL` et Prometheus doit utiliser `scheme: http`. Voir [[config-system#Separation TLS API / P2P (v0.4.3)]].
 
 ### Isolation reseau
 
@@ -101,6 +104,7 @@ Services supplementaires par rapport a la production :
 - Limites memoire explicites : Engine 4 Go, Gateway/Prometheus/Simulator 512 Mo
 - Retention Prometheus : 3 jours, 1 Go max
 - Images pre-buildees localement (pas de `build:` dans le compose, uniquement `image:`)
+- **(v0.4.3)** Le testnet simule la config prod avec HTTPS de bout en bout. Le Gateway utilise `danger_accept_invalid_certs(true)` pour accepter le certificat auto-signe de l'Engine. Le script de deploiement nettoie les anciennes images Docker avant `docker load` pour prevenir le bloat containerd.
 
 ## Dockerfiles
 
@@ -302,7 +306,7 @@ Le `Caddyfile.prod` est genere dynamiquement par `deploy.sh` :
 |---|---|---|
 | `etc/config/config.prod.toml` | Production | Config complete avec token admin, coordinator keys |
 | `etc/config/config.prod.template.toml` | Production | Template avec `REPLACE_WITH_YOUR_SECRET_TOKEN` |
-| `etc/config/config.testnet.toml` | Testnet | Config testnet (rate limits plus eleves) |
+| `etc/config/config.testnet.toml` | Testnet | Config testnet (rate limits plus eleves, HTTPS simule prod) |
 | `etc/config/config.docker-test.toml` | Test Docker | Config pour tests locaux |
 | `etc/config/config.e2e-prod.toml` | E2E | Config simulation E2E production |
 | `etc/config/config.vps-test.toml` | VPS Test | Config architecture VPS multi-processus |
@@ -316,7 +320,7 @@ Le `Caddyfile.prod` est genere dynamiquement par `deploy.sh` :
 | `PMS_ADMIN_TOKEN` | Engine, Gateway | Token d'authentification admin (requis) |
 | `PMS_CONFIG` | Engine | Chemin vers le fichier config TOML |
 | `RUST_LOG` | Tous | Niveau de log (`info`, `debug`, etc.) |
-| `UPSTREAM_URL` | Gateway | URL de l'Engine (`https://pms-engine:8080`) |
+| `UPSTREAM_URL` | Gateway | URL de l'Engine. `https://pms-engine:8080` (HTTPS auto-signe, prod et testnet). Le Gateway accepte les certs auto-signes automatiquement. |
 | `LISTEN_ADDR` | Gateway | Adresse d'ecoute Gateway (`0.0.0.0:8443`) |
 | `TLS_CERT` / `TLS_KEY` | Gateway | Chemins certificat/cle TLS |
 | `DASHBOARD_PATH` | Gateway | Chemin fichiers statiques dashboard |

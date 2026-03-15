@@ -2,6 +2,11 @@ use http::StatusCode;
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 
+/// HTTP client for proxying requests to the PMS Engine.
+///
+/// Supports both `http://` and `https://` upstream URLs.
+/// When the upstream is HTTPS, self-signed certificates are accepted
+/// (internal Docker network communication).
 pub struct EngineClient {
     base_url: String,
     http: Client,
@@ -9,13 +14,32 @@ pub struct EngineClient {
 
 impl EngineClient {
     pub fn new(base_url: &str) -> Self {
-        // Create client with timeout and self-signed cert support (internal HTTPS)
-        let http = Client::builder()
-            .danger_accept_invalid_certs(true)
+        let is_https = base_url.starts_with("https://");
+
+        let mut builder = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .build()
-            .unwrap_or_else(|_| Client::new());
+            .connect_timeout(std::time::Duration::from_secs(5));
+
+        // Only enable dangerous cert acceptance for HTTPS upstream
+        if is_https {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+
+        let http = builder.build().unwrap_or_else(|e| {
+            // NEVER silently fall back to Client::new() — a default client
+            // would reject self-signed certs, causing all HTTPS requests to fail
+            // with opaque "error sending request" messages.
+            panic!(
+                "FATAL: Failed to build reqwest HTTP client for upstream {}: {}",
+                base_url, e
+            );
+        });
+
+        tracing::info!(
+            upstream = %base_url,
+            tls = is_https,
+            "Engine client initialized"
+        );
 
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),

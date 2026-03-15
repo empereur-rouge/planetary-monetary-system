@@ -139,6 +139,7 @@ pub async fn spawn_node_generic_rocks_with_seed(
         bind_addr: bind_addr.to_string(),
         api_addr: api_addr.to_string(),
         tls: None,
+        api_tls_enabled: false,
         network: pms_config::Network {
             mode: pms_config::NetworkMode::Dev,
             network_id: net_id,

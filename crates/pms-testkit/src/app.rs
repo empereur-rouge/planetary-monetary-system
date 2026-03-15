@@ -65,6 +65,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         bind_addr: "127.0.0.1:0".into(),
         api_addr: "127.0.0.1:0".into(),
         tls: settings.tls.clone(),
+        api_tls_enabled: false,
         network: settings.network.clone(),
         auth: settings.auth.clone(),
     });
@@ -93,6 +94,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
+        fee_pool_registry: Arc::new(pms_server::fee_pool::FeePoolRegistry::new()),
         api_key_store: pms_server::api_keys::create_api_key_store(None).unwrap(),
         ledger_mgr: None,
         ledger_id: "main".into(),
@@ -167,6 +169,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         bind_addr: "127.0.0.1:0".into(),
         api_addr: "127.0.0.1:0".into(),
         tls: settings.tls.clone(),
+        api_tls_enabled: false,
         network: settings.network.clone(),
         auth: settings.auth.clone(),
     });
@@ -195,6 +198,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
+        fee_pool_registry: Arc::new(pms_server::fee_pool::FeePoolRegistry::new()),
         api_key_store: pms_server::api_keys::create_api_key_store(None).unwrap(),
         ledger_mgr: None,
         ledger_id: "main".into(),
@@ -278,6 +282,7 @@ pub async fn make_test_ctx_with_admin(
         bind_addr: "127.0.0.1:0".into(),
         api_addr: "127.0.0.1:0".into(),
         tls: settings.tls.clone(),
+        api_tls_enabled: false,
         network: settings.network.clone(),
         auth: settings.auth.clone(),
     });
@@ -306,6 +311,7 @@ pub async fn make_test_ctx_with_admin(
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
+        fee_pool_registry: Arc::new(pms_server::fee_pool::FeePoolRegistry::new()),
         api_key_store: pms_server::api_keys::create_api_key_store(None).unwrap(),
         ledger_mgr: None,
         ledger_id: "main".into(),

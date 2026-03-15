@@ -5,7 +5,7 @@
 # Architecture:
 #   Internet -> Caddy (80/443, Let's Encrypt on testnet.pms-network.com)
 #                -> Gateway (8443, self-signed TLS interne)
-#                    -> Engine (8080, internal only)
+#                    -> Engine (8080, HTTPS self-signed TLS interne)
 #              Prometheus (9091, localhost only)
 #              Simulator -> Gateway (8443, Docker internal DNS)
 #                Web Dashboard (9090, public)
@@ -28,8 +28,13 @@ services:
     user: "pms"
     mem_limit: 4g
     memswap_limit: 4g
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
-      RUST_LOG: info,pms_server=info,pms_core=debug
+      RUST_LOG: info,pms_server=info,pms_core=info
       PMS_CONFIG: /home/pms/config/config.testnet.toml
       PMS_ADMIN_TOKEN: "${PMS_ADMIN_TOKEN}"
     command: ["--config", "/home/pms/config/config.testnet.toml"]
@@ -59,6 +64,11 @@ services:
     hostname: pms-gateway
     mem_limit: 512m
     memswap_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     depends_on:
       pms-engine:
         condition: service_healthy
@@ -92,6 +102,11 @@ services:
   caddy:
     image: caddy:2-alpine
     container_name: pms-caddy-testnet
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "80:80"
       - "443:443"
@@ -114,6 +129,11 @@ services:
     container_name: pms-prometheus-testnet
     mem_limit: 512m
     memswap_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - ./etc/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_testnet_data:/prometheus
@@ -137,6 +157,11 @@ services:
     container_name: pms-simulator-testnet
     mem_limit: 512m
     memswap_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     depends_on:
       pms-gateway:
         condition: service_healthy

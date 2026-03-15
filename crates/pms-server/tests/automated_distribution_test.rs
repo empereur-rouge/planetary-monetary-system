@@ -257,6 +257,7 @@ async fn test_automated_fee_distribution() {
         bind_addr: "127.0.0.1:0".into(),
         api_addr: "127.0.0.1:0".into(),
         tls: None,
+        api_tls_enabled: false,
         network: settings.network.clone(),
         auth: settings.auth.clone(),
     });
@@ -325,6 +326,7 @@ async fn test_automated_fee_distribution() {
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
+        fee_pool_registry: Arc::new(pms_server::fee_pool::FeePoolRegistry::new()),
         api_key_store: pms_server::api_keys::create_api_key_store(None).unwrap(),
         ledger_mgr: None,
         ledger_id: "main".into(),

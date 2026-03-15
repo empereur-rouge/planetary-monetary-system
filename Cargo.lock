@@ -333,7 +333,7 @@ checksum = "cf9ff0bbfd639f15c74af777d81383cf53efb7c93613f6cab67c6c11e05bbf8b"
 
 [[package]]
 name = "bin"
-version = "0.4.0"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "clap",

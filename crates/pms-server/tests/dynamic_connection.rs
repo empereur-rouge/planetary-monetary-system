@@ -57,6 +57,7 @@ async fn spawn_node(port: u16, seed: u8) -> Arc<Server> {
         bind_addr: format!("127.0.0.1:{}", port),
         api_addr: format!("127.0.0.1:{}", port + 1000),
         tls: None,
+        api_tls_enabled: false,
         network: settings.network.clone(),
         auth: settings.auth.clone(),
     });

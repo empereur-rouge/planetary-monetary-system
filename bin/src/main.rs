@@ -149,6 +149,11 @@ async fn main() -> Result<()> {
         bind_addr: settings.client.as_ref().unwrap().bind_addr.clone(),
         api_addr: settings.client.as_ref().unwrap().api_addr.clone(),
         tls: settings.tls.clone(),
+        api_tls_enabled: settings
+            .client
+            .as_ref()
+            .map(|c| c.api_tls_enabled)
+            .unwrap_or(true),
         network: settings.network,
         auth: settings.auth,
     };
@@ -245,6 +250,7 @@ async fn main() -> Result<()> {
             treasury_wallets: pms_config::TreasuryWallets::empty(),
             node_registry: pms_server::node_registry::create_registry(),
             fee_pool: pms_server::fee_pool::create_fee_pool(),
+            fee_pool_registry: std::sync::Arc::new(pms_server::fee_pool::FeePoolRegistry::new()),
             api_key_store: pms_server::api_keys::create_api_key_store(
                 settings_for_internal.auth.api_keys_file.as_deref(),
             )

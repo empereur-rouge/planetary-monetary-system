@@ -121,6 +121,42 @@ pub fn create_fee_pool() -> SharedFeePool {
     Arc::new(RwLock::new(FeePool::new()))
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Per-Ledger Fee Pool Registry
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Registry of per-ledger fee pools.
+/// Thread-safe via DashMap for lock-free concurrent access.
+/// Each ledger (main, eden, etc.) gets its own isolated fee pool.
+pub struct FeePoolRegistry {
+    pools: dashmap::DashMap<String, SharedFeePool>,
+}
+
+impl FeePoolRegistry {
+    pub fn new() -> Self {
+        Self {
+            pools: dashmap::DashMap::new(),
+        }
+    }
+
+    /// Get or lazily create a fee pool for the given ledger.
+    /// Idempotent: returns the same pool on repeated calls for the same ledger.
+    pub fn get_or_create(&self, ledger_id: &str) -> SharedFeePool {
+        self.pools
+            .entry(ledger_id.to_string())
+            .or_insert_with(create_fee_pool)
+            .clone()
+    }
+
+    /// Snapshot of all (ledger_id, pool) pairs.
+    pub fn all_pools(&self) -> Vec<(String, SharedFeePool)> {
+        self.pools
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +276,84 @@ mod tests {
 
         assert_eq!(node1.2.to_string(), "66.66666667");
         assert_eq!(node2.2.to_string(), "33.33333333");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // FeePoolRegistry tests
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_registry_get_or_create_idempotent() {
+        let registry = FeePoolRegistry::new();
+
+        let pool_a1 = registry.get_or_create("eden");
+        let pool_a2 = registry.get_or_create("eden");
+
+        // Same Arc — must be the exact same pool
+        assert!(Arc::ptr_eq(&pool_a1, &pool_a2), "get_or_create must return the same Arc");
+
+        // Mutate via first handle, visible through second
+        pool_a1.write().await.add_fee(Decimal::from(42), "node1");
+        let total = pool_a2.read().await.total_fees;
+        assert_eq!(total, Decimal::from(42));
+
+        println!(
+            "Idempotent: pool_a1 == pool_a2 = {}, total_fees = {}",
+            Arc::ptr_eq(&pool_a1, &pool_a2),
+            total
+        );
+    }
+
+    #[tokio::test]
+    async fn test_registry_ledger_isolation() {
+        let registry = FeePoolRegistry::new();
+
+        let main_pool = registry.get_or_create("main");
+        let eden_pool = registry.get_or_create("eden");
+
+        // They must be DIFFERENT pools
+        assert!(!Arc::ptr_eq(&main_pool, &eden_pool), "Different ledgers must have separate pools");
+
+        // Add fees to main only
+        main_pool.write().await.add_fee(Decimal::from(100), "node1");
+        // Add burn refund to eden only
+        eden_pool
+            .write()
+            .await
+            .add_burn_refund("wallet_a", Decimal::from(50), Some("edenite".into()));
+
+        let main_total = main_pool.read().await.total_fees;
+        let eden_total = eden_pool.read().await.total_fees;
+        let eden_refunds = eden_pool.read().await.get_burn_refunds();
+
+        assert_eq!(main_total, Decimal::from(100));
+        assert_eq!(eden_total, Decimal::ZERO, "Eden pool must not have main's fees");
+        assert_eq!(eden_refunds.len(), 1);
+        assert_eq!(eden_refunds[0].2, Decimal::from(50));
+
+        println!(
+            "Isolation: main_fees={}, eden_fees={}, eden_refunds={}",
+            main_total, eden_total, eden_refunds[0].2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_registry_all_pools() {
+        let registry = FeePoolRegistry::new();
+
+        // Create 3 ledgers
+        registry.get_or_create("main");
+        registry.get_or_create("eden");
+        registry.get_or_create("test");
+
+        let all = registry.all_pools();
+        assert_eq!(all.len(), 3);
+
+        let ids: Vec<&str> = all.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"main"));
+        assert!(ids.contains(&"eden"));
+        assert!(ids.contains(&"test"));
+
+        println!("all_pools: {:?}", ids);
     }
 }

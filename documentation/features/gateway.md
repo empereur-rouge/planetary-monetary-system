@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure]
 created: 2026-03-14
-updated: 2026-03-14
-version: v0.3.0
+updated: 2026-03-15
+version: v0.4.3
 ---
 
 # Gateway (Proxy Public)
@@ -121,7 +121,7 @@ Le Gateway est configure exclusivement par variables d'environnement (pas de fic
 ### Valeurs de production typiques
 
 ```yaml
-# docker-compose.yml (production)
+# docker-compose.yml (production, Engine avec TLS interne)
 UPSTREAM_URL: https://pms-engine:8080
 LISTEN_ADDR: 0.0.0.0:8443
 TLS_CERT: /app/tls/cert.pem
@@ -132,10 +132,13 @@ BURST_SIZE: 2000
 ```
 
 ```yaml
-# docker-compose.testnet.yml (testnet, rate limit eleve)
+# docker-compose.testnet.yml (testnet, simule config prod avec HTTPS)
+UPSTREAM_URL: https://pms-engine:8080   # HTTPS auto-signe (v0.4.3: danger_accept_invalid_certs)
 RATE_LIMIT_RPS: 50000
 BURST_SIZE: 100000
 ```
+
+> **Note (v0.4.3)** : Le Gateway accepte les certificats auto-signes via `danger_accept_invalid_certs(true)` quand `UPSTREAM_URL` commence par `https://`. L'option `api_tls_enabled` dans `[client]` (voir [[config-system]]) permet de desactiver le TLS API independamment du P2P si necessaire (default: `true`).
 
 ### Note sur tower-governor
 
@@ -189,6 +192,7 @@ Le struct `EngineClient` encapsule un client `reqwest` configure pour la communi
 
 - **Timeout** : 30 secondes par requete, 5 secondes pour la connexion.
 - **Certificats** : `danger_accept_invalid_certs(true)` pour accepter les certificats auto-signes internes.
+- **Initialisation stricte (v0.4.3)** : `EngineClient::new()` **panic** si le client HTTP ne peut pas etre cree (au lieu de retourner silencieusement un client par defaut via `unwrap_or_else`). L'URL upstream est loguee au demarrage pour faciliter le diagnostic.
 - **Trois modes d'operation** :
   1. `get<T>()` / `post<B, T>()` : requetes typees avec deserialisation JSON automatique.
   2. `proxy_request()` : proxy generique pour le fallback catch-all (forward brut du body et des headers).
@@ -233,7 +237,7 @@ Le Gateway ne valide aucune cle -- c'est le Engine qui applique le middleware `r
 | `get_config()` | `crates/pms-gateway/src/routes.rs` | Recupere la configuration des fees via `/internal/config` |
 | `proxy_fallback()` | `crates/pms-gateway/src/routes.rs` | Catch-all : proxifie toute requete non matchee vers le Engine en preservant methode, path, query, headers et body |
 | `proxy_stream()` | `crates/pms-gateway/src/routes.rs` | Proxy streaming : relaye les flux SSE chunk-par-chunk via `Body::from_stream()` |
-| `EngineClient::new()` | `crates/pms-gateway/src/client.rs` | Cree le client HTTP avec timeout 30s et acceptation des certificats auto-signes |
+| `EngineClient::new()` | `crates/pms-gateway/src/client.rs` | Cree le client HTTP avec timeout 30s et acceptation des certificats auto-signes. Panic si la creation echoue (v0.4.3). Logue l'URL upstream au demarrage |
 | `EngineClient::get()` | `crates/pms-gateway/src/client.rs` | Requete GET typee avec deserialisation JSON |
 | `EngineClient::post()` | `crates/pms-gateway/src/client.rs` | Requete POST typee avec serialisation/deserialisation JSON |
 | `EngineClient::proxy_request()` | `crates/pms-gateway/src/client.rs` | Proxy generique : forward methode, path, headers auth, body brut |
@@ -295,6 +299,8 @@ Router (match route ou fallback)
 Les routes de health (`/livez`, `/healthz`) sont exclues du rate limiting car elles sont dans un router separe merge avant l'application des layers.
 
 ## Gestion des erreurs
+
+**Logging des erreurs reqwest (v0.4.3)** : les erreurs de connexion au Engine sont loguees avec le format `{e:?}` (Debug) au lieu de `{e}` (Display). Cela expose la chaine complete des erreurs (`source()`, cause interne `hyper`/`h2`/`io`) ce qui facilite le diagnostic en production (ex: distinction entre DNS failure, connection refused, TLS handshake error, timeout).
 
 Chaque handler retourne un code HTTP adapte en cas d'erreur de communication avec le Engine :
 

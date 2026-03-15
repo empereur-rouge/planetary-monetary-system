@@ -101,8 +101,13 @@ pub struct AppState {
     pub treasury_wallets: TreasuryWallets,
     /// Dynamic node registry for distributed TX processing
     pub node_registry: crate::node_registry::SharedNodeRegistry,
-    /// Fee pool for accumulating fees until Milestone distribution
+    /// Fee pool for accumulating fees until Milestone distribution.
+    /// In multi-ledger mode, this points to the **current ledger's** pool
+    /// (set by `dynamic_ledger_handler` via `fee_pool_registry`).
     pub fee_pool: crate::fee_pool::SharedFeePool,
+    /// Per-ledger fee pool registry. Each ledger gets an isolated pool so
+    /// that burn refunds (e.g. EDN on eden) are distributed on the correct ledger.
+    pub fee_pool_registry: Arc<crate::fee_pool::FeePoolRegistry>,
     /// Multi-ledger manager (Phase 2).
     /// Quand présent, les routes /l/{ledger_id}/* sont actives.
     pub ledger_mgr: Option<Arc<pms_ledger::LedgerManager>>,
@@ -482,6 +487,7 @@ async fn dynamic_ledger_handler(
     );
     ledger_state.store = instance.store.clone();
     ledger_state.ledger_id = ledger_id.clone();
+    ledger_state.fee_pool = state.fee_pool_registry.get_or_create(&ledger_id);
     ledger_state.effective_fees = Arc::new(crate::api_fn::tx_helpers::resolve_effective_fees(
         &state.settings.fees,
         instance.def.fees.as_ref(),
@@ -833,6 +839,10 @@ pub async fn serve_api(
 
     let ledger_mgr = srv.ledger_manager();
 
+    // Per-ledger fee pool registry — main ledger pool is pre-created
+    let fee_pool_registry = Arc::new(crate::fee_pool::FeePoolRegistry::new());
+    let main_fee_pool = fee_pool_registry.get_or_create("main");
+
     let state = AppState {
         srv,
         _cfg: cfg.clone(),
@@ -845,7 +855,8 @@ pub async fn serve_api(
         allowed_networks,
         treasury_wallets,
         node_registry: crate::node_registry::create_registry(),
-        fee_pool: crate::fee_pool::create_fee_pool(),
+        fee_pool: main_fee_pool,
+        fee_pool_registry,
         api_key_store: api_keys::create_api_key_store(settings.auth.api_keys_file.as_deref())
             .unwrap_or_else(|e| {
                 tracing::error!("❌ Failed to load API keys: {}", e);
@@ -876,10 +887,24 @@ pub async fn serve_api(
     let app = build_api_router(state, &settings);
 
     let addr: SocketAddr = addr.parse()?;
-    eprintln!("[API] binding to {} (TLS={})", addr, cfg.tls.is_some());
+
+    // api_tls_enabled=false → skip TLS on the API even if [tls] is configured.
+    // P2P TLS is independent (handled in server.rs).
+    let use_api_tls = cfg.api_tls_enabled && cfg.tls.is_some();
+    eprintln!(
+        "[API] binding to {} (TLS={}, api_tls_enabled={})",
+        addr,
+        cfg.tls.is_some(),
+        cfg.api_tls_enabled
+    );
+
+    if !cfg.api_tls_enabled && cfg.tls.is_some() {
+        eprintln!("[API] api_tls_enabled=false → serving plain HTTP (P2P TLS unaffected)");
+    }
 
     // TLS / HTTP
-    if let Some(tls) = cfg.tls.clone() {
+    if use_api_tls {
+        let tls = cfg.tls.as_ref().unwrap();
         let cert_path = Path::new(&tls.cert_pem);
         let key_path = Path::new(&tls.key_pem);
         let files_exist = cert_path.exists() && key_path.exists();
@@ -892,17 +917,13 @@ pub async fn serve_api(
             let tls_cfg = load_tls(&tls.cert_pem, &tls.key_pem)?;
             let tls_cfg = RustlsConfig::from_config(Arc::new(tls_cfg));
 
-            // NOTE: bind_rustls ne supporte pas facilement inject_connect_info pour l'instant avec axum-server simple?
-            // Axum-server handle l'IP via remote_addr() dans la request extension.
-            // ConnectInfo extractor d'Axum standard fonctionne avec axum::serve, pas forcément axum-server ?
-            // On vérifie... Axum-server implémente MakeService qui donne l'addr.
             bind_rustls(addr, tls_cfg)
                 .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await?;
             return Ok(());
         }
 
-        // En dev -> fallback
+        // En dev -> fallback si fichiers absents
         if !files_exist {
             eprintln!("[API] Fallback HTTP clair (dev)");
             let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -922,7 +943,7 @@ pub async fn serve_api(
         return Ok(());
     }
 
-    // HTTP simple
+    // HTTP simple (no TLS or api_tls_enabled=false)
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
         listener,
@@ -959,40 +980,86 @@ pub fn spawn_fee_distributor_task(state: AppState) {
             loop {
                 interval.tick().await; // Wait for next tick
 
-                // Log pool state BEFORE distribution attempt for diagnostics
-                let pool_total = state_distrib.fee_pool.read().await.total_fees;
+                // 1. Distribute main ledger
+                distribute_for_ledger(&state_distrib).await;
 
-                match crate::fee_distribution::perform_fee_distribution(&state_distrib, None).await
-                {
-                    Ok(res) => {
-                        if res.success && res.total_distributed != "0" {
-                            tracing::info!(
-                                "✅ Automated distribution success: {} PMS to {} recipients",
-                                res.total_distributed,
-                                res.num_recipients
-                            );
-                        } else if !res.success {
-                            tracing::warn!(
-                                pool_total = %pool_total,
-                                "⚠️ Fee distribution FAILED (success=false). \
-                                 Possible causes: empty tips (DAG over-pruned) or not coordinator. \
-                                 Fees are accumulating and NOT being distributed."
-                            );
+                // 2. Distribute each custom ledger from the registry
+                if let Some(ref mgr) = state_distrib.ledger_mgr {
+                    for lid in mgr.list_ids() {
+                        if lid == "main" {
+                            continue;
                         }
-                        // Note: success=true with total=0 means no fees to distribute (normal)
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            pool_total = %pool_total,
-                            error = %e,
-                            "❌ Fee distribution ERROR — fees blocked! \
-                             Pool has {} PMS waiting. Error: {}",
-                            pool_total, e
-                        );
+
+                        let pool = state_distrib.fee_pool_registry.get_or_create(&lid);
+                        // Skip if pool is empty (no fees/refunds pending)
+                        if !pool.read().await.has_fees() {
+                            continue;
+                        }
+
+                        // Build per-ledger AppState with correct adapter/store/pool
+                        if let Some(instance) = mgr.get(&lid) {
+                            let mut ledger_state = state_distrib.clone();
+                            ledger_state.srv = crate::Server::api_only(
+                                instance.adapter.clone(),
+                                &instance.def.network_id,
+                                instance.def.protocol_version,
+                                state_distrib.node_wallet.clone(),
+                                Some(state_distrib.srv.broadcast_sender()),
+                            );
+                            ledger_state.store = instance.store.clone();
+                            ledger_state.ledger_id = lid.clone();
+                            ledger_state.fee_pool = pool;
+                            ledger_state.effective_fees = Arc::new(
+                                crate::api_fn::tx_helpers::resolve_effective_fees(
+                                    &state_distrib.settings.fees,
+                                    instance.def.fees.as_ref(),
+                                ),
+                            );
+
+                            distribute_for_ledger(&ledger_state).await;
+                        }
                     }
                 }
             }
         });
+    }
+}
+
+/// Run fee distribution for a single ledger's AppState.
+async fn distribute_for_ledger(state: &AppState) {
+    let pool_total = state.fee_pool.read().await.total_fees;
+
+    match crate::fee_distribution::perform_fee_distribution(state, None).await {
+        Ok(res) => {
+            if res.success && res.total_distributed != "0" {
+                tracing::info!(
+                    "✅ [{}] Fee distribution: {} PMS to {} recipients",
+                    state.ledger_id,
+                    res.total_distributed,
+                    res.num_recipients
+                );
+            } else if !res.success {
+                tracing::warn!(
+                    pool_total = %pool_total,
+                    ledger = %state.ledger_id,
+                    "⚠️ [{}] Fee distribution FAILED (success=false). \
+                     Possible causes: empty tips (DAG over-pruned) or not coordinator. \
+                     Fees are accumulating and NOT being distributed.",
+                    state.ledger_id
+                );
+            }
+            // Note: success=true with total=0 means no fees to distribute (normal)
+        }
+        Err(e) => {
+            tracing::error!(
+                pool_total = %pool_total,
+                ledger = %state.ledger_id,
+                error = %e,
+                "❌ [{}] Fee distribution ERROR — fees blocked! \
+                 Pool has {} PMS waiting. Error: {}",
+                state.ledger_id, pool_total, e
+            );
+        }
     }
 }
 

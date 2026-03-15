@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.3] - 2026-03-14 — Gateway TLS Fix + Error Logging + Deploy Cleanup
+
+### Added
+- **config**: New `api_tls_enabled` option in `[client]` section. When `false`, the HTTP API serves plain HTTP even if `[tls]` is configured. P2P TLS is unaffected. Default: `true` (backward compatible). Not used in testnet (simulates prod with full HTTPS).
+- **gateway**: `EngineClient` now logs upstream URL and TLS mode on initialization.
+
+### Fixed
+- **gateway(critical)**: Fix persistent 502 Bad Gateway caused by silent client fallback. `Client::builder().build()` previously fell back to `Client::new()` on error, losing the `danger_accept_invalid_certs(true)` setting — all HTTPS requests to self-signed engine then failed with opaque "error sending request" messages. Now panics with a clear error message instead of silently degrading.
+- **gateway**: Fix opaque error logging — proxy errors now use `{:?}` (Debug format) to show the full reqwest error chain (TLS failures, DNS errors, connection refused) instead of just the top-level "error sending request for url" message.
+- **gateway**: `danger_accept_invalid_certs` now only applied when upstream is HTTPS (not for HTTP upstreams).
+
+### Infrastructure
+- **deploy**: Added `docker rmi` for old images before `docker load` to prevent containerd snapshot bloat (`/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/` grew to 213G+ in production).
+- **deploy**: Added post-load `docker image prune -f` for dangling layers cleanup.
+
+---
+
 ## [0.3.1] - 2026-03-14 — Documentation Obsidian Vault
 
 ### Added

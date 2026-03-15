@@ -36,10 +36,11 @@ fn to_wire(
 }
 
 fn mk_test_cfg(api_addr: &str) -> ServerConfig {
-    let mut cfg = ServerConfig {
+    let cfg = ServerConfig {
         bind_addr: "127.0.0.1:0".into(),
         api_addr: api_addr.to_string(),
         tls: None,
+        api_tls_enabled: false,
         network: load_config().unwrap().network,
         auth: load_config().unwrap().auth,
     };

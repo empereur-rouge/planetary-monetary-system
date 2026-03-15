@@ -12,7 +12,7 @@
 # Architecture:
 #   Internet -> Caddy (80/443, Let's Encrypt testnet.pms-network.com)
 #                -> Gateway (8443, self-signed TLS interne)
-#                    -> Engine (8080, internal only)
+#                    -> Engine (8080, HTTPS self-signed TLS interne)
 #              Prometheus (9091, localhost only)
 #              Simulator -> Gateway (97 agents, dashboard :9090)
 #
@@ -296,6 +296,16 @@ cd $REMOTE_DIR
 
 # --- Load Docker images ---
 if [ "\$DO_BUILD" = "true" ]; then
+    # Remove old image layers BEFORE loading new ones.
+    # docker load replaces the tag but containerd keeps old snapshot layers,
+    # causing /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs to
+    # grow unboundedly (213G+ observed in production).
+    echo -e "\${YELLOW}   Removing old images before load (prevents containerd bloat)...\${NC}"
+    for img_tag in pms-node:testnet pms-gateway:testnet pms-simulator:testnet; do
+        docker rmi "\$img_tag" 2>/dev/null || true
+    done
+    docker image prune -f 2>/dev/null || true
+
     echo -e "\${YELLOW}   Loading Docker images...\${NC}"
     for img in /tmp/pms-images/*.tar.gz; do
         NAME=\$(basename "\$img" .tar.gz)
@@ -305,8 +315,8 @@ if [ "\$DO_BUILD" = "true" ]; then
     rm -rf /tmp/pms-images
     echo -e "\${GREEN}   All images loaded.\${NC}"
 
-    # Prune dangling images to free disk space on VPS
-    echo -e "\${YELLOW}   Pruning old Docker images...\${NC}"
+    # Final prune: remove any remaining dangling images/layers
+    echo -e "\${YELLOW}   Pruning dangling images...\${NC}"
     docker image prune -f 2>/dev/null || true
     echo -e "\${GREEN}   Docker prune done.\${NC}"
 fi
@@ -574,35 +584,51 @@ if [ "\$DO_BUILD" = "true" ]; then
         sleep 1
     done
 
-    # --- Create SDK API Key (before simulator can work) ---
+    # --- SDK API Key (before simulator can work) ---
     # Engine port 8080 is internal-only (Docker expose, not ports).
     # Use docker exec in the gateway container (has curl + is on internal network).
     echo ""
-    echo -e "\${YELLOW}   Creating SDK API Key...\${NC}"
 
-    API_KEY_RESPONSE=\$(docker compose -f \$COMPOSE_FILE exec -T pms-gateway \
-        curl -sk -X POST \
-        -H "Authorization: Bearer \$ADMIN_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"label": "SDK Default", "scopes": ["*"]}' \
-        https://pms-engine:8080/admin/api-keys 2>/dev/null || echo "")
+    # Reuse existing API key if available (survives across redeploys).
+    # Both sdk-api-key.json (plaintext) and api-keys.json (hashes) are on the
+    # host filesystem — they survive docker compose down -v (only volumes are wiped).
+    SDK_API_KEY=""
+    if [ -f etc/pms/sdk-api-key.json ]; then
+        SDK_API_KEY=\$(python3 -c "import json; print(json.load(open('etc/pms/sdk-api-key.json')).get('key',''))" 2>/dev/null || echo "")
+        if [ -n "\$SDK_API_KEY" ]; then
+            echo -e "   \${GREEN}Reusing existing SDK API Key: \${SDK_API_KEY:0:20}...\${NC}"
+        fi
+    fi
 
-    if echo "\$API_KEY_RESPONSE" | grep -q '"key"'; then
-        SDK_API_KEY=\$(echo "\$API_KEY_RESPONSE" | grep -o '"key"\s*:\s*"[^"]*"' | awk -F'"' '{print \$4}' 2>/dev/null || echo "")
-        echo "\$API_KEY_RESPONSE" > etc/pms/sdk-api-key.json
-        chmod 600 etc/pms/sdk-api-key.json
-        echo -e "   \${GREEN}SDK API Key created: \${SDK_API_KEY:0:20}...\${NC}"
-        echo -e "   \${YELLOW}Save this key! It is shown only ONCE.\${NC}"
+    if [ -z "\$SDK_API_KEY" ]; then
+        echo -e "\${YELLOW}   Creating SDK API Key...\${NC}"
 
+        # Engine serves HTTPS with self-signed cert (testnet simulates prod config)
+        API_KEY_RESPONSE=\$(docker compose -f \$COMPOSE_FILE exec -T pms-gateway \
+            curl -sk -X POST \
+            -H "Authorization: Bearer \$ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"label": "SDK Default", "scopes": ["*"]}' \
+            https://pms-engine:8080/admin/api-keys 2>/dev/null || echo "")
+
+        if echo "\$API_KEY_RESPONSE" | grep -q '"key"'; then
+            SDK_API_KEY=\$(echo "\$API_KEY_RESPONSE" | grep -o '"key"\s*:\s*"[^"]*"' | awk -F'"' '{print \$4}' 2>/dev/null || echo "")
+            echo "\$API_KEY_RESPONSE" > etc/pms/sdk-api-key.json
+            chmod 600 etc/pms/sdk-api-key.json
+            echo -e "   \${GREEN}SDK API Key created: \${SDK_API_KEY:0:20}...\${NC}"
+        else
+            echo -e "   \${RED}Could not create API key. Response: \${API_KEY_RESPONSE}\${NC}"
+            echo -e "   \${YELLOW}Simulator will not work without an API key.\${NC}"
+        fi
+    fi
+
+    if [ -n "\$SDK_API_KEY" ]; then
         # Restart simulator with the API key + coordinator credentials
         echo -e "   \${YELLOW}Restarting simulator with API key...\${NC}"
         export PMS_API_KEY="\$SDK_API_KEY"
         export PMS_COORDINATOR_KEY="\$COORD_PRIV_KEY"
         export PMS_COORDINATOR_ADDR="\$COORD_ADDR"
         docker compose -f \$COMPOSE_FILE up -d --force-recreate pms-simulator
-    else
-        echo -e "   \${RED}Could not create API key. Response: \${API_KEY_RESPONSE}\${NC}"
-        echo -e "   \${YELLOW}Simulator will not work without an API key.\${NC}"
     fi
 
     # Wait for Simulator (now has API key)
@@ -661,8 +687,8 @@ if ask_yes_no "   Download Secure Backup (coordinator keys) locally?" "Y"; then
     scp -q $SSH_OPTS -r "$VPS_USER@$VPS_IP:$REMOTE_DIR/etc/pms/treasury-keys/*" "$TMP_DIR/treasury-keys/" 2>/dev/null || true
     scp -q $SSH_OPTS "$VPS_USER@$VPS_IP:$REMOTE_DIR/etc/pms/sdk-api-key.json" "$TMP_DIR/sdk-api-key.json" 2>/dev/null || echo "{}" > "$TMP_DIR/sdk-api-key.json"
 
-    # Clean up the temporary API key file on the VPS for security
-    ssh -q $SSH_OPTS "$VPS_USER@$VPS_IP" "rm -f $REMOTE_DIR/etc/pms/sdk-api-key.json" 2>/dev/null
+    # sdk-api-key.json is kept on the VPS for reuse across redeploys.
+    # It is protected by chmod 600 and only accessible by the pms user.
 
     python3 -c "
 import json, os, glob
