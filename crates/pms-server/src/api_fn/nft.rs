@@ -486,8 +486,12 @@ async fn evaluate_contracts_after_burn(
     let nft_type = pre_fetched_metadata.and_then(|m| m.nft_type.as_deref());
     let token_count = token_ids.len() as u64;
 
+    // Use contract_store (always main RocksDB) for contract lookups.
+    // Contracts are registered on the main ledger, but burns can happen on
+    // any ledger (e.g. eden). Using state.store here would search the
+    // per-ledger store which has no contracts → no refunds.
     let results = crate::contract_engine::evaluate_nft_burn(
-        state.store.as_ref(),
+        state.contract_store.as_ref(),
         &state.ledger_id,
         burner_address,
         nft_type,

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.1] - 2026-03-15 — Fix EDN burn refunds not distributed on custom ledgers
+
+### Fixed
+- **fix(contracts/critical)**: Smart contracts registered on the main ledger were invisible to NFT burn handlers on custom ledgers (e.g. eden). `evaluate_contracts_after_burn()` used `state.store` (per-ledger RocksDB) for contract lookups, but contracts are only stored in the **main** RocksDB. Burns produced zero refunds → agents never received EDN. Fixed by adding `contract_store` field to `AppState` that always points to the main store, and using it for contract lookups regardless of which ledger the burn occurs on.
+
+---
+
 ## [0.5.0] - 2026-03-15 — Service Status Monitoring + Deploy Fixes
 
 ### Added

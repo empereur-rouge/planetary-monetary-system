@@ -115,6 +115,10 @@ pub struct AppState {
     pub ledger_id: String,
     /// Resolved fee configuration for this ledger context.
     pub effective_fees: Arc<crate::api_fn::tx_helpers::EffectiveFees>,
+    /// Main store for global lookups (contracts, etc.).
+    /// In multi-ledger mode, `store` is swapped per-ledger but `contract_store`
+    /// always points to the main RocksDB where contracts are registered.
+    pub contract_store: Arc<RocksStore>,
     /// Store des clés API pour l'authentification des clients SDK.
     /// Protégé par un RwLock pour lectures concurrentes (middleware)
     /// et écritures exclusives (CRUD admin).
@@ -848,6 +852,7 @@ pub async fn serve_api(
         _cfg: cfg.clone(),
         _ready: ready.clone(),
         stats: stats.clone(),
+        contract_store: store.clone(),
         store,
         admin_token,
         node_wallet,

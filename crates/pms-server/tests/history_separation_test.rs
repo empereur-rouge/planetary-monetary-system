@@ -55,6 +55,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
         _cfg: cfg,
         _ready: ready,
         stats,
+        contract_store: store.clone(),
         store: store.clone(),
         admin_token: None,
         node_wallet: wallet.clone(),

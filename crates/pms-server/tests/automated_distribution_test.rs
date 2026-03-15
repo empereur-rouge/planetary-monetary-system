@@ -318,6 +318,7 @@ async fn test_automated_fee_distribution() {
         _cfg: server_config,
         _ready: Arc::new(AtomicBool::new(true)),
         stats: Arc::new(pms_server::stats::Stats::new()),
+        contract_store: rocks_store_arc.clone(),
         store: rocks_store_arc.clone(), // Concrete type
         admin_token: None,
         node_wallet: node_wallet.clone(),

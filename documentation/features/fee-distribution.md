@@ -1,7 +1,7 @@
 ---
 tags: [feature]
 created: 2026-01-10
-updated: 2026-03-14
+updated: 2026-03-15
 version: v0.1.0
 ---
 
@@ -18,7 +18,7 @@ Ce mécanisme est essentiel au modèle économique du réseau : il rémunère le
 | | Date |
 |---|---|
 | Créée | 2026-01-10 (commit `1f3d2ba`) |
-| Dernière mise à jour | 2026-03-14 (branche `feature/economics`) |
+| Dernière mise à jour | 2026-03-15 |
 | Version d'introduction | v0.1.0 |
 
 ### Historique des changements majeurs
@@ -31,6 +31,7 @@ Ce mécanisme est essentiel au modèle économique du réseau : il rémunère le
 | 2026-03-11 | `89e1a2f` | `fix(storage): protect last RocksDB tip from deletion -- unblock fee distribution` -- Protection duale RAM+RocksDB, diagnostics améliorés |
 | 2026-03-13 | `1bb09bd` | `fix(perf): resolve TPS degradation + add smart contract system (v0.2.1)` -- Intégration fee burn et contrats smart |
 | 2026-03-14 | branche `feature/economics` | Intégration fee burn (`burn_rate_bps`), gas pool, subscriptions, dynamic fees |
+| 2026-03-15 | v0.5.1 | Fix: `contract_store` field in `AppState` — burn refunds now work on custom ledgers (contracts looked up from main store) |
 
 ## Mécanisme
 
@@ -241,6 +242,8 @@ Les paramètres de distribution peuvent être modifiés sans redémarrage via de
 ### Avec les [[smart-contracts|contrats smart]] (burn refunds)
 
 Lorsqu'un contrat smart déclenche un burn refund (ex: `OnNftBurn`), le montant est ajouté au pool via `pool.add_burn_refund()`. Ces refunds sont distribués directement aux wallets utilisateurs lors de la prochaine distribution périodique, séparément des fees de nœuds.
+
+**Note (v0.5.1)** : Avant cette version, les burn refunds ne fonctionnaient pas sur les custom ledgers. `evaluate_contracts_after_burn()` cherchait les contrats dans `state.store` (le RocksDB du ledger courant), mais les contrats sont stockés uniquement dans le store du main ledger. Les burns sur un custom ledger (ex: eden) ne trouvaient aucun contrat et ne produisaient donc aucun refund dans le FeePool. Le fix ajoute un champ `AppState.contract_store` qui pointe toujours vers le main store, utilisé par `evaluate_contracts_after_burn()` pour les lookups de contrats. Voir [[smart-contracts]] pour les details.
 
 ### Avec le Node Registry (rewards multi-nœuds)
 

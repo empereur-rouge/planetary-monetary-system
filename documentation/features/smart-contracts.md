@@ -1,22 +1,28 @@
 ---
 tags: [feature]
 created: 2026-03-13
-updated: 2026-03-13
-version: v0.2.1
+updated: 2026-03-15
+version: v0.5.1
 ---
 
 # Smart Contracts (Contrats Déclaratifs)
 
 ## Résumé
 
-Le système de Smart Contracts de PMS est un moteur de règles déclaratives, exécuté nativement par le nœud coordinateur. Contrairement aux smart contracts Turing-complets (Solidity/EVM), les contrats PMS sont des règles pré-définies qui réagissent à des événements spécifiques (burn de NFT, burn de tokens) et déclenchent des actions automatiques (refunds, émissions d'événements). Ce design garantit la prévisibilité, la sécurité, et la performance, sans risque d'exécution arbitraire de code. Les contrats sont stockés dans RocksDB et évalués en temps réel par le `ContractEngine` lors de chaque burn NFT.
+Le système de Smart Contracts de PMS est un moteur de règles déclaratives, exécuté nativement par le nœud coordinateur. Contrairement aux smart contracts Turing-complets (Solidity/EVM), les contrats PMS sont des règles pré-définies qui réagissent à des événements spécifiques (burn de NFT, burn de tokens) et déclenchent des actions automatiques (refunds, émissions d'événements). Ce design garantit la prévisibilité, la sécurité, et la performance, sans risque d'exécution arbitraire de code. Les contrats sont stockés dans le RocksDB du **main ledger** et évalués en temps réel par le `ContractEngine` lors de chaque burn NFT, y compris sur les custom ledgers.
+
+### Architecture : `contract_store` (v0.5.1)
+
+Les contrats sont enregistrés uniquement dans le store RocksDB du main ledger. Dans un environnement [[multi-ledger]], chaque ledger custom possède son propre `state.store` (RocksDB dédié). Avant v0.5.1, `evaluate_contracts_after_burn()` utilisait `state.store` pour chercher les contrats, ce qui signifiait que les burns sur un custom ledger (ex: eden) ne trouvaient aucun contrat et ne produisaient aucun refund.
+
+**Fix (v0.5.1)** : Un champ `contract_store: Arc<RocksStore>` a été ajouté à `AppState`. Ce champ pointe **toujours** vers le store du main ledger, indépendamment du ledger courant. `evaluate_contracts_after_burn()` utilise désormais `state.contract_store` au lieu de `state.store` pour les lookups de contrats, garantissant que les contrats Global sont visibles depuis tous les ledgers.
 
 ## Dates
 
 | | Date |
 |---|---|
 | Créée | 2026-03-13 |
-| Dernière mise à jour | 2026-03-13 |
+| Dernière mise à jour | 2026-03-15 |
 | Version d'introduction | v0.2.1 |
 
 ## Configuration
@@ -61,6 +67,7 @@ Pour désactiver les frais de déploiement : `{ "SetContractDeploymentFee": { "f
 | `pms-server` | `crates/pms-server/src/contract_engine.rs` | Moteur d'évaluation des contrats (`evaluate_nft_burn`, `evaluate_formula`, `find_attribute`) |
 | `pms-server` | `crates/pms-server/src/api_fn/contracts.rs` | Endpoints API admin CRUD pour les contrats |
 | `pms-server` | `crates/pms-server/src/api_fn/nft.rs` | Intégration des contrats dans les 3 handlers de burn NFT (`evaluate_contracts_after_burn`) |
+| `pms-server` | `crates/pms-server/src/api.rs` | `AppState.contract_store: Arc<RocksStore>` — référence au store du main ledger pour les lookups de contrats cross-ledger |
 | `pms-server` | `crates/pms-server/src/api_fn/tx_helpers.rs` | Chargement des frais de déploiement (`load_contract_deployment_fee`) |
 | `pms-server` | `crates/pms-server/src/fee_pool.rs` | Accumulation des refunds de burn dans le `FeePool` (`add_burn_refund`) |
 | `pms-storage` | `crates/pms-storage/src/contract_store.rs` | Trait `ContractStorage` + implémentation in-memory pour les tests |
