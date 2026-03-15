@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.4] - 2026-03-15 — OOM Fix + Containerd Cleanup
+
+### Fixed
+- **infra(critical)**: Fix engine OOM-kill at 4GB container limit. With 632K accumulated blocks, 500K UTXO cache, and 512MB RocksDB block cache, the engine exceeded the 4GB memory cap — triggering 108 container restarts and generating 200GB+ of containerd snapshots.
+
+### Infrastructure
+- **docker-compose**: Bumped engine `mem_limit` from 4GB to 6GB (`memswap_limit` too) to prevent OOM kills with large block histories.
+- **config**: Reduced `max_utxos` from 500,000 to 250,000 in testnet config to lower memory footprint.
+- **deploy**: Added containerd snapshot prune documentation and `docker image prune` to deploy script.
+- **systemd**: Added `pms-containerd-cleanup.timer` (daily at 4 AM) to prevent containerd snapshot accumulation from container restarts.
+
+---
+
 ## [0.4.3] - 2026-03-14 — Gateway TLS Fix + Error Logging + Deploy Cleanup
 
 ### Added

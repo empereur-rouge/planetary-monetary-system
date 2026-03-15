@@ -2,7 +2,7 @@
 tags: [feature, infrastructure, ops]
 created: 2026-03-14
 updated: 2026-03-15
-version: v0.4.3
+version: v0.4.4
 ---
 
 # Deployment & Operations
@@ -101,7 +101,7 @@ Services :
 
 Services supplementaires par rapport a la production :
 - **pms-simulator** : Image `pms-simulator:testnet`, ~97 agents, dashboard web port 9090
-- Limites memoire explicites : Engine 4 Go, Gateway/Prometheus/Simulator 512 Mo
+- Limites memoire explicites : Engine 6 Go (bumped from 4 Go in v0.4.4 to prevent OOM-kill), Gateway/Prometheus/Simulator 512 Mo
 - Retention Prometheus : 3 jours, 1 Go max
 - Images pre-buildees localement (pas de `build:` dans le compose, uniquement `image:`)
 - **(v0.4.3)** Le testnet simule la config prod avec HTTPS de bout en bout. Le Gateway utilise `danger_accept_invalid_certs(true)` pour accepter le certificat auto-signe de l'Engine. Le script de deploiement nettoie les anciennes images Docker avant `docker load` pour prevenir le bloat containerd.
@@ -460,6 +460,8 @@ docker compose start pms-engine
 | `429 Too Many Requests` | Rate limit depasse | Augmenter `RATE_LIMIT_RPS` dans docker-compose et redemarrer |
 | Engine ne demarre pas | Fichiers critiques manquants | Verifier le pre-flight check (11 fichiers) |
 | Gateway `502 Bad Gateway` | Engine pas encore ready | Attendre le health check (30s max) |
+| Engine OOM-kill (restart loop) | `mem_limit` trop bas pour le nombre de blocs/UTXOs accumules | Augmenter `mem_limit`/`memswap_limit` (6g+), reduire `max_utxos` si necessaire. Verifier avec `dmesg \| grep oom-kill` |
+| Containerd snapshots 200Go+ | Restarts multiples accumulent des layers containerd orphelins | `docker rmi` avant `docker load`, systemd timer `pms-containerd-cleanup` pour nettoyage quotidien |
 | Certificat Let's Encrypt echoue | DNS non propage ou ports 80/443 bloques | Verifier DNS + firewall |
 
 ## Fichiers Cles
