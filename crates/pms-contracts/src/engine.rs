@@ -1,7 +1,7 @@
 //! Contract Engine — évaluation des contrats déclaratifs.
 //!
 //! Évalue les contrats enregistrés lors des événements de trigger (NFT burn, etc.).
-//! Les résultats sont des refunds à accumuler dans le FeePool existant.
+//! Les résultats sont des refunds à accumuler via le trait [`RefundSink`](crate::listener::RefundSink).
 
 use pms_storage::ContractStorage;
 use pms_types_contract::{ContractAction, MintFormula};

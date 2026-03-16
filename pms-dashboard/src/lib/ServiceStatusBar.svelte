@@ -13,7 +13,10 @@
         checked_at: number;
     }
 
+    type FetchState = "loading" | "ok" | "offline";
+
     let snapshot: ServicesSnapshot | null = null;
+    let fetchState: FetchState = "loading";
     let interval: any;
 
     function statusColor(status: string): string {
@@ -32,9 +35,14 @@
             const res = await fetch("/services/status");
             if (res.ok) {
                 snapshot = await res.json();
+                fetchState = "ok";
+            } else {
+                console.warn(`[ServiceStatus] HTTP ${res.status} from /services/status`);
+                fetchState = "offline";
             }
-        } catch {
-            // Keep last known state
+        } catch (e) {
+            console.warn("[ServiceStatus] Cannot reach /services/status:", e);
+            fetchState = "offline";
         }
     }
 
@@ -48,7 +56,14 @@
     });
 </script>
 
-{#if snapshot && snapshot.services.length > 0}
+{#if fetchState === "loading"}
+    <div class="status-bar">
+        <div class="status-item" title="Checking services...">
+            <span class="dot pulse" style="background-color: var(--color-fg-secondary, #71717a)"></span>
+            <span class="name">checking...</span>
+        </div>
+    </div>
+{:else if snapshot && snapshot.services.length > 0}
     <div class="status-bar">
         {#each snapshot.services as svc}
             <div
@@ -64,6 +79,13 @@
                 <span class="name">{svc.name}</span>
             </div>
         {/each}
+    </div>
+{:else}
+    <div class="status-bar offline">
+        <div class="status-item" title="Cannot reach service monitor">
+            <span class="dot" style="background-color: var(--color-fg-secondary, #71717a)"></span>
+            <span class="name">services offline</span>
+        </div>
     </div>
 {/if}
 
@@ -100,6 +122,19 @@
         color: var(--color-fg-secondary, #a1a1aa);
         text-transform: uppercase;
         letter-spacing: 0.03em;
+    }
+
+    .status-bar.offline {
+        opacity: 0.5;
+    }
+
+    .dot.pulse {
+        animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+        0%, 100% { opacity: 0.4; }
+        50% { opacity: 1; }
     }
 
     @media (max-width: 768px) {

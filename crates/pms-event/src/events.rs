@@ -4,7 +4,7 @@
 //! d'événement (ex: nouveau type de smart contract) sera ajouté comme
 //! un nouveau variant.
 
-use pms_types_nft::NftAction;
+use pms_types_nft::{NftAction, NftMetadata};
 use serde::{Deserialize, Serialize};
 
 /// Événements émis par le système PMS.
@@ -27,6 +27,24 @@ pub enum PmsEvent {
         block_id: String,
         /// L'action NFT effectuée
         action: NftAction,
+    },
+
+    /// NFT burn traité avec succès — enrichi avec les métadonnées pré-fetchées.
+    ///
+    /// Émis par les handlers burn AVANT `apply_action()` (qui supprime le `block_id`
+    /// du NFT, rendant les métadonnées irrécupérables). Le listener contrat
+    /// consomme cet événement pour évaluer les contrats déclaratifs.
+    NftBurnProcessed {
+        /// ID du bloc contenant l'action burn
+        block_id: String,
+        /// ID du ledger où le burn a eu lieu
+        ledger_id: String,
+        /// Adresse bech32 du burner
+        burner_address: String,
+        /// IDs des tokens brûlés
+        token_ids: Vec<String>,
+        /// Métadonnées pré-fetchées (pour `AttributeFormula`)
+        metadata: Option<NftMetadata>,
     },
 
     // ═══════════════════════════════════════════════════════════════════
@@ -99,6 +117,7 @@ impl PmsEvent {
                 NftAction::Burn { .. } => "nft_burned",
                 NftAction::BatchBurn { .. } => "nft_batch_burned",
             },
+            PmsEvent::NftBurnProcessed { .. } => "nft_burn_processed",
             PmsEvent::ContractFulfilled { .. } => "contract_fulfilled",
             PmsEvent::ContractFailed { .. } => "contract_failed",
             PmsEvent::MilestoneConfirmed { .. } => "milestone_confirmed",
@@ -112,6 +131,7 @@ impl PmsEvent {
     pub fn block_id(&self) -> &str {
         match self {
             PmsEvent::Nft { block_id, .. } => block_id,
+            PmsEvent::NftBurnProcessed { block_id, .. } => block_id,
             PmsEvent::ContractFulfilled { block_id, .. } => block_id,
             PmsEvent::ContractFailed { block_id, .. } => block_id,
             PmsEvent::MilestoneConfirmed { block_id, .. } => block_id,
@@ -124,5 +144,22 @@ impl PmsEvent {
     /// Helper pour créer un événement NFT.
     pub fn nft(block_id: String, action: NftAction) -> Self {
         PmsEvent::Nft { block_id, action }
+    }
+
+    /// Helper pour créer un événement de burn NFT traité (enrichi avec métadonnées).
+    pub fn nft_burn_processed(
+        block_id: String,
+        ledger_id: String,
+        burner_address: String,
+        token_ids: Vec<String>,
+        metadata: Option<NftMetadata>,
+    ) -> Self {
+        PmsEvent::NftBurnProcessed {
+            block_id,
+            ledger_id,
+            burner_address,
+            token_ids,
+            metadata,
+        }
     }
 }

@@ -30,6 +30,7 @@ members = [
     "crates/pms-bridge",
     "crates/pms-types-economics",
     "crates/pms-economics",
+    "crates/pms-contracts",
 ]
 
 resolver = "2"

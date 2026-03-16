@@ -81,6 +81,45 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// RefundSink implementation for pms-contracts listener
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Adapts `FeePoolRegistry` to the `RefundSink` trait required by `pms-contracts`.
+///
+/// Each call routes the refund to the correct per-ledger FeePool.
+struct FeePoolRefundSink {
+    registry: Arc<crate::fee_pool::FeePoolRegistry>,
+}
+
+impl pms_contracts::RefundSink for FeePoolRefundSink {
+    fn add_burn_refund(
+        &self,
+        ledger_id: &str,
+        address: &str,
+        amount: rust_decimal::Decimal,
+        asset_id: Option<String>,
+    ) {
+        let pool = self.registry.get_or_create(ledger_id);
+        // Use try_write to avoid blocking the EventBus listener task.
+        // If the lock is held (fee distribution in progress), use blocking write.
+        match pool.try_write() {
+            Ok(mut guard) => {
+                guard.add_burn_refund(address, amount, asset_id);
+            }
+            Err(_) => {
+                // Fallback: spawn a blocking write to avoid deadlock.
+                // This is rare — only when fee distribution holds the write lock.
+                let pool = pool.clone();
+                let address = address.to_string();
+                tokio::spawn(async move {
+                    pool.write().await.add_burn_refund(&address, amount, asset_id);
+                });
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub srv: Arc<Server>,
@@ -115,10 +154,6 @@ pub struct AppState {
     pub ledger_id: String,
     /// Resolved fee configuration for this ledger context.
     pub effective_fees: Arc<crate::api_fn::tx_helpers::EffectiveFees>,
-    /// Main store for global lookups (contracts, etc.).
-    /// In multi-ledger mode, `store` is swapped per-ledger but `contract_store`
-    /// always points to the main RocksDB where contracts are registered.
-    pub contract_store: Arc<RocksStore>,
     /// Store des clés API pour l'authentification des clients SDK.
     /// Protégé par un RwLock pour lectures concurrentes (middleware)
     /// et écritures exclusives (CRUD admin).
@@ -127,6 +162,11 @@ pub struct AppState {
     pub activity_cache: Arc<crate::api_fn::activity::ActivityCache>,
     /// TPS tracker for dynamic fee calculation (congestion-based multiplier).
     pub tps_tracker: Arc<pms_economics::dynamic_fee::TpsTracker>,
+    /// Main EventBus for contract evaluation.
+    /// Burns on ANY ledger emit `NftBurnProcessed` to this bus,
+    /// where the `ContractListener` is subscribed.
+    /// `None` in test contexts where contracts are not needed.
+    pub contract_event_bus: Option<pms_event::EventBus>,
 }
 
 /// Sync the PMS_BLOCKS_TOTAL gauge with the actual in-memory DAG size for the default ledger.
@@ -847,12 +887,21 @@ pub async fn serve_api(
     let fee_pool_registry = Arc::new(crate::fee_pool::FeePoolRegistry::new());
     let main_fee_pool = fee_pool_registry.get_or_create("main");
 
+    // Keep a reference to the main store for the contract listener.
+    // Contracts are registered on the main RocksDB, so the listener
+    // needs it regardless of per-ledger store swaps.
+    let main_store_for_contracts: std::sync::Arc<dyn pms_storage::ContractStorage> = store.clone();
+
+    // Grab the main EventBus BEFORE building AppState.
+    // This bus is shared across all ledgers so that NftBurnProcessed
+    // events from any ledger reach the single ContractListener.
+    let main_event_bus = srv.adapter_arc().event_bus();
+
     let state = AppState {
         srv,
         _cfg: cfg.clone(),
         _ready: ready.clone(),
         stats: stats.clone(),
-        contract_store: store.clone(),
         store,
         admin_token,
         node_wallet,
@@ -875,6 +924,7 @@ pub async fn serve_api(
         )),
         activity_cache: Arc::new(crate::api_fn::activity::ActivityCache::new(10_000, 30)),
         tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
+        contract_event_bus: main_event_bus.clone(),
     };
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -886,6 +936,17 @@ pub async fn serve_api(
     // SCHEDULED INFLATION MINT TASK
     // ═══════════════════════════════════════════════════════════════════════
     spawn_inflation_mint_task(state.clone());
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // CONTRACT EVALUATION LISTENER (EventBus)
+    // ═══════════════════════════════════════════════════════════════════════
+    if let Some(bus) = main_event_bus {
+        let sink = Arc::new(FeePoolRefundSink {
+            registry: state.fee_pool_registry.clone(),
+        });
+        pms_contracts::spawn_contract_listener(bus, main_store_for_contracts, sink);
+        tracing::info!("ContractListener spawned on EventBus");
+    }
 
     // 🔹 Construit le Router complet
     eprintln!("[API] building router...");

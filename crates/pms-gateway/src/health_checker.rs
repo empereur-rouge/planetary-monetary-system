@@ -46,7 +46,7 @@ struct MonitoredService {
     name: String,
     url: String,
     /// If set, the response body must contain this substring for "up" status.
-    /// Empty string means any 2xx response is sufficient.
+    /// Empty string means any HTTP response (including 3xx redirects) is sufficient.
     expect_body: String,
 }
 
@@ -111,8 +111,14 @@ async fn check_service(
             let status_code = resp.status();
             let body = resp.text().await.unwrap_or_default();
 
-            let is_up = status_code.is_success()
-                && (svc.expect_body.is_empty() || body.contains(&svc.expect_body));
+            // When expect_body is empty, any HTTP response means the service is alive
+            // (even 3xx redirects or 4xx errors). Only connection failures = "down".
+            // When expect_body is set, require 2xx + body match for "up".
+            let is_up = if svc.expect_body.is_empty() {
+                !status_code.is_server_error() // 2xx/3xx/4xx = up, 5xx = degraded
+            } else {
+                status_code.is_success() && body.contains(&svc.expect_body)
+            };
 
             // Extract block_count from Engine's /internal/health response
             let detail = if svc.name == "Engine" {
@@ -166,10 +172,13 @@ pub fn spawn_health_checker(cache: SharedServicesCache) {
             .join(", ")
     );
 
-    // Separate reqwest client with aggressive timeouts for health checks
+    // Separate reqwest client with aggressive timeouts for health checks.
+    // Redirects are disabled so services like Caddy (which 301-redirects HTTP→HTTPS
+    // to a domain unreachable from inside Docker) still report as "up".
     let checker_client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
         .danger_accept_invalid_certs(true) // Engine uses self-signed TLS
         .build()
         .expect("health checker reqwest client");

@@ -242,7 +242,6 @@ async fn main() -> Result<()> {
             _cfg: Arc::new(cfg.clone()),
             _ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             stats: Arc::new(pms_server::stats::Stats::default()), // Use independent stats for internal API
-            contract_store: store.clone(),
             store: store.clone(),
             admin_token: admin_api_token.clone(),
             node_wallet: node_wallet.clone(),
@@ -269,6 +268,7 @@ async fn main() -> Result<()> {
             ),
             activity_cache: std::sync::Arc::new(pms_server::api_fn::activity::ActivityCache::new(10_000, 30)),
             tps_tracker: std::sync::Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
+            contract_event_bus: None, // Internal API doesn't need contract events
         };
 
         eprintln!("🔧 Launching Internal API at {}", addr);

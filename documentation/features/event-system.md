@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure]
 created: 2026-01-08
-updated: 2026-03-14
-version: v0.1.0
+updated: 2026-03-16
+version: v0.5.3
 ---
 
 # Event System (EventBus)
@@ -13,14 +13,16 @@ L'Event System est le bus d'evenements asynchrone central du moteur PMS. Il repo
 
 Le bus est thread-safe (clonable via `Arc` interne du `broadcast::Sender`), non-bloquant a l'emission, et supporte plusieurs subscribers en parallele. Il utilise une backpressure automatique : les subscribers trop lents recoivent une erreur `Lagged` et perdent les evenements les plus anciens du buffer. La capacite par defaut en production est de **4096 evenements** en buffer.
 
-Le consommateur principal est le systeme de streaming SSE (`GET /v1/wallet/{address}/activity/stream`) de l'[[activity-system|Activity System]], qui filtre les evenements `BlockPersisted` par adresse en memoire sans acces disque pour offrir des notifications temps reel aux clients.
+Les consommateurs principaux sont :
+- Le systeme de streaming SSE (`GET /v1/wallet/{address}/activity/stream`) de l'[[activity-system|Activity System]], qui filtre les evenements `BlockPersisted` par adresse en memoire sans acces disque pour offrir des notifications temps reel aux clients.
+- Le `ContractListener` (`pms-contracts`) qui ecoute les evenements `NftBurnProcessed` et evalue les [[smart-contracts|contrats declaratifs]] pour accumuler les refunds de burn.
 
 ## Dates
 
 | | Date |
 |---|---|
 | Creee | 2026-01-08 |
-| Derniere mise a jour | 2026-03-14 |
+| Derniere mise a jour | 2026-03-15 |
 | Version d'introduction | v0.1.0 |
 
 ### Historique des commits
@@ -43,6 +45,9 @@ Le consommateur principal est le systeme de streaming SSE (`GET /v1/wallet/{addr
 | `pms-core` | `crates/pms-core/src/core_adapter.rs` | Creation de l'`EventBus` (capacite 4096) dans `CoreAdapter::new()` |
 | `pms-core` | `crates/pms-core/src/net_adapter.rs` | Emission des evenements `Nft`, `NodeRewardDistributed`, `BlockPersisted` dans `persist_block()` |
 | `pms-interface` | `crates/pms-interface/src/net_adapter.rs` | Trait `NetDagAdapter` : methode `event_bus() -> Option<EventBus>` (default `None` pour les mocks) |
+| `pms-contracts` | `crates/pms-contracts/src/listener.rs` | Consommateur : `ContractListener` ecoute `NftBurnProcessed`, evalue les contrats, pousse les refunds |
+| `pms-server` | `crates/pms-server/src/api_fn/nft.rs` | Producteur : `emit_nft_burn_processed()` emet `NftBurnProcessed` depuis les 3 handlers burn |
+| `pms-server` | `crates/pms-server/src/api.rs` | `FeePoolRefundSink` impl + spawn du `ContractListener` au demarrage |
 | `pms-server` | `crates/pms-server/src/api_fn/activity.rs` | Consommateur SSE : `stream_wallet_activity()` s'abonne au bus et filtre `BlockPersisted` |
 | `pms-wallet` | `crates/pms-wallet/src/history.rs` | `collect_involved_addresses()` : extraction des adresses impliquees depuis un `PlainPayload`, utilisee par le producteur `BlockPersisted` |
 
@@ -62,14 +67,20 @@ L'enum `PmsEvent` est defini dans `crates/pms-event/src/events.rs`. Chaque varia
 
 Le variant `Nft` encapsule un `NftAction` (defini dans `pms-types-nft`) et utilise le helper `PmsEvent::nft(block_id, action)` pour la construction.
 
-### Smart Contract Events (FUTUR)
+### NFT Burn Processed (v0.5.2)
 
 | Variant | `event_type()` | Champs | Description | Statut |
 |---------|----------------|--------|-------------|--------|
-| `ContractFulfilled` | `"contract_fulfilled"` | `block_id`, `contract_id`, `result` | Un smart contract a ete execute avec succes | **Reserve** -- defini mais pas encore emis |
+| `NftBurnProcessed` | `"nft_burn_processed"` | `block_id`, `ledger_id`, `burner_address`, `token_ids: Vec<String>`, `metadata: Option<NftMetadata>` | Burn NFT traite avec succes, enrichi avec metadata pre-fetchees. Emis par les handlers burn AVANT `apply_action()`. | **Actif** -- emis dans `nft.rs`, consomme par `ContractListener` |
+
+### Smart Contract Events
+
+| Variant | `event_type()` | Champs | Description | Statut |
+|---------|----------------|--------|-------------|--------|
+| `ContractFulfilled` | `"contract_fulfilled"` | `block_id`, `contract_id`, `result` | Un smart contract a ete execute avec succes | **Actif** -- emis par `ContractListener` apres evaluation reussie |
 | `ContractFailed` | `"contract_failed"` | `block_id`, `contract_id`, `error` | Un smart contract a echoue | **Reserve** -- defini mais pas encore emis |
 
-Ces variants sont prepares pour l'integration future des contrats declaratifs ([[smart-contracts]]) dans le flux d'evenements.
+Le variant `ContractFulfilled` est emis par le `ContractListener` (`pms-contracts`) pour chaque contrat evalue avec succes suite a un `NftBurnProcessed`.
 
 ### System Events
 
@@ -94,18 +105,21 @@ Le variant `BlockPersisted` est le plus riche : il contient le payload JSON comp
 | `event_type()` | `fn event_type(&self) -> &'static str` | Retourne le type d'evenement sous forme de chaine statique (ex: `"nft_minted"`, `"block_persisted"`) |
 | `block_id()` | `fn block_id(&self) -> &str` | Retourne le `block_id` associe a l'evenement (pour `NodeRewardDistributed`, retourne `milestone_id`) |
 | `nft()` | `fn nft(block_id: String, action: NftAction) -> Self` | Helper constructeur pour creer un evenement NFT |
+| `nft_burn_processed()` | `fn nft_burn_processed(block_id, ledger_id, burner_address, token_ids, metadata) -> Self` | Helper constructeur pour creer un evenement `NftBurnProcessed` enrichi avec metadata (v0.5.2) |
 
 ## Producteurs et Consommateurs
 
 ### Producteurs (Emission)
 
-Tous les evenements sont emis depuis un seul fichier : `crates/pms-core/src/net_adapter.rs`, dans la methode `persist_block()` du `CoreAdapter`.
+Les evenements sont emis depuis deux sources :
 
 | Evenement | Localisation | Contexte d'emission |
 |-----------|-------------|---------------------|
-| `PmsEvent::Nft` | `net_adapter.rs:267-268` | Apres application reussie d'une `NftAction` (Mint, Transfer, Burn, Use, BatchBurn) via `store.apply_action()` ou `store.set_owner()` |
-| `PmsEvent::NodeRewardDistributed` | `net_adapter.rs:1001-1006` | Apres creation des UTXOs de recompense pour chaque noeud validateur, declenchee par un bloc Milestone |
-| `PmsEvent::BlockPersisted` | `net_adapter.rs:1068-1074` | A la fin de `persist_block()`, pour tout bloc persiste dans le DAG. Inclut le type de payload, les adresses impliquees et le JSON serialise |
+| `PmsEvent::Nft` | `pms-core/net_adapter.rs:267-268` | Apres application reussie d'une `NftAction` (Mint, Transfer, Burn, Use, BatchBurn) via `store.apply_action()` ou `store.set_owner()` |
+| `PmsEvent::NftBurnProcessed` | `pms-server/api_fn/nft.rs` | Apres burn reussi, avec metadata pre-fetchees. Emis par `emit_nft_burn_processed()` dans les 3 handlers burn. |
+| `PmsEvent::ContractFulfilled` | `pms-contracts/listener.rs` | Apres evaluation reussie d'un contrat par le `ContractListener`. |
+| `PmsEvent::NodeRewardDistributed` | `pms-core/net_adapter.rs:1001-1006` | Apres creation des UTXOs de recompense pour chaque noeud validateur, declenchee par un bloc Milestone |
+| `PmsEvent::BlockPersisted` | `pms-core/net_adapter.rs:1068-1074` | A la fin de `persist_block()`, pour tout bloc persiste dans le DAG. Inclut le type de payload, les adresses impliquees et le JSON serialise |
 
 Le bus est cree dans `CoreAdapter::new()` (`core_adapter.rs:60`) avec une capacite de **4096 evenements** et stocke comme champ `pub event_bus: EventBus` de la struct `CoreAdapter`.
 
@@ -113,6 +127,7 @@ Le bus est cree dans `CoreAdapter::new()` (`core_adapter.rs:60`) avec une capaci
 
 | Consommateur | Localisation | Evenement consomme | Description |
 |-------------|-------------|-------------------|-------------|
+| ContractListener | `crates/pms-contracts/src/listener.rs` | `NftBurnProcessed` | Evalue les contrats declaratifs matchants, accumule les refunds via `RefundSink`, emet `ContractFulfilled`. Spawne au demarrage du serveur dans `api.rs`. |
 | SSE Activity Stream | `crates/pms-server/src/api_fn/activity.rs:430-575` | `BlockPersisted` | Endpoint `GET /v1/wallet/{address}/activity/stream`. Souscrit au bus, filtre par adresse via `involved_addresses`, classifie le payload en `ActivityItem`, et emet des evenements SSE `"activity"` ou `"warning"` (lagged). Supporte le dechiffrement en temps reel via `x25519_sk_hex` et le filtrage par type via `?type=`. |
 
 Le bus est expose via le trait `NetDagAdapter::event_bus() -> Option<EventBus>` (`crates/pms-interface/src/net_adapter.rs:61`). L'implementation par defaut retourne `None` (pour les mocks de test). L'implementation reelle dans `CoreAdapter` (`net_adapter.rs:1232-1234`) retourne `Some(self.event_bus.clone())`.
@@ -162,30 +177,28 @@ Handler Axum SSE. Souscrit au bus via `event_bus().subscribe()`, filtre les `Blo
 ## Architecture
 
 ```
- persist_block() [pms-core/net_adapter.rs]
-          |
-          |  .emit(PmsEvent::Nft { ... })
-          |  .emit(PmsEvent::NodeRewardDistributed { ... })
-          |  .emit(PmsEvent::BlockPersisted { ... })
-          v
-  +------------------+
-  |    EventBus      |  tokio::broadcast (cap=4096)
-  |  (bus.rs)        |
-  +--------+---------+
-           |
-           |  .subscribe()  ->  broadcast::Receiver<PmsEvent>
-           |
-           v
-  +---------------------------+
-  |  stream_wallet_activity() |  SSE endpoint
-  |  (activity.rs)            |  GET /v1/wallet/{addr}/activity/stream
-  +---------------------------+
-           |
-           |  filtre BlockPersisted par involved_addresses
-           |  classifie en ActivityItem
-           |
-           v
-     SSE events -> Client (Dashboard, SDK)
+ persist_block() [pms-core]       burn handlers [pms-server/nft.rs]
+          |                                |
+          |  .emit(Nft)                    |  .emit(NftBurnProcessed)
+          |  .emit(NodeRewardDistributed)  |
+          |  .emit(BlockPersisted)         |
+          v                                v
+  +--------------------------------------------+
+  |              EventBus                      |  tokio::broadcast (cap=4096)
+  |            (pms-event/bus.rs)               |
+  +--------+---------------------+-------------+
+           |                     |
+           |  .subscribe()       |  .subscribe()
+           v                     v
+  +---------------------------+  +------------------------------+
+  |  stream_wallet_activity() |  |  ContractListener            |
+  |  (activity.rs)            |  |  (pms-contracts/listener.rs) |
+  |  GET /v1/wallet/stream    |  +------------------------------+
+  +---------------------------+            |
+           |                               |  evaluate_nft_burn()
+           |                               |  RefundSink::add_burn_refund()
+           v                               v
+     SSE -> Client                  FeePool -> fee_distribution
 ```
 
 ### Flux de donnees detaille pour `BlockPersisted`
@@ -205,7 +218,7 @@ Handler Axum SSE. Souscrit au bus via `event_bus().subscribe()`, filtre les `Blo
 - [[activity-system]] : Consommateur principal. Le SSE Activity Stream utilise l'EventBus pour recevoir les blocs persistes en temps reel et les diffuser aux clients connectes.
 - [[nft-system]] : Les actions NFT (Mint, Transfer, Use, Burn, BatchBurn) sont emises comme evenements `PmsEvent::Nft` apres application dans le store NFT.
 - [[fee-distribution]] : Les recompenses de noeuds generees par les Milestones sont emises comme `PmsEvent::NodeRewardDistributed`.
-- [[smart-contracts]] : Les variants `ContractFulfilled` et `ContractFailed` sont reserves pour l'emission future lors de l'execution des contrats declaratifs.
+- [[smart-contracts]] : Le `ContractListener` (dans `pms-contracts`) ecoute les `NftBurnProcessed` et evalue les contrats declaratifs. Emet `ContractFulfilled` apres chaque evaluation reussie.
 - [[server-engine]] : Le `CoreAdapter` cree et possede l'`EventBus`. L'interface `NetDagAdapter` expose `event_bus()` pour que le serveur API puisse s'abonner.
 - [[storage-rocksdb]] : L'emission de `BlockPersisted` se produit apres la validation RAM/DAG mais avant la persistance asynchrone sur disque (fire-and-forget via `PersistJob`). Les evenements refletent donc l'etat RAM confirme, pas necessairement l'etat disque.
 

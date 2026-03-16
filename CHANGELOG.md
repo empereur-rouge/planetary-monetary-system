@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.3] - 2026-03-16 — Fix EventBus routing: burns on custom ledgers now reach ContractListener
+
+### Fixed
+- **fix(contracts/critical)**: Burns on custom ledgers (eden, etc.) emitted `NftBurnProcessed` on the **per-ledger** EventBus, but the `ContractListener` was subscribed to the **main** EventBus only. Events never reached the listener → zero EDN distributed. Fixed by adding `contract_event_bus: Option<EventBus>` to `AppState`, always pointing to the main adapter's bus. `emit_nft_burn_processed()` now uses this shared bus regardless of which ledger the burn occurs on.
+
+---
+
+## [0.5.2] - 2026-03-15 — Extract contract engine into pms-contracts crate + EventBus decoupling
+
+### Changed
+- **refactor(contracts)**: Extracted contract evaluation engine into new `pms-contracts` crate. `contract_engine.rs` moved from `pms-server` to `pms-contracts/src/engine.rs`. The `ContractResult` type, `evaluate_nft_burn()`, formula evaluation, and all 9 unit tests moved intact.
+- **refactor(contracts)**: Decoupled contract evaluation from NFT burn handlers via EventBus. The 3 direct calls to `evaluate_contracts_after_burn()` in `nft.rs` are replaced by `NftBurnProcessed` event emissions. A new `ContractListener` subscribes to these events and evaluates contracts asynchronously.
+- **refactor(contracts)**: Introduced `RefundSink` trait in `pms-contracts` to decouple refund accumulation from `pms-server`'s `FeePoolRegistry`. `FeePoolRefundSink` in `api.rs` bridges the two.
+- **refactor(server)**: Removed `contract_store` field from `AppState` — the contract listener receives its own `Arc<dyn ContractStorage>` at startup, always pointing to the main RocksDB.
+
+### Added
+- **feat(event)**: New `PmsEvent::NftBurnProcessed` variant carrying `block_id`, `ledger_id`, `burner_address`, `token_ids`, and pre-fetched `NftMetadata`. Emitted by burn handlers BEFORE `apply_action()` (which destroys metadata references).
+- **feat(contracts)**: `pms-contracts` crate — dedicated crate for contract engine + EventBus listener. Contains `engine.rs` (evaluation), `listener.rs` (subscriber + `RefundSink` trait).
+
+---
+
 ## [0.5.1] - 2026-03-15 — Fix EDN burn refunds not distributed on custom ledgers
 
 ### Fixed

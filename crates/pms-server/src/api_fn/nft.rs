@@ -461,56 +461,35 @@ pub async fn mint_nft(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CONTRACT ENGINE — Post-burn evaluation
+// CONTRACT ENGINE — Post-burn event emission
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Évalue les contrats déclaratifs après un burn NFT réussi.
+/// Émet un événement `NftBurnProcessed` sur le **main EventBus** pour déclencher
+/// l'évaluation des contrats déclaratifs par le listener dans `pms-contracts`.
 ///
-/// Récupère les metadata du NFT (pour AttributeFormula), recherche les contrats
-/// matchant ce type de burn, et accumule les refunds dans le FeePool.
+/// Utilise `state.contract_event_bus` (le bus du main adapter) et NON
+/// `state.srv.adapter_arc().event_bus()` qui retourne le bus per-ledger.
+/// Le `ContractListener` est abonné uniquement au bus main — les burns sur
+/// les custom ledgers (eden, etc.) doivent émettre sur ce même bus.
 ///
-/// **IMPORTANT**: Les metadata doivent être récupérées AVANT apply_action()
-/// car apply_action supprime le block_id du NFT.
-///
-/// # Arguments
-/// * `state` - AppState pour accéder au store et fee_pool
-/// * `token_ids` - IDs des tokens brûlés
-/// * `burner_address` - Adresse bech32 du burner
-/// * `pre_fetched_metadata` - Metadata récupérées AVANT le burn (pour un token représentatif)
-async fn evaluate_contracts_after_burn(
+/// **IMPORTANT**: Les metadata doivent être récupérées AVANT `apply_action()`
+/// car `apply_action` supprime le `block_id` du NFT, rendant les métadonnées
+/// irrécupérables depuis le DAG.
+fn emit_nft_burn_processed(
     state: &AppState,
+    block_id: &str,
     token_ids: &[String],
     burner_address: &str,
-    pre_fetched_metadata: Option<&pms_types_nft::NftMetadata>,
+    pre_fetched_metadata: Option<pms_types_nft::NftMetadata>,
 ) {
-    let nft_type = pre_fetched_metadata.and_then(|m| m.nft_type.as_deref());
-    let token_count = token_ids.len() as u64;
-
-    // Use contract_store (always main RocksDB) for contract lookups.
-    // Contracts are registered on the main ledger, but burns can happen on
-    // any ledger (e.g. eden). Using state.store here would search the
-    // per-ledger store which has no contracts → no refunds.
-    let results = crate::contract_engine::evaluate_nft_burn(
-        state.contract_store.as_ref(),
-        &state.ledger_id,
-        burner_address,
-        nft_type,
-        pre_fetched_metadata,
-        token_count,
-    );
-
-    if !results.is_empty() {
-        let mut pool = state.fee_pool.write().await;
-        for r in &results {
-            pool.add_burn_refund(&r.refund_address, r.refund_amount, r.asset_id.clone());
-            tracing::info!(
-                "Contract '{}': burn refund {} {} for {}",
-                r.contract_name,
-                r.refund_amount,
-                r.asset_id.as_deref().unwrap_or("PMS"),
-                &r.refund_address[..20.min(r.refund_address.len())]
-            );
-        }
+    if let Some(bus) = &state.contract_event_bus {
+        bus.emit(pms_event::PmsEvent::nft_burn_processed(
+            block_id.to_string(),
+            state.ledger_id.clone(),
+            burner_address.to_string(),
+            token_ids.to_vec(),
+            pre_fetched_metadata,
+        ));
     }
 }
 
@@ -672,14 +651,14 @@ pub async fn burn_nft(
                 );
             }
 
-            // Evaluate contracts after successful burn
-            evaluate_contracts_after_burn(
+            // Emit NftBurnProcessed event for contract listener
+            emit_nft_burn_processed(
                 &state,
+                &block_id,
                 &token_ids_to_process,
                 &burner,
-                pre_metadata.as_ref(),
-            )
-            .await;
+                pre_metadata,
+            );
 
             let response_token_id = if token_ids_to_process.len() == 1 {
                 token_ids_to_process[0].clone()
@@ -970,14 +949,14 @@ pub async fn burn_nft_simple(
                 );
             }
 
-            // Evaluate contracts after successful burn
-            evaluate_contracts_after_burn(
+            // Emit NftBurnProcessed event for contract listener
+            emit_nft_burn_processed(
                 &state,
+                &block_id,
                 &[req.token_id],
                 &burner_addr,
-                pre_metadata.as_ref(),
-            )
-            .await;
+                pre_metadata,
+            );
 
             (
                 StatusCode::OK,
@@ -1154,14 +1133,14 @@ pub async fn burn_nft_batch_simple(
                 );
             }
 
-            // Evaluate contracts after successful batch burn
-            evaluate_contracts_after_burn(
+            // Emit NftBurnProcessed event for contract listener
+            emit_nft_burn_processed(
                 &state,
+                &block_id,
                 &req.token_ids,
                 &burner_addr,
-                pre_metadata.as_ref(),
-            )
-            .await;
+                pre_metadata,
+            );
 
             (
                 StatusCode::OK,

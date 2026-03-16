@@ -1,21 +1,30 @@
 ---
 tags: [feature]
 created: 2026-03-13
-updated: 2026-03-15
-version: v0.5.1
+updated: 2026-03-16
+version: v0.5.3
 ---
 
 # Smart Contracts (Contrats Déclaratifs)
 
 ## Résumé
 
-Le système de Smart Contracts de PMS est un moteur de règles déclaratives, exécuté nativement par le nœud coordinateur. Contrairement aux smart contracts Turing-complets (Solidity/EVM), les contrats PMS sont des règles pré-définies qui réagissent à des événements spécifiques (burn de NFT, burn de tokens) et déclenchent des actions automatiques (refunds, émissions d'événements). Ce design garantit la prévisibilité, la sécurité, et la performance, sans risque d'exécution arbitraire de code. Les contrats sont stockés dans le RocksDB du **main ledger** et évalués en temps réel par le `ContractEngine` lors de chaque burn NFT, y compris sur les custom ledgers.
+Le système de Smart Contracts de PMS est un moteur de règles déclaratives, exécuté nativement par le nœud coordinateur. Contrairement aux smart contracts Turing-complets (Solidity/EVM), les contrats PMS sont des règles pré-définies qui réagissent à des événements spécifiques (burn de NFT, burn de tokens) et déclenchent des actions automatiques (refunds, émissions d'événements). Ce design garantit la prévisibilité, la sécurité, et la performance, sans risque d'exécution arbitraire de code. Les contrats sont stockés dans le RocksDB du **main ledger** et évalués en temps réel par le `ContractEngine` dans le crate dédié `pms-contracts`, déclenché via l'[[event-system|EventBus]] lors de chaque burn NFT, y compris sur les custom ledgers.
 
-### Architecture : `contract_store` (v0.5.1)
+### Architecture : EventBus + `pms-contracts` (v0.5.2)
 
-Les contrats sont enregistrés uniquement dans le store RocksDB du main ledger. Dans un environnement [[multi-ledger]], chaque ledger custom possède son propre `state.store` (RocksDB dédié). Avant v0.5.1, `evaluate_contracts_after_burn()` utilisait `state.store` pour chercher les contrats, ce qui signifiait que les burns sur un custom ledger (ex: eden) ne trouvaient aucun contrat et ne produisaient aucun refund.
+Depuis v0.5.2, l'évaluation des contrats est **découplée** des handlers NFT burn via l'[[event-system|EventBus]] :
 
-**Fix (v0.5.1)** : Un champ `contract_store: Arc<RocksStore>` a été ajouté à `AppState`. Ce champ pointe **toujours** vers le store du main ledger, indépendamment du ledger courant. `evaluate_contracts_after_burn()` utilise désormais `state.contract_store` au lieu de `state.store` pour les lookups de contrats, garantissant que les contrats Global sont visibles depuis tous les ledgers.
+1. Les handlers burn (`burn_nft`, `burn_nft_simple`, `burn_nft_batch_simple`) émettent un événement `NftBurnProcessed` sur l'EventBus après un burn réussi.
+2. Le `ContractListener` (dans `pms-contracts`) écoute ces événements et évalue les contrats matchants.
+3. Les refunds sont accumulés via le trait `RefundSink`, implémenté côté `pms-server` par `FeePoolRefundSink` qui wrappe le `FeePoolRegistry`.
+
+Ce design :
+- **Isole** la logique contrat dans un crate dédié (`pms-contracts`), sans dépendance sur `pms-server` ou `AppState`.
+- **Résout** le problème cross-ledger (v0.5.1) : le listener reçoit `Arc<dyn ContractStorage>` pointant vers le main RocksDB au démarrage.
+- **Découple** temporellement : les handlers burn n'attendent plus l'évaluation des contrats.
+
+**Fix v0.5.3 — EventBus routing** : Les burns sur les custom ledgers (eden, etc.) émettaient sur le bus **per-ledger** (via `state.srv.adapter_arc().event_bus()`), mais le `ContractListener` est abonné au bus **main** uniquement. Fix : `AppState.contract_event_bus` pointe toujours vers le bus du main adapter, et `emit_nft_burn_processed()` utilise ce bus partagé quel que soit le ledger.
 
 ## Dates
 
@@ -62,12 +71,15 @@ Pour désactiver les frais de déploiement : `{ "SetContractDeploymentFee": { "f
 
 | Crate | Fichier | Rôle |
 |-------|---------|------|
+| `pms-contracts` | `crates/pms-contracts/src/engine.rs` | Moteur d'évaluation des contrats (`evaluate_nft_burn`, `evaluate_formula`, `find_attribute`, `ContractResult`) |
+| `pms-contracts` | `crates/pms-contracts/src/listener.rs` | Subscriber EventBus : écoute `NftBurnProcessed`, évalue les contrats, pousse les refunds via `RefundSink` |
+| `pms-contracts` | `crates/pms-contracts/src/lib.rs` | Re-exports : `evaluate_nft_burn`, `ContractResult`, `RefundSink`, `spawn_contract_listener` |
 | `pms-types-contract` | `crates/pms-types-contract/src/lib.rs` | Types de données : `Contract`, `ContractScope`, `ContractTrigger`, `ContractAction`, `MintFormula` |
 | `pms-types-payload` | `crates/pms-types-payload/src/payload.rs` | Variantes `PlainPayload::ContractRegister` et `PlainPayload::ContractUpdate` |
-| `pms-server` | `crates/pms-server/src/contract_engine.rs` | Moteur d'évaluation des contrats (`evaluate_nft_burn`, `evaluate_formula`, `find_attribute`) |
+| `pms-event` | `crates/pms-event/src/events.rs` | Variant `PmsEvent::NftBurnProcessed` + helper `nft_burn_processed()` |
 | `pms-server` | `crates/pms-server/src/api_fn/contracts.rs` | Endpoints API admin CRUD pour les contrats |
-| `pms-server` | `crates/pms-server/src/api_fn/nft.rs` | Intégration des contrats dans les 3 handlers de burn NFT (`evaluate_contracts_after_burn`) |
-| `pms-server` | `crates/pms-server/src/api.rs` | `AppState.contract_store: Arc<RocksStore>` — référence au store du main ledger pour les lookups de contrats cross-ledger |
+| `pms-server` | `crates/pms-server/src/api_fn/nft.rs` | Émission `NftBurnProcessed` via `emit_nft_burn_processed()` dans les 3 handlers burn |
+| `pms-server` | `crates/pms-server/src/api.rs` | `FeePoolRefundSink` impl + spawn du `ContractListener` au démarrage |
 | `pms-server` | `crates/pms-server/src/api_fn/tx_helpers.rs` | Chargement des frais de déploiement (`load_contract_deployment_fee`) |
 | `pms-server` | `crates/pms-server/src/fee_pool.rs` | Accumulation des refunds de burn dans le `FeePool` (`add_burn_refund`) |
 | `pms-storage` | `crates/pms-storage/src/contract_store.rs` | Trait `ContractStorage` + implémentation in-memory pour les tests |
@@ -82,17 +94,19 @@ Pour désactiver les frais de déploiement : `{ "SetContractDeploymentFee": { "f
 |-------|---------|------------|
 | `pms-core` | `crates/pms-core/tests/contract_validation.rs` | Validation DAG : signature coordinateur, champs vides, scopes, triggers |
 | `pms-storage` | `crates/pms-storage/tests/contract_store_test.rs` | CRUD RocksDB, filtrage par type/scope, toggle enable/disable, wildcard |
-| `pms-server` | `crates/pms-server/src/contract_engine.rs` (tests inline) | Évaluation des formules, batch burn, scope ledger, contrats désactivés, wildcard |
+| `pms-contracts` | `crates/pms-contracts/src/engine.rs` (tests inline) | Évaluation des formules, batch burn, scope ledger, contrats désactivés, wildcard |
 | `pms-types-contract` | `crates/pms-types-contract/src/lib.rs` (tests inline) | Sérialisation/désérialisation, scope matching |
 
 ## Fonctions Clés
 
 | Fonction | Fichier | Description |
 |----------|---------|-------------|
-| `evaluate_nft_burn()` | `crates/pms-server/src/contract_engine.rs` | Point d'entrée principal : recherche les contrats matching et évalue les formules pour un burn NFT donné |
-| `evaluate_formula()` | `crates/pms-server/src/contract_engine.rs` | Évalue une `MintFormula` (`FixedRate`, `AttributeFormula`, `FixedAmount`) et retourne un `Decimal` |
-| `find_attribute()` | `crates/pms-server/src/contract_engine.rs` | Extrait un attribut du JSON `extra` des metadata NFT, avec support du dot-notation (ex: `"attributes.weight"`) |
-| `evaluate_contracts_after_burn()` | `crates/pms-server/src/api_fn/nft.rs` | Wrapper async appelé après chaque burn réussi, accumule les refunds dans le `FeePool` |
+| `evaluate_nft_burn()` | `crates/pms-contracts/src/engine.rs` | Point d'entrée principal : recherche les contrats matching et évalue les formules pour un burn NFT donné |
+| `evaluate_formula()` | `crates/pms-contracts/src/engine.rs` | Évalue une `MintFormula` (`FixedRate`, `AttributeFormula`, `FixedAmount`) et retourne un `Decimal` |
+| `find_attribute()` | `crates/pms-contracts/src/engine.rs` | Extrait un attribut du JSON `extra` des metadata NFT, avec support du dot-notation (ex: `"attributes.weight"`) |
+| `spawn_contract_listener()` | `crates/pms-contracts/src/listener.rs` | Spawne la tâche Tokio qui écoute les `NftBurnProcessed` et évalue les contrats |
+| `RefundSink::add_burn_refund()` | `crates/pms-contracts/src/listener.rs` | Trait pour l'accumulation des refunds (implémenté par `FeePoolRefundSink` dans pms-server) |
+| `emit_nft_burn_processed()` | `crates/pms-server/src/api_fn/nft.rs` | Émet un événement `NftBurnProcessed` sur l'EventBus après un burn réussi |
 | `decrypt_nft_metadata_from_dag()` | `crates/pms-server/src/api_fn/nft.rs` | Récupère les metadata NFT AVANT le burn (nécessaire car `apply_action` supprime le block_id) |
 | `register_contract()` | `crates/pms-server/src/api_fn/contracts.rs` | Handler API pour l'enregistrement d'un nouveau contrat (génère l'ID SHA-256, charge les frais de déploiement) |
 | `list_contracts()` | `crates/pms-server/src/api_fn/contracts.rs` | Handler API pour lister tous les contrats enregistrés |
@@ -311,27 +325,29 @@ Ces blocs sont validés par `validate_block()` dans `pms-core` avec les règles 
 
 ## Interactions
 
-### Burn NFT (3 handlers)
+### Burn NFT → EventBus → ContractListener (3 handlers)
 
-Les contrats sont évalués automatiquement après chaque burn NFT réussi, via `evaluate_contracts_after_burn()`. Cette fonction est appelée dans les 3 handlers de burn du [[nft-system]] :
+Les contrats sont évalués automatiquement après chaque burn NFT réussi, via l'[[event-system|EventBus]]. Les 3 handlers burn du [[nft-system]] émettent un événement `NftBurnProcessed` :
 
-1. **`burn_nft()`** (ligne 534 de `nft.rs`) : burn signé par le client via `WireBlock` (single ou batch).
-2. **`burn_nft_simple()`** (ligne 842 de `nft.rs`) : burn simplifié (single NFT, le serveur construit le bloc).
-3. **`burn_nft_batch_simple()`** (ligne 1015 de `nft.rs`) : burn batch simplifié (multiple NFTs).
+1. **`burn_nft()`** : burn signé par le client via `WireBlock` (single ou batch).
+2. **`burn_nft_simple()`** : burn simplifié (single NFT, le serveur construit le bloc).
+3. **`burn_nft_batch_simple()`** : burn batch simplifié (multiple NFTs).
 
 **Flux d'exécution :**
 1. Le handler reçoit la requête de burn.
 2. Les metadata du NFT sont récupérées AVANT le burn via `decrypt_nft_metadata_from_dag()` (car `apply_action()` supprime le `block_id` du NFT).
 3. Le burn est exécuté (`apply_action()` + persistence du bloc dans le DAG).
-4. `evaluate_contracts_after_burn()` est appelé avec les metadata pre-fetched.
-5. Le `ContractEngine` recherche les contrats matching (type NFT + scope ledger).
-6. Les formules sont évaluées et les refunds sont accumulés dans le `FeePool`.
+4. `emit_nft_burn_processed()` émet un événement `NftBurnProcessed` sur l'EventBus avec les metadata pre-fetched.
+5. Le `ContractListener` (dans `pms-contracts`) reçoit l'événement de manière asynchrone.
+6. `evaluate_nft_burn()` recherche les contrats matching (type NFT + scope ledger).
+7. Les formules sont évaluées et les refunds sont poussés via `RefundSink::add_burn_refund()`.
+8. `FeePoolRefundSink` route le refund vers le bon `FeePool` via `FeePoolRegistry`.
 
 ### FeePool et [[fee-distribution|Fee Distribution]]
 
-Les refunds de contrats sont accumulés dans le `FeePool` via `add_burn_refund(wallet_address, amount)`. Ils sont distincts des fees de nœuds et sont distribués directement aux wallets des utilisateurs lors du prochain cycle de fee distribution (bloc Milestone ou Reward).
+Les refunds de contrats sont accumulés dans le `FeePool` via `add_burn_refund(wallet_address, amount, asset_id)`. Ils sont distincts des fees de nœuds et sont distribués directement aux wallets des utilisateurs lors du prochain cycle de fee distribution (bloc Milestone ou Reward).
 
-Le `FeePool` maintient un `HashMap<String, Decimal>` pour les `burn_refunds`, accessible via `get_burn_refunds()` et `total_burn_refunds()`.
+Le `FeePool` maintient un `HashMap<(String, Option<String>), Decimal>` pour les `burn_refunds` (clé = (adresse, asset_id)), accessible via `get_burn_refunds()` et `total_burn_refunds()`.
 
 ### Validation DAG (pms-core)
 

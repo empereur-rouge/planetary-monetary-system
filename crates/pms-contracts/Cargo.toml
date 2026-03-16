@@ -1,0 +1,15 @@
+[package]
+name = "pms-contracts"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pms-types-contract = { path = "../pms-types-contract" }
+pms-types-nft = { path = "../pms-types-nft" }
+pms-storage = { path = "../pms-storage" }
+pms-event = { path = "../pms-event" }
+rust_decimal = "1"
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["sync"] }

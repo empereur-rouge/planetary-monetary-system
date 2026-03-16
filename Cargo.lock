@@ -333,7 +333,7 @@ checksum = "cf9ff0bbfd639f15c74af777d81383cf53efb7c93613f6cab67c6c11e05bbf8b"
 
 [[package]]
 name = "bin"
-version = "0.5.1"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2453,6 +2453,21 @@ name = "pms-consensus"
 version = "0.1.0"
 
 [[package]]
+name = "pms-contracts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pms-event",
+ "pms-storage",
+ "pms-types-contract",
+ "pms-types-nft",
+ "rust_decimal",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pms-core"
 version = "0.1.0"
 dependencies = [
@@ -2638,6 +2653,7 @@ dependencies = [
  "once_cell",
  "pms-bridge",
  "pms-config",
+ "pms-contracts",
  "pms-core",
  "pms-economics",
  "pms-event",

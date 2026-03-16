@@ -55,7 +55,6 @@ async fn history_separation_test() -> anyhow::Result<()> {
         _cfg: cfg,
         _ready: ready,
         stats,
-        contract_store: store.clone(),
         store: store.clone(),
         admin_token: None,
         node_wallet: wallet.clone(),
@@ -73,6 +72,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
         ),
         activity_cache: std::sync::Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
         tps_tracker: std::sync::Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
+        contract_event_bus: None,
     };
 
     // 4) Insert Blocks manually into Store (to bypass validation/mining for speed)
