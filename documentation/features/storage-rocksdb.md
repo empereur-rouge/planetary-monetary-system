@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure]
 created: 2026-03-14
-updated: 2026-03-14
-version: v0.3.0
+updated: 2026-03-16
+version: v0.5.4
 ---
 
 # Storage / RocksDB
@@ -48,6 +48,7 @@ Le systeme utilise une architecture a deux couches complementaires :
 - Cache stale-while-revalidate sur `top_tips()` (5 secondes de staleness, evite les stampedes)
 - Cache 500 ms sur `runtime_config` (evite un GET RocksDB + JSON deser par bloc)
 - Cache in-memory DashSet pour les adresses gelees (`frozen_set`, O(1) sans I/O)
+- `db_path: PathBuf` stocke le chemin absolu de la DB. Utilise pour deriver le chemin de backup (sibling `backups/pms/`) — garantit que les checkpoints sont toujours sur le meme volume que les donnees (critique en Docker)
 
 ### Regle critique : Dual-Layer Consistency
 
@@ -359,7 +360,7 @@ Lancee via `spawn_background_maintenance()` avec 4 timers independants :
 | Flush WAL | configurable | `flush_wal(true)` avec fsync |
 | Compaction | 6h | `compact_all()` avec rate-limiting 200ms/CF |
 | Stats | configurable | Log L0 files, write stalls, compaction pending |
-| Checkpoint | `checkpoint_interval_secs` (defaut 6h) | Snapshot + rotation (garde 7 checkpoints) |
+| Checkpoint | `checkpoint_interval_secs` (defaut 6h) | Snapshot + rotation (garde 3 checkpoints). Path derive de `db_path` (sibling `backups/pms/`), overridable via `PMS_BACKUP_ROOT` env var |
 
 ## Type de DB Handle
 

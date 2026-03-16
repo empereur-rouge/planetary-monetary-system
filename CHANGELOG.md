@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.4] - 2026-03-16 — Fix backup path writing to container layer instead of volume
+
+### Fixed
+- **fix(storage/critical)**: RocksDB checkpoints (backups) were written to `./backups/pms` (relative CWD), which in Docker resolves to the container's writable layer instead of the mounted volume. On testnet with hourly checkpoints and 7 retained copies, this filled the entire 237 GB disk. Backup path now derived from the DB path itself (`db_path.parent()/backups/pms`), guaranteeing checkpoints land on the same volume as the data.
+
+### Changed
+- **change(storage)**: Added `db_path: PathBuf` field to `RocksStore` struct. Populated from the actual DB path in all constructors (`new()`, `from_shared_db()`, `open_read_only()`, `open_secondary()`).
+- **change(storage)**: Reduced checkpoint rotation from 7 to 3 retained copies (75 GB → 75 GB max instead of 175 GB).
+
+---
+
 ## [0.5.3] - 2026-03-16 — Fix EventBus routing: burns on custom ledgers now reach ContractListener
 
 ### Fixed

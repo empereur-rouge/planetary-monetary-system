@@ -40,6 +40,10 @@ pub struct RocksStore {
     pub prefix: String,
     /// Intervalle de checkpoint
     pub checkpoint_interval: Duration,
+    /// Absolute path to the RocksDB data directory.
+    /// Used to derive the backup path (sibling `backups/` directory) so that
+    /// checkpoints always land on the same volume as the data itself.
+    pub db_path: PathBuf,
     /// Approximate count of tips in the CF. Used to skip expensive `trim_tips`
     /// full scans when we're clearly under the limit. Updated atomically on
     /// every tip add/remove; the actual trim logic still does a full scan when
@@ -238,11 +242,15 @@ impl RocksStore {
             .with_context(|| format!("open RocksDB at {}", path.display()))?;
 
         let cf_names = Self::build_cf_names(&prefix);
+        // Canonicalize the DB path so backup derivation is always absolute.
+        let db_path = std::fs::canonicalize(&path)
+            .unwrap_or_else(|_| path.clone());
         Ok(Self {
             db: Arc::new(db),
             tip_limit,
             prefix,
             checkpoint_interval,
+            db_path,
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
             top_tips_cache: std::sync::Mutex::new(None),
             cf_names,
@@ -374,11 +382,13 @@ impl RocksStore {
             Duration::from_secs(checkpoint_interval_secs.unwrap_or(24 * 3600));
         let prefix = prefix.into();
         let cf_names = Self::build_cf_names(&prefix);
+        let db_path = db.path().to_path_buf();
         Self {
             db,
             tip_limit,
             prefix,
             checkpoint_interval,
+            db_path,
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
             top_tips_cache: std::sync::Mutex::new(None),
             cf_names,
@@ -1296,21 +1306,20 @@ impl RocksStore {
     ) -> JoinHandle<()> {
         // Interval pour les checkpoints (celui configuré)
         let checkpoint_every = self.checkpoint_interval;
-        // Dossier de backup :
-        // - en prod tu mettras typiquement /var/backups/pms
-        // - en dev: ./backups/pms
+        // Backup directory: derived from the DB path so checkpoints always
+        // land on the same filesystem/volume as the data (critical in Docker
+        // where only the data dir is volume-mounted).
+        // Override with PMS_BACKUP_ROOT env var if needed.
         let backup_root = std::env::var("PMS_BACKUP_ROOT").unwrap_or_else(|_| {
-            let p = std::path::Path::new("./crates");
-            if p.exists() && p.is_dir() {
-                // On est à la racine du workspace
-                "./backups/pms".to_string()
-            } else if std::path::Path::new("../../crates").exists() {
-                // On est probablement dans crates/pms-server
-                "../../backups/pms".to_string()
-            } else {
-                // Fallback
-                "./backups/pms".to_string()
-            }
+            // Place backups as a sibling of the rocks directory:
+            //   db_path = /home/pms/data/rocks  →  backup = /home/pms/data/backups/pms
+            self.db_path
+                .parent()
+                .unwrap_or(&self.db_path)
+                .join("backups")
+                .join("pms")
+                .to_string_lossy()
+                .into_owned()
         });
 
         tokio::spawn(async move {
@@ -1365,7 +1374,7 @@ impl RocksStore {
                     _ = checkpoint_tick.tick() => {
                         if let Err(e) = self.create_checkpoint(&backup_root) {
                             tracing::error!("[rocks] create_checkpoint failed: {e:#}");
-                        } else if let Err(e) = rotate_checkpoints(&backup_root, 7) {
+                        } else if let Err(e) = rotate_checkpoints(&backup_root, 3) {
                             tracing::error!("[rocks] rotate_checkpoints failed: {e:#}");
                         }
                     }
@@ -1390,11 +1399,13 @@ impl RocksStore {
 
         let prefix = "".to_string();
         let cf_names = Self::build_cf_names(&prefix);
+        let db_path = PathBuf::from(path);
         Ok(Self {
             db: std::sync::Arc::new(db),
             tip_limit,
             prefix,
             checkpoint_interval: Duration::from_secs(24 * 3600),
+            db_path,
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
             top_tips_cache: std::sync::Mutex::new(None),
             cf_names,
@@ -1472,6 +1483,7 @@ impl RocksStore {
             tip_limit,
             prefix,
             checkpoint_interval: Duration::from_secs(24 * 3600),
+            db_path: primary,
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
             top_tips_cache: std::sync::Mutex::new(None),
             cf_names,
