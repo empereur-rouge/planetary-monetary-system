@@ -285,6 +285,7 @@ async fn main() -> Result<()> {
             activity_cache: std::sync::Arc::new(pms_server::api_fn::activity::ActivityCache::new(10_000, 30)),
             tps_tracker: std::sync::Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
             contract_event_bus: None, // Internal API doesn't need contract events
+            contract_store: store.clone(),
         };
 
         eprintln!("🔧 Launching Internal API at {}", addr);

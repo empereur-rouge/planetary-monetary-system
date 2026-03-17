@@ -243,6 +243,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             max_write_buffer_number: 3,
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
+            max_open_files: 512,
         },
         network: Network {
             mode: NetworkMode::Mainnet,
@@ -337,6 +338,12 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             bind_addr: None,
             allowed_peer_ips: vec![],
             strict_whitelist: false,
+            max_connections: 256,
+            per_peer_queue_cap: 2_000,
+            max_orphans: 2_000,
+            max_inflight_requests: 10_000,
+            max_parent_deps: 5_000,
+            max_peer_retries: 20,
         },
         ledgers: vec![],
     };
@@ -383,6 +390,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_testnet() {
             max_write_buffer_number: 3,
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
+            max_open_files: 512,
         },
         network: Network {
             mode: NetworkMode::Testnet,
@@ -476,6 +484,12 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_testnet() {
             bind_addr: None,
             allowed_peer_ips: vec![],
             strict_whitelist: false,
+            max_connections: 256,
+            per_peer_queue_cap: 2_000,
+            max_orphans: 2_000,
+            max_inflight_requests: 10_000,
+            max_parent_deps: 5_000,
+            max_peer_retries: 20,
         },
         ledgers: vec![],
     };
@@ -528,6 +542,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_mainnet() {
             max_write_buffer_number: 3,
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
+            max_open_files: 512,
         },
         network: Network {
             mode: NetworkMode::Mainnet,
@@ -621,6 +636,12 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_mainnet() {
             bind_addr: None,
             allowed_peer_ips: vec![],
             strict_whitelist: false,
+            max_connections: 256,
+            per_peer_queue_cap: 2_000,
+            max_orphans: 2_000,
+            max_inflight_requests: 10_000,
+            max_parent_deps: 5_000,
+            max_peer_retries: 20,
         },
         ledgers: vec![],
     };
@@ -673,6 +694,7 @@ fn mint_policy_allows_empty_signer_pubkeys_in_dev() {
             max_write_buffer_number: 3,
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
+            max_open_files: 512,
         },
         network: Network {
             mode: NetworkMode::Dev,
@@ -766,6 +788,12 @@ fn mint_policy_allows_empty_signer_pubkeys_in_dev() {
             bind_addr: None,
             allowed_peer_ips: vec![],
             strict_whitelist: false,
+            max_connections: 256,
+            per_peer_queue_cap: 2_000,
+            max_orphans: 2_000,
+            max_inflight_requests: 10_000,
+            max_parent_deps: 5_000,
+            max_peer_retries: 20,
         },
         ledgers: vec![],
     };

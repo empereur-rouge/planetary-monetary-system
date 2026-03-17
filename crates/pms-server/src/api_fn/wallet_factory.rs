@@ -7,7 +7,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use http::StatusCode;
 use pms_contracts::engine::evaluate_transfer;
-use pms_storage::{ContractStorage, PutResult};
+use pms_storage::PutResult;
 use pms_types::{Transaction, TxInput, TxOutput, Unlock};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use pms_wallet::SignerBackend;
@@ -400,7 +400,7 @@ pub async fn wallet_send_simple(
     // 3.a) Évaluer les contrats de frais de transfert (smart contract fees)
     // ════════════════════════════════════════════════════════════════════
     let transfer_fees = evaluate_transfer(
-        state.store.as_ref() as &dyn ContractStorage,
+        state.contract_store.as_ref(),
         &state.ledger_id,
         req.asset_id.as_deref(),
         amount_dec,

@@ -159,6 +159,7 @@ async fn test_automated_fee_distribution() {
             max_write_buffer_number: 3,
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
+            max_open_files: 512,
         },
         network: Network {
             mode: NetworkMode::Dev,
@@ -252,6 +253,12 @@ async fn test_automated_fee_distribution() {
             bind_addr: Some("127.0.0.1:0".to_string()),
             allowed_peer_ips: vec![],
             strict_whitelist: false,
+            max_connections: 256,
+            per_peer_queue_cap: 2_000,
+            max_orphans: 2_000,
+            max_inflight_requests: 10_000,
+            max_parent_deps: 5_000,
+            max_peer_retries: 20,
         },
         ledgers: vec![],
     };
@@ -341,6 +348,7 @@ async fn test_automated_fee_distribution() {
         activity_cache: Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
         tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
         contract_event_bus: None,
+        contract_store: rocks_store_arc.clone(),
     };
 
     // 8. Spawn Distributor

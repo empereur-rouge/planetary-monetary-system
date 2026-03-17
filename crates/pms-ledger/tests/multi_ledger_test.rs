@@ -15,6 +15,11 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             max_spent_outpoints: 0,
             max_utxos: 0,
             checkpoint_interval_secs: None,
+            write_buffer_size_mb: 128,
+            max_write_buffer_number: 3,
+            block_cache_size_mb: 512,
+            db_write_buffer_size_mb: 512,
+            max_open_files: 512,
         },
         network: pms_config::Network {
             mode: pms_config::NetworkMode::Dev,
@@ -108,6 +113,12 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             bind_addr: None,
             allowed_peer_ips: vec![],
             strict_whitelist: false,
+            max_connections: 256,
+            per_peer_queue_cap: 2_000,
+            max_orphans: 2_000,
+            max_inflight_requests: 10_000,
+            max_parent_deps: 5_000,
+            max_peer_retries: 20,
         },
         ledgers: vec![
             LedgerDef {

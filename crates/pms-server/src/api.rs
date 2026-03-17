@@ -58,6 +58,7 @@ use axum::{
 use axum_server::bind_rustls;
 use axum_server::tls_rustls::RustlsConfig;
 use pms_config::{ServerConfig, Settings, TreasuryWallets, load_config, load_treasury_wallets};
+use pms_storage::ContractStorage;
 use pms_storage::rocks_store::store::RocksStore;
 use pms_wallet::Wallet;
 use serde_json::json;
@@ -168,6 +169,11 @@ pub struct AppState {
     /// where the `ContractListener` is subscribed.
     /// `None` in test contexts where contracts are not needed.
     pub contract_event_bus: Option<pms_event::EventBus>,
+    /// Contract storage — always points to the **main** RocksDB store.
+    /// Contracts are registered globally (via `POST /admin/contracts`) and stored
+    /// in the main store's `contracts` CF. Per-ledger stores do NOT contain contracts.
+    /// Used by `evaluate_transfer()` in `prepare_tx()` and `wallet_send_simple()`.
+    pub contract_store: Arc<dyn ContractStorage>,
 }
 
 /// Sync the PMS_BLOCKS_TOTAL gauge with the actual in-memory DAG size for the default ledger.
@@ -935,6 +941,7 @@ pub async fn serve_api(
         activity_cache: Arc::new(crate::api_fn::activity::ActivityCache::new(10_000, 30)),
         tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
         contract_event_bus: main_event_bus.clone(),
+        contract_store: main_store_for_contracts.clone(),
     };
 
     // ═══════════════════════════════════════════════════════════════════════

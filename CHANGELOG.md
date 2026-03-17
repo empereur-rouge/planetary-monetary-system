@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.10] - 2026-03-17 — Fix transfer fees broken on custom ledgers
+
+### Fixed
+- **fix(server/critical)**: Transfer fees (smart contract `OnTransfer` trigger) never applied on custom ledgers. `evaluate_transfer()` in `prepare_tx()` and `wallet_send_simple()` queried the per-ledger store (empty `contracts` CF) instead of the main store where contracts are registered. Added `contract_store: Arc<dyn ContractStorage>` to `AppState` — always points to main RocksDB. Burn refunds were unaffected (used separate `main_store_for_contracts`).
+- **fix(tests)**: Updated all test files constructing `Settings` inline to include fields added in v0.5.7–v0.5.9 (`Rocks::max_open_files`, `P2pConfig` scaling limits).
+
+---
+
 ## [0.5.9] - 2026-03-17 — Configurable P2P scaling limits
 
 ### Added

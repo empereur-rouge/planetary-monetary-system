@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-03-13
-updated: 2026-03-16
-version: v0.5.6
+updated: 2026-03-17
+version: v0.5.10
 ---
 
 # Smart Contracts (Contrats Déclaratifs)
@@ -479,11 +479,13 @@ Le champ `contract_deployment_fee` peut être modifié à chaud via `ConfigUpdat
 Les contrats `OnTransfer` sont évalués **au moment de la préparation de la transaction** (pas via l'EventBus). C'est une évaluation synchrone dans `prepare_tx()` et `wallet_send_simple()` :
 
 1. Le handler calcule le montant du transfert.
-2. `evaluate_transfer()` recherche les contrats `OnTransfer` matching (asset + ledger scope).
+2. `evaluate_transfer()` recherche les contrats `OnTransfer` matching (asset + ledger scope) via `state.contract_store`.
 3. Pour chaque contrat, la `TransferFeeFormula` est évaluée → `TransferFeeResult`.
 4. Les frais sont sommés et ajoutés à `total_needed` pour la sélection de coins.
 5. Un `TxOutput` additionnel est inséré pour chaque bénéficiaire (même asset que le transfert).
 6. Le change est ajusté : `change = selected_sum - amount - transfer_fees`.
+
+**Important (fix v0.5.10)** : `evaluate_transfer()` doit utiliser `state.contract_store` (qui pointe toujours vers le main RocksDB) et **non** `state.store` (qui est le store per-ledger sur les custom ledgers). Les contrats sont enregistrés globalement dans le main store — les stores per-ledger ont un CF `contracts` vide. Bug historique : transfer fees silencieusement ignorées sur tous les custom ledgers avant v0.5.10.
 
 **Ordre des outputs :**
 1. Destination (montant transféré)

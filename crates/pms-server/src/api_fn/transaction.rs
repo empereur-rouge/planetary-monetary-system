@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use http::StatusCode;
 use pms_contracts::engine::evaluate_transfer;
-use pms_storage::{ContractStorage, PutResult};
+use pms_storage::PutResult;
 use pms_types::{Transaction, TxInput, TxOutput};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use rust_decimal::Decimal;
@@ -435,7 +435,7 @@ pub async fn prepare_tx(
     // 2.a) Évaluer les contrats de frais de transfert (smart contract fees)
     // ════════════════════════════════════════════════════════════════════════
     let transfer_fees = evaluate_transfer(
-        state.store.as_ref() as &dyn ContractStorage,
+        state.contract_store.as_ref(),
         &state.ledger_id,
         req.asset_id.as_deref(),
         amount_dec,
