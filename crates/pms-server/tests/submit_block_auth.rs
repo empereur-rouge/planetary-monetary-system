@@ -6,7 +6,7 @@ use anyhow::{Error, Result};
 use pms_config::{ServerConfig, load_config};
 use pms_core::{ConcurrentDag, CoreAdapter};
 use pms_interface::NetDagAdapter;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_storage::{PutResult, StoredBlock};
 use pms_testkit::forge_signed_wire_block_for_test;
 use pms_types::{Block, TxOutput};
@@ -80,6 +80,7 @@ async fn unsigned_block_is_rejected() -> anyhow::Result<()> {
             256, // tip_limit test
             "pms:test",
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );
@@ -145,7 +146,7 @@ async fn signed_plain_block_is_accepted() -> Result<()> {
     let db_path = dir.path().join("rocks-signed-plain");
 
     let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None).await?);
+        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None, &RocksMemoryConfig::default()).await?);
 
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);
@@ -192,7 +193,7 @@ async fn signed_encrypted_mint_is_accepted() -> Result<()> {
     let db_path = dir.path().join("rocks-signed-mint");
 
     let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None).await?);
+        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None, &RocksMemoryConfig::default()).await?);
 
     let settings = load_config()?;
     let meta = WireMeta::from(&settings);

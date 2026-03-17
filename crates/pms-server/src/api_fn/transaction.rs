@@ -4,7 +4,8 @@ use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use http::StatusCode;
-use pms_storage::PutResult;
+use pms_contracts::engine::evaluate_transfer;
+use pms_storage::{ContractStorage, PutResult};
 use pms_types::{Transaction, TxInput, TxOutput};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use rust_decimal::Decimal;
@@ -374,8 +375,11 @@ pub struct PrepareTxResponse {
     /// Hash SHA256 du message à signer (hex)
     /// Le client doit signer ce hash avec sa clé privée ECDSA
     pub tx_hash: String,
-    /// Frais calculés (string décimale)
+    /// Frais de gas PMS calculés (string décimale)
     pub fee: String,
+    /// Frais de transfert smart contract (string décimale, dans le même asset que le transfert).
+    /// `"0"` si aucun contrat de transfert n'est actif sur ce ledger.
+    pub transfer_fee: String,
     /// Détail des UTXOs sélectionnés comme inputs
     pub inputs_detail: Vec<UtxoDetail>,
 }
@@ -427,12 +431,23 @@ pub async fn prepare_tx(
         .map(|a| a.inner())
         .unwrap_or(Decimal::ZERO);
 
-    // For PMS native: total_needed = amount + fee
-    // For custom tokens: total_needed = amount only (fee is separate in PMS)
+    // ════════════════════════════════════════════════════════════════════════
+    // 2.a) Évaluer les contrats de frais de transfert (smart contract fees)
+    // ════════════════════════════════════════════════════════════════════════
+    let transfer_fees = evaluate_transfer(
+        state.store.as_ref() as &dyn ContractStorage,
+        &state.ledger_id,
+        req.asset_id.as_deref(),
+        amount_dec,
+    );
+    let total_transfer_fee: Decimal = transfer_fees.iter().map(|f| f.fee_amount).sum();
+
+    // For PMS native: total_needed = amount + fee + transfer_fee
+    // For custom tokens: total_needed = amount + transfer_fee (PMS gas fee is separate)
     let total_needed = if req.asset_id.is_some() {
-        amount_dec // Custom token: only need the amount from token UTXOs
+        amount_dec + total_transfer_fee
     } else {
-        amount_dec + fee_dec // PMS: amount + fee from same pool
+        amount_dec + fee_dec + total_transfer_fee
     };
 
     // ════════════════════════════════════════════════════════════════════════
@@ -528,6 +543,15 @@ pub async fn prepare_tx(
         asset_id: req.asset_id.clone(),
     });
 
+    // Outputs frais de transfert (smart contract) — même asset que le transfert
+    for fee_result in &transfer_fees {
+        tx_outputs.push(TxOutput {
+            address: fee_result.beneficiary_address.clone(),
+            amount: fee_result.fee_amount.to_string(),
+            asset_id: req.asset_id.clone(),
+        });
+    }
+
     // Change (retour vers l'expéditeur) — same asset as the transfer
     let change = selected_sum - total_needed;
     if change > Decimal::ZERO {
@@ -610,6 +634,7 @@ pub async fn prepare_tx(
             unsigned_tx,
             tx_hash,
             fee: fee_dec.to_string(),
+            transfer_fee: total_transfer_fee.to_string(),
             inputs_detail,
         })),
     )

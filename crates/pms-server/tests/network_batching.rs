@@ -8,7 +8,7 @@
 use anyhow::Result;
 use pms_interface::NetDagAdapter;
 use pms_server::Server;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_storage::{DagStorage, PutResult, StoredBlock};
 use pms_wallet::Wallet;
 use pms_wire::WireBlock;
@@ -124,7 +124,7 @@ fn make_test_wallet() -> Arc<Wallet> {
 async fn test_network_batching_enqueue() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let store =
-        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None).await?);
+        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None, &RocksMemoryConfig::default()).await?);
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter::new(store));
     let wallet = make_test_wallet();
 
@@ -158,7 +158,7 @@ async fn test_network_batching_enqueue() -> Result<()> {
 async fn test_network_batching_high_load() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let store =
-        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None).await?);
+        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None, &RocksMemoryConfig::default()).await?);
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter::new(store));
     let wallet = make_test_wallet();
 
@@ -189,7 +189,7 @@ async fn test_network_batching_high_load() -> Result<()> {
 async fn test_network_batching_empty_tick() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let store =
-        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None).await?);
+        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None, &RocksMemoryConfig::default()).await?);
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter::new(store));
     let wallet = make_test_wallet();
 
@@ -219,7 +219,7 @@ async fn test_network_batching_empty_tick() -> Result<()> {
 async fn test_network_batching_concurrent() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let store =
-        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None).await?);
+        Arc::new(RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None, &RocksMemoryConfig::default()).await?);
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter::new(store));
     let wallet = make_test_wallet();
 

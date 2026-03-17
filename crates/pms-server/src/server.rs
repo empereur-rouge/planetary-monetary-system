@@ -7,8 +7,8 @@
 
 use crate::api;
 use crate::limits::{
-    HANDSHAKE_TIMEOUT_MS, MAX_BLOCKS_BATCH, MAX_INFLIGHT_GETBLOCK, MAX_LINE_BYTES, MAX_ORPHANS,
-    MAX_PARENT_DEPS, MAX_PARSE_ERRORS, PER_PEER_Q_CAP, PING_EVERY_MS, RATE_BURST,
+    HANDSHAKE_TIMEOUT_MS, MAX_BLOCKS_BATCH, MAX_LINE_BYTES,
+    MAX_PARSE_ERRORS, PING_EVERY_MS, RATE_BURST,
     RATE_MSGS_PER_SEC, SEEN_CAPACITY,
 };
 use crate::rate::TokenBucket;
@@ -65,6 +65,20 @@ pub struct Server {
     /// Multi-ledger manager (optional). When present, P2P routes blocks
     /// to the correct ledger based on `network_id` in WireBlock metadata.
     ledger_mgr: Option<Arc<pms_ledger::LedgerManager>>,
+    /// Semaphore limiting concurrent inbound P2P connections.
+    conn_semaphore: Arc<tokio::sync::Semaphore>,
+
+    // ── Configurable P2P limits (from [p2p] TOML, v0.5.9) ─────────────
+    /// Maximum concurrent inbound P2P connections. Default: 256.
+    max_connections: usize,
+    /// Per-peer outbound queue capacity. Default: 2 000.
+    per_peer_queue_cap: usize,
+    /// Maximum orphan blocks in memory. Default: 2 000.
+    max_orphans: usize,
+    /// Maximum in-flight GetBlock requests. Default: 10 000.
+    max_inflight_requests: usize,
+    /// Maximum parent→children dependency entries. Default: 5 000.
+    max_parent_deps: usize,
 }
 
 #[derive(Debug)]
@@ -95,6 +109,7 @@ impl Server {
         // Canal avec buffer pour les IDs à diffuser
         let (broadcast_tx, broadcast_rx) = mpsc::channel(10000);
 
+        let max_connections = p2p_config.max_connections;
         let this = Arc::new(Self {
             adapter,
             peers: DashMap::new(),
@@ -111,6 +126,12 @@ impl Server {
             allowed_peer_ips: p2p_config.allowed_peer_ips.clone(),
             strict_whitelist: p2p_config.strict_whitelist,
             ledger_mgr,
+            conn_semaphore: Arc::new(tokio::sync::Semaphore::new(max_connections)),
+            max_connections,
+            per_peer_queue_cap: p2p_config.per_peer_queue_cap,
+            max_orphans: p2p_config.max_orphans,
+            max_inflight_requests: p2p_config.max_inflight_requests,
+            max_parent_deps: p2p_config.max_parent_deps,
         });
 
         // Lancement du worker d'agrégation
@@ -187,6 +208,7 @@ impl Server {
             tx
         });
 
+        let defaults = pms_config::P2pConfig::default();
         Arc::new(Self {
             adapter,
             peers: DashMap::new(),
@@ -203,6 +225,12 @@ impl Server {
             allowed_peer_ips: vec![],
             strict_whitelist: false,
             ledger_mgr: None,
+            conn_semaphore: Arc::new(tokio::sync::Semaphore::new(defaults.max_connections)),
+            max_connections: defaults.max_connections,
+            per_peer_queue_cap: defaults.per_peer_queue_cap,
+            max_orphans: defaults.max_orphans,
+            max_inflight_requests: defaults.max_inflight_requests,
+            max_parent_deps: defaults.max_parent_deps,
         })
         // NOTE: pas de spawn_broadcast_worker ici — API-only
     }
@@ -605,6 +633,14 @@ impl Server {
             let (tcp, sa) = listener.accept().await?;
             let acceptor = acceptor.clone();
             let this = Arc::clone(&self);
+            let permit = match this.conn_semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::warn!(peer = %sa, "P2P connection rejected: max connections ({}) reached", self.max_connections);
+                    drop(tcp);
+                    continue;
+                }
+            };
 
             tokio::spawn(async move {
                 match acceptor.accept(tcp).await {
@@ -615,6 +651,7 @@ impl Server {
                     }
                     Err(e) => tracing::error!(peer = %sa, error = %e, "TLS accept failed"),
                 }
+                drop(permit); // Release connection slot when peer disconnects
             });
         }
     }
@@ -630,6 +667,11 @@ impl Server {
         let lis = TcpListener::bind(addr).await?;
         loop {
             let (stream, sa) = lis.accept().await?;
+            if self.conn_semaphore.available_permits() == 0 {
+                tracing::warn!(peer = %sa, "P2P connection rejected: max connections ({}) reached", self.max_connections);
+                drop(stream);
+                continue;
+            }
             self.handle_new_peer(stream, sa).await?;
         }
     }
@@ -643,6 +685,11 @@ impl Server {
         let _ = ready.send(()); // ✅ signal "bind OK"
         loop {
             let (stream, sa) = lis.accept().await?;
+            if self.conn_semaphore.available_permits() == 0 {
+                tracing::warn!(peer = %sa, "P2P connection rejected: max connections ({}) reached", self.max_connections);
+                drop(stream);
+                continue;
+            }
             self.handle_new_peer(stream, sa).await?;
         }
     }
@@ -736,7 +783,7 @@ impl Server {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         // On encapsule le reader dans un BufReader pour faire des `read_line` efficaces.
-        let (tx_out, mut rx_out) = mpsc::channel::<Arc<str>>(PER_PEER_Q_CAP);
+        let (tx_out, mut rx_out) = mpsc::channel::<Arc<str>>(self.per_peer_queue_cap);
 
         self.peers.insert(
             sa,
@@ -964,7 +1011,7 @@ impl Server {
                                         continue;
                                     }
                                 }
-                                if this.inflight_fetch.len() < MAX_INFLIGHT_GETBLOCK {
+                                if this.inflight_fetch.len() < this.max_inflight_requests {
                                     this.inflight_fetch.insert(id.clone(), Instant::now());
                                     to_fetch.push(id.clone());
                                     tracing::trace!(id = %id, peer = %sa, "requesting block from peer");
@@ -1038,7 +1085,7 @@ impl Server {
                                         continue;
                                     }
                                 }
-                                if this.inflight_fetch.len() < MAX_INFLIGHT_GETBLOCK {
+                                if this.inflight_fetch.len() < this.max_inflight_requests {
                                     this.inflight_fetch.insert(id.clone(), Instant::now());
                                     to_fetch.push(id);
                                 }
@@ -1219,7 +1266,7 @@ impl Server {
                     }
 
                     // Register dependency: when 'p' arrives, re-process 'wb' (bounded)
-                    if self.parent_dependency.len() < MAX_PARENT_DEPS {
+                    if self.parent_dependency.len() < self.max_parent_deps {
                         tracing::debug!(
                             parent = %p.get(..8).unwrap_or(p),
                             child = %wb.id.get(..8).unwrap_or(&wb.id),
@@ -1235,7 +1282,7 @@ impl Server {
 
             if missing_any {
                 // SAFETY: Enforce orphan cache bound to prevent memory exhaustion
-                if self.orphans.len() >= MAX_ORPHANS {
+                if self.orphans.len() >= self.max_orphans {
                     tracing::warn!(
                         "Orphan cache full ({} entries), dropping block {}",
                         self.orphans.len(),
@@ -1259,7 +1306,7 @@ impl Server {
                 self.orphans.insert(wb.id.clone(), wb.clone());
 
                 for pid in missing_to_fetch {
-                    if self.inflight_fetch.len() < crate::limits::MAX_INFLIGHT_GETBLOCK
+                    if self.inflight_fetch.len() < self.max_inflight_requests
                         || self.inflight_fetch.contains_key(&pid)
                     {
                         self.inflight_fetch.insert(pid.clone(), Instant::now());
@@ -1361,9 +1408,9 @@ impl Server {
                         tracing::debug!(peer = %sa, parent = %pid_clean, "fetching missing parent");
 
                         // Save orphan & dep (bounded)
-                        if self.orphans.len() < MAX_ORPHANS {
+                        if self.orphans.len() < self.max_orphans {
                             self.orphans.insert(wb.id.clone(), wb.clone());
-                            if self.parent_dependency.len() < MAX_PARENT_DEPS {
+                            if self.parent_dependency.len() < self.max_parent_deps {
                                 self.parent_dependency
                                     .entry(pid_clean.clone())
                                     .or_default()
@@ -1372,7 +1419,7 @@ impl Server {
                         }
 
                         // Request parent
-                        if self.inflight_fetch.len() < crate::limits::MAX_INFLIGHT_GETBLOCK
+                        if self.inflight_fetch.len() < self.max_inflight_requests
                             || self.inflight_fetch.contains_key(&pid_clean)
                         {
                             self.inflight_fetch.insert(pid_clean.clone(), Instant::now());

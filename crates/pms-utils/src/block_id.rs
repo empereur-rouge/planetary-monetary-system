@@ -54,6 +54,7 @@ pub fn compute_block_id(
                 PlainPayload::Reverse { .. } => "Reverse",
                 PlainPayload::ContractRegister(_) => "ContractRegister",
                 PlainPayload::ContractUpdate { .. } => "ContractUpdate",
+                PlainPayload::LedgerOwnershipTransfer { .. } => "LedgerOwnershipTransfer",
             }
             .to_string();
 

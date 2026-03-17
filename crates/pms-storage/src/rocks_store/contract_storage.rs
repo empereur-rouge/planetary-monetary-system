@@ -76,6 +76,51 @@ impl ContractStorage for RocksStore {
         Ok(results)
     }
 
+    fn find_transfer_contracts(
+        &self,
+        asset_id: Option<&str>,
+        ledger_id: &str,
+    ) -> Result<Vec<Contract>> {
+        let cf = self.cf("contracts");
+        let mut results = Vec::new();
+        for kv in self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
+            let (_k, v) = kv?;
+            let contract: Contract = serde_json::from_slice(&v)?;
+
+            if !contract.enabled {
+                continue;
+            }
+            if !contract.scope.matches(ledger_id) {
+                continue;
+            }
+            match &contract.trigger {
+                pms_types_contract::ContractTrigger::OnTransfer {
+                    asset_id: filter,
+                } => match filter {
+                    None => results.push(contract), // wildcard
+                    Some(f) => {
+                        if asset_id.is_some_and(|a| a == f) {
+                            results.push(contract);
+                        }
+                    }
+                },
+                _ => continue,
+            }
+        }
+        Ok(results)
+    }
+
+    fn update_contract(&self, contract_id: &str, contract: &Contract) -> Result<()> {
+        let cf = self.cf("contracts");
+        // Vérifie que le contrat existe
+        if self.db.get_cf(&cf, contract_id.as_bytes())?.is_none() {
+            anyhow::bail!("Contract '{}' not found", contract_id);
+        }
+        let json = serde_json::to_vec(contract)?;
+        self.db.put_cf(&cf, contract_id.as_bytes(), &json)?;
+        Ok(())
+    }
+
     fn set_enabled(&self, contract_id: &str, enabled: bool) -> Result<()> {
         let cf = self.cf("contracts");
         if let Some(v) = self.db.get_cf(&cf, contract_id.as_bytes())? {

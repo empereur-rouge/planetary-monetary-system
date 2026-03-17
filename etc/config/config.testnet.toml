@@ -11,6 +11,12 @@ tip_limit = 256
 max_dag_blocks = 50000
 max_utxos = 250000
 checkpoint_interval_secs = 3600
+# Memory tuning for 8 GB VPS with multiple ledgers (66+ CFs)
+write_buffer_size_mb = 64        # Per-CF memtable size (default 128, reduced for many CFs)
+max_write_buffer_number = 3      # Max memtables per CF before flush
+block_cache_size_mb = 256        # Shared LRU cache (default 512, reduced for multi-ledger)
+db_write_buffer_size_mb = 512    # Global memtable cap — prevents OOM with 66+ CFs
+max_open_files = 512             # FD limit — prevents FD exhaustion with 66+ CFs (OS default ulimit=1024)
 
 [network]
 mode = "testnet"
@@ -34,6 +40,14 @@ allow_insecure_tls = true
 known_peers = ""
 allowed_peer_ips = []
 strict_whitelist = false
+# P2P scaling limits (configurable since v0.5.9)
+# Increase for vertical scaling (more RAM) or horizontal scaling (more peers)
+max_connections = 256           # Max concurrent inbound P2P connections
+per_peer_queue_cap = 2000       # Per-peer outbound message queue size
+max_orphans = 2000              # Max orphan blocks held in RAM
+max_inflight_requests = 10000   # Max in-flight GetBlock requests
+max_parent_deps = 5000          # Max parent->child dependency tracking entries
+max_peer_retries = 20           # Max connection retry attempts per known peer
 
 [tls]
 cert_pem = "/home/pms/tls/cert.pem"

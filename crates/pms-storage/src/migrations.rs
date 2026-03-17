@@ -15,7 +15,7 @@ use thiserror::Error;
 
 /// Version logique du schéma attendu par ce binaire.
 /// Incrémentez lorsqu'une nouvelle migration est introduite.
-pub const CURRENT_VER: i64 = 8;
+pub const CURRENT_VER: i64 = 9;
 
 /// Version du protocole DAG (SemVer).
 /// - MAJOR : changement incompatible (refus de démarrer, migration manuelle requise)

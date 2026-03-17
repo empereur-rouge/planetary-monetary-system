@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.9] - 2026-03-17 — Configurable P2P scaling limits
+
+### Added
+- **feat(config)**: 6 new `[p2p]` TOML settings for P2P resource limits: `max_connections` (default 256), `per_peer_queue_cap` (default 2000), `max_orphans` (default 2000), `max_inflight_requests` (default 10000), `max_parent_deps` (default 5000), `max_peer_retries` (default 20).
+- **feat(server)**: `Server` struct stores P2P limits from config instead of reading hardcoded constants. `api_only()` uses `P2pConfig::default()` values.
+
+### Changed
+- **change(server)**: All P2P resource limits (`MAX_PEER_CONNECTIONS`, `PER_PEER_Q_CAP`, `MAX_INFLIGHT_GETBLOCK`, `MAX_ORPHANS`, `MAX_PARENT_DEPS`) replaced with configurable fields read from `[p2p]` TOML section. No recompilation needed for scaling.
+- **change(main)**: `MAX_PEER_RETRIES` hardcoded constant removed — now reads `max_peer_retries` from `[p2p]` config.
+- **change(config/testnet)**: Added P2P limits documentation to testnet config with recommended values for 8 GB VPS.
+
+---
+
+## [0.5.8] - 2026-03-17 — Pre-production stability audit (crash prevention)
+
+### Fixed
+- **fix(storage/critical)**: RocksDB `max_open_files` now configurable (default 512). Previously unlimited — with 66+ CFs on VPS (ulimit=1024), FD exhaustion caused crashes.
+- **fix(fee_distribution/critical)**: Replaced all `[0]` index accesses on treasury wallet lists with `.first()` / `.cloned()`. Empty treasury config no longer panics.
+- **fix(storage/critical)**: Activity pagination iterator `list_wallet_activity_paginated()` no longer panics on empty/exhausted iterators. Defensive `Option` handling replaces `.unwrap()` chain.
+- **fix(storage/critical)**: `from_be_i64()`, `be_to_ts()`, `le_to_u64()` now return 0 for malformed input instead of panicking on non-8-byte slices.
+- **fix(ledger/critical)**: `ensure_schema()` failure is now fatal (`bail!`) instead of silently logged as `warn!`. Prevents operating on outdated/corrupted schema.
+- **fix(server)**: TLS config `.unwrap()` replaced with proper error message when `api_tls_enabled=true` but `[tls]` section missing.
+- **fix(bridge)**: `disable_bridge()` `.expect()` replaced with `anyhow::bail!` to handle race condition where link is deleted between disable and get.
+- **fix(economics)**: `TpsTracker` mutex lock uses `unwrap_or_else(|e| e.into_inner())` to recover from poison instead of cascading panics.
+
+### Added
+- **feat(main/critical)**: Graceful SIGTERM/SIGINT shutdown handler. On Docker stop: flushes RocksDB WAL for all ledgers before exiting. Prevents WAL corruption from mid-write kills.
+- **feat(server)**: P2P connection semaphore (max 256 concurrent inbound connections). Prevents OOM from connection bombs.
+- **feat(config)**: `max_open_files` field in `[rocks]` config section and `RocksMemoryConfig` struct.
+- **feat(validation)**: `skip_utxo_checks=true` now emits `tracing::error!` audit log. Flags accidental bypass of double-spend detection in production.
+
+### Changed
+- **change(main)**: Peer retry loop now uses exponential backoff (5s→60s) with max 20 attempts instead of retrying forever. Prevents leaked tasks for unreachable peers.
+- **change(limits)**: Reduced P2P memory constants for VPS: `PER_PEER_Q_CAP` 10K→2K, `MAX_INFLIGHT_GETBLOCK` 100K→10K, `MAX_ORPHANS` 10K→2K, `MAX_PARENT_DEPS` 20K→5K. Saves ~240 MB under load.
+
+---
+
+## [0.5.7] - 2026-03-17 — Configurable RocksDB memory tuning (OOM prevention)
+
+### Added
+- **feat(config)**: 4 new `[rocks]` settings for RocksDB memory control: `write_buffer_size_mb` (per-CF memtable, default 128), `max_write_buffer_number` (per-CF, default 3), `block_cache_size_mb` (shared LRU, default 512), `db_write_buffer_size_mb` (global memtable cap, default 512).
+- **feat(storage)**: `RocksMemoryConfig` struct — encapsulates RocksDB memory tuning parameters, passed to `new()` and `open_db_multi_prefix()`. `Default` impl preserves backward-compatible values.
+- **feat(storage)**: Global memtable budget via `set_db_write_buffer_size()` — caps total memtable memory across ALL column families. Critical for multi-ledger setups where N×33 CFs can spike and OOM.
+- **feat(storage)**: Startup log line showing applied memory tuning (`write_buffer_mb`, `max_write_buffers`, `block_cache_mb`, `db_write_buffer_mb`).
+
+### Changed
+- **change(storage)**: `apply_db_tuning()` now accepts `&RocksMemoryConfig` instead of using hardcoded values. All 4 memory pools are configurable.
+- **change(storage)**: `RocksStore::new()` and `open_db_multi_prefix()` now require a `&RocksMemoryConfig` parameter.
+- **change(config/testnet)**: Testnet config tuned for 8 GB VPS with multiple ledgers: `write_buffer_size_mb=64`, `block_cache_size_mb=256`, `db_write_buffer_size_mb=512`.
+
+---
+
+## [0.5.6] - 2026-03-16 — Multi-wallet TransferFee splits + Ledger ownership transfer
+
+### Added
+- **feat(contracts)**: `TransferFeeSplit` struct — each split has `address: String` and `share_bps: u32` (basis points out of 10,000). `ContractAction::TransferFee` now uses `splits: Vec<TransferFeeSplit>` instead of a single `beneficiary_address`. Dust-free rounding: last split gets `total - sum(previous)`.
+- **feat(contracts)**: `ContractAction::validate()` method — validates TransferFee splits sum to 10,000, non-empty, positive shares, non-empty addresses.
+- **feat(contracts)**: Contract update endpoint `PUT /admin/contracts/{contract_id}` — partial update of scope, actions, enabled. Auto-bumps contract version. Validates TransferFee splits on update.
+- **feat(storage)**: `update_contract()` method on `ContractStorage` trait + RocksDB and InMemory implementations.
+- **feat(storage)**: `LedgerDefStorage` trait — `get_ledger_def()`, `put_ledger_def()`, `list_ledger_defs()`, `update_owner()`. RocksDB implementation in new `ledger_defs` column family.
+- **feat(storage)**: Schema migration 8→9 — adds `ledger_defs` column family for persisting ledger definitions.
+- **feat(ledger)**: Ledger ownership transfer via DAG block — `POST /admin/ledgers/{ledger_id}/transfer-ownership` creates an encrypted `LedgerOwnershipTransfer` block in the DAG for full traceability, then applies state change to RocksDB + RAM.
+- **feat(ledger)**: `owner_pubkey` and `owner_x25519_pubkey` fields in `CreateLedgerRequest` — specify ownership and encryption key at creation time.
+- **feat(ledger)**: Ledger definition persistence — dynamically created ledgers and ownership changes survive restarts. `load_persisted_ledgers()` called at startup.
+- **feat(ledger)**: `LedgerManager::update_def()` — hot-swap a ledger's definition in-memory without restart.
+- **feat(payload)**: New `PlainPayload::LedgerOwnershipTransfer` variant (#18) — records ledger ownership changes in the DAG. Contains cleartext `ledger_id` for routing/validation + `EncryptedPayload` with `OwnershipTransferData` (new_owner_pubkey, reason). Encrypted for coordinator + current owner + new owner (X25519+AES-256-GCM).
+- **feat(config)**: `owner_x25519_pubkey: Option<String>` on `LedgerDef` — stores the owner's X25519 public key for encrypted DAG blocks.
+
+### Changed
+- **change(contracts)**: `ContractAction::TransferFee` now uses `splits: Vec<TransferFeeSplit>` instead of single `beneficiary_address: String`. Breaking change for contract registration payloads.
+- **change(config)**: Added `Serialize` derive to `LedgerDef`, `LedgerFeesOverride`, `LedgerValidationOverride` (needed for RocksDB JSON persistence).
+- **change(server)**: `API_VERSION` 4 → 5 (contract update endpoint + TransferFee splits format + ownership transfer).
+- **change(storage)**: `CURRENT_VER` 8 → 9 (new `ledger_defs` column family).
+- **change(simulator)**: Updated `ContractActionSim::TransferFee` to use `TransferFeeSplitSim` splits format.
+- **change(ledger)**: Ownership transfer refactored from direct RocksDB write to DAG-block-first pattern (encrypted `LedgerOwnershipTransfer` block → persist → apply state). Follows blockchain convention: all state mutations go through the DAG.
+
+---
+
+## [0.5.5] - 2026-03-16 — Smart contract transfer fees (deductive, per-ledger)
+
+### Added
+- **feat(contracts)**: New `OnTransfer` trigger in `ContractTrigger` — fires on UTXO token transfers. Supports `asset_id` filter (None = any asset, Some("edenite") = specific).
+- **feat(contracts)**: New `TransferFee` action in `ContractAction` — routes a fee to a fixed `beneficiary_address`. Uses `TransferFeeFormula` (PercentageBps or FixedAmount).
+- **feat(contracts)**: New `TransferFeeFormula` enum — `PercentageBps { rate_bps }` (fee = amount * bps / 10000) and `FixedAmount { amount }` (flat fee per transfer).
+- **feat(contracts)**: `evaluate_transfer()` in `pms-contracts/engine.rs` — evaluates transfer fee contracts at TX preparation time. Returns `Vec<TransferFeeResult>` with beneficiary + fee amount.
+- **feat(storage)**: `find_transfer_contracts()` method on `ContractStorage` trait + RocksDB and InMemory implementations. Filters by `asset_id`, `ledger_id`, scope, and enabled status.
+- **feat(server)**: Transfer fee outputs added to `prepare_tx()` and `wallet_send_simple()`. The fee is an additional `TxOutput` in the transaction (deductive: sender pays amount + fee). No minting — pure UTXO output.
+- **feat(server)**: `transfer_fee` field added to `PrepareTxResponse` and `SendSimpleResponse` — clients can display the total cost breakdown.
+- **feat(simulator)**: `GameEngine::setup()` now registers a 5% transfer fee contract on the game ledger, routing fees to the coordinator wallet (ledger creator revenue).
+
+### Changed
+- **change(server)**: `API_VERSION` 3 → 4 (tx/prepare and send_simple responses now include `transfer_fee` field).
+
+---
+
 ## [0.5.4] - 2026-03-16 — Fix backup path writing to container layer instead of volume
 
 ### Fixed

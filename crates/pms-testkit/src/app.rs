@@ -6,7 +6,7 @@ use pms_server::api::{AppState, build_api_router};
 use pms_server::stats::Stats;
 use pms_server::{Server, resolve_admin_token};
 use pms_storage::DagStorage;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_types::Block;
 use pms_wallet::{SignerBackend, Wallet};
 use std::sync::Arc;
@@ -25,6 +25,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
             settings.rocks.tip_limit as usize,
             &settings.rocks.prefix,
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );
@@ -133,6 +134,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
             settings.rocks.tip_limit as usize,
             &settings.rocks.prefix,
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );
@@ -246,6 +248,7 @@ pub async fn make_test_ctx_with_admin(
             settings.rocks.tip_limit as usize,
             &settings.rocks.prefix,
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );

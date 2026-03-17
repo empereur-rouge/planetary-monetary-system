@@ -4,6 +4,7 @@ pub mod compliance_registry;
 pub mod config_storage;
 pub mod contract_storage;
 pub mod gas_pool_storage;
+pub mod ledger_storage;
 mod helpers;
 mod migration;
 pub mod nft_storage;

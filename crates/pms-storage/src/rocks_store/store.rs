@@ -68,10 +68,45 @@ pub struct RocksStore {
     pub(crate) persist_counter: std::sync::atomic::AtomicU64,
 }
 
+/// RocksDB memory tuning parameters, extracted from `[rocks]` config.
+///
+/// Controls the three main memory pools:
+/// - **Write buffers (memtables)**: `write_buffer_size_mb` × `max_write_buffer_number` per CF
+/// - **Block cache**: `block_cache_size_mb` shared LRU across all CFs
+/// - **Global memtable budget**: `db_write_buffer_size_mb` caps total memtable RAM
+///
+/// With N ledgers × 33 CFs each, the default per-CF settings can cause OOM.
+/// Use `db_write_buffer_size_mb` to cap total memtable memory globally.
+#[derive(Debug, Clone)]
+pub struct RocksMemoryConfig {
+    /// Write buffer (memtable) size per column family, in MB. Default: 128.
+    pub write_buffer_size_mb: usize,
+    /// Max memtables kept in memory per CF. Default: 3.
+    pub max_write_buffer_number: i32,
+    /// Shared LRU block cache in MB (all CFs). Default: 512.
+    pub block_cache_size_mb: usize,
+    /// Global memtable budget in MB. 0 = disabled. Default: 512.
+    pub db_write_buffer_size_mb: usize,
+    /// Maximum open file descriptors for RocksDB. -1 = unlimited. Default: 512.
+    pub max_open_files: i32,
+}
+
+impl Default for RocksMemoryConfig {
+    fn default() -> Self {
+        Self {
+            write_buffer_size_mb: 128,
+            max_write_buffer_number: 3,
+            block_cache_size_mb: 512,
+            db_write_buffer_size_mb: 512,
+            max_open_files: 512,
+        }
+    }
+}
+
 impl RocksStore {
     /// Common DB-level tuning applied to BOTH `new()` and `open_db_multi_prefix()`.
     /// Centralised here to guarantee identical settings on every code path.
-    fn apply_db_tuning(db_opts: &mut Options) {
+    fn apply_db_tuning(db_opts: &mut Options, mem: &RocksMemoryConfig) {
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
 
@@ -83,10 +118,29 @@ impl RocksStore {
 
         db_opts.set_level_compaction_dynamic_level_bytes(true);
 
-        // Memory tuning (8 GB VPS with NVMe SSD)
-        db_opts.set_write_buffer_size(128 * 1024 * 1024); // 128 MB
-        db_opts.set_max_write_buffer_number(3); // 384 MB ceiling
+        // Memory tuning — configurable via [rocks] section in config.toml
+        db_opts.set_write_buffer_size(mem.write_buffer_size_mb * 1024 * 1024);
+        db_opts.set_max_write_buffer_number(mem.max_write_buffer_number);
         db_opts.set_target_file_size_base(64 * 1024 * 1024); // 64 MB per SSTable
+
+        // Global memtable budget: caps TOTAL memtable memory across all CFs.
+        // Critical for multi-ledger setups (N × 33 CFs can spike without a cap).
+        if mem.db_write_buffer_size_mb > 0 {
+            db_opts.set_db_write_buffer_size(mem.db_write_buffer_size_mb * 1024 * 1024);
+        }
+
+        // File descriptor limit: prevents FD exhaustion with many CFs + deep LSM trees.
+        // Default OS ulimit is typically 1024. With 66+ CFs, unlimited FDs can crash.
+        db_opts.set_max_open_files(mem.max_open_files);
+
+        tracing::info!(
+            write_buffer_mb = mem.write_buffer_size_mb,
+            max_write_buffers = mem.max_write_buffer_number,
+            block_cache_mb = mem.block_cache_size_mb,
+            db_write_buffer_mb = mem.db_write_buffer_size_mb,
+            max_open_files = mem.max_open_files,
+            "RocksDB memory tuning applied"
+        );
 
         // === WRITE STALL PREVENTION ===
         //
@@ -115,6 +169,7 @@ impl RocksStore {
         tip_limit: usize,
         prefix: impl Into<String>,
         checkpoint_interval_secs: Option<u64>,
+        mem: &RocksMemoryConfig,
     ) -> Result<Self> {
         let prefix = prefix.into();
         // Défaut 24h si None
@@ -131,7 +186,7 @@ impl RocksStore {
         // 1) Options DB globales (SSD-friendly, write-stall prevention)
         // ==============
         let mut db_opts = Options::default();
-        Self::apply_db_tuning(&mut db_opts);
+        Self::apply_db_tuning(&mut db_opts, mem);
 
         // ==============
         // 2) CF attendues (préfixées)
@@ -167,6 +222,7 @@ impl RocksStore {
             "contracts",     // Declarative smart contracts: contract_id -> Contract (JSON)
             "gas_pools",     // Gas pools per ledger: ledger_id -> GasPool (JSON)
             "ledger_subscriptions", // Ledger annual subscriptions: ledger_id -> LedgerSubscription (JSON)
+            "ledger_defs",   // Persisted ledger definitions: ledger_id -> LedgerDef (JSON)
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -197,10 +253,10 @@ impl RocksStore {
         // ==============
         // 4) Helper pour CF options (bloom pour index)
         // ==============
-        // Shared LRU block cache: 512 MB across all CFs.
-        // Must be large enough to hold index+filter blocks for 31 CFs
-        // without evicting hot data blocks (256 MB caused thrashing).
-        let shared_cache = Cache::new_lru_cache(512 * 1024 * 1024);
+        // Shared LRU block cache across all CFs.
+        // Must be large enough to hold index+filter blocks for all CFs
+        // without evicting hot data blocks.
+        let shared_cache = Cache::new_lru_cache(mem.block_cache_size_mb * 1024 * 1024);
 
         fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
@@ -211,7 +267,7 @@ impl RocksStore {
             table_opts.set_block_cache(cache);
             table_opts.set_cache_index_and_filter_blocks(true);
             // Pin L0 index+filter blocks so they're never evicted from cache.
-            // Without this, 31 CFs compete for cache space and L0 blocks
+            // Without this, N CFs compete for cache space and L0 blocks
             // get evicted → every point lookup needs 2+ disk reads → TPS→0.
             table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
             opts.set_block_based_table_factory(&table_opts);
@@ -298,20 +354,25 @@ impl RocksStore {
         "contracts",
         "gas_pools",
         "ledger_subscriptions",
+        "ledger_defs",
     ];
 
     /// Ouvre un RocksDB avec les column families de **plusieurs prefixes** à la fois.
     /// Retourne un `Arc<DB>` partageable entre N `RocksStore` instances.
-    pub async fn open_db_multi_prefix(path: &str, prefixes: &[String]) -> Result<Arc<PmsDb>> {
+    pub async fn open_db_multi_prefix(
+        path: &str,
+        prefixes: &[String],
+        mem: &RocksMemoryConfig,
+    ) -> Result<Arc<PmsDb>> {
         let path = PathBuf::from(path);
         std::fs::create_dir_all(&path)
             .with_context(|| format!("create_dir_all({})", path.display()))?;
 
         let mut db_opts = Options::default();
-        Self::apply_db_tuning(&mut db_opts);
+        Self::apply_db_tuning(&mut db_opts, mem);
 
-        // Shared LRU block cache: 512 MB across all CFs.
-        let shared_cache = Cache::new_lru_cache(512 * 1024 * 1024);
+        // Shared LRU block cache across all CFs.
+        let shared_cache = Cache::new_lru_cache(mem.block_cache_size_mb * 1024 * 1024);
 
         fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
@@ -1238,22 +1299,32 @@ impl RocksStore {
             }
         }
 
-        // Merge: pick the iterator with the highest timestamp each round
+        // Merge: pick the iterator with the highest timestamp each round.
+        // Invariant: every CatIter in `iters` has `current.is_some()`.
+        // We use defensive Option handling to avoid panics on corruption.
         let mut ids = Vec::with_capacity(limit + 1);
         while !iters.is_empty() && ids.len() <= limit {
             // Find iterator with the newest entry
-            let best_idx = iters
+            let Some(best_idx) = iters
                 .iter()
                 .enumerate()
+                .filter(|(_, ci)| ci.current.is_some())
                 .max_by(|(_, a), (_, b)| {
+                    // SAFETY: filter above guarantees is_some()
                     let (ts_a, id_a) = a.current.as_ref().unwrap();
                     let (ts_b, id_b) = b.current.as_ref().unwrap();
                     ts_a.cmp(ts_b).then_with(|| id_a.cmp(id_b))
                 })
                 .map(|(i, _)| i)
-                .unwrap();
+            else {
+                break; // All iterators exhausted (should not happen given while guard)
+            };
 
-            let (ts, block_id) = iters[best_idx].current.clone().unwrap();
+            let Some((ts, block_id)) = iters[best_idx].current.clone() else {
+                // Defensive: iterator became None unexpectedly
+                iters.swap_remove(best_idx);
+                continue;
+            };
             ids.push((block_id, ts));
 
             iters[best_idx].advance_next();

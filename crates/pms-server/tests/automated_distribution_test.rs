@@ -7,7 +7,7 @@ use pms_config::{
 use pms_interface::NetDagAdapter;
 use pms_server::Server;
 use pms_server::api::{AppState, spawn_fee_distributor_task};
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_storage::{DagStorage, PutResult};
 use pms_types_block::{Block, BlockMetadata};
 use pms_types_payload::{PayloadEnvelope, PlainPayload};
@@ -131,7 +131,7 @@ async fn test_automated_fee_distribution() {
     // 1. Setup Temp RocksDB
     let temp_dir = TempDir::new().unwrap();
     let rocks_store_arc = Arc::new(
-        RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None)
+        RocksStore::new(temp_dir.path().to_str().unwrap(), 100, "test", None, &RocksMemoryConfig::default())
             .await
             .unwrap(),
     );
@@ -155,6 +155,10 @@ async fn test_automated_fee_distribution() {
             max_spent_outpoints: 0,
             max_utxos: 0,
             checkpoint_interval_secs: None,
+            write_buffer_size_mb: 128,
+            max_write_buffer_number: 3,
+            block_cache_size_mb: 512,
+            db_write_buffer_size_mb: 512,
         },
         network: Network {
             mode: NetworkMode::Dev,

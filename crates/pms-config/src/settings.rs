@@ -46,6 +46,7 @@ impl Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: None,
+                owner_x25519_pubkey: None,
                 symbol: self.network.symbol.clone(),
             }]
         } else {

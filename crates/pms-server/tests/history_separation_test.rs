@@ -6,7 +6,7 @@ use pms_server::api::AppState;
 use pms_server::api_fn::history::{PageQ, get_encrypted_history, get_plain_history};
 use pms_server::{Server, stats::Stats};
 use pms_storage::StoredBlock;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_types::{Block, TxOutput};
 use pms_types_payload::{AAD, EncryptedPayload, PayloadEnvelope, PlainPayload};
 use pms_utils::compute_block_id;
@@ -20,7 +20,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("rocks-separation");
     let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None).await?);
+        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None, &RocksMemoryConfig::default()).await?);
 
     // 2) Configuration
     let settings = load_config()?;

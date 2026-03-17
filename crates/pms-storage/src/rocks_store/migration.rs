@@ -67,6 +67,7 @@ impl RocksStore {
                 5 => self.mig_5_to_6().await?,
                 6 => self.mig_6_to_7().await?,
                 7 => self.mig_7_to_8().await?,
+                8 => self.mig_8_to_9().await?,
                 _ => return Err(MigError::Unexpected(v)),
             }
             v += 1;
@@ -583,6 +584,23 @@ impl RocksStore {
             .map_err(|e| MigError::Any(anyhow!(e)))?;
 
         tracing::info!("Migration 7→8: gas_pools + ledger_subscriptions CFs verified — economics system ready");
+        Ok(())
+    }
+
+    /// Migration 8 → 9 : Column family `ledger_defs` pour la persistence des LedgerDef.
+    ///
+    /// Permet de sauvegarder les definitions de ledgers créés dynamiquement et
+    /// de survivre aux redémarrages. Stocke aussi les changements d'ownership.
+    async fn mig_8_to_9(&self) -> std::result::Result<(), MigError> {
+        let cf = self.cf("ledger_defs");
+        self.db
+            .put_cf(&cf, b"__init__", b"")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+        self.db
+            .delete_cf(&cf, b"__init__")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+
+        tracing::info!("Migration 8→9: ledger_defs CF verified — ledger persistence ready");
         Ok(())
     }
 }

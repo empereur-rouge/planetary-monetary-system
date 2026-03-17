@@ -33,6 +33,19 @@ pub struct ToggleContractRequest {
     pub reason: String,
 }
 
+/// Requête pour PUT /admin/contracts/:id — mise à jour partielle d'un contrat.
+///
+/// Seuls les champs présents sont mis à jour. Le `version` est incrémenté automatiquement.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateContractRequest {
+    #[serde(default)]
+    pub scope: Option<pms_types_contract::ContractScope>,
+    #[serde(default)]
+    pub actions: Option<Vec<pms_types_contract::ContractAction>>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // POST /admin/contracts — Register a new contract
 // ═══════════════════════════════════════════════════════════════════════════
@@ -54,6 +67,17 @@ pub async fn register_contract(
             Json(serde_json::json!({ "error": "at least one action required" })),
         )
             .into_response();
+    }
+
+    // Validate all actions (TransferFee splits must sum to 10,000, etc.)
+    for (i, action) in req.actions.iter().enumerate() {
+        if let Err(e) = action.validate() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("action[{i}]: {e}") })),
+            )
+                .into_response();
+        }
     }
 
     // Generate contract_id as SHA-256 of (name + trigger + actions)
@@ -206,6 +230,104 @@ pub async fn toggle_contract(
         Json(serde_json::json!({
             "contract_id": contract_id,
             "enabled": req.enabled,
+        })),
+    )
+        .into_response()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PUT /admin/contracts/:id — Update an existing contract
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// PUT /admin/contracts/:id — Met à jour un contrat existant.
+///
+/// Seuls les champs présents dans la requête sont modifiés.
+/// Le champ `version` est incrémenté automatiquement à chaque mise à jour.
+///
+/// # Cas d'usage
+/// - Modifier les splits de répartition d'un TransferFee (changer les pourcentages)
+/// - Changer le scope d'un contrat
+/// - Activer/désactiver un contrat (alternative à /toggle)
+pub async fn update_contract(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+    Json(req): Json<UpdateContractRequest>,
+) -> impl IntoResponse {
+    // 1. Verify contract exists
+    let existing = match state.store.get_contract(&contract_id) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "Contract not found" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("{e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Validate new actions if provided
+    if let Some(ref actions) = req.actions {
+        if actions.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "actions cannot be empty" })),
+            )
+                .into_response();
+        }
+        for (i, action) in actions.iter().enumerate() {
+            if let Err(e) = action.validate() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("action[{i}]: {e}") })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // 3. Build updated contract
+    let updated = Contract {
+        contract_id: existing.contract_id.clone(),
+        name: existing.name.clone(),
+        scope: req.scope.unwrap_or(existing.scope),
+        trigger: existing.trigger.clone(),
+        actions: req.actions.unwrap_or(existing.actions),
+        enabled: req.enabled.unwrap_or(existing.enabled),
+        version: existing.version + 1,
+    };
+
+    // 4. Store
+    if let Err(e) = state.store.update_contract(&contract_id, &updated) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to update contract: {e}") })),
+        )
+            .into_response();
+    }
+
+    tracing::info!(
+        "Contract '{}' updated (id={}, v{} → v{})",
+        updated.name,
+        &contract_id[..16.min(contract_id.len())],
+        existing.version,
+        updated.version,
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "contract_id": contract_id,
+            "name": updated.name,
+            "version": updated.version,
+            "enabled": updated.enabled,
+            "scope": updated.scope,
         })),
     )
         .into_response()

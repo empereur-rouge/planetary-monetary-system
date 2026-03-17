@@ -192,6 +192,7 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: None,
+                owner_x25519_pubkey: None,
                 symbol: None,
             },
             LedgerDef {
@@ -203,6 +204,7 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: Some("owner_nft_pk".into()),
+                owner_x25519_pubkey: None,
                 symbol: None,
             },
         ],

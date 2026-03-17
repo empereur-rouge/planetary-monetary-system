@@ -331,6 +331,11 @@ pub fn validate_block(
                 if !policy.skip_utxo_checks {
                     utxo_no_double_spend(dag, tx)?;
                     utxo_sufficient_funds(dag, tx)?;
+                } else {
+                    tracing::error!(
+                        "SECURITY AUDIT: skip_utxo_checks=true — UTXO double-spend detection BYPASSED. \
+                         This flag must be false in production."
+                    );
                 }
             }
             PlainPayload::Milestone {
@@ -606,6 +611,14 @@ pub fn validate_block(
                 if contract_id.trim().is_empty() {
                     return Err(ValidationError::Other(
                         "ContractUpdate: contract_id cannot be empty",
+                    ));
+                }
+            }
+            PlainPayload::LedgerOwnershipTransfer { ledger_id, .. } => {
+                require_coordinator_signature(b, policy, "LedgerOwnershipTransfer")?;
+                if ledger_id.trim().is_empty() {
+                    return Err(ValidationError::Other(
+                        "LedgerOwnershipTransfer: ledger_id cannot be empty",
                     ));
                 }
             }

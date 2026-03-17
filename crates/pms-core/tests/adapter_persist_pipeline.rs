@@ -7,7 +7,7 @@ use tokio::time::{Duration, sleep};
 use pms_config::load_config;
 use pms_core::{ConcurrentDag, CoreAdapter};
 use pms_interface::NetDagAdapter;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_storage::{DagStorage, PutResult};
 use pms_testkit::forge_signed_wire_block_for_test;
 use pms_types::Block;
@@ -25,7 +25,7 @@ async fn signed_block_goes_through_full_pipeline() -> Result<()> {
     let db_path = dir.path().join("rocks-core-pipeline");
 
     let store =
-        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None).await?);
+        Arc::new(RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "pms:test", None, &RocksMemoryConfig::default()).await?);
 
     // Initialize store schema
     store.ensure_schema().await?;

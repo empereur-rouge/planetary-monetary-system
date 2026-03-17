@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure]
 created: 2026-03-14
-updated: 2026-03-16
-version: v0.5.4
+updated: 2026-03-17
+version: v0.5.8
 ---
 
 # Storage / RocksDB
@@ -134,37 +134,66 @@ Un CF present dans l'une mais absent de l'autre provoque un crash RocksDB au dem
 | `max_spent_outpoints` | `usize` | `500_000` | Outpoints depenses max en RAM (double-spend detection) |
 | `max_utxos` | `usize` | `500_000` | UTXOs max dans le cache LRU RAM. Cache miss -> RocksDB |
 | `checkpoint_interval_secs` | `Option<u64>` | `21600` (6h) | Intervalle entre les checkpoints de backup |
+| `write_buffer_size_mb` | `usize` | `128` | Taille du memtable par CF, en MB. Reduire pour multi-ledger (ex: 64) |
+| `max_write_buffer_number` | `i32` | `3` | Nombre max de memtables par CF avant flush |
+| `block_cache_size_mb` | `usize` | `512` | Cache LRU partage entre toutes les CFs, en MB |
+| `db_write_buffer_size_mb` | `usize` | `512` | Budget memtable global (toutes CFs). 0 = desactive. **Critique pour multi-ledger** |
+| `max_open_files` | `i32` | `512` | Limite FD RocksDB. -1 = illimite (dangereux). **Critique pour VPS avec ulimit=1024 et 66+ CFs** (v0.5.8) |
 
-### Parametres `apply_db_tuning()` (hardcodes)
+### RocksMemoryConfig (v0.5.7, FD limit v0.5.8)
+
+Structure dediee encapsulant les 5 parametres memoire/FD configurables, passee a `new()` et `open_db_multi_prefix()` :
+
+```rust
+pub struct RocksMemoryConfig {
+    pub write_buffer_size_mb: usize,     // Per-CF memtable size
+    pub max_write_buffer_number: i32,    // Max memtables per CF
+    pub block_cache_size_mb: usize,      // Shared LRU cache
+    pub db_write_buffer_size_mb: usize,  // Global memtable budget
+    pub max_open_files: i32,             // FD limit (v0.5.8)
+}
+```
+
+**Recommandations par taille VPS :**
+
+| VPS | `write_buffer_size_mb` | `block_cache_size_mb` | `db_write_buffer_size_mb` |
+|-----|----------------------|---------------------|------------------------|
+| 4 GB RAM | 32 | 128 | 256 |
+| 8 GB RAM (testnet) | 64 | 256 | 512 |
+| 16 GB RAM | 128 (defaut) | 512 (defaut) | 1024 |
+
+### Parametres `apply_db_tuning()` (configurable + hardcodes)
 
 Ces parametres sont appliques uniformement a `new()` et `open_db_multi_prefix()` via la methode centralisee `apply_db_tuning()` :
 
-| Parametre | Valeur | Justification |
-|-----------|--------|---------------|
-| `create_if_missing` | `true` | Cree la DB si elle n'existe pas |
-| `create_missing_column_families` | `true` | Cree les CFs manquantes au demarrage |
-| `increase_parallelism` | `num_cpus` | Un thread background par coeur CPU |
-| `max_background_jobs` | `6` | Flush + compaction overlap sur VPS 4-core |
-| `level_compaction_dynamic_level_bytes` | `true` | Ajuste automatiquement la taille des niveaux |
-| `write_buffer_size` | `128 MB` | Taille du memtable avant flush |
-| `max_write_buffer_number` | `3` | Plafond : 384 MB de memtables en RAM |
-| `target_file_size_base` | `64 MB` | Taille cible par SSTable |
-| `level_zero_file_num_compaction_trigger` | `4` | Debut de compaction L0 (defaut) |
-| `level_zero_slowdown_writes_trigger` | `40` | Seuil de ralentissement (defaut: 20) |
-| `level_zero_stop_writes_trigger` | `56` | Seuil d'arret total (defaut: 24) |
-| `max_subcompactions` | `3` | Parallelise chaque job de compaction |
+| Parametre | Valeur | Configurable | Justification |
+|-----------|--------|-------------|---------------|
+| `create_if_missing` | `true` | Non | Cree la DB si elle n'existe pas |
+| `create_missing_column_families` | `true` | Non | Cree les CFs manquantes au demarrage |
+| `increase_parallelism` | `num_cpus` | Non | Un thread background par coeur CPU |
+| `max_background_jobs` | `6` | Non | Flush + compaction overlap sur VPS 4-core |
+| `level_compaction_dynamic_level_bytes` | `true` | Non | Ajuste automatiquement la taille des niveaux |
+| `write_buffer_size` | `128 MB` | **Oui** (`write_buffer_size_mb`) | Taille du memtable avant flush |
+| `max_write_buffer_number` | `3` | **Oui** (`max_write_buffer_number`) | Max memtables par CF |
+| `db_write_buffer_size` | `512 MB` | **Oui** (`db_write_buffer_size_mb`) | Cap memoire global memtables (v0.5.7) |
+| `target_file_size_base` | `64 MB` | Non | Taille cible par SSTable |
+| `level_zero_file_num_compaction_trigger` | `4` | Non | Debut de compaction L0 (defaut) |
+| `level_zero_slowdown_writes_trigger` | `40` | Non | Seuil de ralentissement (defaut: 20) |
+| `level_zero_stop_writes_trigger` | `56` | Non | Seuil d'arret total (defaut: 24) |
+| `max_subcompactions` | `3` | Non | Parallelise chaque job de compaction |
+| `max_open_files` | `512` | **Oui** (`max_open_files`) | Limite FD RocksDB. Empêche FD exhaustion sur VPS (v0.5.8) |
 
 ### Block Cache et Bloom Filters
 
 Appliques a **toutes** les 31 CFs (pas seulement aux CFs d'index) :
 
-| Parametre | Valeur | Justification |
-|-----------|--------|---------------|
-| `bloom_filter` | `10.0 bits/key, non full-key` | Reduit les lectures disque sur point lookups |
-| `block_cache` (LRU partage) | `512 MB` | Partage entre toutes les CFs |
-| `cache_index_and_filter_blocks` | `true` | Index et filtres en cache (pas sur disque) |
-| `pin_l0_filter_and_index_blocks_in_cache` | `true` | Empeche l'eviction des blocs L0 |
-| `optimize_filters_for_hits` | `true` | Optimise les bloom filters pour les hits |
+| Parametre | Valeur | Configurable | Justification |
+|-----------|--------|-------------|---------------|
+| `bloom_filter` | `10.0 bits/key, non full-key` | Non | Reduit les lectures disque sur point lookups |
+| `block_cache` (LRU partage) | `512 MB` | **Oui** (`block_cache_size_mb`) | Partage entre toutes les CFs |
+| `cache_index_and_filter_blocks` | `true` | Non | Index et filtres en cache (pas sur disque) |
+| `pin_l0_filter_and_index_blocks_in_cache` | `true` | Non | Empeche l'eviction des blocs L0 |
+| `optimize_filters_for_hits` | `true` | Non | Optimise les bloom filters pour les hits |
 
 ## Crates et Fichiers
 

@@ -17,6 +17,14 @@
 - Les dépendances cryptographiques doivent être des librairies éprouvées et maintenues. Pas de crypto "maison".
 - Revue systématique des edge cases de sécurité : overflow/underflow, integer truncation, timing attacks, replay attacks.
 
+### Traçabilité DAG — Mutations d'état
+- **CRITICAL: Toute mutation d'état persistante (ownership, configuration, compliance, etc.) DOIT être enregistrée comme un bloc dans le DAG.** C'est la convention fondamentale d'un système blockchain/DAG : le DAG est la source de vérité pour l'audit et la traçabilité.
+- Jamais de writes directs en base de données pour des changements d'état — toujours passer par un bloc DAG signé par le coordinateur.
+- Les données sensibles dans les blocs DAG DOIVENT être chiffrées (X25519+AES-256-GCM) pour que seuls les destinataires autorisés puissent les déchiffrer.
+- Le `PlainPayload` du bloc peut contenir un identifiant public (ex: `ledger_id`) pour le routage, mais les détails sensibles (ex: `new_owner_pubkey`) sont dans un `EncryptedPayload` embarqué.
+- L'application de l'état (RocksDB + RAM) se fait APRÈS la persistance du bloc dans le DAG.
+- Pattern de référence : `LedgerOwnershipTransfer` (ownership chiffré), `Freeze/Seize` (compliance en clair).
+
 ### Rigueur et Exhaustivité
 - **Ne JAMAIS chercher à économiser des tokens ou prendre des raccourcis.** Ce projet gère de l'argent réel — la rigueur prime sur la rapidité.
 - Jamais de placeholder code, TODO stubs, ou implémentations incomplètes. Toujours écrire le code complet et fonctionnel immédiatement.

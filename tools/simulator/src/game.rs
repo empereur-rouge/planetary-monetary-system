@@ -59,9 +59,16 @@ impl GameEngine {
         self.cube_registry.insert(token_id, attrs);
     }
 
-    /// Setup: create game ledger + edenite token + register smart contract
-    /// Ignores 409 CONFLICT (already exists) for idempotent restarts
-    pub async fn setup(client: &DagClient, config: &GameConfig) -> SimResult<Self> {
+    /// Setup: create game ledger + edenite token + register smart contracts.
+    /// Registers two contracts:
+    /// 1. `edenite-cube-burn` — NFT burn → EDN reward via AttributeFormula
+    /// 2. `eden-transfer-fee` — transfer fee (5%) → creator (coordinator) revenue
+    /// Ignores 409 CONFLICT (already exists) for idempotent restarts.
+    pub async fn setup(
+        client: &DagClient,
+        config: &GameConfig,
+        coordinator_address: Option<&str>,
+    ) -> SimResult<Self> {
         let ledger_id = config.ledger_id.clone();
         let network_id = config.network_id.clone();
 
@@ -73,6 +80,8 @@ impl GameEngine {
                 network_id: network_id.clone(),
                 prefix: ledger_id.clone(),
                 symbol: config.symbol.clone(),
+                owner_pubkey: coordinator_address.map(|s| s.to_string()),
+                owner_x25519_pubkey: None, // Simulator doesn't need X25519 for ownership
             })
             .await
         {
@@ -183,6 +192,47 @@ impl GameEngine {
                     tracing::info!("Smart contract 'edenite-cube-burn' already exists, reusing");
                 } else {
                     return Err(e);
+                }
+            }
+        }
+
+        // 6. Register transfer fee contract: 5% fee on all transfers → coordinator
+        if let Some(coord_addr) = coordinator_address {
+            tracing::info!(
+                "Registering transfer fee contract on ledger '{}' (5% → {})...",
+                ledger_id,
+                &coord_addr[..20.min(coord_addr.len())]
+            );
+            match client
+                .register_contract(&RegisterContractRequest {
+                    name: "eden-transfer-fee".to_string(),
+                    scope: ContractScopeSim::Ledger(vec![ledger_id.clone()]),
+                    trigger: ContractTriggerSim::OnTransfer { asset_id: None },
+                    actions: vec![ContractActionSim::TransferFee {
+                        formula: TransferFeeFormulaSim::PercentageBps { rate_bps: 500 },
+                        splits: vec![TransferFeeSplitSim {
+                            address: coord_addr.to_string(),
+                            share_bps: 10_000,
+                        }],
+                    }],
+                    enabled: true,
+                })
+                .await
+            {
+                Ok(resp) => tracing::info!(
+                    "Transfer fee contract registered: {:?}",
+                    resp.contract_id.as_deref().unwrap_or("?")
+                ),
+                Err(e) => {
+                    let msg = format!("{e}");
+                    if msg.contains("409")
+                        || msg.contains("already exists")
+                        || msg.contains("CONFLICT")
+                    {
+                        tracing::info!("Transfer fee contract already exists, reusing");
+                    } else {
+                        return Err(e);
+                    }
                 }
             }
         }

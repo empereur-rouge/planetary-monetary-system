@@ -9,7 +9,7 @@ use pms_config::{
     Address, Admin, Auth, FeePickMode, FeesSettings, Limits, Network, NetworkMode, P2pConfig,
     Rocks, SecretSettings, Settings, ValidationSettings, load_config,
 };
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_wallet::{SignerBackend, Wallet};
 use pms_wire::{WireBlock, WireMeta};
 
@@ -38,6 +38,7 @@ async fn mint_policy_enforced_on_admin_vs_non_admin() -> anyhow::Result<()> {
             256,
             "pms:test:mint",
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );
@@ -175,6 +176,7 @@ async fn dev_mode_mint_signed_by_admin_is_accepted() -> anyhow::Result<()> {
             256,
             "pms:test:mint-dev",
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );
@@ -237,6 +239,10 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             max_spent_outpoints: 0,
             max_utxos: 0,
             checkpoint_interval_secs: None,
+            write_buffer_size_mb: 128,
+            max_write_buffer_number: 3,
+            block_cache_size_mb: 512,
+            db_write_buffer_size_mb: 512,
         },
         network: Network {
             mode: NetworkMode::Mainnet,
@@ -373,6 +379,10 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_testnet() {
             max_spent_outpoints: 0,
             max_utxos: 0,
             checkpoint_interval_secs: None,
+            write_buffer_size_mb: 128,
+            max_write_buffer_number: 3,
+            block_cache_size_mb: 512,
+            db_write_buffer_size_mb: 512,
         },
         network: Network {
             mode: NetworkMode::Testnet,
@@ -514,6 +524,10 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_mainnet() {
             max_spent_outpoints: 0,
             max_utxos: 0,
             checkpoint_interval_secs: None,
+            write_buffer_size_mb: 128,
+            max_write_buffer_number: 3,
+            block_cache_size_mb: 512,
+            db_write_buffer_size_mb: 512,
         },
         network: Network {
             mode: NetworkMode::Mainnet,
@@ -655,6 +669,10 @@ fn mint_policy_allows_empty_signer_pubkeys_in_dev() {
             max_spent_outpoints: 0,
             max_utxos: 0,
             checkpoint_interval_secs: None,
+            write_buffer_size_mb: 128,
+            max_write_buffer_number: 3,
+            block_cache_size_mb: 512,
+            db_write_buffer_size_mb: 512,
         },
         network: Network {
             mode: NetworkMode::Dev,

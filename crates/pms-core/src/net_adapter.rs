@@ -1254,5 +1254,6 @@ fn plain_payload_type_str(p: &PlainPayload) -> &'static str {
         PlainPayload::Reverse { .. } => "Reverse",
         PlainPayload::ContractRegister(_) => "ContractRegister",
         PlainPayload::ContractUpdate { .. } => "ContractUpdate",
+        PlainPayload::LedgerOwnershipTransfer { .. } => "LedgerOwnershipTransfer",
     }
 }

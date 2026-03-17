@@ -6,7 +6,8 @@ use axum::response::IntoResponse;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use http::StatusCode;
-use pms_storage::PutResult;
+use pms_contracts::engine::evaluate_transfer;
+use pms_storage::{ContractStorage, PutResult};
 use pms_types::{Transaction, TxInput, TxOutput, Unlock};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use pms_wallet::SignerBackend;
@@ -205,7 +206,11 @@ pub struct SendSimpleRequest {
 #[derive(Debug, Serialize)]
 pub struct SendSimpleResponse {
     pub block_id: String,
+    /// Frais de gas PMS
     pub fee: String,
+    /// Frais de transfert smart contract (dans le même asset que le transfert).
+    /// `"0"` si aucun contrat de transfert n'est actif.
+    pub transfer_fee: String,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -391,10 +396,21 @@ pub async fn wallet_send_simple(
         .map(|a| a.inner())
         .unwrap_or(Decimal::ZERO);
 
+    // ════════════════════════════════════════════════════════════════════
+    // 3.a) Évaluer les contrats de frais de transfert (smart contract fees)
+    // ════════════════════════════════════════════════════════════════════
+    let transfer_fees = evaluate_transfer(
+        state.store.as_ref() as &dyn ContractStorage,
+        &state.ledger_id,
+        req.asset_id.as_deref(),
+        amount_dec,
+    );
+    let total_transfer_fee: Decimal = transfer_fees.iter().map(|f| f.fee_amount).sum();
+
     let total_needed = if req.asset_id.is_some() {
-        amount_dec
+        amount_dec + total_transfer_fee
     } else {
-        amount_dec + fee_dec
+        amount_dec + fee_dec + total_transfer_fee
     };
 
     // ════════════════════════════════════════════════════════════════════
@@ -461,6 +477,15 @@ pub async fn wallet_send_simple(
         amount: amount_dec.to_string(),
         asset_id: req.asset_id.clone(),
     });
+
+    // Transfer fee outputs (smart contract) — same asset as the transfer
+    for fee_result in &transfer_fees {
+        tx_outputs.push(TxOutput {
+            address: fee_result.beneficiary_address.clone(),
+            amount: fee_result.fee_amount.to_string(),
+            asset_id: req.asset_id.clone(),
+        });
+    }
 
     // Change
     let change = selected_sum - total_needed;
@@ -573,6 +598,15 @@ pub async fn wallet_send_simple(
         }
     }
 
+    // Add transfer fee beneficiary X25519 keys
+    for fee_result in &transfer_fees {
+        if let Ok((_h20, xpk)) = pms_wallet::decode_address(&fee_result.beneficiary_address) {
+            if !recipients_xpk.contains(&xpk) {
+                recipients_xpk.push(xpk);
+            }
+        }
+    }
+
     let plain = PlainPayload::TxUtxo(signed_tx.clone());
     let enc = match EncryptedPayload::encrypt_for_plain(&plain, &recipients_xpk) {
         Ok(e) => e,
@@ -662,6 +696,7 @@ pub async fn wallet_send_simple(
                 Json(json!(SendSimpleResponse {
                     block_id: wb.id,
                     fee: fee_dec.to_string(),
+                    transfer_fee: total_transfer_fee.to_string(),
                 })),
             )
         }

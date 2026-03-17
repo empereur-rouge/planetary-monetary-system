@@ -3,7 +3,7 @@ use pms_core::ConcurrentDag;
 use pms_interface::NetDagAdapter;
 use pms_server::Server;
 use pms_storage::DagStorage;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_types::Block;
 use pms_wallet::{SignerBackend, Wallet};
 use std::sync::Arc;
@@ -24,6 +24,7 @@ async fn spawn_node(port: u16, seed: u8) -> Arc<Server> {
             settings.rocks.tip_limit as usize,
             &settings.rocks.prefix,
             None,
+            &RocksMemoryConfig::default(),
         )
         .await
         .expect("store"),

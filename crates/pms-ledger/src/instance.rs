@@ -55,9 +55,10 @@ impl LedgerInstance {
             .ensure_column_families()
             .with_context(|| format!("ensure_column_families for ledger '{}'", def.id))?;
 
-        if let Err(e) = store.ensure_schema().await {
-            tracing::warn!(ledger = %def.id, "ensure_schema: {e}");
-        }
+        store
+            .ensure_schema()
+            .await
+            .with_context(|| format!("schema migration failed for ledger '{}' — refusing to start with outdated schema", def.id))?;
 
         // Load frozen addresses into in-memory cache (O(1) lookups on hot path)
         if let Err(e) = store.load_frozen_cache() {

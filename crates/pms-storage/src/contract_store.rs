@@ -35,6 +35,24 @@ pub trait ContractStorage: Send + Sync {
         ledger_id: &str,
     ) -> Result<Vec<Contract>>;
 
+    /// Recherche les contrats activés qui matchent un trigger de type transfert.
+    ///
+    /// Retourne les contrats dont :
+    /// - `enabled == true`
+    /// - `scope` matche le `ledger_id`
+    /// - `trigger` est `OnTransfer` avec `asset_id` matching (None = wildcard)
+    fn find_transfer_contracts(
+        &self,
+        asset_id: Option<&str>,
+        ledger_id: &str,
+    ) -> Result<Vec<Contract>>;
+
+    /// Met à jour un contrat existant (actions, scope, enabled, etc.).
+    ///
+    /// Le `contract_id` doit correspondre à un contrat existant.
+    /// Remplace le contrat complet par les données fournies.
+    fn update_contract(&self, contract_id: &str, contract: &Contract) -> Result<()>;
+
     /// Active ou désactive un contrat.
     fn set_enabled(&self, contract_id: &str, enabled: bool) -> Result<()>;
 }
@@ -107,6 +125,45 @@ impl ContractStorage for InMemoryContractStore {
             .cloned()
             .collect();
         Ok(results)
+    }
+
+    fn find_transfer_contracts(
+        &self,
+        asset_id: Option<&str>,
+        ledger_id: &str,
+    ) -> Result<Vec<Contract>> {
+        let map = self.contracts.read().unwrap();
+        let results = map
+            .values()
+            .filter(|c| {
+                if !c.enabled {
+                    return false;
+                }
+                if !c.scope.matches(ledger_id) {
+                    return false;
+                }
+                match &c.trigger {
+                    pms_types_contract::ContractTrigger::OnTransfer {
+                        asset_id: filter,
+                    } => match filter {
+                        None => true, // wildcard: match tous les transferts
+                        Some(f) => asset_id.is_some_and(|a| a == f),
+                    },
+                    _ => false,
+                }
+            })
+            .cloned()
+            .collect();
+        Ok(results)
+    }
+
+    fn update_contract(&self, contract_id: &str, contract: &Contract) -> Result<()> {
+        let mut map = self.contracts.write().unwrap();
+        if !map.contains_key(contract_id) {
+            anyhow::bail!("Contract '{}' not found", contract_id);
+        }
+        map.insert(contract_id.to_string(), contract.clone());
+        Ok(())
     }
 
     fn set_enabled(&self, contract_id: &str, enabled: bool) -> Result<()> {

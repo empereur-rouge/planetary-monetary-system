@@ -13,6 +13,7 @@ use std::sync::{Arc, Once};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
 
+
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Args {
@@ -174,6 +175,7 @@ async fn main() -> Result<()> {
         let srv_conn = srv.clone();
         // Capture TlsConfig directly (not ClientConfig)
         let tls_config_base = settings.tls.clone();
+        let max_retries = settings.p2p.max_peer_retries;
 
         eprintln!("🔗 Launching connector for {} known peers...", peers.len());
         tokio::spawn(async move {
@@ -186,6 +188,8 @@ async fn main() -> Result<()> {
                 let addr = p.replace("p2ps://", "").replace("p2p://", "");
 
                 tokio::spawn(async move {
+                    let mut attempts = 0u32;
+                    let mut delay_secs = 5u64;
                     loop {
                         // Use unified connect_to_peer which handles parsing & DNS
                         let res = srv.clone().connect_to_peer(addr.clone(), tls.clone()).await;
@@ -196,11 +200,23 @@ async fn main() -> Result<()> {
                                 break;
                             }
                             Err(e) => {
+                                attempts += 1;
+                                if attempts >= max_retries {
+                                    tracing::error!(
+                                        peer = %addr,
+                                        attempts,
+                                        "Gave up connecting to peer after {} attempts: {}",
+                                        max_retries, e
+                                    );
+                                    break;
+                                }
                                 eprintln!(
-                                    "[P2P Connector] Failed to connect to {}: {}. Retrying in 5s...",
-                                    addr, e
+                                    "[P2P Connector] Failed to connect to {}: {} (attempt {}/{}). Retrying in {}s...",
+                                    addr, e, attempts, max_retries, delay_secs
                                 );
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                                // Exponential backoff: 5s → 10s → 20s → 40s → 60s (cap)
+                                delay_secs = (delay_secs * 2).min(60);
                             }
                         }
                     }
@@ -279,9 +295,61 @@ async fn main() -> Result<()> {
         });
     }
 
-    srv.run(Arc::new(cfg), store).await?;
+    // 10) Graceful shutdown: race srv.run() against SIGTERM/SIGINT
+    let store_for_shutdown = store.clone();
+    let cfg = Arc::new(cfg);
+
+    tokio::select! {
+        result = srv.run(cfg, store) => {
+            if let Err(e) = result {
+                tracing::error!(error = %e, "Server exited with error");
+            }
+        }
+        _ = shutdown_signal() => {
+            tracing::info!("Shutdown signal received, flushing RocksDB WAL...");
+            eprintln!("🛑 Shutdown signal received — flushing RocksDB...");
+
+            // Flush RocksDB WAL for all ledgers to prevent corruption
+            for instance in ledger_mgr.list_all() {
+                if let Err(e) = instance.store.flush_wal().await {
+                    tracing::error!(ledger = %instance.id, error = %e, "Failed to flush WAL on shutdown");
+                } else {
+                    tracing::info!(ledger = %instance.id, "WAL flushed");
+                }
+            }
+            // Also flush the default store (same DB, but ensures WAL is synced)
+            if let Err(e) = store_for_shutdown.flush_wal().await {
+                tracing::error!(error = %e, "Failed to flush main store WAL on shutdown");
+            }
+
+            eprintln!("✅ Graceful shutdown complete.");
+            tracing::info!("Graceful shutdown complete");
+        }
+    }
 
     Ok(())
+}
+
+/// Wait for SIGTERM (Docker stop) or SIGINT (Ctrl+C).
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => { tracing::info!("Received SIGINT (Ctrl+C)"); }
+            _ = sigterm.recv() => { tracing::info!("Received SIGTERM"); }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.ok();
+        tracing::info!("Received Ctrl+C");
+    }
 }
 
 fn init_logging() {

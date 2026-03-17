@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2025-12-28
-updated: 2026-03-13
-version: v0.1.0
+updated: 2026-03-16
+version: v0.5.6
 ---
 
 # Multi-Ledger
@@ -133,7 +133,8 @@ max_outputs = 5
 | `tip_limit` | `Option<usize>` | non | Limite de tips (hérite du global si absent) |
 | `fees` | `Option<LedgerFeesOverride>` | non | Surcharges de fees (hérite du global si absent) |
 | `validation` | `Option<LedgerValidationOverride>` | non | Surcharges de validation |
-| `owner_pubkey` | `Option<String>` | non | Clé publique du propriétaire (`None` = admin-owned) |
+| `owner_pubkey` | `Option<String>` | non | Clé publique du propriétaire (`None` = admin-owned). Transférable via `POST /admin/ledgers/{id}/transfer-ownership` (v0.5.6). Persisté en RocksDB. Changement enregistré dans le DAG via bloc `LedgerOwnershipTransfer` chiffré. |
+| `owner_x25519_pubkey` | `Option<String>` | non | Clé publique X25519 du propriétaire pour le chiffrement (v0.5.6). Utilisée pour chiffrer les blocs `LedgerOwnershipTransfer` dans le DAG. |
 | `symbol` | `Option<String>` | non | Symbole du token natif (défaut: "PMS") |
 
 ### Surcharges de fees (`LedgerFeesOverride`)
@@ -148,12 +149,14 @@ La résolution se fait via `resolve_effective_fees(global, ledger_override)` qui
 |-------|---------|------|
 | `pms-ledger` | `crates/pms-ledger/src/lib.rs` | Réexporte `LedgerInstance`, `LedgerManager`, et le module picks |
 | `pms-ledger` | `crates/pms-ledger/src/instance.rs` | Définition de `LedgerInstance` et logique de bootstrap |
-| `pms-ledger` | `crates/pms-ledger/src/manager.rs` | Définition de `LedgerManager` (DashMap, bootstrap, add_ledger, lookups) |
+| `pms-ledger` | `crates/pms-ledger/src/manager.rs` | Définition de `LedgerManager` (DashMap, bootstrap, add_ledger, lookups, update_def, load_persisted_ledgers) |
 | `pms-ledger` | `crates/pms-ledger/src/picks.rs` | Sélection des adresses de fee recipients |
 | `pms-config` | `crates/pms-config/src/config.rs` | Définition de `LedgerDef`, `LedgerFeesOverride`, `LedgerValidationOverride` |
 | `pms-config` | `crates/pms-config/src/settings.rs` | `Settings.ledgers` et `effective_ledgers()` (génération automatique du ledger "main") |
 | `pms-server` | `crates/pms-server/src/api.rs` | `AppState.ledger_mgr`, `dynamic_ledger_handler()`, `build_ledger_scoped_routes()` |
-| `pms-server` | `crates/pms-server/src/api_fn/ledger.rs` | Endpoints API : `list_ledgers`, `admin_list_ledgers`, `admin_get_ledger`, `admin_create_ledger` |
+| `pms-server` | `crates/pms-server/src/api_fn/ledger.rs` | Endpoints API : `list_ledgers`, `admin_list_ledgers`, `admin_get_ledger`, `admin_create_ledger`, `transfer_ledger_ownership` |
+| `pms-storage` | `crates/pms-storage/src/ledger_store.rs` | Trait `LedgerDefStorage` : CRUD + ownership transfer |
+| `pms-storage` | `crates/pms-storage/src/rocks_store/ledger_storage.rs` | Implémentation RocksDB de `LedgerDefStorage` (CF `ledger_defs`) |
 | `pms-server` | `crates/pms-server/src/api_fn/tx_helpers.rs` | `EffectiveFees`, `resolve_effective_fees()`, `try_consume_gas()` |
 | `pms-server` | `crates/pms-server/src/server.rs` | `Server.ledger_manager()`, `adapter_for_network()` (routage P2P multi-ledger) |
 | `pms-storage` | `crates/pms-storage/src/rocks_store/store.rs` | `open_db_multi_prefix()`, `from_shared_db()`, `CF_NAMES`, `build_cf_names()` |
@@ -173,6 +176,9 @@ La résolution se fait via `resolve_effective_fees(global, ledger_override)` qui
 | `LedgerManager::get_by_network_id()` | `crates/pms-ledger/src/manager.rs` | Lookup d'un ledger par network_id (routage P2P) |
 | `LedgerManager::default_ledger()` | `crates/pms-ledger/src/manager.rs` | Retourne le ledger "main" (ou le premier disponible) |
 | `LedgerManager::list_all()` | `crates/pms-ledger/src/manager.rs` | Liste toutes les instances de ledgers actifs |
+| `LedgerManager::update_def()` | `crates/pms-ledger/src/manager.rs` | Met à jour la LedgerDef d'un ledger en RAM (ownership transfer) (v0.5.6) |
+| `LedgerManager::load_persisted_ledgers()` | `crates/pms-ledger/src/manager.rs` | Restaure les ledgers dynamiques et changements d'ownership depuis RocksDB au démarrage (v0.5.6) |
+| `transfer_ledger_ownership()` | `crates/pms-server/src/api_fn/ledger.rs` | Endpoint admin pour transférer l'ownership d'un ledger (v0.5.6) |
 | `Settings::effective_ledgers()` | `crates/pms-config/src/settings.rs` | Génère les définitions de ledgers (rétrocompatible si aucun `[[ledgers]]`) |
 | `RocksStore::open_db_multi_prefix()` | `crates/pms-storage/src/rocks_store/store.rs` | Ouvre RocksDB avec les CFs de N préfixes en une seule DB |
 | `RocksStore::from_shared_db()` | `crates/pms-storage/src/rocks_store/store.rs` | Crée un `RocksStore` pointé vers une DB partagée avec un prefix |
@@ -201,6 +207,7 @@ La résolution se fait via `resolve_effective_fees(global, ledger_override)` qui
 | `GET` | `/admin/ledgers` | Liste détaillée des ledgers (infos techniques) |
 | `GET` | `/admin/ledgers/{ledger_id}` | Détail d'un ledger spécifique |
 | `POST` | `/admin/ledgers/create` | Crée un nouveau ledger dynamiquement |
+| `POST` | `/admin/ledgers/{ledger_id}/transfer-ownership` | Transfère l'ownership d'un ledger (v0.5.6). Persiste en RocksDB + update in-memory. |
 | `POST` | `/admin/gas-pool/deposit` | Dépose des PMS dans le gas pool d'un ledger |
 | `POST` | `/admin/gas-pool/withdraw` | Retire des PMS du gas pool d'un ledger |
 
@@ -295,6 +302,56 @@ Le `BridgeEngine` (`crates/pms-bridge/src/engine.rs`) orchestre les transferts c
 3. **Disable** : Désactive un pont.
 
 Le bridge utilise directement le `LedgerManager` pour accéder aux adapters des deux ledgers impliqués.
+
+### [[smart-contracts|Transfer Fees]] — Creator Revenue (v0.5.5)
+
+Les créateurs de ledgers custom peuvent configurer des **frais de transfert** via le système de [[smart-contracts]] : un contrat `OnTransfer` avec action `TransferFee` prélève un pourcentage ou montant fixe sur chaque transfert et le route vers le wallet du créateur. Cela permet un modèle de revenus pour les opérateurs de ledgers custom.
+
+Exemple : le créateur du ledger "eden" enregistre un contrat `OnTransfer` avec `PercentageBps { rate_bps: 500 }` (5%). Chaque transfert EDN sur eden prélève 5% du montant et le route vers le wallet du créateur.
+
+### Ownership Transfer & Persistence (v0.5.6)
+
+Les définitions de ledgers custom sont **persistées en RocksDB** (CF `ledger_defs`), ce qui permet :
+
+1. **Transfert d'ownership via DAG** : `POST /admin/ledgers/{ledger_id}/transfer-ownership` crée un bloc `LedgerOwnershipTransfer` chiffré dans le DAG, puis applique le changement en RocksDB + RAM. Le nouveau propriétaire est effectif immédiatement après la persistance du bloc.
+2. **Traçabilité blockchain** : chaque changement d'ownership est enregistré comme un bloc dans le DAG, conformément à la convention blockchain. Les données sensibles (nouveau propriétaire, raison) sont chiffrées via X25519+AES-256-GCM pour le coordinator, l'ancien owner, et le nouveau owner.
+3. **Survie au redémarrage** : au démarrage, `load_persisted_ledgers()` lit les LedgerDefs depuis RocksDB et :
+   - Pour les ledgers déjà bootstrappés (config.toml) : restaure les changements d'ownership si RocksDB diffère.
+   - Pour les ledgers absents du config.toml (créés dynamiquement via API) : les restaure via `add_ledger()`.
+4. **Ownership à la création** : `CreateLedgerRequest` accepte les champs optionnels `owner_pubkey` et `owner_x25519_pubkey` pour spécifier le propriétaire et sa clé de chiffrement dès la création.
+
+```json
+// Transfert d'ownership (crée un bloc DAG chiffré)
+POST /admin/ledgers/eden/transfer-ownership
+{
+  "new_owner_pubkey": "pms1newowner...",
+  "new_owner_x25519_pubkey": "abc123hex...",
+  "reason": "Ownership transfer to new team lead"
+}
+// Réponse: { "ledger_id": "eden", "new_owner_pubkey": "pms1newowner...", "block_id": "abc...", "message": "..." }
+```
+
+#### Architecture du bloc LedgerOwnershipTransfer
+
+Le transfert d'ownership suit le pattern "embedded encryption" (comme `EncryptedReward`) :
+
+```
+PlainPayload::LedgerOwnershipTransfer {
+    ledger_id: String,                    // cleartext — routage + validation
+    encrypted_transfer: EncryptedPayload, // OwnershipTransferData chiffré
+}
+
+OwnershipTransferData {
+    new_owner_pubkey: Option<String>,     // None = revoke ownership (admin-owned)
+    reason: String,
+}
+```
+
+- **Validation** : requiert la signature du coordinator + `ledger_id` non vide.
+- **Chiffrement** : X25519+AES-256-GCM pour coordinator + owner actuel (si connu) + nouvel owner (si fourni).
+- **Application d'état** : se fait dans l'endpoint API APRÈS persistance du bloc (le `CoreAdapter` n'a pas accès aux wallets).
+
+Voir [[block-payloads]] pour plus de détails sur le pattern d'encryption.
 
 ### [[economics|Gas Pool]] (Anti-Spam)
 

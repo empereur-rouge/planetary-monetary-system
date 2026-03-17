@@ -332,9 +332,7 @@ pub async fn perform_fee_distribution(
                 &settings.fees.treasury_addresses
             };
 
-            if !treasury_wallets.is_empty() {
-                // Pick random treasury wallet or first one
-                let target = &treasury_wallets[0];
+            if let Some(target) = treasury_wallets.first() {
                 all_outputs.push(TxOutput {
                     address: target.clone(),
                     amount: treasury_cut.to_string(),
@@ -396,11 +394,9 @@ pub async fn perform_fee_distribution(
             if target_address.is_none() {
                 // Determine fallback treasury address (same logic as tax)
                 let fallback = if !state.treasury_wallets.is_empty() {
-                    Some(state.treasury_wallets.list[0].clone())
-                } else if !settings.fees.treasury_addresses.is_empty() {
-                    Some(settings.fees.treasury_addresses[0].clone())
+                    state.treasury_wallets.list.first().cloned()
                 } else {
-                    None
+                    settings.fees.treasury_addresses.first().cloned()
                 };
 
                 if let Some(addr) = fallback {
@@ -633,13 +629,13 @@ pub async fn perform_daily_inflation_mint(state: &AppState) -> Result<Distribute
     let treasury_amount = (daily_amount * treasury_pct / Decimal::from(100)).round_dp(8);
 
     let coordinator_address = node_wallet.get_address("8e");
-    let treasury_addr = if !state.treasury_wallets.is_empty() {
-        state.treasury_wallets.list[0].clone()
-    } else if !settings.fees.treasury_addresses.is_empty() {
-        settings.fees.treasury_addresses[0].clone()
-    } else {
-        coordinator_address.clone()
-    };
+    let treasury_addr = state
+        .treasury_wallets
+        .list
+        .first()
+        .cloned()
+        .or_else(|| settings.fees.treasury_addresses.first().cloned())
+        .unwrap_or_else(|| coordinator_address.clone());
 
     let mut all_outputs: Vec<TxOutput> = Vec::new();
     let mut total_distributed = Decimal::ZERO;

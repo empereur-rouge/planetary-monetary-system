@@ -119,6 +119,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: None,
+                owner_x25519_pubkey: None,
                 symbol: None,
             },
             LedgerDef {
@@ -130,6 +131,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: None,
+                owner_x25519_pubkey: None,
                 symbol: None,
             },
         ],
@@ -234,6 +236,7 @@ async fn add_ledger_dynamically() -> Result<()> {
         fees: None,
         validation: None,
         owner_pubkey: None,
+        owner_x25519_pubkey: None,
         symbol: None,
     };
 
@@ -257,6 +260,7 @@ async fn add_ledger_dynamically() -> Result<()> {
             fees: None,
             validation: None,
             owner_pubkey: None,
+            owner_x25519_pubkey: None,
             symbol: None,
         })
         .await;

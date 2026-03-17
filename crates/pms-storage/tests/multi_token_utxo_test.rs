@@ -7,7 +7,7 @@
 // - get_utxo avec asset_id
 
 use anyhow::Result;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_storage::rocks_store::utxo::UtxoApply;
 use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
@@ -22,7 +22,7 @@ async fn mk_store(prefix: &str) -> Result<TestStore> {
     let path = dir.path().join(format!("rocks-mt-{}", nanoid::nanoid!(5)));
     std::fs::create_dir_all(&path)?;
     let path_str = path.to_string_lossy().to_string();
-    let store = Arc::new(RocksStore::new(&path_str, 64, prefix, None).await?);
+    let store = Arc::new(RocksStore::new(&path_str, 64, prefix, None, &RocksMemoryConfig::default()).await?);
     Ok(TestStore { _dir: dir, store })
 }
 

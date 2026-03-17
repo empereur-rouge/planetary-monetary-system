@@ -31,6 +31,26 @@ fn default_max_utxos() -> usize {
     500_000
 }
 
+fn default_write_buffer_size_mb() -> usize {
+    128
+}
+
+fn default_max_write_buffer_number() -> i32 {
+    3
+}
+
+fn default_block_cache_size_mb() -> usize {
+    512
+}
+
+fn default_db_write_buffer_size_mb() -> usize {
+    512
+}
+
+fn default_max_open_files() -> i32 {
+    512
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Rocks {
     pub path: String,
@@ -56,6 +76,44 @@ pub struct Rocks {
     /// Défaut: 21600 (6 heures).
     #[serde(default)]
     pub checkpoint_interval_secs: Option<u64>,
+
+    // ── RocksDB memory tuning ──────────────────────────────────────────
+
+    /// Write buffer (memtable) size per column family, in MB.
+    /// Each CF can hold up to `max_write_buffer_number` memtables of this size.
+    /// Lower this when running many ledgers (many CFs) to reduce per-CF memory.
+    /// Default: 128 MB.
+    #[serde(default = "default_write_buffer_size_mb")]
+    pub write_buffer_size_mb: usize,
+
+    /// Maximum number of write buffers (memtables) kept in memory per CF.
+    /// Higher values absorb write bursts but increase memory. Default: 3.
+    #[serde(default = "default_max_write_buffer_number")]
+    pub max_write_buffer_number: i32,
+
+    /// Shared LRU block cache size in MB, shared across ALL column families.
+    /// Holds data blocks, index blocks, and filter blocks.
+    /// Must be large enough to hold L0 index+filter for all CFs.
+    /// Default: 512 MB.
+    #[serde(default = "default_block_cache_size_mb")]
+    pub block_cache_size_mb: usize,
+
+    /// Global memtable memory budget in MB (`db_write_buffer_size`).
+    /// Caps the TOTAL memory used by ALL memtables across ALL column families.
+    /// Critical for multi-ledger setups where N ledgers × 33 CFs can spike.
+    /// 0 = disabled (each CF manages independently — can OOM with many CFs).
+    /// Recommended: 512 MB for 8 GB VPS with multiple ledgers.
+    /// Default: 512 MB.
+    #[serde(default = "default_db_write_buffer_size_mb")]
+    pub db_write_buffer_size_mb: usize,
+
+    /// Maximum number of open file descriptors RocksDB may use.
+    /// Each SSTable consumes one FD. With 66+ CFs and deep LSM trees,
+    /// RocksDB can easily exceed the OS ulimit (typically 1024 on Linux).
+    /// -1 = unlimited (RocksDB default, dangerous on VPS).
+    /// Recommended: 512 for 8 GB VPS. Default: 512.
+    #[serde(default = "default_max_open_files")]
+    pub max_open_files: i32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -129,6 +187,33 @@ pub struct TlsConfig {
     pub whitelist_fp256: Vec<String>, // empreintes SHA-256 autorisées (optionnel)
 }
 
+// ── P2P limit defaults ──────────────────────────────────────────────────
+
+fn default_max_connections() -> usize {
+    256
+}
+fn default_per_peer_queue_cap() -> usize {
+    2_000
+}
+fn default_max_orphans() -> usize {
+    2_000
+}
+fn default_max_inflight_requests() -> usize {
+    10_000
+}
+fn default_max_parent_deps() -> usize {
+    5_000
+}
+fn default_max_peer_retries() -> u32 {
+    20
+}
+
+/// P2P network configuration.
+///
+/// Includes connectivity settings (`known_peers`, `allowed_peer_ips`) and
+/// resource limits that control memory usage and scaling behaviour.
+/// All limit fields have safe defaults tuned for an 8 GB VPS.
+/// Increase them for vertical scaling (more RAM) or horizontal scaling (more peers).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct P2pConfig {
     #[serde(default)]
@@ -138,6 +223,44 @@ pub struct P2pConfig {
     pub allowed_peer_ips: Vec<String>,
     #[serde(default)]
     pub strict_whitelist: bool,
+
+    // ── Scaling limits (configurable since v0.5.9) ─────────────────────
+
+    /// Maximum concurrent inbound P2P peer connections.
+    /// Each connection uses ~2 tokio tasks + a per-peer queue.
+    /// Increase for horizontal scaling (more peers). Default: 256.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+
+    /// Per-peer outbound message queue capacity.
+    /// Slow peers that exceed this limit will have messages dropped.
+    /// Increase for vertical scaling (more RAM). Default: 2 000.
+    #[serde(default = "default_per_peer_queue_cap")]
+    pub per_peer_queue_cap: usize,
+
+    /// Maximum orphan blocks held in memory waiting for missing parents.
+    /// Higher values improve sync speed at the cost of RAM.
+    /// Default: 2 000 (~2 MB).
+    #[serde(default = "default_max_orphans")]
+    pub max_orphans: usize,
+
+    /// Maximum in-flight GetBlock requests tracked concurrently.
+    /// Prevents unbounded memory growth from unanswered requests.
+    /// Default: 10 000.
+    #[serde(default = "default_max_inflight_requests")]
+    pub max_inflight_requests: usize,
+
+    /// Maximum parent→children dependency entries for orphan resolution.
+    /// Limits memory used by the orphan dependency tracker.
+    /// Default: 5 000.
+    #[serde(default = "default_max_parent_deps")]
+    pub max_parent_deps: usize,
+
+    /// Maximum connection retry attempts per known peer at startup.
+    /// Uses exponential backoff (5s → 60s cap). After max retries, gives up.
+    /// Increase if peers are slow to boot. Default: 20.
+    #[serde(default = "default_max_peer_retries")]
+    pub max_peer_retries: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -503,7 +626,7 @@ pub enum FeePickMode {
 /// Configuration d'un ledger individuel.
 /// Chaque ledger a son propre prefix RocksDB, network_id, et éventuellement
 /// des settings de validation/fees spécifiques.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerDef {
     /// Identifiant unique du ledger (ex: "main", "nft", "client-acme")
     pub id: String,
@@ -523,10 +646,14 @@ pub struct LedgerDef {
     /// Validation settings override pour ce ledger
     #[serde(default)]
     pub validation: Option<LedgerValidationOverride>,
-    /// Clé publique du propriétaire du ledger.
+    /// Clé publique (Ed25519) du propriétaire du ledger.
     /// None = admin-owned (ex: "main"), Some = custom ledger avec owner.
     #[serde(default)]
     pub owner_pubkey: Option<String>,
+    /// Clé publique X25519 du propriétaire (pour chiffrement).
+    /// Utilisée pour chiffrer les blocs de transfert d'ownership dans le DAG.
+    #[serde(default)]
+    pub owner_x25519_pubkey: Option<String>,
     /// Native token symbol for this ledger (default: "PMS")
     #[serde(default)]
     pub symbol: Option<String>,
@@ -534,7 +661,7 @@ pub struct LedgerDef {
 
 /// Overrides de fees pour un ledger spécifique.
 /// Chaque champ à `None` hérite de la config globale `FeesSettings`.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LedgerFeesOverride {
     pub ratio: Option<String>,
     pub base_fee: Option<String>,
@@ -573,7 +700,7 @@ pub struct LedgerFeesOverride {
 }
 
 /// Overrides de validation pour un ledger spécifique.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LedgerValidationOverride {
     pub max_inputs: Option<usize>,
     pub max_outputs: Option<usize>,

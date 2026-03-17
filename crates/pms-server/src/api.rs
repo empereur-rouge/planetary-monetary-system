@@ -15,7 +15,7 @@ use crate::api_fn::compliance::{
     admin_shadow_balance, admin_unfreeze,
 };
 use crate::api_fn::contracts::{
-    get_contract, list_contracts, register_contract, toggle_contract,
+    get_contract, list_contracts, register_contract, toggle_contract, update_contract,
 };
 use crate::api_fn::coordinator::get_coordinator_info;
 use crate::api_fn::gas_pool::{admin_gas_pool_deposit, admin_gas_pool_withdraw, get_gas_pool};
@@ -24,6 +24,7 @@ use crate::api_fn::dag::get_tips;
 use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
 use crate::api_fn::ledger::{
     admin_create_ledger, admin_get_ledger, admin_list_ledgers, list_ledgers,
+    transfer_ledger_ownership,
 };
 use crate::api_fn::milestone::{distribute_fees, get_fee_pool_status};
 use crate::api_fn::nft::{
@@ -675,6 +676,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/admin/ledgers", get(admin_list_ledgers))
         .route("/admin/ledgers/create", post(admin_create_ledger))
         .route("/admin/ledgers/{ledger_id}", get(admin_get_ledger))
+        .route("/admin/ledgers/{ledger_id}/transfer-ownership", post(transfer_ledger_ownership))
         // Admin Bridge API - Cross-ledger bridge management
         .route("/admin/bridge/enable", post(admin_bridge_enable))
         .route("/admin/bridge/disable", post(admin_bridge_disable))
@@ -705,7 +707,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         // Admin Contract API - Declarative smart contracts
         .route("/admin/contracts", post(register_contract))
         .route("/admin/contracts", get(list_contracts))
-        .route("/admin/contracts/{contract_id}", get(get_contract))
+        .route("/admin/contracts/{contract_id}", get(get_contract).put(update_contract))
         .route(
             "/admin/contracts/{contract_id}/toggle",
             post(toggle_contract),
@@ -883,6 +885,14 @@ pub async fn serve_api(
 
     let ledger_mgr = srv.ledger_manager();
 
+    // Load dynamically-created ledgers from RocksDB persistence
+    // (ownership transfers, ledgers created via API in previous runs)
+    if let Some(ref mgr) = ledger_mgr {
+        if let Err(e) = mgr.load_persisted_ledgers(store.as_ref()).await {
+            tracing::warn!("Failed to load persisted ledger defs: {e}");
+        }
+    }
+
     // Per-ledger fee pool registry — main ledger pool is pre-created
     let fee_pool_registry = Arc::new(crate::fee_pool::FeePoolRegistry::new());
     let main_fee_pool = fee_pool_registry.get_or_create("main");
@@ -970,7 +980,8 @@ pub async fn serve_api(
 
     // TLS / HTTP
     if use_api_tls {
-        let tls = cfg.tls.as_ref().unwrap();
+        let tls = cfg.tls.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("api_tls_enabled=true but [tls] section missing from config"))?;
         let cert_path = Path::new(&tls.cert_pem);
         let key_path = Path::new(&tls.key_pem);
         let files_exist = cert_path.exists() && key_path.exists();

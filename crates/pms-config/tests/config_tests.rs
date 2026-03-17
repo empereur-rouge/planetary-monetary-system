@@ -143,6 +143,47 @@ fn test_p2p_config_defaults() {
     assert!(p2p.bind_addr.is_none());
     assert!(p2p.allowed_peer_ips.is_empty());
     assert!(!p2p.strict_whitelist);
+
+    // P2P scaling limits — verify defaults match documented values
+    println!("max_connections={}", p2p.max_connections);
+    println!("per_peer_queue_cap={}", p2p.per_peer_queue_cap);
+    println!("max_orphans={}", p2p.max_orphans);
+    println!("max_inflight_requests={}", p2p.max_inflight_requests);
+    println!("max_parent_deps={}", p2p.max_parent_deps);
+    println!("max_peer_retries={}", p2p.max_peer_retries);
+    assert_eq!(p2p.max_connections, 256);
+    assert_eq!(p2p.per_peer_queue_cap, 2_000);
+    assert_eq!(p2p.max_orphans, 2_000);
+    assert_eq!(p2p.max_inflight_requests, 10_000);
+    assert_eq!(p2p.max_parent_deps, 5_000);
+    assert_eq!(p2p.max_peer_retries, 20);
+}
+
+#[test]
+fn test_p2p_config_custom_values() {
+    use pms_config::P2pConfig;
+
+    let json = r#"{
+        "known_peers": "node1:8443",
+        "max_connections": 512,
+        "per_peer_queue_cap": 5000,
+        "max_orphans": 10000,
+        "max_inflight_requests": 50000,
+        "max_parent_deps": 20000,
+        "max_peer_retries": 50
+    }"#;
+
+    let p2p: P2pConfig = serde_json::from_str(json).unwrap();
+    println!("custom: max_connections={} per_peer_queue_cap={} max_orphans={} max_inflight_requests={} max_parent_deps={} max_peer_retries={}",
+        p2p.max_connections, p2p.per_peer_queue_cap, p2p.max_orphans,
+        p2p.max_inflight_requests, p2p.max_parent_deps, p2p.max_peer_retries);
+    assert_eq!(p2p.known_peers, "node1:8443");
+    assert_eq!(p2p.max_connections, 512);
+    assert_eq!(p2p.per_peer_queue_cap, 5_000);
+    assert_eq!(p2p.max_orphans, 10_000);
+    assert_eq!(p2p.max_inflight_requests, 50_000);
+    assert_eq!(p2p.max_parent_deps, 20_000);
+    assert_eq!(p2p.max_peer_retries, 50);
 }
 
 #[test]

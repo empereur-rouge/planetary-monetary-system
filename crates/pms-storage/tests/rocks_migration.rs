@@ -1,7 +1,7 @@
 // tests/rocks_migration.rs
 
 use anyhow::Result;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use std::path::PathBuf;
 
 // ==== helpers ==== //
@@ -20,7 +20,7 @@ async fn migrations_apply_and_version_is_current() -> Result<()> {
 
     let path = temp_db_path();
     let prefix = format!("pms:test:{}", nanoid::nanoid!());
-    let store = RocksStore::new(path.to_str().unwrap(), 64, prefix.clone(), None).await?;
+    let store = RocksStore::new(path.to_str().unwrap(), 64, prefix.clone(), None, &RocksMemoryConfig::default()).await?;
 
     // si tu as une fonction équivalente à ensure_schema()
     store.ensure_schema().await?;
@@ -40,7 +40,7 @@ async fn migrations_apply_and_version_is_current() -> Result<()> {
 async fn test_dag_version_default() -> Result<()> {
     let path = temp_db_path();
     let prefix = format!("pms:test:{}", nanoid::nanoid!());
-    let store = RocksStore::new(path.to_str().unwrap(), 64, prefix, None).await?;
+    let store = RocksStore::new(path.to_str().unwrap(), 64, prefix, None, &RocksMemoryConfig::default()).await?;
 
     let version = store.get_dag_version().await?;
     println!("Default DAG version (fresh DB): '{}'", version);
@@ -53,7 +53,7 @@ async fn test_dag_version_default() -> Result<()> {
 async fn test_dag_version_roundtrip() -> Result<()> {
     let path = temp_db_path();
     let prefix = format!("pms:test:{}", nanoid::nanoid!());
-    let store = RocksStore::new(path.to_str().unwrap(), 64, prefix, None).await?;
+    let store = RocksStore::new(path.to_str().unwrap(), 64, prefix, None, &RocksMemoryConfig::default()).await?;
 
     store.set_dag_version("1.2.3").await?;
     let version = store.get_dag_version().await?;
@@ -75,7 +75,7 @@ async fn test_dag_version_persistence() -> Result<()> {
 
     // Ouverture 1 : écrire la version
     {
-        let store = RocksStore::new(path.to_str().unwrap(), 64, prefix.clone(), None).await?;
+        let store = RocksStore::new(path.to_str().unwrap(), 64, prefix.clone(), None, &RocksMemoryConfig::default()).await?;
         store.set_dag_version("3.1.4").await?;
         let v = store.get_dag_version().await?;
         println!("Before close: '{}'", v);
@@ -84,7 +84,7 @@ async fn test_dag_version_persistence() -> Result<()> {
 
     // Ouverture 2 : vérifier que la version persiste
     {
-        let store = RocksStore::new(path.to_str().unwrap(), 64, prefix, None).await?;
+        let store = RocksStore::new(path.to_str().unwrap(), 64, prefix, None, &RocksMemoryConfig::default()).await?;
         let v = store.get_dag_version().await?;
         println!("After reopen: '{}'", v);
         assert_eq!(v, "3.1.4", "DAG version should survive DB reopen");

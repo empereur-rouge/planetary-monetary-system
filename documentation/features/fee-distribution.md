@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-01-10
-updated: 2026-03-15
-version: v0.1.0
+updated: 2026-03-17
+version: v0.5.8
 ---
 
 # Fee Distribution (Distribution Automatique des Frais)
@@ -12,6 +12,10 @@ version: v0.1.0
 Le système de Fee Distribution gère la collecte, l'accumulation et la distribution périodique des frais de transaction dans le réseau PMS. Les frais sont collectés à chaque transaction dans un pool en mémoire (`FeePool`), puis distribués automatiquement à intervalles réguliers via un bloc `Mint` signé par le Coordinator. La distribution répartit les frais entre le Coordinator (65% par défaut), le Treasury (35% par défaut) et les nœuds participants, avec possibilité de N-way split configurable. Le système intègre également un mécanisme de [[economics|fee burn]] (destruction permanente d'une fraction des frais), des burn refunds (remboursements de [[smart-contracts|contrats smart]]), et une inflation programmée quotidienne.
 
 Ce mécanisme est essentiel au modèle économique du réseau : il rémunère les opérateurs de nœuds, alimente la trésorerie du projet, et contrôle la masse monétaire via le burn déflationniste.
+
+### Transfer Fees (v0.5.5)
+
+En plus des frais de gas PMS et des burn refunds, le système supporte désormais les **frais de transfert smart contract** : un pourcentage ou montant fixe prélevé au sender lors de chaque transfert, routé vers un bénéficiaire fixe (ex: le créateur du ledger). Ces frais sont des `TxOutput` additionnels dans la transaction elle-même — ils ne passent PAS par le FeePool ni la fee distribution. Voir [[smart-contracts#Transfer Fees → TX Preparation (v0.5.5)]] pour les détails.
 
 ## Dates
 

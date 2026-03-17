@@ -1,7 +1,7 @@
 use pms_core::{ConcurrentDag, CoreAdapter};
 use pms_interface::NetDagAdapter;
 use pms_storage::DagStorage;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_types::{Block, BlockMetadata, PayloadEnvelope, PlainPayload, TxOutput};
 use pms_utils::compute_block_id;
 use rust_decimal::Decimal;
@@ -14,7 +14,7 @@ async fn test_metadata_persistence_and_supply() {
     let dir = tempdir().unwrap();
     // Fix: to_str() for path
     let store = Arc::new(
-        RocksStore::new(dir.path().to_str().unwrap(), 1000, "test", None)
+        RocksStore::new(dir.path().to_str().unwrap(), 1000, "test", None, &RocksMemoryConfig::default())
             .await
             .unwrap(),
     );

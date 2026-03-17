@@ -1,10 +1,12 @@
 use crate::api::AppState;
+use crate::api_fn::tx_helpers;
 use crate::helper::is_admin_authorized;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use pms_config::LedgerDef;
+use pms_types_payload::{EncryptedPayload, OwnershipTransferData, PayloadEnvelope, PlainPayload};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -101,6 +103,13 @@ pub struct CreateLedgerRequest {
     /// Native token symbol for this ledger (default: "PMS")
     #[serde(default)]
     pub symbol: Option<String>,
+    /// Clé publique (Ed25519) du propriétaire du ledger.
+    /// `None` = admin-owned, `Some(pubkey)` = custom ledger avec owner.
+    #[serde(default)]
+    pub owner_pubkey: Option<String>,
+    /// Clé publique X25519 du propriétaire (pour chiffrement des blocs d'ownership transfer).
+    #[serde(default)]
+    pub owner_x25519_pubkey: Option<String>,
 }
 
 fn default_protocol_version() -> u32 {
@@ -137,6 +146,7 @@ pub async fn admin_list_ledgers(
                 "tip_limit": l.def.tip_limit,
                 "block_count": l.dag.len(),
                 "utxo_shards": 256,
+                "owner_pubkey": l.def.owner_pubkey,
             })
         })
         .collect();
@@ -190,6 +200,7 @@ pub async fn admin_get_ledger(
             "tip_limit": instance.def.tip_limit,
             "block_count": instance.dag.len(),
             "utxo_shards": 256,
+            "owner_pubkey": instance.def.owner_pubkey,
         })),
     )
         .into_response()
@@ -246,11 +257,12 @@ pub async fn admin_create_ledger(
         tip_limit: req.tip_limit,
         fees: None,
         validation: None,
-        owner_pubkey: None,
+        owner_pubkey: req.owner_pubkey.clone(),
+        owner_x25519_pubkey: req.owner_x25519_pubkey.clone(),
         symbol: req.symbol.clone(),
     };
 
-    match mgr.add_ledger(def).await {
+    match mgr.add_ledger(def.clone()).await {
         Ok(instance) => {
             // Auto-create gas pool (balance=0) for the new ledger
             {
@@ -259,6 +271,14 @@ pub async fn admin_create_ledger(
                 let pool = pms_types_economics::GasPool::new(req.id.clone(), now_ms);
                 if let Err(e) = state.store.put_gas_pool(&pool) {
                     tracing::warn!("Failed to create gas pool for ledger '{}': {e}", req.id);
+                }
+            }
+
+            // Persist ledger definition to RocksDB (survives restart)
+            {
+                use pms_storage::LedgerDefStorage;
+                if let Err(e) = state.store.put_ledger_def(&def) {
+                    tracing::warn!("Failed to persist ledger def for '{}': {e}", req.id);
                 }
             }
 
@@ -272,6 +292,7 @@ pub async fn admin_create_ledger(
                         "prefix": instance.def.prefix,
                         "protocol_version": instance.def.protocol_version,
                         "block_count": instance.dag.len(),
+                        "owner_pubkey": instance.def.owner_pubkey,
                     },
                     "message": "Ledger created. API routes available at /l/{id}/..., P2P routing active immediately."
                 })),
@@ -299,4 +320,238 @@ pub async fn admin_create_ledger(
             }
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LEDGER OWNERSHIP TRANSFER (DAG-based, encrypted)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Requête pour POST /admin/ledgers/:id/transfer-ownership.
+#[derive(Deserialize)]
+pub struct TransferOwnershipRequest {
+    /// Nouvelle clé publique (Ed25519) du propriétaire. `None` = retour à admin-owned.
+    pub new_owner_pubkey: Option<String>,
+    /// Clé publique X25519 du nouveau propriétaire (pour chiffrement futur).
+    #[serde(default)]
+    pub new_owner_x25519_pubkey: Option<String>,
+    /// Raison du transfert (audit trail, stocké chiffré dans le DAG).
+    #[serde(default = "default_transfer_reason")]
+    pub reason: String,
+}
+
+fn default_transfer_reason() -> String {
+    "ownership transfer".to_string()
+}
+
+/// POST /admin/ledgers/{ledger_id}/transfer-ownership
+///
+/// Transfère la propriété d'un ledger custom à un nouveau propriétaire.
+///
+/// # Architecture DAG
+/// Le transfert est enregistré comme un bloc `LedgerOwnershipTransfer` dans le DAG.
+/// Le contenu sensible (new_owner_pubkey) est chiffré via X25519+AES-256-GCM.
+/// Seuls le propriétaire actuel et le coordinateur peuvent déchiffrer le bloc.
+///
+/// # Flux
+/// 1. Chiffrement des données de transfert pour owner + coordinator
+/// 2. Création et signature d'un bloc DAG `LedgerOwnershipTransfer`
+/// 3. Persistance du bloc dans le DAG (audit trail immuable)
+/// 4. Application de l'état : RocksDB (ledger_defs) + mémoire (LedgerManager)
+///
+/// # Sécurité
+/// - Admin-only (Bearer token via `require_local_or_admin` middleware).
+/// - Le bloc est signé par le coordinateur.
+/// - Le changement est tracé dans le DAG pour auditabilité.
+pub async fn transfer_ledger_ownership(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(ledger_id): Path<String>,
+    Json(req): Json<TransferOwnershipRequest>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    }
+
+    let Some(mgr) = &state.ledger_mgr else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "multi-ledger not enabled"})),
+        )
+            .into_response();
+    };
+
+    let Some(instance) = mgr.get(&ledger_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("ledger '{}' not found", ledger_id)})),
+        )
+            .into_response();
+    };
+
+    let old_owner = instance.def.owner_pubkey.clone();
+    let old_owner_x25519 = instance.def.owner_x25519_pubkey.clone();
+
+    // ── 1. Build encrypted transfer data ──────────────────────────────
+    let transfer_data = OwnershipTransferData {
+        new_owner_pubkey: req.new_owner_pubkey.clone(),
+        reason: req.reason.clone(),
+    };
+    let transfer_json = match serde_json::to_vec(&transfer_data) {
+        Ok(j) => j,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("serialize transfer data: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    // Recipients: coordinator X25519 + current owner X25519 (if available)
+    let coordinator_x25519 = state.node_wallet.x25519_pub_hex().to_string();
+    let mut recipients = vec![coordinator_x25519];
+    if let Some(ref owner_xpk) = old_owner_x25519 {
+        if !owner_xpk.is_empty() && !recipients.contains(owner_xpk) {
+            recipients.push(owner_xpk.clone());
+        }
+    }
+    // Also add new owner X25519 if provided (so they can prove ownership)
+    if let Some(ref new_xpk) = req.new_owner_x25519_pubkey {
+        if !new_xpk.is_empty() && !recipients.contains(new_xpk) {
+            recipients.push(new_xpk.clone());
+        }
+    }
+
+    let encrypted_transfer = match EncryptedPayload::encrypt_for(
+        &transfer_json,
+        &recipients,
+        transfer_json.len() as u32,
+    ) {
+        Ok(ep) => ep,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("encrypt transfer data: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    // ── 2. Create DAG block ───────────────────────────────────────────
+    let payload = PayloadEnvelope::Plain(PlainPayload::LedgerOwnershipTransfer {
+        ledger_id: ledger_id.clone(),
+        encrypted_transfer,
+    });
+
+    let parents = match tx_helpers::get_block_parents(&state.store, &state.settings).await {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("get parents: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    let adapter = state.srv.adapter_arc();
+    let wb = match tx_helpers::forge_and_sign_block(
+        Some(payload),
+        parents,
+        &adapter,
+        &state.node_wallet,
+        &state.settings,
+        Some(&format!(
+            "LedgerOwnershipTransfer: {} → {:?}",
+            ledger_id, req.new_owner_pubkey
+        )),
+    )
+    .await
+    {
+        Ok(wb) => wb,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("forge block: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    // ── 3. Persist block to DAG (audit trail) ─────────────────────────
+    match tx_helpers::persist_and_broadcast(&state, &wb).await {
+        Ok(pms_storage::PutResult::Inserted) => {}
+        Ok(pms_storage::PutResult::Rejected(reason)) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": format!("block rejected: {reason}")})),
+            )
+                .into_response();
+        }
+        Ok(_) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "block already exists"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("persist block: {e}")})),
+            )
+                .into_response();
+        }
+    }
+
+    // ── 4. Apply state change (RocksDB + RAM) ─────────────────────────
+    // The block is now persisted in the DAG. Apply the ownership change.
+    let mut updated_def = instance.def.clone();
+    updated_def.owner_pubkey = req.new_owner_pubkey.clone();
+    updated_def.owner_x25519_pubkey = req.new_owner_x25519_pubkey.clone();
+
+    {
+        use pms_storage::LedgerDefStorage;
+        if let Err(e) = state.store.put_ledger_def(&updated_def) {
+            tracing::error!(
+                "Failed to persist ownership change for '{}' (block {} already in DAG): {e}",
+                ledger_id,
+                wb.id
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("state update failed (block {} persisted): {e}", wb.id),
+                    "block_id": wb.id,
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    mgr.update_def(&ledger_id, updated_def);
+
+    tracing::info!(
+        "🔑 Ledger '{}' ownership transferred: {:?} → {:?} (block {})",
+        ledger_id,
+        old_owner,
+        req.new_owner_pubkey,
+        wb.id,
+    );
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "block_id": wb.id,
+            "ledger_id": ledger_id,
+            "old_owner": old_owner,
+            "new_owner": req.new_owner_pubkey,
+        })),
+    )
+        .into_response()
 }

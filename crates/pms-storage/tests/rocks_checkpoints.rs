@@ -7,7 +7,7 @@ use anyhow::Result;
 use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_storage::rotate_checkpoints;
 
 /// Test d'intégration pour:
@@ -33,7 +33,7 @@ async fn rocks_checkpoints_are_created_and_rotated() -> Result<()> {
     //    - path: db_path
     //    - tip_limit: 256 (valeur arbitraire pour le test)
     //    - prefix: "it:test"
-    let store = RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "it:test", None)
+    let store = RocksStore::new(db_path.to_string_lossy().as_ref(), 256, "it:test", None, &RocksMemoryConfig::default())
         .await
         .expect("RocksStore::new doit réussir en test");
 

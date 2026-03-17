@@ -3,7 +3,9 @@ pub const MAX_MSG_BYTES: usize = 10 * 1024 * 1024; // 10 MiB/message
 pub const MAX_LINE_BYTES: usize = 10 * 1024 * 1024; // lecture JSONL
 /// Taille du buffer pour la file de sortie par pair.
 /// Si un pair ne lit pas assez vite, ses messages seront drop une fois la file pleine.
-pub const PER_PEER_Q_CAP: usize = 10_000; // file sortie (was 1024)
+/// NOTE: Per-peer queue cap is now configurable via `[p2p] per_peer_queue_cap` in TOML.
+/// This constant is kept as documentation of the default value.
+pub const PER_PEER_Q_CAP: usize = 2_000;
 pub const MAX_CONN_PER_IP: usize = 8; // connexions par IP
 
 // Token bucket (messages/s) et burst
@@ -29,9 +31,11 @@ pub const SEEN_CAPACITY: usize = 10_000; // borne mémoire
 
 // bornes / quotas de rattrapage
 pub const MAX_BLOCKS_BATCH: usize = 512; // (was 32)
-pub const MAX_INFLIGHT_GETBLOCK: usize = 100_000; // (was 128)
+/// NOTE: Max inflight is now configurable via `[p2p] max_inflight_requests` in TOML.
+pub const MAX_INFLIGHT_GETBLOCK: usize = 10_000;
 pub const INFLIGHT_TTL_MS: u128 = 10_000; // 10s TTL pour les requêtes en vol
 
 // Orphan cache bounds (memory safety)
-pub const MAX_ORPHANS: usize = 10_000; // max orphan blocks in memory
-pub const MAX_PARENT_DEPS: usize = 20_000; // max parent→children dependency entries
+// NOTE: These are now configurable via `[p2p] max_orphans` / `max_parent_deps` in TOML.
+pub const MAX_ORPHANS: usize = 2_000;
+pub const MAX_PARENT_DEPS: usize = 5_000;

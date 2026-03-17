@@ -127,7 +127,10 @@ impl BridgeEngine {
         let link = self
             .bridge_store
             .get_bridge_link(&req.ledger_a, &req.ledger_b)?
-            .expect("link just disabled");
+            .ok_or_else(|| anyhow::anyhow!(
+                "bridge link between '{}' and '{}' disappeared after disable (concurrent deletion?)",
+                req.ledger_a, req.ledger_b
+            ))?;
 
         tracing::info!(
             ledger_a = %link.ledger_a,

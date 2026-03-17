@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure, networking]
 created: 2025-12-28
-updated: 2026-03-14
-version: v0.3.0
+updated: 2026-03-17
+version: v0.5.9
 ---
 
 # P2P Network (Reseau Pair-a-Pair)
@@ -57,6 +57,12 @@ Le systeme P2P de DAG-PMS implemente un protocole de gossip pour la diffusion et
 | `bind_addr` | `Option<String>` | `None` | Adresse d'ecoute P2P (ex: `"0.0.0.0:8050"`) |
 | `allowed_peer_ips` | `Vec<String>` | `[]` | IPs autorisees pour les connexions P2P entrantes |
 | `strict_whitelist` | `bool` | `false` | Si `true`, rejette toute connexion entrante hors `allowed_peer_ips` |
+| `max_connections` | `usize` | `256` | Max connexions P2P entrantes concurrentes (v0.5.9) |
+| `per_peer_queue_cap` | `usize` | `2 000` | Capacite de la file d'envoi par pair (v0.5.9) |
+| `max_orphans` | `usize` | `2 000` | Max blocs orphelins en RAM (v0.5.9) |
+| `max_inflight_requests` | `usize` | `10 000` | Max requetes GetBlock en vol (v0.5.9) |
+| `max_parent_deps` | `usize` | `5 000` | Max entrees de tracking parent-enfant (v0.5.9) |
+| `max_peer_retries` | `u32` | `20` | Max tentatives de connexion par peer au demarrage (v0.5.9) |
 
 ### Section `[network]` (TOML)
 
@@ -221,8 +227,8 @@ Le worker d'agregation (`spawn_broadcast_worker`) optimise le reseau en groupant
 
 Quand un bloc arrive avec des parents manquants :
 
-1. Le bloc est stocke dans le cache `orphans` (borne a `MAX_ORPHANS = 10_000`).
-2. Les dependances parent-enfant sont enregistrees dans `parent_dependency` (borne a `MAX_PARENT_DEPS = 20_000`).
+1. Le bloc est stocke dans le cache `orphans` (borne a `max_orphans`, defaut 2 000, configurable via `[p2p]`).
+2. Les dependances parent-enfant sont enregistrees dans `parent_dependency` (borne a `max_parent_deps`, defaut 5 000, configurable via `[p2p]`).
 3. Les parents manquants sont demandes via `GetBlock` (avec tracking `inflight_fetch`).
 4. Quand un parent arrive et est persiste, les orphelins dependants sont re-traites recursivement via une `VecDeque` (evite la recursion stack).
 5. Un worker toutes les 2 secondes relance les demandes pour les parents non resolus.
@@ -269,22 +275,24 @@ Le serveur supporte le routage multi-ledger transparent :
 
 ### Constantes (`pms-server/src/limits.rs`)
 
-| Constante | Valeur | Description |
-|-----------|--------|-------------|
-| `MAX_LINE_BYTES` | 10 MiB | Taille max d'un message JSONL. Depassement = deconnexion. |
-| `PER_PEER_Q_CAP` | 10 000 | Capacite de la file de sortie par pair. |
-| `RATE_MSGS_PER_SEC` | 10 000 | Token bucket : messages/seconde par pair. |
-| `RATE_BURST` | 20 000 | Token bucket : burst max par pair. |
-| `HANDSHAKE_TIMEOUT_MS` | 1 500 ms | Timeout du handshake. |
-| `PING_EVERY_MS` | 1 000 ms | Intervalle de ping. |
-| `MAX_PARSE_ERRORS` | 8 | Nombre max d'erreurs de parsing avant kick. |
-| `SEEN_CAPACITY` | 10 000 | Taille du cache LRU des Inv deja vus. |
-| `SEEN_TTL_MS` | 5 000 ms | TTL des entrees dans le cache LRU. |
-| `MAX_BLOCKS_BATCH` | 512 | Nombre max de blocs dans un message `Blocks`. |
-| `MAX_INFLIGHT_GETBLOCK` | 100 000 | Nombre max de requetes `GetBlock` en vol. |
-| `INFLIGHT_TTL_MS` | 10 000 ms | TTL des requetes en vol. |
-| `MAX_ORPHANS` | 10 000 | Taille max du cache d'orphelins en memoire. |
-| `MAX_PARENT_DEPS` | 20 000 | Taille max de la table de dependances parent-enfant. |
+| Constante | Valeur | Configurable | Description |
+|-----------|--------|:---:|-------------|
+| `MAX_LINE_BYTES` | 10 MiB | Non | Taille max d'un message JSONL. Depassement = deconnexion. |
+| `per_peer_queue_cap` | 2 000 | **Oui** (`[p2p]`) | Capacite de la file de sortie par pair. |
+| `RATE_MSGS_PER_SEC` | 10 000 | Non | Token bucket : messages/seconde par pair. |
+| `RATE_BURST` | 20 000 | Non | Token bucket : burst max par pair. |
+| `HANDSHAKE_TIMEOUT_MS` | 1 500 ms | Non | Timeout du handshake. |
+| `PING_EVERY_MS` | 1 000 ms | Non | Intervalle de ping. |
+| `MAX_PARSE_ERRORS` | 8 | Non | Nombre max d'erreurs de parsing avant kick. |
+| `SEEN_CAPACITY` | 10 000 | Non | Taille du cache LRU des Inv deja vus. |
+| `SEEN_TTL_MS` | 5 000 ms | Non | TTL des entrees dans le cache LRU. |
+| `MAX_BLOCKS_BATCH` | 512 | Non | Nombre max de blocs dans un message `Blocks`. |
+| `max_inflight_requests` | 10 000 | **Oui** (`[p2p]`) | Nombre max de requetes `GetBlock` en vol. |
+| `INFLIGHT_TTL_MS` | 10 000 ms | Non | TTL des requetes en vol. |
+| `max_orphans` | 2 000 | **Oui** (`[p2p]`) | Taille max du cache d'orphelins en memoire. |
+| `max_parent_deps` | 5 000 | **Oui** (`[p2p]`) | Taille max de la table de dependances parent-enfant. |
+| `max_connections` | 256 | **Oui** (`[p2p]`) | Max connexions P2P entrantes (semaphore). |
+| `max_peer_retries` | 20 | **Oui** (`[p2p]`) | Max tentatives de connexion par known peer. |
 
 ### Token Bucket (`pms-server/src/rate.rs`)
 

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_storage::rocks_store::utxo::UtxoApply;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -21,7 +21,7 @@ async fn mk_store(prefix: &str, tip_limit: usize) -> Result<TestStore> {
         .join(format!("rocks-utxo-{}", nanoid::nanoid!(5)));
     std::fs::create_dir_all(&path)?;
     let path_str = path.to_string_lossy().to_string();
-    let store = Arc::new(RocksStore::new(&path_str, tip_limit, prefix, None).await?);
+    let store = Arc::new(RocksStore::new(&path_str, tip_limit, prefix, None, &RocksMemoryConfig::default()).await?);
     Ok(TestStore {
         _dir: dir,
         path: path_str,

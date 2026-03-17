@@ -9,7 +9,7 @@ use pms_server::api_fn::tx_helpers::{
     EffectiveFees, is_nft_type_fee_exempt, load_mint_fee_policy, load_nft_mint_fee,
     load_token_creation_fee, resolve_effective_fees,
 };
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use rust_decimal::Decimal;
 
 /// Create a temporary RocksStore with default RuntimeConfig.
@@ -19,7 +19,7 @@ async fn temp_store() -> Arc<RocksStore> {
     // Leak the tempdir so it doesn't get cleaned up during test
     std::mem::forget(dir);
     Arc::new(
-        RocksStore::new(db_path.to_str().unwrap(), 256, "test:fee", None)
+        RocksStore::new(db_path.to_str().unwrap(), 256, "test:fee", None, &RocksMemoryConfig::default())
             .await
             .expect("RocksStore::new failed"),
     )

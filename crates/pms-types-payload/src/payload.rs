@@ -124,6 +124,36 @@ pub enum PlainPayload {
         enabled: bool,
         reason: String,
     },
+    /// Transfert d'ownership d'un ledger, enregistré dans le DAG pour traçabilité.
+    ///
+    /// Le contenu sensible (new_owner_pubkey) est chiffré via X25519+AES-256-GCM.
+    /// Seuls le propriétaire actuel et le coordinateur peuvent le déchiffrer.
+    /// Le `ledger_id` reste en clair pour le routage et la validation.
+    ///
+    /// # Sécurité
+    /// - Coordinator seulement (signature requise).
+    /// - Le bloc constitue une preuve immuable du changement d'ownership dans le DAG.
+    /// - Conforme à la règle : toute mutation d'état DOIT passer par le DAG.
+    LedgerOwnershipTransfer {
+        /// ID du ledger concerné (cleartext — nécessaire pour validation et routage).
+        ledger_id: String,
+        /// Données de transfert chiffrées : `OwnershipTransferData` sérialisé en JSON.
+        /// Recipients: \[owner_x25519 (si connu), coordinator_x25519\]
+        encrypted_transfer: EncryptedPayload,
+    },
+}
+
+/// Données de transfert d'ownership d'un ledger, sérialisées en JSON
+/// puis chiffrées dans le champ `encrypted_transfer` de `LedgerOwnershipTransfer`.
+///
+/// Seuls le propriétaire actuel et le coordinateur peuvent déchiffrer ces données.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnershipTransferData {
+    /// Nouvelle clé publique du propriétaire.
+    /// `None` = retour à admin-owned (pas de propriétaire spécifique).
+    pub new_owner_pubkey: Option<String>,
+    /// Raison du transfert (audit trail).
+    pub reason: String,
 }
 
 /// Métadonnées d'un token enregistré dans le DAG.

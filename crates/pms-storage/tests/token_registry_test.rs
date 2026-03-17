@@ -3,7 +3,7 @@
 // Tests pour le registre de tokens multi-asset (RocksDB column family "token_registry").
 
 use anyhow::Result;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_types_payload::TokenMetadata;
 use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
@@ -20,7 +20,7 @@ async fn mk_store(prefix: &str) -> Result<TestStore> {
         .join(format!("rocks-token-{}", nanoid::nanoid!(5)));
     std::fs::create_dir_all(&path)?;
     let path_str = path.to_string_lossy().to_string();
-    let store = Arc::new(RocksStore::new(&path_str, 64, prefix, None).await?);
+    let store = Arc::new(RocksStore::new(&path_str, 64, prefix, None, &RocksMemoryConfig::default()).await?);
     Ok(TestStore { _dir: dir, store })
 }
 

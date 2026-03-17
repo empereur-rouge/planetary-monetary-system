@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use dashmap::DashMap;
 use pms_config::LedgerDef;
 use pms_config::Settings;
-use pms_storage::rocks_store::store::{PmsDb, RocksStore};
+use pms_storage::rocks_store::store::{PmsDb, RocksMemoryConfig, RocksStore};
 use rocksdb::Options;
 use std::sync::Arc;
 
@@ -36,9 +36,18 @@ impl LedgerManager {
             "Opening shared RocksDB for multi-ledger"
         );
 
-        let shared_db = RocksStore::open_db_multi_prefix(&settings.rocks.path, &prefixes)
-            .await
-            .context("opening shared RocksDB")?;
+        let mem_config = RocksMemoryConfig {
+            write_buffer_size_mb: settings.rocks.write_buffer_size_mb,
+            max_write_buffer_number: settings.rocks.max_write_buffer_number,
+            block_cache_size_mb: settings.rocks.block_cache_size_mb,
+            db_write_buffer_size_mb: settings.rocks.db_write_buffer_size_mb,
+            max_open_files: settings.rocks.max_open_files,
+        };
+
+        let shared_db =
+            RocksStore::open_db_multi_prefix(&settings.rocks.path, &prefixes, &mem_config)
+                .await
+                .context("opening shared RocksDB")?;
 
         let manager = Self {
             ledgers: DashMap::new(),
@@ -159,5 +168,67 @@ impl LedgerManager {
         self.ledgers.insert(def.id.clone(), instance.clone());
         tracing::info!(ledger = %def.id, "Ledger added dynamically");
         Ok(instance)
+    }
+
+    /// Met à jour la LedgerDef d'un ledger existant en mémoire.
+    ///
+    /// Utilisé pour le transfert d'ownership et autres modifications de métadonnées.
+    /// Remplace l'instance Arc dans le DashMap en conservant DAG, UTXOs et store.
+    pub fn update_def(&self, id: &str, new_def: LedgerDef) {
+        if let Some(mut entry) = self.ledgers.get_mut(id) {
+            let old = entry.value().clone();
+            let updated = Arc::new(LedgerInstance {
+                id: old.id.clone(),
+                dag: old.dag.clone(),
+                utxos: old.utxos.clone(),
+                store: old.store.clone(),
+                adapter: old.adapter.clone(),
+                def: new_def,
+            });
+            *entry = updated;
+            tracing::debug!(ledger = %id, "LedgerDef updated in-memory");
+        }
+    }
+
+    /// Charge les définitions de ledgers persistées en RocksDB.
+    ///
+    /// Appelé après `bootstrap()` pour restaurer :
+    /// 1. Les changements d'ownership (ledger existe déjà en RAM, mais owner_pubkey a changé)
+    /// 2. Les ledgers créés dynamiquement via l'API (pas dans config.toml)
+    pub async fn load_persisted_ledgers(
+        &self,
+        store: &dyn pms_storage::LedgerDefStorage,
+    ) -> Result<()> {
+        let persisted = store.list_ledger_defs()?;
+        if persisted.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(count = persisted.len(), "Loading persisted ledger definitions from RocksDB");
+
+        for def in persisted {
+            if let Some(existing) = self.ledgers.get(&def.id) {
+                // Ledger exists in RAM — check if ownership changed
+                if existing.def.owner_pubkey != def.owner_pubkey {
+                    tracing::info!(
+                        ledger = %def.id,
+                        old_owner = ?existing.def.owner_pubkey,
+                        new_owner = ?def.owner_pubkey,
+                        "Restoring ownership from RocksDB"
+                    );
+                    drop(existing); // release DashMap ref before mutating
+                    let id = def.id.clone();
+                    self.update_def(&id, def);
+                }
+            } else {
+                // Ledger doesn't exist in RAM — dynamically created, restore it
+                tracing::info!(ledger = %def.id, "Restoring dynamic ledger from RocksDB");
+                if let Err(e) = self.add_ledger(def).await {
+                    tracing::warn!("Failed to restore persisted ledger: {e}");
+                }
+            }
+        }
+
+        Ok(())
     }
 }

@@ -77,6 +77,11 @@ pub struct CreateLedgerRequest {
     pub prefix: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_pubkey: Option<String>,
+    /// Clé publique X25519 du propriétaire (pour chiffrement des blocs d'ownership transfer).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_x25519_pubkey: Option<String>,
 }
 
 /// Response from POST /admin/ledgers/create
@@ -223,6 +228,9 @@ pub enum ContractTriggerSim {
     OnTokenBurn {
         asset_id: String,
     },
+    OnTransfer {
+        asset_id: Option<String>,
+    },
 }
 
 /// Contract action — what happens when the trigger fires
@@ -235,6 +243,17 @@ pub enum ContractActionSim {
     EmitEvent {
         event_type: String,
     },
+    TransferFee {
+        formula: TransferFeeFormulaSim,
+        splits: Vec<TransferFeeSplitSim>,
+    },
+}
+
+/// Single split within a TransferFee action (simulator-side)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferFeeSplitSim {
+    pub address: String,
+    pub share_bps: u32,
 }
 
 /// Formula for calculating refund amounts
@@ -251,6 +270,13 @@ pub enum MintFormulaSim {
     FixedAmount {
         amount: String,
     },
+}
+
+/// Formula for calculating transfer fees
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TransferFeeFormulaSim {
+    PercentageBps { rate_bps: u32 },
+    FixedAmount { amount: String },
 }
 
 /// Response from POST /admin/contracts

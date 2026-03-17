@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tempfile::{TempDir, tempdir};
 use tokio::time::{Duration, sleep};
 
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_storage::{DagStorage, StoredBlock};
 use pms_testkit::{mk_block, test_meta_and_wallet};
 
@@ -21,7 +21,7 @@ async fn mk_store(tip_limit: usize, prefix: &str) -> Result<TestStore> {
     std::fs::create_dir_all(&path)?;
     let path_str = path.to_string_lossy().to_string();
 
-    let store = Arc::new(RocksStore::new(&path_str, tip_limit, prefix, None).await?);
+    let store = Arc::new(RocksStore::new(&path_str, tip_limit, prefix, None, &RocksMemoryConfig::default()).await?);
     Ok(TestStore {
         _dir: dir,
         path: path_str,

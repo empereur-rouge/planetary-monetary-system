@@ -2,7 +2,7 @@
 tags: [feature]
 created: 2026-03-13
 updated: 2026-03-16
-version: v0.5.3
+version: v0.5.6
 ---
 
 # Smart Contracts (Contrats Déclaratifs)
@@ -111,8 +111,12 @@ Pour désactiver les frais de déploiement : `{ "SetContractDeploymentFee": { "f
 | `register_contract()` | `crates/pms-server/src/api_fn/contracts.rs` | Handler API pour l'enregistrement d'un nouveau contrat (génère l'ID SHA-256, charge les frais de déploiement) |
 | `list_contracts()` | `crates/pms-server/src/api_fn/contracts.rs` | Handler API pour lister tous les contrats enregistrés |
 | `get_contract()` | `crates/pms-server/src/api_fn/contracts.rs` | Handler API pour récupérer les détails d'un contrat par ID |
+| `update_contract()` | `crates/pms-server/src/api_fn/contracts.rs` | Handler API PUT pour mise à jour partielle d'un contrat (scope, actions, enabled), auto-bump version (v0.5.6) |
 | `toggle_contract()` | `crates/pms-server/src/api_fn/contracts.rs` | Handler API pour activer/désactiver un contrat existant |
+| `evaluate_transfer()` | `crates/pms-contracts/src/engine.rs` | Évalue les contrats `OnTransfer` pour un transfert donné — retourne les `TransferFeeResult` à ajouter comme TxOutput (v0.5.5) |
+| `evaluate_transfer_formula()` | `crates/pms-contracts/src/engine.rs` | Évalue une `TransferFeeFormula` (`PercentageBps` ou `FixedAmount`) sur un montant Decimal (v0.5.5) |
 | `find_nft_burn_contracts()` | `crates/pms-storage/src/contract_store.rs` | Recherche les contrats actifs matching un trigger `OnNftBurn` + scope ledger |
+| `find_transfer_contracts()` | `crates/pms-storage/src/contract_store.rs` | Recherche les contrats actifs matching un trigger `OnTransfer` + scope ledger (v0.5.5) |
 | `set_enabled()` | `crates/pms-storage/src/contract_store.rs` | Active ou désactive un contrat dans le store |
 | `load_contract_deployment_fee()` | `crates/pms-server/src/api_fn/tx_helpers.rs` | Charge le montant des frais de déploiement depuis `RuntimeConfig` ou `EffectiveFees` |
 | `require_coordinator_signature()` | `crates/pms-core/src/validations/check.rs` | Valide que le bloc est signé par le coordinateur (utilisée pour `ContractRegister` et `ContractUpdate`) |
@@ -127,6 +131,7 @@ Tous les endpoints de gestion des contrats sont sous le préfixe `/admin/` et ac
 | `POST` | `/admin/contracts` | Enregistre un nouveau contrat. Génère un `contract_id` (SHA-256 de name+trigger+actions). Charge les frais de déploiement si configurés. Retourne `201 Created`. |
 | `GET` | `/admin/contracts` | Liste tous les contrats enregistrés (actifs et inactifs). Retourne `{ "contracts": [...] }`. |
 | `GET` | `/admin/contracts/{contract_id}` | Récupère les détails d'un contrat par son ID. Retourne `404` si inexistant. |
+| `PUT` | `/admin/contracts/{contract_id}` | Met à jour un contrat (scope, actions, enabled — partial update). Auto-bumpe la version. Valide les splits TransferFee. (v0.5.6) |
 | `POST` | `/admin/contracts/{contract_id}/toggle` | Active ou désactive un contrat. Body : `{ "enabled": bool, "reason": "..." }`. |
 
 ### Exemple : enregistrer un contrat
@@ -168,6 +173,56 @@ POST /admin/contracts
   "fee_block_id": "block_abc123..."
 }
 ```
+
+### Exemple : enregistrer un contrat de frais de transfert avec splits (v0.5.6)
+
+**Requête :**
+
+```json
+POST /admin/contracts
+{
+  "name": "eden-transfer-fee",
+  "scope": { "Ledger": ["eden"] },
+  "trigger": { "OnTransfer": { "asset_id": null } },
+  "actions": [
+    {
+      "TransferFee": {
+        "formula": { "PercentageBps": { "rate_bps": 500 } },
+        "splits": [
+          { "address": "pms1creator...", "share_bps": 6000 },
+          { "address": "pms1treasury...", "share_bps": 4000 }
+        ]
+      }
+    }
+  ]
+}
+```
+
+**Résultat :** Chaque transfert sur le ledger `eden` prélèvera 5% du montant au sender. 60% du frais ira au créateur (`pms1creator`) et 40% au trésor (`pms1treasury`). Cela s'applique à tous les assets (EDN, PMS, etc.) car `asset_id: null` est un wildcard.
+
+### Exemple : mettre à jour les splits d'un contrat (v0.5.6)
+
+**Requête :**
+
+```json
+PUT /admin/contracts/{contract_id}
+{
+  "actions": [
+    {
+      "TransferFee": {
+        "formula": { "PercentageBps": { "rate_bps": 300 } },
+        "splits": [
+          { "address": "pms1creator...", "share_bps": 5000 },
+          { "address": "pms1treasury...", "share_bps": 3000 },
+          { "address": "pms1community...", "share_bps": 2000 }
+        ]
+      }
+    }
+  ]
+}
+```
+
+**Résultat :** Le contrat est mis à jour avec un nouveau taux (3%) et 3 bénéficiaires (50/30/20). La version du contrat est auto-incrémentée. Seuls les champs fournis sont modifiés (partial update).
 
 ### Exemple : désactiver un contrat
 
@@ -232,12 +287,15 @@ pub enum ContractScope {
 pub enum ContractTrigger {
     OnNftBurn { nft_type: Option<String> },  // Burn de NFT (filtre optionnel par type)
     OnTokenBurn { asset_id: String },        // Burn de token fungible (UTXO)
+    OnTransfer { asset_id: Option<String> }, // Transfert de tokens (v0.5.5)
 }
 ```
 
 - `OnNftBurn { nft_type: None }` : wildcard, matche tous les burns NFT quel que soit le type.
 - `OnNftBurn { nft_type: Some("cube") }` : matche uniquement les burns de NFTs dont `metadata.nft_type == "cube"`.
 - `OnTokenBurn` : prévu pour les burns de tokens fungibles (pas encore intégré dans les handlers).
+- `OnTransfer { asset_id: None }` : matche tous les transferts quel que soit l'asset (v0.5.5).
+- `OnTransfer { asset_id: Some("edenite") }` : matche uniquement les transferts d'edenite.
 
 ### `ContractAction`
 
@@ -252,11 +310,31 @@ pub enum ContractAction {
     EmitEvent {
         event_type: String,        // Type d'événement (pour traitement off-chain)
     },
+    TransferFee {                  // Frais de transfert (v0.5.5, splits v0.5.6)
+        formula: TransferFeeFormula,  // Formule de calcul du frais
+        splits: Vec<TransferFeeSplit>, // Répartition multi-wallet (somme = 10000 bps)
+    },
 }
 ```
 
 - `AccumulateRefund` : accumule un montant dans le `FeePool`, distribué au prochain cycle de [[fee-distribution]] (Milestone/Reward).
 - `EmitEvent` : émet un log/événement (pour webhooks, notifications off-chain).
+- `TransferFee` (v0.5.5, multi-wallet v0.5.6) : prélève un frais au sender lors d'un transfert et le répartit entre plusieurs bénéficiaires via `splits`. Chaque split a une `address` et un `share_bps` (basis points, somme = 10,000). Le frais est un `TxOutput` additionnel par split dans la transaction (déductif, pas de mint). Arrondi dust-free : le dernier split reçoit `total - sum(previous)`. Évalué au moment de la préparation de la TX.
+
+### `TransferFeeSplit` (v0.5.6)
+
+Répartition d'un frais de transfert entre plusieurs wallets.
+
+```rust
+pub struct TransferFeeSplit {
+    pub address: String,  // Adresse du bénéficiaire
+    pub share_bps: u32,   // Part en basis points (sur 10,000)
+}
+```
+
+- `share_bps` en basis points (6000 = 60%, 4000 = 40%).
+- La somme de tous les `share_bps` DOIT être exactement 10,000.
+- Validé par `ContractAction::validate()` : non-vide, somme = 10000, shares > 0, adresses non-vides.
 
 ### `MintFormula`
 
@@ -289,6 +367,41 @@ pub enum MintFormula {
 - Tous les calculs utilisent `rust_decimal::Decimal` avec arrondi à 8 décimales (`round_dp(8)`).
 - Division par zéro rejetée avec une erreur (`rate_denominator == 0` ou `divisor == 0`).
 - `AttributeFormula` supporte le dot-notation dans les noms d'attributs (ex: `"attributes.weight"` navigue dans `extra["attributes"]["weight"]`).
+
+### `TransferFeeFormula` (v0.5.5)
+
+Formule pour calculer un frais de transfert prélevé au sender.
+
+```rust
+pub enum TransferFeeFormula {
+    PercentageBps { rate_bps: u32 },  // fee = amount * rate_bps / 10_000
+    FixedAmount { amount: String },   // Montant fixe par transfert
+}
+```
+
+**Calculs :**
+
+| Formule | Calcul | Exemple |
+|---------|--------|---------|
+| `PercentageBps` | `amount * rate_bps / 10000` | 100 EDN avec 500 bps (5%) = 5.0 EDN |
+| `FixedAmount` | montant fixe | 2.5 EDN par transfert |
+
+- `rate_bps` en basis points (100 bps = 1%, 500 bps = 5%, 10000 bps = 100%).
+- `rate_bps > 10000` rejeté avec erreur (dépasse 100%).
+- Arrondi à 8 décimales (`round_dp(8)`).
+
+### `TransferFeeResult` (v0.5.5)
+
+Résultat de l'évaluation d'un contrat de frais de transfert, retourné par `evaluate_transfer()`.
+
+```rust
+pub struct TransferFeeResult {
+    pub contract_id: String,         // ID du contrat déclenché
+    pub contract_name: String,       // Nom du contrat
+    pub beneficiary_address: String, // Adresse du bénéficiaire
+    pub fee_amount: Decimal,         // Montant du frais prélevé
+}
+```
 
 ### `ContractResult`
 
@@ -360,6 +473,30 @@ Les blocs `ContractRegister` et `ContractUpdate` sont validés au niveau du DAG 
 ### Configuration hot-swap (RuntimeConfig)
 
 Le champ `contract_deployment_fee` peut être modifié à chaud via `ConfigUpdate::SetContractDeploymentFee { fee: Option<String> }` dans le système `RuntimeConfig` de `pms-config`. Cela permet d'ajuster les frais de déploiement sans redémarrage du nœud.
+
+### Transfer Fees → TX Preparation (v0.5.5)
+
+Les contrats `OnTransfer` sont évalués **au moment de la préparation de la transaction** (pas via l'EventBus). C'est une évaluation synchrone dans `prepare_tx()` et `wallet_send_simple()` :
+
+1. Le handler calcule le montant du transfert.
+2. `evaluate_transfer()` recherche les contrats `OnTransfer` matching (asset + ledger scope).
+3. Pour chaque contrat, la `TransferFeeFormula` est évaluée → `TransferFeeResult`.
+4. Les frais sont sommés et ajoutés à `total_needed` pour la sélection de coins.
+5. Un `TxOutput` additionnel est inséré pour chaque bénéficiaire (même asset que le transfert).
+6. Le change est ajusté : `change = selected_sum - amount - transfer_fees`.
+
+**Ordre des outputs :**
+1. Destination (montant transféré)
+2. Transfer fee(s) (frais pour le créateur/bénéficiaire)
+3. Change (retour au sender)
+4. PMS gas fee (frais anti-spam)
+5. PMS change
+
+**Validation :** `validate_transaction_async()` vérifie la conservation par asset (`sum(inputs) == sum(outputs)`). Les frais de transfert sont des outputs réguliers, équilibrés par les inputs. Aucun changement nécessaire dans la validation.
+
+**Exemple :** Envoyer 100 EDN avec un contrat de 5% :
+- Sender doit avoir ≥105 EDN + PMS pour le gas
+- Outputs : 100 EDN (destinataire) + 5 EDN (créateur) + X EDN (change) + Y PMS (gas)
 
 ### [[economics|Gas Pool]] (ledgers custom)
 

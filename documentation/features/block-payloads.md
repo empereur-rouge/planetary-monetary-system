@@ -1,8 +1,8 @@
 ---
 tags: [feature, reference]
 created: 2025-05-01
-updated: 2026-03-14
-version: v0.3.0
+updated: 2026-03-16
+version: v0.5.6
 ---
 
 # Block Payloads & Encryption
@@ -16,7 +16,7 @@ Le systeme de blocs du DAG-PMS repose sur une architecture a deux niveaux : le *
 
 Le modele garantit que le **BlockId** (hash SHA-256) peut etre calcule de maniere deterministe *sans* dechiffrer le contenu, grace a un systeme de `commitment` (hash du plaintext) et de metadonnees publiques (`EnvelopeHeader`).
 
-Le crate `pms-types-payload` definit 17 variantes de `PlainPayload`, couvrant toutes les operations du moteur bancaire : transactions UTXO, minting, NFTs, bridge cross-ledger, compliance (freeze/seize/reverse), contrats declaratifs, et distribution de recompenses.
+Le crate `pms-types-payload` definit 18 variantes de `PlainPayload`, couvrant toutes les operations du moteur bancaire : transactions UTXO, minting, NFTs, bridge cross-ledger, compliance (freeze/seize/reverse), contrats declaratifs, distribution de recompenses, et transfert d'ownership de ledger.
 
 ---
 
@@ -65,7 +65,7 @@ L'`EnvelopeHeader` contient uniquement des metadonnees publiques :
 
 | Champ | Description |
 |---|---|
-| `payload_type` | Type lisible : `"None"`, `"Genesis"`, `"Mint"`, `"Transaction"`, `"Milestone"`, `"Nft"`, `"ConfigUpdate"`, `"Reward"`, `"EncryptedReward"`, `"TokenCreate"`, `"BridgeLock"`, `"BridgeMint"`, `"Freeze"`, `"Unfreeze"`, `"Seize"`, `"Reverse"`, `"ContractRegister"`, `"ContractUpdate"`, `"Encrypted"` |
+| `payload_type` | Type lisible : `"None"`, `"Genesis"`, `"Mint"`, `"Transaction"`, `"Milestone"`, `"Nft"`, `"ConfigUpdate"`, `"Reward"`, `"EncryptedReward"`, `"TokenCreate"`, `"BridgeLock"`, `"BridgeMint"`, `"Freeze"`, `"Unfreeze"`, `"Seize"`, `"Reverse"`, `"ContractRegister"`, `"ContractUpdate"`, `"LedgerOwnershipTransfer"`, `"Encrypted"` |
 | `commitment` | `hex(sha256(plaintext))` -- lie le contenu sans le reveler |
 | `len_hint` | Taille approximative (bytes du plaintext ou taille du ciphertext base64) |
 | `key_version` | `0` si Plain/None, sinon version de cle pour le chiffrement |
@@ -76,7 +76,7 @@ L'`EnvelopeHeader` contient uniquement des metadonnees publiques :
 
 ## Types de Payload
 
-L'enum `PlainPayload` (defini dans `crates/pms-types-payload/src/payload.rs`) contient 17 variantes couvrant toutes les operations du moteur.
+L'enum `PlainPayload` (defini dans `crates/pms-types-payload/src/payload.rs`) contient 18 variantes couvrant toutes les operations du moteur.
 
 ### Enveloppe
 
@@ -108,6 +108,7 @@ pub enum PayloadEnvelope {
 | 15 | `Reverse` | `original_block_id: String`, `inputs: Vec<TxInput>`, `outputs: Vec<TxOutput>`, `reason: String` | Inverse une transaction si ses outputs n'ont pas ete depenses (UTXOs non consommes). Voir [[compliance]]. | Coordinator |
 | 16 | `ContractRegister` | `Contract` (contract_id, name, scope, trigger, actions, enabled, version) | Enregistrement d'un contrat declaratif. Le contrat est stocke dans RocksDB et evalue par le `ContractEngine` lors des evenements de trigger. Voir [[smart-contracts]]. | Coordinator |
 | 17 | `ContractUpdate` | `contract_id: String`, `enabled: bool`, `reason: String` | Activation ou desactivation d'un contrat existant. Voir [[smart-contracts]]. | Coordinator |
+| 18 | `LedgerOwnershipTransfer` | `ledger_id: String`, `encrypted_transfer: EncryptedPayload` | Transfert d'ownership d'un ledger custom. Le `ledger_id` reste en clair pour le routage/validation. Les données sensibles (`OwnershipTransferData`: `new_owner_pubkey`, `reason`) sont chiffrées via X25519+AES-256-GCM pour le coordinator + l'owner actuel + le nouvel owner. Suit le pattern "embedded encryption" comme `EncryptedReward`. Voir [[multi-ledger]]. | Coordinator |
 
 ### Types auxiliaires references
 
@@ -123,6 +124,7 @@ pub enum PayloadEnvelope {
 | `Contract` | `pms-types-contract` | `{ contract_id, name, scope: ContractScope, trigger: ContractTrigger, actions: Vec<ContractAction>, enabled, version }` |
 | `ConfigUpdate` | `pms-config` | Enum avec 19 variantes de mise a jour de configuration (voir section ConfigUpdate ci-dessus) |
 | `EncryptedRewardOutput` | `pms-types-payload` | `{ encrypted: EncryptedPayload }` -- un `TxOutput` chiffre individuellement |
+| `OwnershipTransferData` | `pms-types-payload` | `{ new_owner_pubkey: Option<String>, reason: String }` -- donnees de transfert d'ownership (chiffrees dans le bloc) |
 
 ---
 
@@ -275,13 +277,25 @@ La variante `PlainPayload::EncryptedReward` est un hybride : le payload lui-meme
 - Le champ `tx_block_id` reste **public** pour la tracabilite.
 - Chaque `encrypted_outputs[i].encrypted` est un `EncryptedPayload` contenant un `TxOutput` chiffre pour son destinataire et le coordinator.
 
+### Cas special : LedgerOwnershipTransfer
+
+La variante `PlainPayload::LedgerOwnershipTransfer` suit le meme pattern "embedded encryption" :
+
+- Le champ `ledger_id` reste **public** pour le routage et la validation (le validateur doit savoir quel ledger est concerne).
+- Le champ `encrypted_transfer` est un `EncryptedPayload` contenant un `OwnershipTransferData` chiffre pour :
+  - Le **coordinator** (toujours, pour l'audit et la gouvernance).
+  - L'**owner actuel** du ledger (si `owner_x25519_pubkey` est connu dans `LedgerDef`).
+  - Le **nouvel owner** (si `new_owner_x25519_pubkey` est fourni dans la requete).
+
+L'application de l'etat (mise a jour RocksDB + RAM) est effectuee **apres** la persistance du bloc DAG dans l'endpoint API, car le `CoreAdapter` n'a pas acces aux wallets pour le dechiffrement.
+
 ---
 
 ## Crates et Fichiers
 
 | Crate | Fichier | Contenu |
 |---|---|---|
-| `pms-types-payload` | `src/payload.rs` | `PayloadEnvelope`, `PlainPayload` (17 variantes), `EncryptedRewardOutput`, `TokenMetadata` |
+| `pms-types-payload` | `src/payload.rs` | `PayloadEnvelope`, `PlainPayload` (18 variantes), `EncryptedRewardOutput`, `TokenMetadata`, `OwnershipTransferData` |
 | `pms-types-payload` | `src/encrypted_payload.rs` | `EncryptedPayload`, `AAD`, `KeyWrap`, logique de chiffrement/dechiffrement X25519+AES-256-GCM |
 | `pms-types-payload` | `src/lib.rs` | Re-exports publics |
 | `pms-types-payload` | `tests/general.rs` | Tests de roundtrip serde et chiffrement/dechiffrement |
@@ -308,7 +322,7 @@ pub enum PayloadEnvelope {
     Encrypted(EncryptedPayload),
 }
 
-// --- Payload metier (17 variantes) ---
+// --- Payload metier (18 variantes) ---
 pub enum PlainPayload {
     Genesis,
     Mint { outputs: Vec<TxOutput> },
@@ -327,6 +341,7 @@ pub enum PlainPayload {
     Reverse { original_block_id: String, inputs: Vec<TxInput>, outputs: Vec<TxOutput>, reason: String },
     ContractRegister(Contract),
     ContractUpdate { contract_id: String, enabled: bool, reason: String },
+    LedgerOwnershipTransfer { ledger_id: String, encrypted_transfer: EncryptedPayload },
 }
 
 // --- Chiffrement ---

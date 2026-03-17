@@ -244,7 +244,8 @@ async fn main() -> anyhow::Result<()> {
     // 8. Optional game engine setup (Edenite cube NFTs)
     let game_engine = if let Some(ref game_config) = config.simulation.game {
         tracing::info!("Setting up game engine (ledger: {})...", game_config.ledger_id);
-        let engine = game::GameEngine::setup(&client, game_config).await?;
+        let coord_addr = coordinator_wallet.as_ref().map(|w| w.address.as_str());
+        let engine = game::GameEngine::setup(&client, game_config, coord_addr).await?;
         tracing::info!("Game engine ready (edenite on ledger '{}')", engine.ledger_id);
         Some(Arc::new(RwLock::new(engine)))
     } else {

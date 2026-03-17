@@ -122,6 +122,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: None, // admin-owned
+                owner_x25519_pubkey: None,
                 symbol: None,
             },
             LedgerDef {
@@ -133,6 +134,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
                 fees: None,
                 validation: None,
                 owner_pubkey: Some("owner_pk_nft".into()),
+                owner_x25519_pubkey: None,
                 symbol: None,
             },
         ],
@@ -243,6 +245,7 @@ fn auth_admin_can_always_manage() {
         fees: None,
         validation: None,
         owner_pubkey: None, // admin-owned
+        owner_x25519_pubkey: None,
         symbol: None,
     };
     let nft_def = LedgerDef {
@@ -254,6 +257,7 @@ fn auth_admin_can_always_manage() {
         fees: None,
         validation: None,
         owner_pubkey: Some("owner_pk".into()),
+        owner_x25519_pubkey: None,
         symbol: None,
     };
 
@@ -274,6 +278,7 @@ fn auth_non_admin_cannot_manage_main_bridge() {
         fees: None,
         validation: None,
         owner_pubkey: None,
+        owner_x25519_pubkey: None,
         symbol: None,
     };
     let nft_def = LedgerDef {
@@ -285,6 +290,7 @@ fn auth_non_admin_cannot_manage_main_bridge() {
         fees: None,
         validation: None,
         owner_pubkey: Some("owner_pk".into()),
+        owner_x25519_pubkey: None,
         symbol: None,
     };
 
@@ -320,6 +326,7 @@ fn auth_owner_can_manage_custom_bridges() {
         fees: None,
         validation: None,
         owner_pubkey: Some("owner_a".into()),
+        owner_x25519_pubkey: None,
         symbol: None,
     };
     let custom_b = LedgerDef {
@@ -331,6 +338,7 @@ fn auth_owner_can_manage_custom_bridges() {
         fees: None,
         validation: None,
         owner_pubkey: Some("owner_b".into()),
+        owner_x25519_pubkey: None,
         symbol: None,
     };
 

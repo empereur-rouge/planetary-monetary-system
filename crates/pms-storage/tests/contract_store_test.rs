@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tempfile::tempdir;
 
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_storage::ContractStorage;
 use pms_types_contract::*;
 
@@ -15,7 +15,7 @@ async fn mk_store(prefix: &str) -> Result<(tempfile::TempDir, Arc<RocksStore>)> 
     let path = dir.path().join(format!("rocks-contract-{}", nanoid::nanoid!(6)));
     std::fs::create_dir_all(&path)?;
     let path_str = path.to_string_lossy().to_string();
-    let store = Arc::new(RocksStore::new(&path_str, 64, prefix, None).await?);
+    let store = Arc::new(RocksStore::new(&path_str, 64, prefix, None, &RocksMemoryConfig::default()).await?);
     // Run migrations to create all CFs including "contracts"
     store.ensure_schema().await?;
     Ok((dir, store))

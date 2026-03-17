@@ -8,7 +8,7 @@ use pms_server::Server;
 use pms_storage::DagStorage;
 use tokio::task::JoinHandle;
 // adapte les imports à ton projet
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_types::Block;
 use pms_wallet::{SignerBackend, Wallet};
 
@@ -92,7 +92,7 @@ pub async fn spawn_node_generic_rocks_with_seed(
     }
 
     // 1) Store Rocks
-    let store = Arc::new(RocksStore::new(db_path, tip_limit, prefix, None).await?);
+    let store = Arc::new(RocksStore::new(db_path, tip_limit, prefix, None, &RocksMemoryConfig::default()).await?);
 
     // 1.bis) Schéma + GENESIS si DB vide (pipeline prod-like)
     store.ensure_schema().await?;

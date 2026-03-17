@@ -11,7 +11,7 @@ use anyhow::Result;
 use pms_config::load_config;
 use pms_core::{ConcurrentDag, CoreAdapter};
 use pms_interface::NetDagAdapter;
-use pms_storage::rocks_store::store::RocksStore;
+use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_storage::{NftStorage, PutResult};
 use pms_testkit::forge_signed_wire_block_for_test;
 use pms_types::Block;
@@ -36,6 +36,7 @@ async fn nft_mint_and_verify_ownership() -> Result<()> {
             256,
             "pms:nft-test",
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );
@@ -116,6 +117,7 @@ async fn nft_transfer_changes_ownership() -> Result<()> {
             256,
             "pms:nft-transfer",
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );
@@ -218,6 +220,7 @@ async fn nft_burn_removes_token() -> Result<()> {
             256,
             "pms:nft-burn",
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );
@@ -292,6 +295,7 @@ async fn nft_unauthorized_transfer_rejected() -> Result<()> {
             256,
             "pms:nft-unauth",
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );
@@ -378,6 +382,7 @@ async fn nft_get_by_owner_after_mint() -> Result<()> {
             256,
             "pms:nft-byowner",
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );
@@ -439,6 +444,7 @@ async fn nft_get_by_owner_updates_on_transfer() -> Result<()> {
             256,
             "pms:nft-transfer-list",
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );
@@ -525,6 +531,7 @@ async fn nft_get_by_owner_clears_on_burn() -> Result<()> {
             256,
             "pms:nft-burn-list",
             None,
+            &RocksMemoryConfig::default(),
         )
         .await?,
     );

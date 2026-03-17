@@ -6,8 +6,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub fn be_u64(x: u64) -> [u8; 8] {
     x.to_be_bytes()
 }
+/// Decode 8 big-endian bytes into i64. Returns 0 for malformed input.
 pub fn from_be_i64(b: &[u8]) -> i64 {
-    u64::from_be_bytes(b.try_into().unwrap()) as i64
+    let Ok(arr): Result<[u8; 8], _> = b.try_into() else {
+        return 0;
+    };
+    u64::from_be_bytes(arr) as i64
 }
 pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,7 +24,11 @@ pub fn now_ms() -> i64 {
 pub fn ts_to_be(ts: i64) -> [u8; 8] {
     (ts as u64).to_be_bytes()
 }
+/// Decode 8+ big-endian bytes into a timestamp (i64). Returns 0 if input is too short.
 pub fn be_to_ts(b: &[u8]) -> i64 {
+    if b.len() < 8 {
+        return 0;
+    }
     let mut arr = [0u8; 8];
     arr.copy_from_slice(&b[..8]);
     u64::from_be_bytes(arr) as i64
@@ -35,7 +43,11 @@ pub fn now_ms_i64() -> i64 {
 pub fn u64_to_le(v: u64) -> [u8; 8] {
     v.to_le_bytes()
 }
+/// Decode 8+ little-endian bytes into u64. Returns 0 if input is too short.
 pub fn le_to_u64(b: &[u8]) -> u64 {
+    if b.len() < 8 {
+        return 0;
+    }
     let mut arr = [0u8; 8];
     arr.copy_from_slice(&b[..8]);
     u64::from_le_bytes(arr)
