@@ -1193,6 +1193,14 @@ where
         self.utxos.balance_by_address(address).await
     }
 
+    async fn balance_by_address_and_asset(
+        &self,
+        address: &str,
+        asset_id: Option<&str>,
+    ) -> rust_decimal::Decimal {
+        self.utxos.balance_by_address_and_asset(address, asset_id).await
+    }
+
     async fn utxos_by_address(
         &self,
         address: &str,

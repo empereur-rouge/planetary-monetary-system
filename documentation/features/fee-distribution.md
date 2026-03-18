@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-01-10
-updated: 2026-03-17
-version: v0.5.8
+updated: 2026-03-18
+version: v0.5.12
 ---
 
 # Fee Distribution (Distribution Automatique des Frais)
@@ -36,6 +36,7 @@ En plus des frais de gas PMS et des burn refunds, le système supporte désormai
 | 2026-03-13 | `1bb09bd` | `fix(perf): resolve TPS degradation + add smart contract system (v0.2.1)` -- Intégration fee burn et contrats smart |
 | 2026-03-14 | branche `feature/economics` | Intégration fee burn (`burn_rate_bps`), gas pool, subscriptions, dynamic fees |
 | 2026-03-15 | v0.5.1 | Fix: `contract_store` field in `AppState` — burn refunds now work on custom ledgers (contracts looked up from main store) |
+| 2026-03-18 | v0.5.12 | Fix: PMS fee bootstrap deadlock on custom ledgers — protocol fee waived when PMS unavailable for custom asset transfers |
 
 ## Mécanisme
 
@@ -67,6 +68,16 @@ Un timer asynchrone (`spawn_fee_distributor_task`) exécute `perform_fee_distrib
 6. **Création du bloc Mint** : Un bloc `PlainPayload::Mint` est créé avec tous les outputs, miné (PoW si requis), signé par le Coordinator.
 7. **Persistance et broadcast** : Le bloc est persisté dans le DAG, les UTXOs sont créés, et le bloc est broadcast aux pairs.
 8. **Reset du pool** : Le `FeePool` est remis à zéro.
+
+### 2b. Custom Ledger Fee Bootstrap (v0.5.12)
+
+Sur les ledgers custom (ex: eden), le token principal est un custom asset (ex: EDN). Le token PMS natif n'existe pas initialement sur ces ledgers. Cela créait un deadlock :
+
+1. Les transferts d'EDN nécessitent du PMS pour le protocol fee
+2. Le PMS n'apparaît sur eden que via `create_reward_block` (après un transfert réussi)
+3. Aucun transfert ne peut réussir sans PMS → deadlock
+
+**Fix (v0.5.12)** : Quand un agent n'a pas de PMS pour le protocol fee lors d'un transfert de custom asset, le fee est gracieusement waivé (`fee_dec = 0`). Les smart contract transfer fees (en EDN) s'appliquent toujours et fournissent les revenus au créateur du ledger. Une fois que du PMS apparaît sur le ledger (ex: via bridge), le protocol fee reprend automatiquement.
 
 ### 3. Distribution immédiate (Reward blocks)
 

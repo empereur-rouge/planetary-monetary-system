@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-13
-updated: 2026-03-03
-version: v0.1.0
+updated: 2026-03-18
+version: v0.5.12
 ---
 
 # Wallet Factory (Gestion Custodiale des Wallets)

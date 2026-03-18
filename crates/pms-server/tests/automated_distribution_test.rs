@@ -99,6 +99,14 @@ impl NetDagAdapter for MockAdapter {
         Decimal::ZERO
     }
 
+    async fn balance_by_address_and_asset(
+        &self,
+        _address: &str,
+        _asset_id: Option<&str>,
+    ) -> Decimal {
+        Decimal::ZERO
+    }
+
     async fn utxos_by_address(
         &self,
         _address: &str,

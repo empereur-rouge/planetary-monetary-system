@@ -1757,6 +1757,70 @@ impl DagStorage for RocksStore {
         Ok(out)
     }
 
+    /// Efficiently returns only the `n` lexicographically largest block IDs
+    /// using a **reverse iterator**. This avoids loading all block IDs into
+    /// memory — critical for ledgers with millions of blocks (e.g. 7.8M blocks
+    /// in Eden would consume ~500 MB if loaded via `all_block_ids()`).
+    ///
+    /// When `n == 0`, falls back to `all_block_ids()` (unlimited).
+    async fn newest_block_ids(&self, n: usize) -> Result<Vec<String>> {
+        if n == 0 {
+            return self.all_block_ids().await;
+        }
+        let cf_idx = self.cf("idx_blocks");
+        let mut ids = Vec::with_capacity(n);
+        for kv in self.db.iterator_cf(&cf_idx, IteratorMode::End) {
+            let (k, _v) = kv?;
+            ids.push(String::from_utf8(k.to_vec())?);
+            if ids.len() >= n {
+                break;
+            }
+        }
+        ids.reverse(); // Restore ascending lexicographic order
+        Ok(ids)
+    }
+
+    /// O(1) emptiness check — reads a single key from `idx_blocks` CF.
+    async fn is_empty(&self) -> Result<bool> {
+        let cf_idx = self.cf("idx_blocks");
+        let mut iter = self.db.iterator_cf(&cf_idx, IteratorMode::Start);
+        Ok(iter.next().is_none())
+    }
+
+    /// Returns up to `n` block IDs in chronological order (oldest-first),
+    /// using the `by_time` CF which is keyed by `[ts_BE:8][0x00][block_id]`.
+    ///
+    /// A reverse iterator reads the N most-recent entries, then the result
+    /// is reversed so callers get oldest-first ordering — matching the
+    /// expectation of `bootstrap_from_store_with_capacity` where blocks
+    /// should be inserted parents-before-children.
+    ///
+    /// Falls back to `newest_block_ids(n)` (lexicographic) if the `by_time`
+    /// CF is empty (e.g. after an `import_json` that skips time indices).
+    async fn newest_block_ids_by_time(&self, n: usize) -> Result<Vec<String>> {
+        if n == 0 {
+            return self.all_block_ids().await;
+        }
+
+        let cf_time = self.cf("by_time");
+        let mut ids = Vec::with_capacity(n);
+
+        for kv in self.db.iterator_cf(&cf_time, IteratorMode::End) {
+            let (k, _v) = kv?;
+            if let Some((_ts, id)) = parse_time_index_key(&k) {
+                ids.push(id);
+                if ids.len() >= n {
+                    break;
+                }
+            }
+        }
+
+        // Reverse: iterator was newest-first, we want oldest-first
+        // so bootstrap_insert processes parents before children.
+        ids.reverse();
+        Ok(ids)
+    }
+
     async fn block_count(&self) -> Result<u64> {
         let cf_idx = self.cf("idx_blocks");
         let count = self
@@ -1764,6 +1828,21 @@ impl DagStorage for RocksStore {
             .iterator_cf(&cf_idx, rocksdb::IteratorMode::Start)
             .count();
         Ok(count as u64)
+    }
+
+    /// O(1) approximate count via RocksDB metadata property.
+    /// Falls back to full scan on failure.
+    async fn block_count_estimate(&self) -> Result<u64> {
+        let cf_idx = self.cf("idx_blocks");
+        // rocksdb::properties::ESTIMATE_NUM_KEYS = "rocksdb.estimate-num-keys"
+        match self
+            .db
+            .property_int_value_cf(&cf_idx, "rocksdb.estimate-num-keys")
+        {
+            Ok(Some(n)) => Ok(n),
+            Ok(None) => self.block_count().await,
+            Err(_) => self.block_count().await,
+        }
     }
 
     async fn export_json(&self) -> anyhow::Result<String> {

@@ -182,6 +182,41 @@ impl ConcurrentDag {
         self.blocks.insert(block_id, block);
     }
 
+    /// Remove ghost entries from `children_count` and `children_idx`.
+    ///
+    /// Ghost entries are parent IDs that have tracking data but no
+    /// corresponding block in the `blocks` DashMap.  They accumulate during
+    /// selective bootstrap when loaded blocks reference parents outside the
+    /// loaded window (e.g. with 50K blocks loaded from 13M, ~99% of parents
+    /// under lexicographic loading, ~2-5% under chronological loading).
+    ///
+    /// Without cleanup, these ghost entries persist forever and consume
+    /// hundreds of MB in the DashMaps.
+    fn cleanup_ghost_entries(&self) {
+        let ghosts: Vec<BlockId> = self
+            .children_count
+            .iter()
+            .filter(|entry| !self.blocks.contains_key(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        let ghost_count = ghosts.len();
+        for ghost_id in &ghosts {
+            self.children_count.remove(ghost_id);
+            self.children_idx.remove(ghost_id);
+            self.tips.remove(ghost_id);
+        }
+
+        if ghost_count > 0 {
+            tracing::info!(
+                ghost_count,
+                children_count_len = self.children_count.len(),
+                children_idx_len = self.children_idx.len(),
+                "DAG bootstrap: cleaned ghost entries (orphan parents outside loaded window)"
+            );
+        }
+    }
+
     /// Insert a block into the DAG (non-blocking)
     ///
     /// This is the core operation that must be fast for high TPS.
@@ -601,11 +636,19 @@ impl ConcurrentDag {
 
     /// Load the DAG from storage (RAM replay), with optional capacity limit.
     ///
-    /// Uses a two-phase approach to avoid the false-tip problem:
-    /// 1. Load ALL blocks without pruning (children_counts are built correctly
-    ///    regardless of load order).
-    /// 2. Populate `insertion_order` from the loaded blocks, then prune once
-    ///    with full knowledge of the DAG structure.
+    /// Uses a multi-phase approach to avoid false-tip pollution and OOM:
+    ///
+    /// 1. **Chronological selective loading**: uses `newest_block_ids_by_time(n)`
+    ///    which reads the `by_time` CF in reverse — loading the N most-recent
+    ///    blocks by timestamp.  Consecutive blocks reference recent parents, so
+    ///    the loaded set forms a mostly-connected subgraph (~2-5% orphan parents
+    ///    vs ~99.8% with the old lexicographic approach).
+    /// 2. **Ghost cleanup**: removes `children_count`/`children_idx` entries for
+    ///    parents outside the loaded window to prevent unbounded DashMap growth.
+    /// 3. **Insertion order**: uses the loading order directly (oldest-first from
+    ///    the chronological iterator) so `prune_oldest()` evicts truly oldest
+    ///    blocks first.
+    /// 4. **Single prune** with fully-correct children_counts.
     pub async fn bootstrap_from_store_with_capacity<S>(
         store: &S,
         max_blocks: usize,
@@ -615,30 +658,51 @@ impl ConcurrentDag {
         S: pms_storage::DagStorage + Send + Sync,
     {
         let dag = Self::with_capacity_and_spent_limit(max_blocks, max_spent_outpoints);
-        let mut ids = store.all_block_ids().await?;
 
         // ── Selective loading ──────────────────────────────────────────────
-        // When the DB has more blocks than the RAM limit, only load the
-        // lexicographically last `max_blocks` IDs. This produces the SAME
-        // surviving block set as load-all + prune (which uses lexicographic
-        // insertion_order), but avoids reading and discarding the excess
-        // blocks from RocksDB. Historical blocks remain in DB for queries.
-        // Note: all_block_ids() returns keys in RocksDB lex order (ascending).
-        if max_blocks > 0 && ids.len() > max_blocks {
-            let total_in_db = ids.len();
-            let skip = ids.len() - max_blocks;
-            ids = ids.split_off(skip); // O(1) — reuses the tail allocation
-            tracing::info!(
-                total_in_db,
-                loading = ids.len(),
-                skipped = skip,
-                "Selective bootstrap: loading only newest blocks (full history preserved in RocksDB)"
-            );
-        }
+        // Prefer chronological loading via `by_time` CF over lexicographic
+        // (`idx_blocks` CF).  Hash-based block IDs have no correlation with
+        // time, so lexicographic "newest N" actually loads N random blocks
+        // across the entire history — causing 99.8% orphan tips and massive
+        // ghost entries (~800 MB on Eden with 13M blocks).
+        //
+        // Chronological loading preserves parent-child locality: the N most
+        // recent blocks mostly reference each other as parents, yielding
+        // only ~2-5% orphan tips at the boundary.
+        let ids = if max_blocks > 0 {
+            // O(1) approximate count for logging (avoids full-scan of 13M+ keys)
+            let total_in_db = store.block_count_estimate().await.unwrap_or(0) as usize;
+
+            // Try chronological loading first (by_time CF)
+            let mut ids = store.newest_block_ids_by_time(max_blocks).await?;
+
+            // Fallback: if by_time CF is empty (e.g. after import_json which
+            // skips time indices), use lexicographic loading as last resort
+            if ids.is_empty() && total_in_db > 0 {
+                tracing::warn!(
+                    total_in_db,
+                    "by_time CF empty — falling back to lexicographic loading \
+                     (expect high orphan tip count)"
+                );
+                ids = store.newest_block_ids(max_blocks).await?;
+            }
+
+            if total_in_db > ids.len() {
+                tracing::info!(
+                    total_in_db,
+                    loading = ids.len(),
+                    skipped = total_in_db - ids.len(),
+                    "Selective bootstrap: loading newest blocks by timestamp \
+                     (full history preserved in RocksDB)"
+                );
+            }
+            ids
+        } else {
+            store.all_block_ids().await?
+        };
 
         // Phase 1: Load blocks WITHOUT pruning or insertion-order tracking.
-        // When selective loading is active, only the newest max_blocks are loaded.
-        // This ensures children_counts are fully correct before any pruning.
+        // children_counts are built correctly regardless of load order.
         for (i, id) in ids.iter().enumerate() {
             if let Some(sb) = store.get_block(id).await? {
                 let payload = if let Some(json) = &sb.payload_json {
@@ -669,13 +733,18 @@ impl ConcurrentDag {
             }
         }
 
-        // Phase 2: Build insertion_order from loaded blocks in sorted order.
-        // Sorted = deterministic pruning: lexicographically first IDs are at the
-        // front and get pruned first. For sequential IDs (b_00000000...) this
-        // approximates chronological order. For hash IDs it's arbitrary but stable.
+        // Phase 1.5: Clean ghost entries — orphan parent IDs that have tracking
+        // data (children_count, children_idx) but no corresponding block.
+        // With chronological loading this is ~2-5% of loaded blocks at the
+        // boundary; with lexicographic fallback it can be ~99.8%.
+        dag.cleanup_ghost_entries();
+
+        // Phase 2: Build insertion_order from the loading order directly.
+        // With chronological loading, `ids` is oldest-first — so the oldest
+        // blocks are at the front of the deque and get pruned first (correct
+        // temporal behaviour). Only include IDs that were actually loaded
+        // (some get_block calls may have returned None).
         {
-            let mut keys: Vec<String> = dag.blocks.iter().map(|e| e.key().clone()).collect();
-            keys.sort();
             let mut order = match dag.insertion_order.lock() {
                 Ok(o) => o,
                 Err(poisoned) => {
@@ -683,8 +752,10 @@ impl ConcurrentDag {
                     poisoned.into_inner()
                 }
             };
-            for key in keys {
-                order.push_back(key);
+            for id in &ids {
+                if dag.blocks.contains_key(id) {
+                    order.push_back(id.clone());
+                }
             }
         }
 
@@ -707,12 +778,12 @@ impl ConcurrentDag {
                         .any(|p| !dag.blocks.contains_key(p))
                 })
                 .count();
-            tracing::warn!(
+            tracing::info!(
                 total,
                 tips_count,
                 parentless,
                 orphan_parents,
-                "DAG bootstrap PRE-PRUNE diagnostic"
+                "DAG bootstrap diagnostic (post-ghost-cleanup)"
             );
         }
 

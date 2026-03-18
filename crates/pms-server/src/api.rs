@@ -557,7 +557,10 @@ async fn dynamic_ledger_handler(
         .with_state(ledger_state.clone())
         .merge(build_ledger_admin_routes(ledger_state));
 
-    // Reconstruct request with stripped path (remove /l/{ledger_id} prefix)
+    // Reconstruct request with stripped path (remove /l/{ledger_id} prefix).
+    // CRITICAL: Reset extensions to avoid leaking outer path parameters
+    // (ledger_id, rest) into the inner router. Without this, handlers like
+    // `get_utxos_by_address(Path(address))` see 3 params instead of 1 → 500.
     let (mut parts, body) = req.into_parts();
     let query = parts
         .uri
@@ -568,6 +571,7 @@ async fn dynamic_ledger_handler(
     parts.uri = new_uri
         .parse()
         .unwrap_or_else(|_| http::Uri::from_static("/"));
+    parts.extensions = http::Extensions::new();
     let forwarded = Request::from_parts(parts, body);
 
     match router.oneshot(forwarded).await {

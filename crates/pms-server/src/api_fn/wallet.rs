@@ -74,25 +74,73 @@ pub async fn wallet_balance(
     }))
 }
 
-/// Simple balance query by address only (no keys needed)
-/// Uses the RAM UTXO set directly
+/// Simple balance query by address.
+///
+/// Supports optional `ledger_id` to query a custom ledger's balance from the
+/// main endpoint, and optional `asset_id` to query custom token balances.
+///
+/// # Examples
+/// ```json
+/// { "address": "8e1abc..." }                                       // PMS on current ledger
+/// { "address": "8e1abc...", "asset_id": "edenite" }                // EDN on current ledger
+/// { "address": "8e1abc...", "ledger_id": "eden" }                  // PMS on eden
+/// { "address": "8e1abc...", "ledger_id": "eden", "asset_id": "edenite" } // EDN on eden
+/// ```
 #[derive(serde::Deserialize)]
 pub struct SimpleBalanceReq {
     address: String,
+    /// Optional: query a specific ledger (e.g. "eden"). If omitted, uses the
+    /// current ledger (main, or the one from the `/l/{id}/` URL prefix).
+    ledger_id: Option<String>,
+    /// Optional: query balance for a specific asset (e.g. "edenite").
+    /// If omitted, returns native PMS balance.
+    asset_id: Option<String>,
 }
 #[derive(serde::Serialize)]
 pub struct SimpleBalanceResp {
     balance: String,
+    /// Echoes back the ledger that was queried.
+    ledger_id: String,
+    /// Echoes back the asset that was queried (null = PMS native).
+    asset_id: Option<String>,
 }
 
+/// `POST /v1/balance` — query wallet balance by address, with optional
+/// `ledger_id` and `asset_id` parameters.
 pub async fn balance_by_address(
     State(app): State<AppState>,
     Json(req): Json<SimpleBalanceReq>,
 ) -> Result<Json<SimpleBalanceResp>, (StatusCode, String)> {
-    let balance: rust_decimal::Decimal =
-        app.srv.adapter_arc().balance_by_address(&req.address).await;
+    let effective_ledger = req.ledger_id.as_deref().unwrap_or(&app.ledger_id);
+
+    // Resolve the adapter for the target ledger.
+    let adapter = if req.ledger_id.is_some() && effective_ledger != app.ledger_id {
+        // Cross-ledger query — look up from LedgerManager
+        let mgr = app.ledger_mgr.as_ref().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "multi-ledger not enabled".to_string(),
+            )
+        })?;
+        let instance = mgr.get(effective_ledger).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("ledger '{}' not found", effective_ledger),
+            )
+        })?;
+        instance.adapter.clone()
+    } else {
+        app.srv.adapter_arc()
+    };
+
+    let balance = adapter
+        .balance_by_address_and_asset(&req.address, req.asset_id.as_deref())
+        .await;
+
     Ok(Json(SimpleBalanceResp {
         balance: balance.to_string(),
+        ledger_id: effective_ledger.to_string(),
+        asset_id: req.asset_id,
     }))
 }
 

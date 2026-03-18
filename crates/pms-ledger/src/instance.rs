@@ -65,9 +65,10 @@ impl LedgerInstance {
             tracing::warn!(ledger = %def.id, "load_frozen_cache: {e}");
         }
 
-        // Genesis block si DB vide pour ce prefix
-        let ids = store.all_block_ids().await.context("listing block IDs")?;
-        let is_fresh_db = ids.is_empty();
+        // Genesis block si DB vide pour ce prefix.
+        // O(1) check — avoids loading all block IDs into RAM.
+        // (Eden has 13M+ blocks → all_block_ids() would allocate ~1.2 GB.)
+        let is_fresh_db = store.is_empty().await.context("checking if DB is empty")?;
 
         if is_fresh_db {
             let genesis = Block::genesis(compute_block_id);

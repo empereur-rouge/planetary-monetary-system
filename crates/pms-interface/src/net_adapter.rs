@@ -32,6 +32,15 @@ pub trait NetDagAdapter: Send + Sync {
     /// Retourne la balance d'une adresse (somme des UTXOs non dépensés PMS).
     async fn balance_by_address(&self, address: &str) -> rust_decimal::Decimal;
 
+    /// Retourne la balance d'une adresse pour un asset spécifique.
+    /// `asset_id = None` → PMS natif (O(1) via cache).
+    /// `asset_id = Some("edenite")` → balance custom token (shard scan).
+    async fn balance_by_address_and_asset(
+        &self,
+        address: &str,
+        asset_id: Option<&str>,
+    ) -> rust_decimal::Decimal;
+
     /// Retourne tous les UTXOs d'une adresse depuis le set UTXO en mémoire.
     async fn utxos_by_address(
         &self,

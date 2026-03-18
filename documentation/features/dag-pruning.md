@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-17
-updated: 2026-03-12
-version: v0.1.0
+updated: 2026-03-18
+version: v0.5.13
 ---
 
 # DAG Pruning (Gestion Mémoire du DAG)
@@ -65,26 +65,37 @@ RocksDB possède une column family `tips` qui stocke les tips actifs avec leur t
 
 4. **`top_tips()` cache** : Stale-while-revalidate avec fenêtre de 5 secondes pour éviter les scans répétés de la CF `tips`.
 
-### Bootstrap : Chargement sélectif
+### Bootstrap : Chargement chronologique sélectif (v0.5.13)
 
-`bootstrap_from_store_with_capacity()` utilise un chargement en 3 phases :
+`bootstrap_from_store_with_capacity()` utilise un chargement en 4 phases :
 
 ```
-Phase 1 : Chargement sélectif
+Phase 1 : Chargement sélectif chronologique
   - Si max_blocks > 0 et DB contient plus de max_blocks :
-    - all_block_ids() retourne les IDs en ordre lexicographique
-    - Seuls les max_blocks derniers IDs sont chargés (split_off)
+    - newest_block_ids_by_time(max_blocks) : reverse iterator sur by_time CF
+    - Retourne les N blocs les plus récents par timestamp d'insertion
+    - Fallback sur newest_block_ids() (lexicographique) si by_time CF vide
   - Chaque bloc est inséré via bootstrap_insert() (pas de pruning intermédiaire)
 
-Phase 2 : Construction de insertion_order
-  - Les clés sont triées lexicographiquement
-  - Alimentent la VecDeque (les plus anciennes en tête)
+Phase 2 : Ghost cleanup
+  - cleanup_ghost_entries() : supprime les entries de children_count,
+    children_idx et tips pour les IDs absents de blocks DashMap
+  - Élimine les "parents fantômes" référencés par les blocs chargés
+    mais hors de la fenêtre de chargement
 
-Phase 3 : Prune unique post-chargement
-  - prune_oldest() avec children_counts entièrement corrects
+Phase 3 : Construction de insertion_order
+  - Utilise directement l'ordre de chargement (oldest-first)
+  - Pas de re-tri lexicographique
+
+Phase 4 : Prune unique post-chargement
+  - prune_oldest() avec children_counts corrects et sans ghost entries
 ```
 
-Ce chargement sélectif évite de lire et d'évincer immédiatement des centaines de milliers de blocs excédentaires (50K lectures au lieu de 971K sur testnet).
+**Pourquoi chronologique ?** Les IDs de blocs sont des hashes (`compute_block_id`), donc l'ordre lexicographique est aléatoire. Avec 13.2M blocs et 50K chargés, le tri lexicographique sélectionnait des blocs aléatoires → 99.8% tips orphelins (49,904/50,000). Le tri chronologique préserve la localité parent-enfant → ~2-5% orphelins.
+
+**Fallback** : Si la CF `by_time` est vide (cas de `import_json()` qui n'écrit pas dans cette CF), le bootstrap utilise l'ancien tri lexicographique avec un log `warn`.
+
+**Économie mémoire** : Ghost cleanup après Phase 1 libère les entries DashMap pour les ~49K parents hors fenêtre (~100-800 MB selon le cas).
 
 ## Configuration
 
@@ -143,7 +154,8 @@ checkpoint_interval_secs = 3600
 | `ConcurrentDag::insert_block(block)` | Insertion non-bloquante. Incrémente `insert_counter`, déclenche `prune_oldest()` toutes les 1000 insertions. Met à jour le `tips` DashSet incrémentalement. |
 | `ConcurrentDag::prune_oldest()` | Éviction FIFO. Phase 1 sous Mutex (collecte IDs), Phase 2 lock-free (suppression DashMaps), Phase 3 nettoyage FinalityState. Protège le dernier tip. |
 | `ConcurrentDag::bootstrap_insert(block)` | Insertion pendant le bootstrap. Construit `blocks`, `children_count`, `children_idx`, `tips` SANS tracker `insertion_order` ni déclencher de pruning. |
-| `ConcurrentDag::bootstrap_from_store_with_capacity(store, max_blocks, max_spent)` | Chargement sélectif depuis RocksDB + bootstrap 3 phases + prune finale unique. |
+| `ConcurrentDag::bootstrap_from_store_with_capacity(store, max_blocks, max_spent)` | Chargement chronologique sélectif depuis RocksDB + ghost cleanup + prune finale. |
+| `ConcurrentDag::cleanup_ghost_entries()` | Post-bootstrap : supprime les entries DashMap pour les parents hors de la fenêtre chargée. |
 | `ConcurrentDag::bootstrap_from_store(store)` | Wrapper sans limite (capacity=0, pour tests/CLI). |
 | `ConcurrentDag::find_tips()` | Retourne les tips depuis le `DashSet` incrémental (O(tips) au lieu de O(all_blocks)). |
 | `ConcurrentDag::mark_spent(txid, index)` | Marque un outpoint comme dépensé. Si `max_spent_outpoints > 0`, éviction FIFO des plus anciens. |
@@ -157,6 +169,9 @@ checkpoint_interval_secs = 3600
 | `RocksStore::add_tip(id)` | Ajoute un tip dans la CF, incrémente `tip_count_estimate`, appelle `trim_tips()`. |
 | `RocksStore::remove_tip(id)` | Supprime un tip mais REFUSE si c'est le dernier restant (protection anti-tipless). |
 | `RocksStore::top_tips(limit)` | Retourne les N tips les plus récents avec cache stale-while-revalidate (5s). |
+| `RocksStore::is_empty()` | O(1) — single iterator seek sur `idx_blocks` CF. Override de `DagStorage::is_empty()`. |
+| `RocksStore::newest_block_ids_by_time(n)` | Reverse iterator sur `by_time` CF pour chargement chronologique. Fallback sur lexicographique si `by_time` vide. |
+| `RocksStore::block_count_estimate()` | O(1) via `rocksdb.estimate-num-keys` property. Fallback sur `block_count()`. |
 
 ### Métriques (`crates/pms-server/src/api.rs` + `crates/pms-server/src/metrics.rs`)
 
@@ -224,6 +239,22 @@ Le DAG Pruning a connu une série de bugs critiques découverts progressivement 
 
 **Correction** : Introduction de `sync_dag_size_metric()` qui lit `dag.len()` et met à jour la gauge avec un `set()`. Appelée à chaque fetch de `/metrics` pour refléter la taille réelle post-pruning.
 
+### Bug 10 : Chargement lexicographique = 99.8% tips orphelins + OOM (corrigé v0.5.13, 2026-03-18)
+
+**Problème** : Quatre causes combinées provoquaient un OOM après quelques heures sur le testnet (Docker `mem_limit: 7g`, Eden = 13.2M blocs) :
+
+1. **`instance.rs` : `all_block_ids()` pour `is_empty()`** — chargeait les 13.2M IDs en `Vec<String>` (~1.16 GB) juste pour vérifier `.is_empty()`.
+2. **Chargement lexicographique** — `newest_block_ids()` retournait les N IDs les plus grands lexicographiquement, mais les IDs sont des hashes → sélection aléatoire. 49,904/50,000 blocs chargés étaient des tips orphelins (parents hors fenêtre).
+3. **Ghost entries** — Les ~49K parents référencés mais non chargés créaient des entries dans `children_count`/`children_idx` DashMaps (~100-800 MB).
+4. **`block_count()` full scan** — `block_count()` scannait toute la CF `idx_blocks` (13.2M entries) juste pour un log diagnostique.
+
+**Correction** :
+- `is_empty()` : single iterator seek, O(1), 0 bytes.
+- `newest_block_ids_by_time()` : reverse iterator sur `by_time` CF pour chargement chronologique. Fallback lexicographique si `by_time` vide.
+- `cleanup_ghost_entries()` : supprime les entries DashMap pour les parents fantômes après Phase 1.
+- `block_count_estimate()` : O(1) via `rocksdb.estimate-num-keys`.
+- Résultat : pic mémoire réduit de ~6+ GB à ~3-4 GB, tips orphelins de 99.8% à ~2-5%.
+
 ## Interactions
 
 ### Distribution des frais (`fee_distribution.rs`)
@@ -239,12 +270,13 @@ Cette dépendance est la raison pour laquelle la protection du dernier tip est c
 
 Au démarrage du nœud, chaque `LedgerInstance` appelle `ConcurrentDag::bootstrap_from_store_with_capacity()` avec les paramètres de la configuration `[rocks]`. La séquence est :
 
-1. `all_block_ids()` depuis RocksDB
-2. Chargement sélectif (si > max_blocks)
+1. `is_empty()` — O(1) check si genesis nécessaire (remplace `all_block_ids()` qui allouait ~1.16 GB pour 13.2M blocs)
+2. `newest_block_ids_by_time(max_blocks)` — chargement chronologique via `by_time` CF (fallback lexicographique)
 3. `bootstrap_insert()` pour chaque bloc
-4. Construction de `insertion_order`
-5. `prune_oldest()` unique post-chargement
-6. Log : `"DAG loaded"` avec le nombre de blocs
+4. `cleanup_ghost_entries()` — supprime les entries DashMap pour les parents hors fenêtre
+5. Construction de `insertion_order` depuis l'ordre de chargement (oldest-first)
+6. `prune_oldest()` unique post-chargement
+7. Log : `"DAG loaded"` avec nombre de blocs + diagnostic (tips_count, orphan_parents)
 
 ### Métriques Prometheus
 

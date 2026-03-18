@@ -391,7 +391,7 @@ pub async fn wallet_send_simple(
 
     let (fee_policy, _ratio_dec) = tx_helpers::load_fee_policy(&state.store);
 
-    let fee_dec = fee_policy
+    let mut fee_dec = fee_policy
         .compute_fee(&amount_dec.to_string())
         .map(|a| a.inner())
         .unwrap_or(Decimal::ZERO);
@@ -445,25 +445,33 @@ pub async fn wallet_send_simple(
         })
         .collect();
 
-    // PMS inputs for fee (custom token)
+    // PMS inputs for fee (custom token transfers)
+    // If sender has no PMS on this ledger, gracefully skip the protocol fee.
+    // This solves the bootstrap problem on custom ledgers where PMS doesn't
+    // exist yet (chicken-and-egg: need PMS to pay fees, need fees to mint PMS).
+    // Smart contract transfer fees (in the custom asset) still apply.
     let mut pms_change = Decimal::ZERO;
     if req.asset_id.is_some() && fee_dec > Decimal::ZERO {
-        let (pms_selected, pms_sum) =
-            match tx_helpers::select_utxos(&adapter, &from_address, fee_dec, &None).await {
-                Ok(r) => r,
-                Err(e) => {
-                    return (
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        Json(json!({ "error": format!("insufficient PMS for fee: {e}") })),
-                    );
+        match tx_helpers::select_utxos(&adapter, &from_address, fee_dec, &None).await {
+            Ok((pms_selected, pms_sum)) => {
+                for (output_id, _, _) in &pms_selected {
+                    tx_inputs.push(TxInput {
+                        out: output_id.clone(),
+                    });
                 }
-            };
-        for (output_id, _, _) in &pms_selected {
-            tx_inputs.push(TxInput {
-                out: output_id.clone(),
-            });
+                pms_change = pms_sum - fee_dec;
+            }
+            Err(_) => {
+                // No PMS available — waive protocol fee for this custom-asset transfer.
+                // The smart contract transfer fee (if configured) still provides
+                // fee revenue to the ledger creator.
+                tracing::info!(
+                    "Custom asset transfer: no PMS available for protocol fee on ledger '{}', waiving fee",
+                    state.ledger_id
+                );
+                fee_dec = Decimal::ZERO;
+            }
         }
-        pms_change = pms_sum - fee_dec;
     }
 
     // ════════════════════════════════════════════════════════════════════

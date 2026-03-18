@@ -85,8 +85,14 @@ impl DagStorage for MockStore {
     async fn top_tips(&self, _limit: usize) -> Result<Vec<String>> {
         unimplemented!()
     }
+    async fn is_empty(&self) -> Result<bool> {
+        Ok(self.blocks.read().unwrap().is_empty())
+    }
     async fn block_count(&self) -> Result<u64> {
-        unimplemented!()
+        Ok(self.blocks.read().unwrap().len() as u64)
+    }
+    async fn block_count_estimate(&self) -> Result<u64> {
+        self.block_count().await
     }
     async fn export_json(&self) -> Result<String> {
         unimplemented!()
@@ -577,6 +583,115 @@ async fn bootstrap_prune_diamond_topology() -> Result<()> {
 
     // Tip must survive
     assert!(dag.contains_block("chain_0499"), "tip must survive pruning");
+
+    Ok(())
+}
+
+// ─── Ghost entry cleanup tests ──────────────────────────────────────────────
+
+/// Verify that ghost entries (orphan parent IDs in children_count/children_idx
+/// but not in blocks) are cleaned up during bootstrap.
+#[tokio::test]
+async fn bootstrap_cleans_ghost_entries() -> Result<()> {
+    let store = MockStore::new();
+    build_chain(&store, 5000);
+
+    // With selective loading (500 out of 5000), blocks reference parents
+    // outside the loaded window, creating ghost entries.
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
+
+    let blocks_in_dag = dag.len();
+    let children_count_len = dag.children_count.len();
+    let children_idx_len = dag.children_idx.len();
+
+    println!(
+        "[ghost-cleanup] blocks={}, children_count={}, children_idx={}",
+        blocks_in_dag, children_count_len, children_idx_len
+    );
+
+    // After ghost cleanup, children_count should ONLY contain entries
+    // for blocks that are actually in the DAG. No ghost parent entries.
+    for entry in dag.children_count.iter() {
+        assert!(
+            dag.blocks.contains_key(entry.key()),
+            "children_count has ghost entry '{}' not in blocks DashMap",
+            entry.key()
+        );
+    }
+
+    // Same for children_idx
+    for entry in dag.children_idx.iter() {
+        assert!(
+            dag.blocks.contains_key(entry.key()),
+            "children_idx has ghost entry '{}' not in blocks DashMap",
+            entry.key()
+        );
+    }
+
+    // children_count should be <= blocks (each block has at most 1 entry)
+    assert!(
+        children_count_len <= blocks_in_dag + 1,
+        "children_count ({}) should be close to blocks ({})",
+        children_count_len,
+        blocks_in_dag
+    );
+
+    Ok(())
+}
+
+/// Ghost cleanup with hash IDs (worst case for lexicographic fallback).
+#[tokio::test]
+async fn bootstrap_cleans_ghost_entries_hash_ids() -> Result<()> {
+    let store = MockStore::new();
+    let _tip = build_chain_with_hash_ids(&store, 5000);
+
+    let dag = ConcurrentDag::bootstrap_from_store_with_capacity(&store, 500, 0).await?;
+
+    let ghost_count = dag
+        .children_count
+        .iter()
+        .filter(|e| !dag.blocks.contains_key(e.key()))
+        .count();
+
+    println!(
+        "[ghost-hash] blocks={}, children_count_ghosts={}",
+        dag.len(),
+        ghost_count
+    );
+
+    assert_eq!(
+        ghost_count, 0,
+        "after ghost cleanup, no ghost entries should remain (got {})",
+        ghost_count
+    );
+
+    Ok(())
+}
+
+/// is_empty() tests
+#[tokio::test]
+async fn mock_store_is_empty() -> Result<()> {
+    let store = MockStore::new();
+    assert!(store.is_empty().await?, "fresh store should be empty");
+
+    store.insert("g", vec![]);
+    assert!(!store.is_empty().await?, "store with genesis should not be empty");
+
+    Ok(())
+}
+
+/// block_count_estimate returns same as block_count for MockStore
+#[tokio::test]
+async fn mock_store_block_count_estimate() -> Result<()> {
+    let store = MockStore::new();
+    build_chain(&store, 1000);
+
+    let exact = store.block_count().await?;
+    let estimate = store.block_count_estimate().await?;
+
+    println!("[count] exact={}, estimate={}", exact, estimate);
+    assert_eq!(exact, 1000);
+    assert_eq!(estimate, exact, "MockStore estimate should equal exact count");
 
     Ok(())
 }

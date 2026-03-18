@@ -1916,6 +1916,7 @@ mod tests {
             async fn circulating_supply(&self) -> (rust_decimal::Decimal, u64) { (rust_decimal::Decimal::ZERO, 0) }
             async fn circulating_supply_by_asset(&self, _asset_id: Option<&str>) -> (rust_decimal::Decimal, u64) { (rust_decimal::Decimal::ZERO, 0) }
             async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal { rust_decimal::Decimal::ZERO }
+            async fn balance_by_address_and_asset(&self, _address: &str, _asset_id: Option<&str>) -> rust_decimal::Decimal { rust_decimal::Decimal::ZERO }
             async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> { vec![] }
             async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {}
             async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool { false }
@@ -2006,6 +2007,13 @@ mod tests {
                 (rust_decimal::Decimal::ZERO, 0)
             }
             async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
+                rust_decimal::Decimal::ZERO
+            }
+            async fn balance_by_address_and_asset(
+                &self,
+                _address: &str,
+                _asset_id: Option<&str>,
+            ) -> rust_decimal::Decimal {
                 rust_decimal::Decimal::ZERO
             }
             async fn utxos_by_address(
@@ -2111,6 +2119,13 @@ mod tests {
             async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
                 rust_decimal::Decimal::ZERO
             }
+            async fn balance_by_address_and_asset(
+                &self,
+                _address: &str,
+                _asset_id: Option<&str>,
+            ) -> rust_decimal::Decimal {
+                rust_decimal::Decimal::ZERO
+            }
             async fn utxos_by_address(
                 &self,
                 _address: &str,
@@ -2211,6 +2226,13 @@ mod tests {
                 (rust_decimal::Decimal::ZERO, 0)
             }
             async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
+                rust_decimal::Decimal::ZERO
+            }
+            async fn balance_by_address_and_asset(
+                &self,
+                _address: &str,
+                _asset_id: Option<&str>,
+            ) -> rust_decimal::Decimal {
                 rust_decimal::Decimal::ZERO
             }
             async fn utxos_by_address(

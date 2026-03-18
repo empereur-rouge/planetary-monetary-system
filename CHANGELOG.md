@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.14] - 2026-03-18 — Fix custom ledger path routing + balance endpoint enhancement
+
+### Fixed
+- **fix(server/critical)**: All per-ledger endpoints with path parameters (`/l/{id}/v1/wallet/{address}/utxos`, `/v1/nft/{token_id}`, `/v1/blocks/{id}`, `/v1/wallet/{address}/nfts`, `/v1/wallet/{address}/activity`, `/v1/tokens/{asset_id}`) returned **500 Internal Server Error** on custom ledgers. Root cause: Axum's outer `Path` extraction (`ledger_id`, `rest`) leaked into the inner router via request extensions, causing handlers expecting 1 path param to receive 3. Fix: reset `parts.extensions` before forwarding to inner router. **Impact**: This bug silently broke the simulator's EDN balance queries — agents could never see their EDN → never triggered Phase 2 (EDN transfers) → TransferFee contract never fired → coordinator received 0 fees.
+
+### Added
+- **feat(api)**: `POST /v1/balance` now accepts optional `ledger_id` and `asset_id` fields. Clients can query any ledger's balance from the main endpoint (e.g., `{"address":"8e1...", "ledger_id":"eden", "asset_id":"edenite"}`). Response echoes back `ledger_id` and `asset_id` for clarity.
+- **feat(interface)**: Added `balance_by_address_and_asset()` to `NetDagAdapter` trait — supports asset-filtered balance queries (PMS native O(1) cache, custom tokens via shard scan).
+
+### Changed
+- **change(api)**: `API_VERSION` bumped 5 → 6 (new balance endpoint fields, path routing fix).
+
+---
+
+## [0.5.13] - 2026-03-18 — Fix bootstrap OOM: chronological loading + ghost cleanup
+
+### Performance
+- **perf(core/critical)**: Bootstrap now loads blocks **chronologically** via `by_time` CF reverse iterator instead of lexicographically. Block IDs are hashes, so lexicographic "newest N" selects random blocks — causing 99.8% orphan tips (49,904/50,000 on Eden with 13.2M blocks). Chronological loading preserves parent-child locality, reducing orphans to ~2-5%.
+- **perf(ledger/critical)**: Eliminated ~1.16 GB allocation in `LedgerInstance::bootstrap()`. `all_block_ids()` loaded all 13.2M IDs into a Vec just to check `.is_empty()`. Replaced with `is_empty()` — a single RocksDB iterator seek (O(1), 0 bytes).
+- **perf(core)**: `block_count_estimate()` uses RocksDB `estimate-num-keys` property (O(1)) instead of full table scan for diagnostic logging.
+- **perf(core)**: Ghost entry cleanup after bootstrap. Parent IDs referenced by loaded blocks but outside the loaded window created phantom entries in `children_count`/`children_idx` DashMaps (~100-800 MB). `cleanup_ghost_entries()` removes them in a single pass.
+- **perf(server)**: `get_block_parents()` fallback in `tx_helpers.rs` replaced `all_block_ids()` (full scan) with `recent_ids(1)` (O(1)).
+
+### Added
+- **feat(storage)**: 3 new `DagStorage` trait methods with optimized `RocksStore` overrides:
+  - `is_empty()` — O(1) single iterator seek on `idx_blocks` CF
+  - `newest_block_ids_by_time(n)` — reverse iterator on `by_time` CF for chronological ordering, with fallback to lexicographic when `by_time` is empty (e.g. after `import_json`)
+  - `block_count_estimate()` — O(1) via RocksDB `rocksdb.estimate-num-keys` property
+- **feat(core)**: `ConcurrentDag::cleanup_ghost_entries()` — post-bootstrap pass that removes DashMap entries for parent block IDs not in the loaded block set.
+
+### Changed
+- **change(core)**: Bootstrap `insertion_order` now uses the loading order directly (oldest-first from chronological iterator) instead of re-sorting lexicographically. This means `prune_oldest()` evicts truly oldest blocks first.
+- **change(core)**: Bootstrap diagnostic log changed from `warn` to `info` level and reports "post-ghost-cleanup" counts.
+
+---
+
+## [0.5.12] - 2026-03-18 — Fix PMS fee bootstrap deadlock on custom ledgers
+
+### Fixed
+- **fix(server/critical)**: Custom asset transfers (e.g., EDN on eden) failed with "insufficient PMS for fee" because agents had no PMS on the custom ledger. This created a chicken-and-egg deadlock: PMS fees required PMS to exist, but PMS could only appear via fee distribution which required successful transfers. Now, when PMS is unavailable for the protocol fee on custom asset transfers, the fee is gracefully waived. Smart contract transfer fees (in the custom asset) still apply, providing fee revenue to the ledger creator.
+- **fix(server)**: `create_reward_block()` silently swallowed errors (returned `None` without logging). Added structured logging for forge failures, persist rejections, and persist errors — makes debugging fee distribution issues on custom ledgers visible in production logs.
+- **fix(server)**: `perform_fee_distribution()` used `state._cfg.network.network_id` (ServerConfig) instead of `state.settings.network.network_id` (Settings). While functionally equivalent today (both load global config), `_cfg` is an internal field not intended for fee distribution. Switched to the canonical `settings` field for consistency and future-proofing.
+
+---
+
+## [0.5.11] - 2026-03-17 — Fix bootstrap OOM on large ledgers
+
+### Performance
+- **perf(core/critical)**: Bootstrap no longer loads all block IDs into memory. Added `newest_block_ids(n)` to `DagStorage` trait — uses a **reverse RocksDB iterator** to read only the N newest IDs. For Eden (7.8M blocks), this reduces bootstrap memory from ~500 MB (full `Vec<String>`) to ~1.6 MB (25K IDs only). Eliminates the primary cause of OOM kills on 8 GB VPS.
+- **perf(storage)**: `RocksStore::newest_block_ids()` override uses `IteratorMode::End` to read N keys in reverse order, then reverses for ascending lex order. O(N) instead of O(total_blocks).
+
+### Changed
+- **change(docker/testnet)**: Engine memory limit raised from 6g→7g to provide headroom on 8 GB VPS.
+- **change(config/testnet)**: Added RAM scaling guide (8/16/32 GB) as comments in `[rocks]` section for easy tuning.
+
+---
+
 ## [0.5.10] - 2026-03-17 — Fix transfer fees broken on custom ledgers
 
 ### Fixed

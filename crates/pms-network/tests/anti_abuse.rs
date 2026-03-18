@@ -109,6 +109,15 @@ impl NetDagAdapter for DummyAdapter {
         rust_decimal::Decimal::ZERO
     }
 
+    /// Retourne le solde d'une adresse filtré par asset (toujours 0 pour le DummyAdapter)
+    async fn balance_by_address_and_asset(
+        &self,
+        _address: &str,
+        _asset_id: Option<&str>,
+    ) -> rust_decimal::Decimal {
+        rust_decimal::Decimal::ZERO
+    }
+
     /// Retourne les UTXOs d'une adresse (vide pour le DummyAdapter)
     async fn utxos_by_address(
         &self,

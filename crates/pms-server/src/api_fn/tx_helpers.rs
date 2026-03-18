@@ -348,15 +348,17 @@ pub fn is_nft_type_fee_exempt(
 }
 
 /// Select parent blocks for a new block.
-/// Uses top_tips, falls back to all_block_ids, enforces single_writer.
+/// Uses top_tips, falls back to recent_ids(1), enforces single_writer.
 pub async fn get_block_parents(
     store: &Arc<RocksStore>,
     settings: &Settings,
 ) -> Result<Vec<String>, String> {
     let mut parents = match store.top_tips(2).await {
         Ok(tips) if !tips.is_empty() => tips,
-        _ => match store.all_block_ids().await {
-            Ok(ids) if !ids.is_empty() => vec![ids[0].clone()],
+        // Fallback: pick the most recent block instead of loading ALL IDs
+        // (all_block_ids on 13M+ blocks allocates ~1 GB).
+        _ => match store.recent_ids(1).await {
+            Ok(ids) if !ids.is_empty() => ids,
             _ => return Err("no parents available (empty DAG)".into()),
         },
     };
@@ -610,7 +612,7 @@ pub async fn create_reward_block(
     };
 
     let adapter = state.srv.adapter_arc();
-    let wb = forge_and_sign_block(
+    let wb = match forge_and_sign_block(
         Some(PayloadEnvelope::Plain(reward_payload)),
         vec![parent_block_id.to_string()],
         &adapter,
@@ -619,25 +621,52 @@ pub async fn create_reward_block(
         Some("Reward distribution"),
     )
     .await
-    .ok()?;
-
-    if let Ok(PutResult::Inserted) = persist_and_broadcast(state, &wb).await {
-        // Register fee UTXOs so recipients can spend them
-        let adapter = state.srv.adapter_arc();
-        for (idx, fo) in fee_outputs_raw.iter().enumerate() {
-            adapter
-                .add_utxo(
-                    wb.id.clone(),
-                    idx as u32,
-                    fo.address.clone(),
-                    fo.amount.clone(),
-                    None, // fees always in PMS native
-                )
-                .await;
+    {
+        Ok(wb) => wb,
+        Err(e) => {
+            tracing::warn!(
+                ledger = %state.ledger_id,
+                fee = %fee_dec,
+                "Reward block forge failed: {e}"
+            );
+            return None;
         }
-        Some(wb.id)
-    } else {
-        None
+    };
+
+    match persist_and_broadcast(state, &wb).await {
+        Ok(PutResult::Inserted) => {
+            // Register fee UTXOs so recipients can spend them
+            let adapter = state.srv.adapter_arc();
+            for (idx, fo) in fee_outputs_raw.iter().enumerate() {
+                adapter
+                    .add_utxo(
+                        wb.id.clone(),
+                        idx as u32,
+                        fo.address.clone(),
+                        fo.amount.clone(),
+                        None, // fees always in PMS native
+                    )
+                    .await;
+            }
+            Some(wb.id)
+        }
+        Ok(other) => {
+            tracing::warn!(
+                ledger = %state.ledger_id,
+                block_id = %wb.id,
+                result = ?other,
+                "Reward block not inserted"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::error!(
+                ledger = %state.ledger_id,
+                block_id = %wb.id,
+                "Reward block persist error: {e}"
+            );
+            None
+        }
     }
 }
 

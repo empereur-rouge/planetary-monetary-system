@@ -17,8 +17,55 @@ pub trait DagStorage: Send + Sync {
 
     async fn all_block_ids(&self) -> Result<Vec<String>>;
 
+    /// Returns the `n` lexicographically largest block IDs (i.e. the "newest"
+    /// in RocksDB key order).  When `n == 0`, returns **all** IDs (same as
+    /// `all_block_ids()`).
+    ///
+    /// The default implementation falls back to `all_block_ids()` + truncation.
+    /// `RocksStore` overrides this with a **reverse iterator** so that only `n`
+    /// keys are ever read — critical for ledgers with millions of blocks where
+    /// loading all IDs would consume hundreds of MB of RAM.
+    async fn newest_block_ids(&self, n: usize) -> Result<Vec<String>> {
+        let mut all = self.all_block_ids().await?;
+        if n > 0 && all.len() > n {
+            all = all.split_off(all.len() - n);
+        }
+        Ok(all)
+    }
+
+    /// O(1) check whether the storage contains any blocks.
+    ///
+    /// Default implementation falls back to `all_block_ids()`.
+    /// `RocksStore` overrides with a single iterator seek on `idx_blocks` CF.
+    async fn is_empty(&self) -> Result<bool> {
+        Ok(self.all_block_ids().await?.is_empty())
+    }
+
+    /// Returns up to `n` block IDs ordered by insertion timestamp (newest first
+    /// in the iterator, reversed to oldest-first in the returned Vec).
+    ///
+    /// Uses the `by_time` index for true chronological ordering.  This is
+    /// critical for bootstrap: consecutive blocks reference recent parents,
+    /// so loading the N most-recent blocks preserves parent-child locality
+    /// and minimises orphan tips (~2-5% vs ~99.8% with lexicographic order).
+    ///
+    /// Falls back to `newest_block_ids(n)` (lexicographic) when the time
+    /// index is unavailable (e.g. `MockStore`, or blocks imported via
+    /// `import_json` which skips the `by_time` CF).
+    async fn newest_block_ids_by_time(&self, n: usize) -> Result<Vec<String>> {
+        self.newest_block_ids(n).await
+    }
+
     /// Returns the total number of blocks in the DAG
     async fn block_count(&self) -> Result<u64>;
+
+    /// Returns an **approximate** block count using storage metadata.
+    ///
+    /// `RocksStore` uses RocksDB's `estimate-num-keys` property (O(1)).
+    /// Default falls back to the exact (but potentially slow) `block_count()`.
+    async fn block_count_estimate(&self) -> Result<u64> {
+        self.block_count().await
+    }
 
     async fn export_json(&self) -> Result<String>;
     async fn export_namespace(&self) -> Result<String>;
