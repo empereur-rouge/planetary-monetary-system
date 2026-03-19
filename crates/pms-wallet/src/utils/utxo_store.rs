@@ -23,14 +23,10 @@ pub async fn gather_wallet_utxos_dec(
 ) -> anyhow::Result<Vec<UtxoDec>> {
     let candidates = address_candidates(hrp, wallet_pub_hex, wallet_x25519_pub_hex);
 
-    // Si scan_limit est grand (>500), on suppose une demande d'historique profond.
-    // Comme `by_time` est taillé par `tip_limit` (ex: 256), `recent_ids` ne suffit pas.
-    // On bascule sur un scan complet (coûteux mais exhaustif).
-    let ids = if scan_limit > 500 {
-        store.all_block_ids().await?
-    } else {
-        store.recent_ids(scan_limit).await?
-    };
+    // Always use bounded recent_ids() — never call all_block_ids().
+    // At 15M+ blocks, all_block_ids() allocates ~1.2 GB and loads every
+    // block payload into RAM.  recent_ids(N) is O(N) via the by_time CF.
+    let ids = store.recent_ids(scan_limit).await?;
     let blocks = store.get_blocks_by_ids(&ids).await?;
 
     let mut earned: HashMap<(String, u32), Decimal> = HashMap::new();
@@ -169,12 +165,8 @@ pub async fn gather_address_utxos_dec(
     // variantes d’adresse si tu en as (bech32m/hex/etc)
     let candidates = vec![address.to_string()];
 
-    // Même logique deep scan
-    let ids = if scan_limit > 500 {
-        store.all_block_ids().await?
-    } else {
-        store.recent_ids(scan_limit).await?
-    };
+    // Always bounded — see gather_wallet_utxos_dec() rationale.
+    let ids = store.recent_ids(scan_limit).await?;
     let blocks = store.get_blocks_by_ids(&ids).await?;
 
     let mut earned: HashMap<(String, u32), Decimal> = HashMap::new();

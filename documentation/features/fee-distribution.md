@@ -2,7 +2,7 @@
 tags: [feature]
 created: 2026-01-10
 updated: 2026-03-18
-version: v0.5.12
+version: v0.5.15
 ---
 
 # Fee Distribution (Distribution Automatique des Frais)
@@ -37,6 +37,7 @@ En plus des frais de gas PMS et des burn refunds, le système supporte désormai
 | 2026-03-14 | branche `feature/economics` | Intégration fee burn (`burn_rate_bps`), gas pool, subscriptions, dynamic fees |
 | 2026-03-15 | v0.5.1 | Fix: `contract_store` field in `AppState` — burn refunds now work on custom ledgers (contracts looked up from main store) |
 | 2026-03-18 | v0.5.12 | Fix: PMS fee bootstrap deadlock on custom ledgers — protocol fee waived when PMS unavailable for custom asset transfers |
+| 2026-03-18 | v0.5.15 | Fix: Supply double-counting — removed redundant `add_utxo` calls after `persist_block` for Mint and Reward blocks. `persist_block` already handles UtxoDelta → `apply_diff()` for plain payloads. |
 
 ## Mécanisme
 

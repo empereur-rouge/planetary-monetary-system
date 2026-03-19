@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
 
     for instance in ledger_mgr.list_all() {
         let dag_size = instance.dag.len();
-        let persisted = instance.store.block_count().await.unwrap_or(0);
+        let persisted = instance.store.block_count_estimate().await.unwrap_or(0);
         let dag_ver = instance.store.get_dag_version().await.unwrap_or_else(|_| "?".into());
         let schema_ver = instance.store.get_version().await.unwrap_or(0);
         pms_server::metrics::PMS_BLOCKS_TOTAL

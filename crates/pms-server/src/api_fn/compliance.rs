@@ -321,25 +321,10 @@ pub async fn admin_seize(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     };
 
+    // Note: persist_block already handles UTXOs via UtxoDelta → apply_diff()
+    // for plain Seize payloads. No manual apply_utxo_delta needed.
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
         Ok(pms_storage::PutResult::Inserted) => {
-            // Update RAM UTXO cache
-            tx_helpers::apply_utxo_delta(
-                &adapter,
-                &wb.id,
-                &target_utxos
-                    .iter()
-                    .map(|(oid, _)| TxInput {
-                        out: OutputId {
-                            txid: oid.txid.clone(),
-                            index: oid.index,
-                        },
-                    })
-                    .collect::<Vec<_>>(),
-                &outputs,
-            )
-            .await;
-
             (
                 StatusCode::OK,
                 Json(json!({
@@ -563,10 +548,10 @@ pub async fn admin_reverse(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     };
 
+    // Note: persist_block already handles UTXOs via UtxoDelta → apply_diff()
+    // for plain Reverse payloads. No manual apply_utxo_delta needed.
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
         Ok(pms_storage::PutResult::Inserted) => {
-            tx_helpers::apply_utxo_delta(&adapter, &wb.id, &reverse_inputs, &reverse_outputs).await;
-
             let refunded: Vec<String> = refund_amounts.keys().map(|(a, _)| a.clone()).collect();
             (
                 StatusCode::OK,

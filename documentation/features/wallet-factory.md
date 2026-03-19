@@ -2,7 +2,7 @@
 tags: [feature]
 created: 2026-02-13
 updated: 2026-03-18
-version: v0.5.12
+version: v0.5.15
 ---
 
 # Wallet Factory (Gestion Custodiale des Wallets)
@@ -88,7 +88,7 @@ Tous les endpoints wallet factory (sauf `/admin/faucet`) sont disponibles sur le
 
 `wallet_send_simple` interagit directement avec le cache UTXO en mémoire via `NetDagAdapter` :
 - **Lecture** : `select_utxos` appelle `adapter.utxos_by_address()` pour la coin selection (RAM, O(1) par adresse).
-- **Écriture** : `apply_utxo_delta` supprime les UTXOs consommés (`remove_utxo`) et ajoute les nouveaux outputs (`add_utxo`) directement dans le cache RAM après persistance du bloc.
+- **Écriture** : Pour les transactions **chiffrées** (`wallet_send_simple`, `submit_transaction`), `apply_utxo_delta` supprime les UTXOs consommés (`remove_utxo`) et ajoute les nouveaux outputs (`add_utxo`) directement dans le cache RAM après persistance du bloc. Pour les payloads **clairs** (`faucet_mint`, `Seize`, `Reverse`), `persist_block` gère déjà le UtxoDelta via `apply_diff()` — pas de `apply_utxo_delta` nécessaire (v0.5.15).
 
 ### Chiffrement X25519 multi-destinataire
 

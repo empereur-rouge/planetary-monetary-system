@@ -66,6 +66,13 @@ impl pms_interface::NetDagAdapter for MockAdapter {
     async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal {
         rust_decimal::Decimal::ZERO
     }
+    async fn balance_by_address_and_asset(
+        &self,
+        _address: &str,
+        _asset_id: Option<&str>,
+    ) -> rust_decimal::Decimal {
+        rust_decimal::Decimal::ZERO
+    }
     async fn utxos_by_address(
         &self,
         _address: &str,

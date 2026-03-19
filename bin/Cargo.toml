@@ -1,6 +1,6 @@
 [package]
 name = "bin"
-version = "0.5.14"
+version = "0.5.16"
 edition = "2024"
 
 [dependencies]

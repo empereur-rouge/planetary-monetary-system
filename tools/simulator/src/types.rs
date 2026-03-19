@@ -290,10 +290,14 @@ pub struct RegisterContractResponse {
 // UTXO Query API
 // ════════════════════════════════════════════════════════════════════════════
 
-/// Single UTXO entry from GET /v1/wallet/{address}/utxos
+/// Single UTXO entry from GET /v1/wallet/{address}/utxos.
+///
+/// Field names match the server's `UtxoFlatItem` (camelCase via `#[serde(rename)]`).
 #[derive(Debug, Deserialize)]
 pub struct UtxoEntry {
+    #[serde(alias = "txId", alias = "txid")]
     pub txid: String,
+    #[serde(alias = "outIdx", alias = "index")]
     pub index: u32,
     pub amount: String,
     #[serde(default)]

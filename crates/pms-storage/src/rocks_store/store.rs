@@ -152,6 +152,19 @@ impl RocksStore {
         db_opts.set_level_zero_slowdown_writes_trigger(40); // 20→40: doubles headroom
         db_opts.set_level_zero_stop_writes_trigger(56); // 24→56: hard stop raised proportionally
         db_opts.set_max_subcompactions(3); // parallelize each compaction job
+
+        // === PAGE CACHE PRESSURE CONTROL ===
+        //
+        // With 15M+ blocks across 65+ CFs, SST files on disk exceed 15 GB.
+        // Without advise_random, the kernel applies 128 KB readahead on every
+        // SST point lookup, filling the OS page cache.  In a Docker container
+        // page cache counts against `memory.max` — at 7 GB the OOM killer
+        // fires once heap + page cache saturate the cgroup.
+        //
+        // compaction_readahead_size keeps compaction sequential I/O efficient
+        // even after advise_random disables default readahead on normal reads.
+        db_opts.set_advise_random_on_open(true);
+        db_opts.set_compaction_readahead_size(2 * 1024 * 1024); // 2 MB
     }
 
     /// Build a map of short CF name → full "prefix:name" string.
@@ -261,6 +274,9 @@ impl RocksStore {
         fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
             opts.set_optimize_filters_for_hits(true);
+            // Reduce page cache pollution from SST reads (POSIX_FADV_RANDOM).
+            // See apply_db_tuning() for full rationale.
+            opts.set_advise_random_on_open(true);
 
             let mut table_opts = BlockBasedOptions::default();
             table_opts.set_bloom_filter(10.0, false);
@@ -377,6 +393,8 @@ impl RocksStore {
         fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
             opts.set_optimize_filters_for_hits(true);
+            // Reduce page cache pollution from SST reads (POSIX_FADV_RANDOM).
+            opts.set_advise_random_on_open(true);
             let mut table_opts = BlockBasedOptions::default();
             table_opts.set_bloom_filter(10.0, false);
             table_opts.set_block_cache(cache);

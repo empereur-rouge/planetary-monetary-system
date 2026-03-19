@@ -112,20 +112,26 @@ impl ActivityCache {
     }
 
     fn put(&self, key: ActivityCacheKey, resp: ActivityResp) {
-        // Evict if over capacity (simple strategy: clear oldest ~10%)
         if self.entries.len() >= self.max_entries {
-            let cutoff = self.entries.len() / 10;
-            let mut removed = 0;
-            self.entries.retain(|_, (_, created)| {
-                if removed >= cutoff {
-                    return true;
-                }
-                if created.elapsed() >= self.ttl {
+            // Phase 1: remove all TTL-expired entries (cheap, no wasted data).
+            self.entries
+                .retain(|_, (_, created)| created.elapsed() < self.ttl);
+
+            // Phase 2: if still over capacity, forcefully evict entries down to
+            // 70 % of max.  DashMap iteration order is arbitrary — equivalent to
+            // random eviction, which is acceptable for a cache.
+            if self.entries.len() >= self.max_entries {
+                let target = self.max_entries * 7 / 10;
+                let excess = self.entries.len().saturating_sub(target);
+                let mut removed = 0;
+                self.entries.retain(|_, _| {
+                    if removed >= excess {
+                        return true;
+                    }
                     removed += 1;
-                    return false;
-                }
-                true
-            });
+                    false
+                });
+            }
         }
         self.entries.insert(key, (resp, std::time::Instant::now()));
     }

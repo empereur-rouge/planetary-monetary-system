@@ -48,8 +48,11 @@ impl NodeRegistry {
         }
     }
 
-    /// Enregistre ou met à jour un nœud
+    /// Enregistre ou met à jour un nœud.
+    ///
+    /// Piggybacks a stale-node cleanup to prevent unbounded HashMap growth.
     pub fn register(&mut self, node_pk: String, api_url: String, wallet_address: Option<String>) {
+        self.cleanup_stale();
         let entry = self.nodes.entry(node_pk.clone()).or_insert(NodeInfo {
             node_pk: node_pk.clone(),
             api_url: api_url.clone(),

@@ -14,13 +14,19 @@ pub struct InternalHealthResp {
     block_count: usize,
 }
 
+/// Returns health status with approximate block count.
+///
+/// Uses `block_count_estimate()` (O(1) RocksDB property read) instead of
+/// `all_block_ids()` which loaded ALL block IDs into a `Vec<String>`.
+/// At 15M blocks, `all_block_ids()` allocated **~1.2 GB per call**.
+/// With the Gateway's `SERVICES_MONITOR` polling every 20s, this caused
+/// repeated OOM kills on 7 GB Docker containers.
 pub async fn internal_health(State(app): State<AppState>) -> impl IntoResponse {
     let count = app
         .store
-        .all_block_ids()
+        .block_count_estimate()
         .await
-        .map(|v| v.len())
-        .unwrap_or(0);
+        .unwrap_or(0) as usize;
     Json(InternalHealthResp {
         status: "ok".into(),
         block_count: count,

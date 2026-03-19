@@ -144,7 +144,9 @@ pub async fn balance_by_address(
     }))
 }
 
-/// Response format for UTXOs - matches the expected test format
+/// Response format for UTXOs — flat structure returned by `GET /v1/wallet/{address}/utxos`.
+///
+/// Includes `asset_id` for multi-asset support (PMS native = `null`, custom token = `"edenite"`).
 #[derive(serde::Serialize)]
 pub struct UtxoFlatItem {
     #[serde(rename = "txId")]
@@ -153,6 +155,9 @@ pub struct UtxoFlatItem {
     pub out_idx: u32,
     pub amount: String,
     pub address: String,
+    /// `null` for PMS native, `"edenite"` (etc.) for custom tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -174,6 +179,7 @@ pub async fn get_utxos_by_address(
             out_idx: output_id.index,
             amount: tx_output.amount,
             address: tx_output.address,
+            asset_id: tx_output.asset_id,
         })
         .collect();
 

@@ -131,7 +131,7 @@ async fn submit_block_from_cli(
     if let Err(e) = store.refresh_from_primary() {
         eprintln!("[CLI][REFRESH_BEFORE][ERR] {e:#}");
     } else {
-        let cnt = store.all_block_ids().await.map(|v| v.len()).unwrap_or(0);
+        let cnt = store.block_count_estimate().await.unwrap_or(0);
         println!("[CLI][REFRESH_BEFORE][OK] store_count={}", cnt);
     }
 

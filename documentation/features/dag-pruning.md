@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-17
-updated: 2026-03-18
-version: v0.5.13
+updated: 2026-03-19
+version: v0.5.16
 ---
 
 # DAG Pruning (Gestion Mémoire du DAG)
@@ -254,6 +254,23 @@ Le DAG Pruning a connu une série de bugs critiques découverts progressivement 
 - `cleanup_ghost_entries()` : supprime les entries DashMap pour les parents fantômes après Phase 1.
 - `block_count_estimate()` : O(1) via `rocksdb.estimate-num-keys`.
 - Résultat : pic mémoire réduit de ~6+ GB à ~3-4 GB, tips orphelins de 99.8% à ~2-5%.
+
+### Bug 11 : Page cache OOM runtime + memory leaks (corrigé v0.5.16, 2026-03-19)
+
+**Problème** : Même après les fixes bootstrap (v0.5.13) et `internal_health` (v0.5.15), l'engine crash toujours après plusieurs heures d'opération. Cinq causes combinées :
+
+1. **Page cache RocksDB** — Sans `advise_random_on_open`, chaque lecture SST déclenchait 128 KB de readahead kernel. Avec 15M+ blocs et 65+ CFs (~15+ GB de SST sur disque), le page cache saturait la limite Docker de 7 GB.
+2. **Activity cache** — L'éviction ne supprimait que les entries expirées (TTL). Si toutes étaient fraîches, rien n'était évincé même au-delà de `max_entries` (10,000). Croissance illimitée.
+3. **Node registry** — `cleanup_stale()` défini mais jamais appelé. HashMap de nœuds croissait sans borne.
+4. **`block_count()` full scan** — `main.rs` appelait `block_count()` (scan complet O(N)) au lieu de `block_count_estimate()` (O(1)).
+5. **`utxo_store.rs` all_block_ids()** — Pour `scan_limit > 500`, chargeait TOUS les block IDs (~1.2 GB à 15M blocs) + tous les payloads en RAM.
+
+**Correction** :
+- `advise_random_on_open(true)` sur toutes les CFs → kernel utilise `POSIX_FADV_RANDOM`, pas de readahead.
+- `compaction_readahead_size(2 MB)` → compaction garde un I/O séquentiel efficace.
+- Activity cache : éviction en 2 phases (expired, puis forcée à 70% si toujours plein).
+- Node registry : `cleanup_stale()` appelé à chaque `register()`.
+- `block_count_estimate()` partout, `recent_ids()` toujours borné.
 
 ## Interactions
 

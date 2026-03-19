@@ -302,10 +302,11 @@ pub async fn faucet_mint(
         }
     };
 
-    // 5) Persist + broadcast + UTXO
+    // 5) Persist + broadcast
+    // Note: persist_block already creates UTXOs via UtxoDelta → apply_diff()
+    // for plain Mint payloads. No manual apply_utxo_delta needed.
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
         Ok(PutResult::Inserted) => {
-            tx_helpers::apply_utxo_delta(&adapter, &wb.id, &[], &[mint_output]).await;
             (
                 StatusCode::CREATED,
                 Json(json!(FaucetResponse {

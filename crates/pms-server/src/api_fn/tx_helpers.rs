@@ -474,6 +474,11 @@ pub async fn persist_and_broadcast(state: &AppState, wb: &WireBlock) -> Result<P
 }
 
 /// Apply UTXO delta: remove spent inputs and add new outputs.
+///
+/// **IMPORTANT**: Only use for **encrypted** payloads where `persist_block` cannot
+/// see the transaction contents (delta = None). For **plain** payloads (Mint, Reward,
+/// Seize, Reverse, etc.), `persist_block` already constructs the UtxoDelta and calls
+/// `apply_diff()` — calling this function would double-count supply.
 pub async fn apply_utxo_delta(
     adapter: &Arc<dyn NetDagAdapter>,
     block_id: &str,
@@ -635,19 +640,8 @@ pub async fn create_reward_block(
 
     match persist_and_broadcast(state, &wb).await {
         Ok(PutResult::Inserted) => {
-            // Register fee UTXOs so recipients can spend them
-            let adapter = state.srv.adapter_arc();
-            for (idx, fo) in fee_outputs_raw.iter().enumerate() {
-                adapter
-                    .add_utxo(
-                        wb.id.clone(),
-                        idx as u32,
-                        fo.address.clone(),
-                        fo.amount.clone(),
-                        None, // fees always in PMS native
-                    )
-                    .await;
-            }
+            // Note: persist_block already creates UTXOs via UtxoDelta → apply_diff()
+            // for plain Reward payloads. No manual add_utxo needed.
             Some(wb.id)
         }
         Ok(other) => {

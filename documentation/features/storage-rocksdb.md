@@ -182,6 +182,8 @@ Ces parametres sont appliques uniformement a `new()` et `open_db_multi_prefix()`
 | `level_zero_stop_writes_trigger` | `56` | Non | Seuil d'arret total (defaut: 24) |
 | `max_subcompactions` | `3` | Non | Parallelise chaque job de compaction |
 | `max_open_files` | `512` | **Oui** (`max_open_files`) | Limite FD RocksDB. Empêche FD exhaustion sur VPS (v0.5.8) |
+| `advise_random_on_open` | `true` | Non | `POSIX_FADV_RANDOM` sur les SST files — désactive le readahead kernel (128 KB par défaut). Sans ce flag, le page cache Linux sature la limite Docker cgroup (v0.5.16) |
+| `compaction_readahead_size` | `2 MB` | Non | Readahead séquentiel pour les jobs de compaction (nécessaire car `advise_random` désactive le readahead normal) (v0.5.16) |
 
 ### Block Cache et Bloom Filters
 
