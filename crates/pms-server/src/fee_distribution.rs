@@ -509,13 +509,25 @@ pub async fn perform_fee_distribution(
                 .inc();
             let _ = state.srv.enqueue_broadcast(reward_wb.id.clone()).await;
 
-            // Note: persist_block already creates UTXOs via UtxoDelta → apply_diff()
-            // in the ShardedUtxoSet (supply_cache + address_index + shards).
-            // The previous defensive add_utxo loop was REMOVED because it caused
-            // supply double-counting: each UTXO was counted twice in supply_cache,
-            // inflating circulating_supply by 2x.
+            // 5. UPDATE UTXOS DIRECTLY
+            // Note: persist_block already handles UTXO creation via the Reward
+            // payload delta. This loop is a defensive redundancy that ensures
+            // UTXOs are visible in RAM even if persist_block's delta path missed them.
+            for (idx, output) in all_outputs.iter().enumerate() {
+                state
+                    .srv
+                    .adapter_arc()
+                    .add_utxo(
+                        reward_wb.id.clone(),
+                        idx as u32,
+                        output.address.clone(),
+                        output.amount.clone(),
+                        output.asset_id.clone(), // multi-asset support (PMS or custom token)
+                    )
+                    .await;
+            }
 
-            // 5. RESET POOL
+            // 6. RESET POOL
             {
                 let mut pool = state.fee_pool.write().await;
                 pool.reset();
@@ -736,8 +748,19 @@ pub async fn perform_daily_inflation_mint(state: &AppState) -> Result<Distribute
                 .inc();
             let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
 
-            // Note: persist_block already creates UTXOs via UtxoDelta → apply_diff().
-            // No defensive add_utxo loop (would double-count supply).
+            for (idx, output) in all_outputs.iter().enumerate() {
+                state
+                    .srv
+                    .adapter_arc()
+                    .add_utxo(
+                        wb.id.clone(),
+                        idx as u32,
+                        output.address.clone(),
+                        output.amount.clone(),
+                        None, // inflation always PMS
+                    )
+                    .await;
+            }
 
             tracing::info!(
                 "📊 Daily inflation minted: {} PMS to {} wallets (block: {})",

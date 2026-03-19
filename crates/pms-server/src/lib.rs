@@ -20,6 +20,7 @@ mod rate;
 pub mod server;
 pub mod stats;
 pub mod tls;
+pub mod tps_logger;
 
 pub use config::*;
 pub use helper::resolve_admin_token;

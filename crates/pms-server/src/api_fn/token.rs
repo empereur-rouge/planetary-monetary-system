@@ -485,8 +485,19 @@ pub async fn admin_mint_token(
                 .inc();
             let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
 
-            // Note: persist_block already creates UTXOs via UtxoDelta → apply_diff()
-            // for plain Mint payloads. No manual add_utxo needed.
+            // Update UTXO set for all outputs
+            let adapter = state.srv.adapter_arc();
+            for (idx, output) in outputs.iter().enumerate() {
+                adapter
+                    .add_utxo(
+                        wb.id.clone(),
+                        idx as u32,
+                        output.address.clone(),
+                        output.amount.clone(),
+                        output.asset_id.clone(),
+                    )
+                    .await;
+            }
 
             // Accumulate mint fee in pool
             if mint_fee_dec > Decimal::ZERO {

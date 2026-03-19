@@ -266,8 +266,8 @@ Le DAG Pruning a connu une série de bugs critiques découverts progressivement 
 5. **`utxo_store.rs` all_block_ids()** — Pour `scan_limit > 500`, chargeait TOUS les block IDs (~1.2 GB à 15M blocs) + tous les payloads en RAM.
 
 **Correction** :
-- `advise_random_on_open(true)` sur toutes les CFs → kernel utilise `POSIX_FADV_RANDOM`, pas de readahead.
-- `compaction_readahead_size(2 MB)` → compaction garde un I/O séquentiel efficace.
+- `use_direct_io_for_flush_and_compaction(true)` → compaction/flush utilisent O_DIRECT (bypass page cache). Les lectures utilisateur conservent le readahead kernel. Note: `advise_random_on_open(true)` a été testé initialement mais causait un TPS regression 22x (2000→90) car il désactivait le readahead sur TOUTES les lectures SST.
+- `compaction_readahead_size(2 MB)` → compaction garde un I/O séquentiel efficace avec direct I/O.
 - Activity cache : éviction en 2 phases (expired, puis forcée à 70% si toujours plein).
 - Node registry : `cleanup_stale()` appelé à chaque `register()`.
 - `block_count_estimate()` partout, `recent_ids()` toujours borné.

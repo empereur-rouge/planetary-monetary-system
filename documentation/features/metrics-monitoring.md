@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure]
 created: 2025-12-28
-updated: 2026-03-14
-version: v0.3.0
+updated: 2026-03-19
+version: v0.5.16
 ---
 
 # Metrics & Monitoring (Prometheus)
@@ -163,6 +163,54 @@ Le service est place sur le reseau interne `pms-internal` (bridge, `internal: tr
 
 ---
 
+## TPS Logger (v0.5.16)
+
+Module de diagnostic qui enregistre les metriques de throughput toutes les 10 minutes dans un fichier JSONL append-only.
+
+### Fichier de log
+
+- **Chemin** : `{data_dir}/tps_log.jsonl` (ex: `/home/pms/data/tps_log.jsonl` en Docker)
+- **Format** : Une ligne JSON par entree, auto-contenue
+
+```json
+{
+  "ts": "2026-03-19T16:50:00Z",
+  "epoch_ms": 1742403000000,
+  "deployment_id": "6604a1b2-3c4d5e6f",
+  "ledger": "main",
+  "tps_60s": 1842.5,
+  "block_count": 15234567,
+  "circulating_supply": "1000000.00000000",
+  "total_burned": "42000.12345678",
+  "node_pk": "04a1b2c3d4e5f6g7",
+  "uptime_min": 30
+}
+```
+
+### Champs
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `ts` | string | ISO 8601 UTC timestamp |
+| `epoch_ms` | u64 | Unix epoch en millisecondes |
+| `deployment_id` | string | ID unique par instance (17 chars: `{timestamp_hex}-{random_hex}`) |
+| `ledger` | string | ID du ledger (`"main"` ou custom) |
+| `tps_60s` | f64 | TPS mesure sur les 60 dernieres secondes (via `TpsTracker`) |
+| `block_count` | u64 | Estimation du nombre de blocs en RocksDB |
+| `circulating_supply` | string | Supply en circulation (8 decimales) |
+| `total_burned` | string | Total brule cumulatif |
+| `node_pk` | string | 16 premiers caracteres de la cle publique du noeud |
+| `uptime_min` | u64 | Minutes depuis le demarrage du logger |
+
+### Usage
+
+- Lance automatiquement au demarrage du serveur dans `api.rs` via `spawn_tps_logger()`
+- Premiere entree apres 10 minutes (skip le tick immediat)
+- Le `deployment_id` permet de distinguer les redemarrages des runs continus
+- Aucune dependance externe (pas de chrono, pas de uuid)
+
+---
+
 ## Crates et Fichiers
 
 | Fichier                                                       | Role                                                                      |
@@ -171,6 +219,7 @@ Le service est place sur le reseau interne `pms-internal` (bridge, `internal: tr
 | `crates/pms-server/src/internal_api.rs`                       | Endpoint `/internal/metrics` pour le proxy Gateway                        |
 | `crates/pms-server/src/api.rs`                                | Routes `/metrics`, `/metrics/all`, `/l/{id}/metrics` + sync DAG size      |
 | `crates/pms-server/src/stats.rs`                              | Compteurs atomiques internes (non-Prometheus) pour les logs               |
+| `crates/pms-server/src/tps_logger.rs`                         | TPS logger JSONL — enregistrement periodique du throughput (v0.5.16)      |
 | `crates/pms-server/src/server.rs`                             | Boucle de log des stats P2P (~10s) + incrementation metriques persist     |
 | `crates/pms-server/src/api_fn/blocks.rs`                      | Incrementation `BLOCKS_PERSISTED` sur submit de bloc                      |
 | `crates/pms-server/src/api_fn/tx_helpers.rs`                  | Incrementation `BLOCKS_PERSISTED` + `PMS_BLOCKS_TOTAL` sur transaction    |

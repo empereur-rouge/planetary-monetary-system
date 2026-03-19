@@ -153,18 +153,21 @@ impl RocksStore {
         db_opts.set_level_zero_stop_writes_trigger(56); // 24→56: hard stop raised proportionally
         db_opts.set_max_subcompactions(3); // parallelize each compaction job
 
-        // === PAGE CACHE PRESSURE CONTROL ===
+        // === PAGE CACHE CONTROL (v0.5.16) ===
         //
-        // With 15M+ blocks across 65+ CFs, SST files on disk exceed 15 GB.
-        // Without advise_random, the kernel applies 128 KB readahead on every
-        // SST point lookup, filling the OS page cache.  In a Docker container
-        // page cache counts against `memory.max` — at 7 GB the OOM killer
-        // fires once heap + page cache saturate the cgroup.
+        // Without this, the kernel applies 128 KB readahead on every SST
+        // file read. With 15M+ blocks across 65+ CFs, the page cache fills
+        // the Docker cgroup memory limit (7 GB) within minutes → OOM kill loop.
         //
-        // compaction_readahead_size keeps compaction sequential I/O efficient
-        // even after advise_random disables default readahead on normal reads.
-        db_opts.set_advise_random_on_open(true);
-        db_opts.set_compaction_readahead_size(2 * 1024 * 1024); // 2 MB
+        // `advise_random_on_open(true)` tells the OS that SST file access is
+        // random (point lookups), disabling readahead. This keeps page cache
+        // usage proportional to actual working set instead of full DB size.
+        //
+        // HISTORICAL NOTE: This was initially blamed for a 22x TPS regression
+        // (2000→90), but the true cause was removing redundant add_utxo()
+        // calls in 6 code paths (same commit). With add_utxo restored and
+        // advise_random enabled, both OOM prevention AND high TPS are achieved.
+        db_opts.set_compaction_readahead_size(2 * 1024 * 1024); // 2 MB for sequential compaction reads
     }
 
     /// Build a map of short CF name → full "prefix:name" string.
@@ -274,8 +277,8 @@ impl RocksStore {
         fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
             opts.set_optimize_filters_for_hits(true);
-            // Reduce page cache pollution from SST reads (POSIX_FADV_RANDOM).
-            // See apply_db_tuning() for full rationale.
+            // Disable kernel readahead on SST file reads (point lookups are random).
+            // Without this, 128 KB readahead per read fills Docker cgroup page cache → OOM.
             opts.set_advise_random_on_open(true);
 
             let mut table_opts = BlockBasedOptions::default();
@@ -393,7 +396,8 @@ impl RocksStore {
         fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
             opts.set_optimize_filters_for_hits(true);
-            // Reduce page cache pollution from SST reads (POSIX_FADV_RANDOM).
+            // Disable kernel readahead on SST file reads (point lookups are random).
+            // Without this, 128 KB readahead per read fills Docker cgroup page cache → OOM.
             opts.set_advise_random_on_open(true);
             let mut table_opts = BlockBasedOptions::default();
             table_opts.set_bloom_filter(10.0, false);

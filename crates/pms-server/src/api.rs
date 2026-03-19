@@ -959,6 +959,11 @@ pub async fn serve_api(
     spawn_inflation_mint_task(state.clone());
 
     // ═══════════════════════════════════════════════════════════════════════
+    // TPS LOGGER (periodic JSONL file — every 10 min)
+    // ═══════════════════════════════════════════════════════════════════════
+    crate::tps_logger::spawn_tps_logger(state.clone(), settings.rocks.path.clone());
+
+    // ═══════════════════════════════════════════════════════════════════════
     // CONTRACT EVALUATION LISTENER (EventBus)
     // ═══════════════════════════════════════════════════════════════════════
     if let Some(bus) = main_event_bus {

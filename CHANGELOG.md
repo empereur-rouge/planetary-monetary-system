@@ -7,36 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.5.16] - 2026-03-19 — Fix runtime OOM: RocksDB page cache control + memory leak fixes
+## [0.5.16] - 2026-03-19 — Revert TPS regression + TPS logger + deploy automation
+
+### Added
+- **feat(server)**: TPS logger — periodic throughput recording for production diagnostics. Spawns a background task that writes a JSONL line every 10 minutes to `{data_dir}/tps_log.jsonl`. Each deployment gets a unique UUID so operators can distinguish restarts from sustained runs. Fields: `ts`, `epoch_ms`, `deployment_id`, `ledger`, `tps_60s`, `block_count`, `circulating_supply`, `total_burned`, `node_pk`, `uptime_min`.
+- **feat(deploy)**: `deploy-testnet.sh` now supports `--yes`/`-y` non-interactive mode for CI/CD and AI-driven deploys. Auto-answers prompts with defaults, reuses admin token from backup, skips macOS file picker dialog. Backup saved to external drive (`/Volumes/.../pms-key/`) in auto mode.
+
+### Fixed
+- **fix(server/critical)**: UTXOs endpoint (`GET /v1/wallet/{address}/utxos`) was missing `asset_id` field in the response. `UtxoFlatItem` dropped `asset_id` from `TxOutput` during conversion — clients filtering by asset always saw 0 balance (e.g., EDN). Added `asset_id: Option<String>` to `UtxoFlatItem`.
+- **fix(simulator)**: `UtxoEntry` field names (`txid`/`index`) didn't match server's camelCase format (`txId`/`outIdx`). Deserialization failed silently → balance always 0. Added `#[serde(alias)]` to accept both formats.
+- **fix(server)**: Activity cache eviction was broken — cache could grow unboundedly. Fixed: two-phase eviction.
+- **fix(server)**: Node registry `cleanup_stale()` was defined but never called. Fixed: piggyback cleanup on `register()`.
+
+### Reverted
+- **revert(server/critical)**: Restored `add_utxo()`/`apply_utxo_delta()` calls after `persist_block()` in 6 code paths: `fee_distribution.rs` (Mint + Reward), `wallet_factory.rs` (faucet mint), `tx_helpers.rs` (per-tx reward), `token.rs` (token mint), `compliance.rs` (Seize + Reverse). Removing these caused the 22x TPS regression (2000→90). The `add_utxo` calls make UTXOs immediately available in RAM for subsequent transactions; without them, the system stalled waiting for `persist_block`'s async delta propagation.
+- **revert(storage)**: Removed `use_direct_io_for_flush_and_compaction(true)` (does not help, made newly-flushed SSTs cold). Kept `advise_random_on_open(true)` — essential to prevent OOM on 8 GB Docker cgroups. The TPS=90 was misattributed to `advise_random`; the true cause was the `add_utxo` removals above.
 
 ### Performance
-- **perf(storage/critical)**: Added `advise_random_on_open(true)` to ALL RocksDB column families. Without this, every SST point lookup triggered 128 KB kernel readahead, filling the OS page cache. In Docker containers, page cache counts against `memory.max` — with 15M+ blocks across 65+ CFs (15+ GB SST data on disk), the kernel-cached pages saturated the 7 GB cgroup limit, causing OOM kills after hours of operation. `POSIX_FADV_RANDOM` disables readahead on SST files. Combined with `compaction_readahead_size(2 MB)` so compaction retains efficient sequential I/O.
+- **perf(server/critical)**: `internal_health()` endpoint called `all_block_ids()`, loading ALL block IDs into a `Vec<String>`. At 15M blocks, this allocated **~1.2 GB per call**. Replaced with `block_count_estimate()` (O(1), 0 bytes).
 - **perf(main)**: `block_count()` at startup replaced with `block_count_estimate()` — eliminates a full RocksDB table scan (O(N) with N=15M) during boot.
-- **perf(wallet)**: `gather_wallet_utxos_dec()` and `gather_address_utxos_dec()` no longer call `all_block_ids()` for large `scan_limit` values. Previously, `scan_limit > 500` triggered a full block ID scan (~1.2 GB at 15M blocks). Now always uses bounded `recent_ids(scan_limit)`.
-
-### Fixed
-- **fix(server)**: Activity cache eviction was broken — only removed TTL-expired entries up to 10% of capacity. If all entries were fresh (within TTL), nothing was evicted even when over `max_entries` (10,000). Cache could grow unboundedly. Fixed: two-phase eviction — first removes all expired entries, then forcefully evicts down to 70% capacity if still over limit.
-- **fix(server)**: Node registry `cleanup_stale()` was defined but **never called** in production. HashMap of registered nodes grew unboundedly. Fixed: piggyback cleanup on every `register()` call.
-
----
-
-## [0.5.15] - 2026-03-18 — Fix EDN balance visibility + supply double-counting
-
-### Performance
-- **perf(server/critical)**: `internal_health()` endpoint called `all_block_ids()`, loading ALL block IDs into a `Vec<String>`. At 15M blocks, this allocated **~1.2 GB per call**. The Gateway's `SERVICES_MONITOR` polled this endpoint every 20 seconds — each poll spiked memory by 1.2 GB, causing repeated OOM kills on 7 GB Docker containers. Replaced with `block_count_estimate()` (O(1) RocksDB property read, 0 bytes allocated).
-- **perf(tools-cli)**: `block_submission.rs` refresh diagnostic used `all_block_ids()` for block count. Replaced with `block_count_estimate()`.
-
-### Fixed
-- **fix(api/critical)**: UTXOs endpoint (`GET /v1/wallet/{address}/utxos`) was missing `asset_id` field in the response. The `UtxoFlatItem` struct only returned `txId`, `outIdx`, `amount`, and `address` — dropping `asset_id` from `TxOutput` during the conversion. This caused the simulator (and any client filtering UTXOs by asset) to see 0 custom token balance (e.g., EDN) because `asset_id` was always `null`. Added `asset_id: Option<String>` to `UtxoFlatItem`.
-- **fix(simulator)**: `UtxoEntry` field names (`txid`/`index`) didn't match server's camelCase format (`txId`/`outIdx`). Deserialization failed silently → `unwrap_or(0.0)` caught it → balance always 0. Added `#[serde(alias)]` to accept both formats.
-- **fix(server/critical)**: Supply double-counting across 6 code paths. After `persist_block()` updates RAM via `UtxoDelta → apply_diff()` (which increments `supply_cache`), redundant `add_utxo()` calls incremented `supply_cache` again — inflating `circulating_supply` by up to 2x. Removed redundant UTXO registration in:
-  - `fee_distribution.rs` — Mint blocks (burn refund distribution)
-  - `fee_distribution.rs` — Reward blocks (daily inflation mint)
-  - `wallet_factory.rs` — Faucet mint (plain Mint payload)
-  - `tx_helpers.rs` — Per-tx reward blocks (plain Reward payload)
-  - `token.rs` — Token mint (plain Mint payload)
-  - `compliance.rs` — Seize and Reverse (plain payloads)
-- **note**: `apply_utxo_delta()` is correctly retained for **encrypted** transaction payloads (`wallet_send_simple`, `submit_transaction`) where `persist_block` cannot see the transaction contents (delta = None).
+- **perf(wallet)**: `gather_wallet_utxos_dec()` and `gather_address_utxos_dec()` no longer call `all_block_ids()` for large `scan_limit` values. Now always uses bounded `recent_ids(scan_limit)`.
 
 ### Changed
 - **change(api)**: `API_VERSION` bumped 6 → 7 (UTXOs endpoint now includes `asset_id` field).

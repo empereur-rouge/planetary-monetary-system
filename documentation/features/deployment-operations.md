@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure, ops]
 created: 2026-03-14
-updated: 2026-03-15
-version: v0.4.4
+updated: 2026-03-19
+version: v0.5.16
 ---
 
 # Deployment & Operations
@@ -137,7 +137,7 @@ Le binaire `tools-cli` est inclus dans l'image Engine pour permettre l'initialis
 | Script | Usage | Description |
 |---|---|---|
 | `scripts/deploy.sh` | `./deploy.sh <VPS_IP> [USER]` | Deploiement interactif complet production (git pull, build, init coordinateur, backup cles) |
-| `scripts/deploy-testnet.sh` | `./deploy-testnet.sh <VPS_IP> [USER] [SSH_KEY]` | Deploiement testnet avec build local cross-compile + transfert SCP |
+| `scripts/deploy-testnet.sh` | `./deploy-testnet.sh [--yes] <VPS_IP> [USER] [SSH_KEY]` | Deploiement testnet avec build local cross-compile + transfert SCP. `--yes`/`-y` : mode non-interactif (CI/CD, AI-driven). |
 | `scripts/upgrade-testnet.sh` | `./upgrade-testnet.sh <VPS_IP> [USER] [SSH_KEY]` | Upgrade testnet sans toucher aux donnees (rebuild + restart selectif) |
 | `scripts/setup_production.sh` | `./setup_production.sh <DOMAIN>` | Setup initial production : genere token admin, cles, Caddyfile, docker-compose.prod.yml |
 

@@ -3,6 +3,12 @@
 # Script de deploiement PMS Testnet (Engine + Gateway + Caddy + Simulator)
 # =============================================================================
 # Usage: ./deploy-testnet.sh <VPS_IP> [USER] [SSH_KEY]
+#        ./deploy-testnet.sh --yes <VPS_IP> [USER] [SSH_KEY]
+#
+# Options:
+#   --yes, -y   Non-interactive mode: auto-answers Y to build, N to clean reset,
+#               N to init coordinator, Y to backup. Reuses existing admin token
+#               from the VPS (or generates one). Useful for CI/CD and AI-driven deploys.
 #
 # SSH key auth recommended to avoid password prompts during long builds:
 #   ssh-keygen -t ed25519 -f ~/.ssh/pms_vps
@@ -22,9 +28,19 @@
 
 set -e
 
-VPS_IP="${1:-}"
-VPS_USER="${2:-pms}"
-SSH_KEY="${3:-}"
+# Parse --yes / -y flag (can appear anywhere in args)
+AUTO_YES=false
+POSITIONAL_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --yes|-y) AUTO_YES=true ;;
+        *) POSITIONAL_ARGS+=("$arg") ;;
+    esac
+done
+
+VPS_IP="${POSITIONAL_ARGS[0]:-}"
+VPS_USER="${POSITIONAL_ARGS[1]:-pms}"
+SSH_KEY="${POSITIONAL_ARGS[2]:-}"
 
 # SSH options: use key if provided, keep connection alive during long builds
 SSH_OPTS="-o ServerAliveInterval=30 -o ServerAliveCountMax=5 -o ConnectTimeout=10"
@@ -47,8 +63,9 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 if [ -z "$VPS_IP" ]; then
-    echo "Usage: $0 <VPS_IP> [USER] [SSH_KEY]"
+    echo "Usage: $0 [--yes|-y] <VPS_IP> [USER] [SSH_KEY]"
     echo "Example: $0 87.106.50.82 pms ~/.ssh/pms_vps"
+    echo "         $0 --yes 87.106.50.82 pms ~/.ssh/pms_vps  # non-interactive"
     exit 1
 fi
 
@@ -59,6 +76,9 @@ echo "   Target: $VPS_USER@$VPS_IP"
 echo "   Domain: $DOMAIN_NAME"
 echo "   Stack:  Engine + Gateway + Caddy + Prometheus + Simulator"
 echo -e "   Build:  ${BOLD}Local (cross-compile linux/amd64)${NC}"
+if [ "$AUTO_YES" = "true" ]; then
+    echo -e "   Mode:   ${YELLOW}NON-INTERACTIVE (--yes)${NC}"
+fi
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -68,6 +88,17 @@ ask_yes_no() {
     local prompt="$1"
     local default="$2"
     local reply
+
+    # Non-interactive mode: use the default answer
+    if [ "$AUTO_YES" = "true" ]; then
+        if [ "$default" = "Y" ]; then
+            echo "$prompt → auto: Y"
+            return 0
+        else
+            echo "$prompt → auto: N"
+            return 1
+        fi
+    fi
 
     if [ "$default" = "Y" ]; then
         prompt="$prompt [Y/n]"
@@ -92,11 +123,30 @@ ask_yes_no() {
 # 1. Token Admin
 # -----------------------------------------------------------------------------
 echo -e "${YELLOW}[1/7] Admin Token${NC}"
-read -p "   Enter ADMIN_TOKEN (leave empty to generate random): " ADMIN_TOKEN
 
-if [ -z "$ADMIN_TOKEN" ]; then
-    ADMIN_TOKEN=$(openssl rand -hex 32)
-    echo -e "   Generated: ${GREEN}$ADMIN_TOKEN${NC}"
+if [ "$AUTO_YES" = "true" ]; then
+    # Non-interactive: try to extract token from existing backup, else generate
+    ADMIN_TOKEN=""
+    # Look for the most recent backup file (check external drive first, then local)
+    LATEST_BACKUP=$(ls -t "/Volumes/Crutial X9 - Macbook Erwan/Misc/pms-key/pms-testnet-"*.json 2>/dev/null | head -1)
+    if [ -z "$LATEST_BACKUP" ]; then
+        LATEST_BACKUP=$(ls -t backups/pms-testnet-*.json 2>/dev/null | head -1)
+    fi
+    if [ -n "$LATEST_BACKUP" ]; then
+        ADMIN_TOKEN=$(python3 -c "import json; print(json.load(open('$LATEST_BACKUP')).get('deployment',{}).get('admin_token',''))" 2>/dev/null || echo "")
+    fi
+    if [ -z "$ADMIN_TOKEN" ]; then
+        ADMIN_TOKEN=$(openssl rand -hex 32)
+        echo -e "   Auto-generated: ${GREEN}${ADMIN_TOKEN:0:20}...${NC}"
+    else
+        echo -e "   Reused from backup: ${GREEN}${ADMIN_TOKEN:0:20}...${NC}"
+    fi
+else
+    read -p "   Enter ADMIN_TOKEN (leave empty to generate random): " ADMIN_TOKEN
+    if [ -z "$ADMIN_TOKEN" ]; then
+        ADMIN_TOKEN=$(openssl rand -hex 32)
+        echo -e "   Generated: ${GREEN}$ADMIN_TOKEN${NC}"
+    fi
 fi
 
 # -----------------------------------------------------------------------------
@@ -696,15 +746,20 @@ echo ""
 if ask_yes_no "   Download Secure Backup (coordinator keys) locally?" "Y"; then
     echo -e "${YELLOW}[6/7] Downloading backup...${NC}"
 
-    BACKUP_DIR="backups"
     DEFAULT_FILENAME="pms-testnet-$(date +%Y%m%d-%H%M%S).json"
     BACKUP_FILE=""
 
-    if command -v osascript &>/dev/null; then
+    if [ "$AUTO_YES" = "true" ]; then
+        # Non-interactive: save to the operator's external drive
+        BACKUP_DIR="/Volumes/Crutial X9 - Macbook Erwan/Misc/pms-key"
+        mkdir -p "$BACKUP_DIR"
+        BACKUP_FILE="$BACKUP_DIR/$DEFAULT_FILENAME"
+    elif command -v osascript &>/dev/null; then
         BACKUP_FILE=$(osascript -e "set fileName to choose file name with prompt \"Save PMS Testnet Backup:\" default name \"$DEFAULT_FILENAME\" default location (path to desktop folder)" -e "POSIX path of fileName" 2>/dev/null)
     fi
 
     if [ -z "$BACKUP_FILE" ]; then
+        BACKUP_DIR="backups"
         mkdir -p "$BACKUP_DIR"
         BACKUP_FILE="$BACKUP_DIR/$DEFAULT_FILENAME"
     fi
@@ -816,6 +871,9 @@ echo "   - Dashboard:       https://$DOMAIN_NAME/dashboard/"
 echo "   - Simulator:       http://$VPS_IP:9090"
 echo "   - Prometheus:      http://localhost:9091 (VPS only)"
 echo ""
+echo -e "   ${BOLD}Admin Token:${NC}"
+echo -e "   - Token:       ${RED}$ADMIN_TOKEN${NC}"
+echo ""
 if [ -n "$COORD_ADDRESS" ]; then
     echo -e "   ${BOLD}Coordinator Wallet:${NC}"
     echo -e "   - Address:     ${GREEN}$COORD_ADDRESS${NC}"
@@ -834,5 +892,5 @@ echo "   Useful commands (on VPS):"
 echo "   - Logs engine:     docker logs -f pms-engine-testnet"
 echo "   - Logs simulator:  docker logs -f pms-simulator-testnet"
 echo "   - Status:          docker compose -f $COMPOSE_FILE ps"
-echo "   - Stop:            PMS_ADMIN_TOKEN=xxx docker compose -f $COMPOSE_FILE down"
+echo "   - Stop:            PMS_ADMIN_TOKEN=$ADMIN_TOKEN docker compose -f $COMPOSE_FILE down"
 echo ""
