@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-01-10
-updated: 2026-03-18
-version: v0.5.15
+updated: 2026-03-19
+version: v0.5.18
 ---
 
 # Fee Distribution (Distribution Automatique des Frais)
@@ -38,6 +38,8 @@ En plus des frais de gas PMS et des burn refunds, le système supporte désormai
 | 2026-03-15 | v0.5.1 | Fix: `contract_store` field in `AppState` — burn refunds now work on custom ledgers (contracts looked up from main store) |
 | 2026-03-18 | v0.5.12 | Fix: PMS fee bootstrap deadlock on custom ledgers — protocol fee waived when PMS unavailable for custom asset transfers |
 | 2026-03-18 | v0.5.15 | Fix: Supply double-counting — removed redundant `add_utxo` calls after `persist_block` for Mint and Reward blocks. `persist_block` already handles UtxoDelta → `apply_diff()` for plain payloads. |
+| 2026-03-19 | v0.5.16 | Test: DAG Sandbox (`dag_sandbox.rs`) — integration test verifying coordinator receives fees from eden transactions via immediate Reward blocks. |
+| 2026-03-19 | v0.5.18 | Fix: Supply endpoint wallet balances (`admin_balance`, `node_balance`, `treasury_balance`) now use `balance_by_address_and_asset()` — correctly displays EDN (or other custom token) balances instead of always PMS native. |
 
 ## Mécanisme
 

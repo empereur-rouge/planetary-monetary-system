@@ -7,11 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.5.16] - 2026-03-19 — Revert TPS regression + TPS logger + deploy automation
+## [0.5.18] - 2026-03-20 — Fix supply endpoint EDN wallet balances + Eden TPS optimization
+
+### Fixed
+- **fix(api/critical)**: `GET /v1/supply` wallet balances (`admin_balance`, `node_balance`, `treasury_balance`) always showed PMS native balance, even when `circulating_supply` auto-resolved to edenite on custom ledgers. Dashboard showed "2.36 EDN circulating" but "0 EDN" for all wallets. Root cause: all wallet balance calls used `balance_by_address()` (PMS native only) instead of `balance_by_address_and_asset()` with the resolved asset. Fix: when a custom token is resolved (auto-fallback or explicit `?asset_id=`), wallet balances now use `balance_by_address_and_asset(&addr, resolved_asset)`.
+
+### Added
+- **feat(simulator)**: `edn_sends_per_tick` config field for `AgentGameConfig`. Like PMS `sends_per_tick`, allows each agent to send N sequential EDN transfers per tick during Phase 2 instead of 1. Each send re-queries balance for accurate UTXO tracking. Break on error or balance below threshold. Default: 1 (backward compat).
+- **feat(test)**: `test_supply_endpoint_edn_balances` — sandbox test validating the supply endpoint fix. Burns 5 cubes → distributes EDN refunds → sends EDN (triggering 5% transfer fee) → queries `/l/eden/v1/supply?asset_id=edenite` → asserts `admin_balance > 0` (was always "0" before the fix). Also validates auto-resolve behavior when PMS native exists on eden.
+- **feat(test)**: `get_supply()` helper method on Sandbox struct — queries supply endpoint with optional ledger and asset_id parameters.
+
+### Changed
+- **change(simulator)**: Testnet `burn_cooldown_ticks` increased to align with `distribution_interval_sec`: users/miners 10→15, whales 10→5 (×5s=25s), savers 10→3 (×10s=30s). Ensures agents stay in cooldown long enough for `fee_distribution` (now 10s) to deliver EDN UTXOs before Phase 3 remint triggers. Previously, cooldown (10s) expired before distribution (30s) → Phase 2 (send EDN) almost never fired.
+- **change(simulator)**: All game-enabled agent groups now have `edn_sends_per_tick` configured: users=5, miners=10, whales=3, savers=5. Estimated Eden TPS boost: ~3→~355 EDN sends/s.
+- **change(config)**: Testnet `distribution_interval_sec` reduced 30→10s. Faster EDN UTXO delivery aligns with agent cooldown windows.
+
+### Infrastructure
+- **infra(config)**: `agents_testnet.toml` and `agents_dev.toml` updated with new `edn_sends_per_tick` and `burn_cooldown_ticks` values per agent group.
+
+---
+
+## [0.5.17] - 2026-03-19 — EDN lifecycle integration test + diagnostic logging
+
+### Added
+- **feat(test)**: `test_pms_throughput_benchmark` — sandbox benchmark proving PMS engine handles ~10,000 TPS (10 workers × 100 tx, 100% success rate). Demonstrates that simulator's ~200 PMS TPS is an agent config bottleneck (1 tx/tick/agent), not an engine limitation. Engine headroom: ~50x.
+- **feat(simulator)**: `sends_per_tick` config field for `AgentBehavior::Random` and `Coordinator`. Allows each agent to send N sequential PMS transactions per tick instead of 1. Solves PMS TPS disparity vs Eden (200 vs 2000) by multiplying each agent's throughput. Each send is sequential within a wallet (UTXO chain dependency), but concurrent across agents.
+- **feat(test)**: `test_edn_transfer_fee_flow` — comprehensive sandbox test validating the COMPLETE Edenite lifecycle: cube NFT burn → EDN refund (AccumulateRefund) → FeePool distribution → EDN UTXOs → send EDN → 5% TransferFee → coordinator receives EDN. Includes 7 assertions with conservation check (remaining + sent + fee = refund). Validates the exact flow the VPS simulator runs.
+- **feat(test)**: Sandbox helpers: `get_utxos()`, `get_asset_balance()`, `register_contract()`, `mint_nft()`, `burn_nft_simple()`, `send_asset()` — reusable building blocks for future integration tests.
+- **feat(simulator)**: Diagnostic logging for Phase 2 detection in `RandomAgent::game_tick()` — logs EDN balance checks (non-zero), query failures, and Phase 2 entry events. Helps diagnose why agents may never enter the EDN transfer phase on the VPS.
+- **feat(simulator)**: Diagnostic logging in `GameEngine::send_edenite()` — pre-send (amount, recipient, asset) and post-send (block_id, gas_fee, transfer_fee) log lines.
+- **feat(simulator)**: `transfer_fee` field added to `SendResponse` struct in `types.rs` for visibility into smart contract transfer fees.
+- **feat(contracts)**: Debug logging in `evaluate_transfer()` — logs when no transfer contracts found and when evaluating contracts (count, amount, asset, ledger).
+
+### Fixed
+- **fix(test)**: `boot_sandbox()` restructured to load admin wallet FIRST, then write coordinator keys into config file BEFORE `LedgerManager::bootstrap()`. Critical fix: `CoreAdapter::new()` calls `load_config()` internally — programmatic settings modifications were ignored for coordinator key, causing NFT burn validation to reject coordinator-signed burns.
+
+### Performance
+- **perf(simulator)**: Lock-free game engine pattern — `GameEngine` write lock no longer held during HTTP calls. Previously, 65 agents competed for a single `RwLock<GameEngine>` write lock held for 1-2 seconds each during Phase 1 (burn) and Phase 3 (remint 80-120 cubes), serializing all game operations. New static methods (`execute_burn_batch()`, `generate_mint_specs()`, `execute_mints_parallel()`) run HTTP calls without any lock. Write lock held only for brief HashMap registry operations (`drain_cubes()`, `restore_cubes()`, `register_minted()`).
+- **perf(simulator)**: Cached game client — `RandomAgent` caches `(DagClient, edenite_asset_id)` on first game_tick instead of acquiring a read lock every tick. Phase 2 (send EDN) and EDN balance queries now run entirely lock-free.
+
+### Changed
+- **change(simulator)**: `sends_per_tick` added to `AgentBehavior::Random` (default: 1). Agents now send N PMS transactions per tick in a sequential loop. Configured values: snipers=25 (1250 tx/s), fast=15 (480 tx/s), users=5 (60 tx/s), whales=3, savers=5. Theoretical testnet total: ~1793 PMS tx/s (was ~95 with sends_per_tick=1).
+- **change(simulator)**: `burn_cooldown_ticks` added to `AgentGameConfig` (default: 10 ticks). After burning cubes, agents wait N ticks before reminting, giving `fee_distribution` time to deliver EDN UTXOs. Without this, agents cycled burn→remint faster than the 600s distribution interval, so Phase 2 (send EDN → trigger TransferFee) was almost never reached. During cooldown, agents check EDN balance each tick and enter Phase 2 immediately when EDN arrives.
+- **change(simulator)**: All agent config files (`agents_dev.toml`, `agents_testnet.toml`) updated with `burn_cooldown_ticks = 10` and `sends_per_tick` tuned per agent group.
+
+### Infrastructure
+- **infra(docker)**: `docker-compose.testnet.yml` healthcheck timing adjusted: `interval=10s` (was 5s), `timeout=5s` (was 3s), `retries=10` (was 15), `start_period=300s` (was 120s). Prevents premature unhealthy status during initial bootstrap with large block counts.
+
+---
+
+## [0.5.16] - 2026-03-19 — Revert TPS regression + TPS logger + deploy automation + DAG sandbox
 
 ### Added
 - **feat(server)**: TPS logger — periodic throughput recording for production diagnostics. Spawns a background task that writes a JSONL line every 10 minutes to `{data_dir}/tps_log.jsonl`. Each deployment gets a unique UUID so operators can distinguish restarts from sustained runs. Fields: `ts`, `epoch_ms`, `deployment_id`, `ledger`, `tps_60s`, `block_count`, `circulating_supply`, `total_burned`, `node_pk`, `uptime_min`.
 - **feat(deploy)**: `deploy-testnet.sh` now supports `--yes`/`-y` non-interactive mode for CI/CD and AI-driven deploys. Auto-answers prompts with defaults, reuses admin token from backup, skips macOS file picker dialog. Backup saved to external drive (`/Volumes/.../pms-key/`) in auto mode.
+- **feat(test)**: DAG Sandbox (`dag_sandbox.rs`) — production-like in-process PMS engine for integration tests. Boots full LedgerManager + EventBus + ContractListener + fee distribution on a random port with tempdir RocksDB. Reusable `boot_sandbox()` returns a `Sandbox` struct with helpers: `create_ledger()`, `deposit_gas_pool()`, `faucet_mint()`, `send_simple()`, `get_balance()`, `distribute_fees()`. First test: `test_coordinator_receives_eden_fees` verifies coordinator receives fee revenue from eden transactions via immediate Reward blocks.
+- **feat(test)**: Local TPS Benchmark (`local_bench.rs`) — in-process benchmark simulating 6 vCores (VPS constraint). Achieves ~9,000 TPS locally vs 2,000 TPS on VPS. Dev mode config generation (no coordinator key enforcement).
+- **change(api)**: `FeePoolRefundSink` made `pub` in `api.rs` for integration test wiring.
 
 ### Fixed
 - **fix(server/critical)**: UTXOs endpoint (`GET /v1/wallet/{address}/utxos`) was missing `asset_id` field in the response. `UtxoFlatItem` dropped `asset_id` from `TxOutput` during conversion — clients filtering by asset always saw 0 balance (e.g., EDN). Added `asset_id: Option<String>` to `UtxoFlatItem`.

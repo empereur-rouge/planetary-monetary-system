@@ -90,8 +90,8 @@ use tower_http::{
 /// Adapts `FeePoolRegistry` to the `RefundSink` trait required by `pms-contracts`.
 ///
 /// Each call routes the refund to the correct per-ledger FeePool.
-struct FeePoolRefundSink {
-    registry: Arc<crate::fee_pool::FeePoolRegistry>,
+pub struct FeePoolRefundSink {
+    pub registry: Arc<crate::fee_pool::FeePoolRegistry>,
 }
 
 impl pms_contracts::RefundSink for FeePoolRefundSink {

@@ -507,7 +507,13 @@ impl GameEngine {
         to_addr: &str,
         amount: &str,
     ) -> SimResult<()> {
-        self.game_client
+        tracing::info!(
+            "send_edenite: {} EDN to {}... (asset={})",
+            amount,
+            &to_addr[..20.min(to_addr.len())],
+            &self.edenite_asset_id,
+        );
+        let resp = self.game_client
             .send_simple(&SendSimpleRequest {
                 private_key_b64: private_key_b64.to_string(),
                 to: to_addr.to_string(),
@@ -515,6 +521,15 @@ impl GameEngine {
                 asset_id: Some(self.edenite_asset_id.clone()),
             })
             .await?;
+        let block_id = resp.data.block_id.as_deref().unwrap_or("?");
+        let gas_fee = resp.data.fee.as_deref().unwrap_or("0");
+        let transfer_fee = resp.data.transfer_fee.as_deref().unwrap_or("0");
+        tracing::info!(
+            "send_edenite: OK — block={}..., gas_fee={}, transfer_fee={}",
+            &block_id[..16.min(block_id.len())],
+            gas_fee,
+            transfer_fee,
+        );
         Ok(())
     }
 
@@ -531,6 +546,172 @@ impl GameEngine {
     /// Number of cubes currently tracked in the registry (for diagnostics).
     pub fn registry_len(&self) -> usize {
         self.cube_registry.len()
+    }
+
+    /// Get the edenite asset ID (for caching in agents).
+    pub fn edenite_asset_id(&self) -> &str {
+        &self.edenite_asset_id
+    }
+
+    /// Get the divisor (for logging in agents).
+    pub fn divisor(&self) -> f64 {
+        self.divisor
+    }
+
+    // ── Lock-free helpers ──────────────────────────────────────────────
+    //
+    // These methods split game operations into phases that run WITHOUT
+    // holding the RwLock during HTTP calls, eliminating write-lock
+    // serialization that was capping Eden TPS at ~60.
+    //
+    // Pattern: acquire write lock → quick registry op → drop lock →
+    //          HTTP calls (no lock) → re-acquire lock → register results.
+
+    /// Remove cubes from registry and return them with their attributes + total expected EDN.
+    /// Quick operation (HashMap removes only, no I/O). Call under write lock, then drop lock.
+    pub fn drain_cubes(&mut self, token_ids: &[String]) -> (Vec<(String, CubeAttributes)>, f64) {
+        let mut drained = Vec::with_capacity(token_ids.len());
+        let mut total_edn = 0.0;
+        for tid in token_ids {
+            if let Some(attrs) = self.cube_registry.remove(tid) {
+                total_edn += attrs.edenite_reward(self.divisor);
+                drained.push((tid.clone(), attrs));
+            }
+        }
+        (drained, total_edn)
+    }
+
+    /// Restore drained cubes on burn failure (re-insert into registry).
+    pub fn restore_cubes(&mut self, cubes: Vec<(String, CubeAttributes)>) {
+        for (tid, attrs) in cubes {
+            self.cube_registry.insert(tid, attrs);
+        }
+    }
+
+    /// Execute a batch burn HTTP call. Static — does NOT hold any lock.
+    pub async fn execute_burn_batch(
+        client: &DagClient,
+        private_key_b64: &str,
+        token_ids: Vec<String>,
+    ) -> SimResult<()> {
+        client
+            .burn_nft_batch_simple(&BurnNftBatchSimpleRequest {
+                private_key_b64: private_key_b64.to_string(),
+                token_ids,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Generate cube mint specs. Static — pure RNG, no lock needed.
+    pub fn generate_mint_specs(count: usize) -> Vec<(String, CubeAttributes, String)> {
+        if count == 0 {
+            return vec![];
+        }
+        let mut rng = rand::rng();
+        (0..count)
+            .map(|_| {
+                let token_id: String = (0..64)
+                    .map(|_| format!("{:x}", rng.random_range(0u8..16)))
+                    .collect();
+                let attrs = CubeAttributes {
+                    weight: rng.random_range(100.0..1000.0),
+                    size: rng.random_range(100.0..500.0),
+                    density: rng.random_range(1.0..20.0),
+                };
+                let extra = serde_json::to_string(&attrs).unwrap_or_default();
+                (token_id, attrs, extra)
+            })
+            .collect()
+    }
+
+    /// Execute parallel mint HTTP calls. Static — does NOT hold any lock.
+    /// Returns `(minted_cubes, ok_count, err_count)`.
+    pub async fn execute_mints_parallel(
+        client: &DagClient,
+        specs: &[(String, CubeAttributes, String)],
+        owner_address: &str,
+        owner_x25519_pubkey: &str,
+    ) -> (Vec<(String, CubeAttributes)>, usize, usize) {
+        if specs.is_empty() {
+            return (vec![], 0, 0);
+        }
+
+        let sem = Arc::new(Semaphore::new(MINT_CONCURRENCY));
+        let mut tasks = Vec::with_capacity(specs.len());
+
+        for (token_id, attrs, extra) in specs {
+            let client = client.clone();
+            let sem = sem.clone();
+            let token_id = token_id.clone();
+            let owner_address = owner_address.to_string();
+            let owner_x25519 = owner_x25519_pubkey.to_string();
+            let attrs_clone = attrs.clone();
+            let extra = extra.clone();
+
+            tasks.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let result = client
+                    .admin_mint_nft(&MintNftRequest {
+                        token_id: token_id.clone(),
+                        owner_address,
+                        owner_x25519_pubkey: owner_x25519,
+                        metadata: NftMetadataSim {
+                            name: Some(format!("Cube Edenite #{}", &token_id[..8])),
+                            description: Some(format!(
+                                "w={:.0} s={:.0} d={:.1}",
+                                attrs_clone.weight, attrs_clone.size, attrs_clone.density
+                            )),
+                            uri: None,
+                            nft_type: Some("cube".to_string()),
+                            extra: Some(extra),
+                        },
+                    })
+                    .await;
+                (token_id, attrs_clone, result)
+            }));
+        }
+
+        let mut minted = Vec::with_capacity(specs.len());
+        let mut ok_count = 0usize;
+        let mut err_count = 0usize;
+
+        for task in tasks {
+            match task.await {
+                Ok((token_id, attrs, Ok(_))) => {
+                    minted.push((token_id, attrs));
+                    ok_count += 1;
+                }
+                Ok((token_id, _, Err(e))) => {
+                    tracing::warn!("Cube mint failed {}: {:#}", &token_id[..16], e);
+                    err_count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("Cube mint task panic: {:#}", e);
+                    err_count += 1;
+                }
+            }
+        }
+
+        tracing::info!(
+            "Parallel mint: {} ok, {} errors (requested {})",
+            ok_count,
+            err_count,
+            specs.len()
+        );
+
+        (minted, ok_count, err_count)
+    }
+
+    /// Register minted cubes in the local registry. Returns token IDs.
+    pub fn register_minted(&mut self, cubes: Vec<(String, CubeAttributes)>) -> Vec<String> {
+        cubes
+            .into_iter()
+            .map(|(tid, attrs)| {
+                self.cube_registry.insert(tid.clone(), attrs);
+                tid
+            })
+            .collect()
     }
 }
 

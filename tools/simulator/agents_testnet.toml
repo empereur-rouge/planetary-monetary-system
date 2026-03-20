@@ -5,6 +5,8 @@
 # ---------------------------------------------------------------------------
 # CASUAL USERS — Transactions PMS moderees + game loop
 # 40 agents, 1 tick/s, petits montants, 30% de chance d'envoyer
+# PMS: sends_per_tick = 5 → 40 × 0.3 × 5 = 60 PMS tx/s
+# EDN: edn_sends_per_tick = 5, cooldown = 15 (15s > 10s distrib)
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 40
@@ -16,6 +18,7 @@ type = "random"
 min_amount = 0.1
 max_amount = 5.0
 send_probability = 0.3
+sends_per_tick = 5
 
 [agents.game]
 enabled = true
@@ -24,10 +27,13 @@ cubes_remint_min = 80
 cubes_remint_max = 120
 edn_send_min_pct = 10.0
 edn_send_max_pct = 50.0
+burn_cooldown_ticks = 15
+edn_sends_per_tick = 5
 
 # ---------------------------------------------------------------------------
 # FAST TRADERS — Micro-transactions rapides, pas de game
 # 20 agents, 500ms entre chaque tick, tres petits montants, 80% send
+# sends_per_tick = 15 → 20 × 0.8/0.5s × 15 = 480 PMS tx/s
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 20
@@ -39,10 +45,12 @@ type = "random"
 min_amount = 0.01
 max_amount = 0.5
 send_probability = 0.8
+sends_per_tick = 15
 
 # ---------------------------------------------------------------------------
 # MINERS — Game-only, pas d'envoi PMS, focus burn/mint cubes
 # 15 agents, 1 tick/s, beaucoup de cubes
+# EDN: edn_sends_per_tick = 10, cooldown = 15 (15s > 10s distrib)
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 15
@@ -62,10 +70,14 @@ cubes_remint_min = 80
 cubes_remint_max = 120
 edn_send_min_pct = 5.0
 edn_send_max_pct = 20.0
+burn_cooldown_ticks = 15
+edn_sends_per_tick = 10
 
 # ---------------------------------------------------------------------------
 # WHALES — Gros montants, peu frequents
 # 5 agents, 1 tick toutes les 5s, gros envois
+# PMS: sends_per_tick = 3 → 5 × 0.8/5s × 3 = 2.4 PMS tx/s
+# EDN: edn_sends_per_tick = 3, cooldown = 5 (5×5s=25s > 10s distrib)
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 5
@@ -77,6 +89,7 @@ type = "random"
 min_amount = 50.0
 max_amount = 200.0
 send_probability = 0.8
+sends_per_tick = 3
 
 [agents.game]
 enabled = true
@@ -85,10 +98,13 @@ cubes_remint_min = 80
 cubes_remint_max = 120
 edn_send_min_pct = 30.0
 edn_send_max_pct = 80.0
+burn_cooldown_ticks = 5
+edn_sends_per_tick = 3
 
 # ---------------------------------------------------------------------------
 # SNIPERS — Tres rapides, tres petits montants, envoi quasi systematique
 # 10 agents, 200ms, micro-tx
+# sends_per_tick = 25 → 10 × 1.0/0.2s × 25 = 1250 PMS tx/s
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 10
@@ -100,10 +116,13 @@ type = "random"
 min_amount = 0.001
 max_amount = 0.05
 send_probability = 1.0
+sends_per_tick = 25
 
 # ---------------------------------------------------------------------------
 # SLOW SAVERS — Peu actifs, gros envois occasionnels + game
 # 5 agents, 1 tick toutes les 10s
+# PMS: sends_per_tick = 5 → 5 × 0.4/10s × 5 = 1 PMS tx/s
+# EDN: edn_sends_per_tick = 5, cooldown = 3 (3×10s=30s > 10s distrib)
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 5
@@ -115,6 +134,7 @@ type = "random"
 min_amount = 10.0
 max_amount = 50.0
 send_probability = 0.4
+sends_per_tick = 5
 
 [agents.game]
 enabled = true
@@ -123,6 +143,8 @@ cubes_remint_min = 80
 cubes_remint_max = 120
 edn_send_min_pct = 40.0
 edn_send_max_pct = 90.0
+burn_cooldown_ticks = 3
+edn_sends_per_tick = 5
 
 # ---------------------------------------------------------------------------
 # OBSERVERS — Monitoring passif

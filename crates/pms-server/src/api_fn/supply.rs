@@ -63,7 +63,15 @@ pub struct SupplyQuery {
 }
 
 /// GET /v1/supply - Retourne le supply circulant
-/// Query params: ?asset_id=edenite (optional, default = PMS natif)
+///
+/// Query params: `?asset_id=edenite` (optional, default = PMS natif)
+///
+/// When no `asset_id` is specified and PMS native supply is 0, auto-fallbacks
+/// to the first registered custom token (e.g. edenite on eden).
+///
+/// Wallet balances (`admin_balance`, `node_balance`, `treasury_balance`) use the
+/// same resolved asset — `balance_by_address_and_asset()` ensures they reflect
+/// the correct token, not always PMS native. (Fixed in v0.5.18)
 pub async fn get_circulating_supply(
     State(state): State<AppState>,
     Query(query): Query<SupplyQuery>,
@@ -104,22 +112,32 @@ pub async fn get_circulating_supply(
     let mut treasury_bal = Decimal::ZERO;
     let mut treasury_details = Vec::new();
 
+    // Use asset-specific balance when a custom token was resolved (e.g. edenite on eden).
+    // Without this, wallet balances show PMS native (0) while supply shows EDN.
+    let asset_filter = resolved_asset.as_deref();
+
     // 1. Admin Wallet Balance (coordinator)
     if let Some(path) = &settings.secrets.admin_wallet_file {
         if let Ok(wallet) = pms_wallet::Wallet::load_from_file(path) {
             let addr = wallet.get_address(&settings.address.hrp);
-            admin_bal = adapter.balance_by_address(&addr).await;
+            admin_bal = adapter
+                .balance_by_address_and_asset(&addr, asset_filter)
+                .await;
         }
     }
 
     // 2. Node Identity Balance (rewards)
     let node_addr = state.node_wallet.get_address(&settings.address.hrp);
-    let node_bal = adapter.balance_by_address(&node_addr).await;
+    let node_bal = adapter
+        .balance_by_address_and_asset(&node_addr, asset_filter)
+        .await;
 
     // 3. Treasury Balance - pre-loaded wallets, fallback to fees config
     if !state.treasury_wallets.is_empty() {
         for addr in &state.treasury_wallets.list {
-            let bal = adapter.balance_by_address(addr).await;
+            let bal = adapter
+                .balance_by_address_and_asset(addr, asset_filter)
+                .await;
             treasury_bal += bal;
             treasury_details.push(TreasuryWalletDetail {
                 address: addr.clone(),
@@ -128,7 +146,9 @@ pub async fn get_circulating_supply(
         }
     } else {
         for addr in &settings.fees.treasury_addresses {
-            let bal = adapter.balance_by_address(addr).await;
+            let bal = adapter
+                .balance_by_address_and_asset(addr, asset_filter)
+                .await;
             treasury_bal += bal;
             treasury_details.push(TreasuryWalletDetail {
                 address: addr.clone(),

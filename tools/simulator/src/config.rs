@@ -149,6 +149,16 @@ pub struct AgentGameConfig {
     /// Max % of EDN balance to send (default: 50.0)
     #[serde(default = "default_edn_send_max_pct")]
     pub edn_send_max_pct: f64,
+    /// Ticks to wait after burn before reminting (allows fee_distribution to deliver EDN).
+    /// During cooldown, the agent checks for EDN balance each tick instead of reminting.
+    /// Set to 0 to disable (old behavior). Default: 10 ticks.
+    #[serde(default = "default_burn_cooldown_ticks")]
+    pub burn_cooldown_ticks: u32,
+    /// Number of sequential EDN transfers per tick during Phase 2 (default: 1).
+    /// Like PMS `sends_per_tick`, multiplies EDN throughput without adding agents.
+    /// Each send is sequential (UTXO chain from same wallet).
+    #[serde(default = "default_edn_sends_per_tick")]
+    pub edn_sends_per_tick: u32,
 }
 
 impl Default for AgentGameConfig {
@@ -160,6 +170,8 @@ impl Default for AgentGameConfig {
             cubes_remint_max: 120,
             edn_send_min_pct: 10.0,
             edn_send_max_pct: 50.0,
+            burn_cooldown_ticks: 10,
+            edn_sends_per_tick: 1,
         }
     }
 }
@@ -178,6 +190,12 @@ fn default_edn_send_min_pct() -> f64 {
 }
 fn default_edn_send_max_pct() -> f64 {
     50.0
+}
+fn default_burn_cooldown_ticks() -> u32 {
+    10
+}
+fn default_edn_sends_per_tick() -> u32 {
+    1
 }
 
 fn default_agent_interval() -> u64 {
@@ -201,6 +219,11 @@ pub enum AgentBehavior {
         max_amount: f64,
         #[serde(default = "default_send_probability")]
         send_probability: f64,
+        /// Number of PMS transactions to send per tick (default: 1).
+        /// Increase to multiply PMS throughput without adding agents.
+        /// Each send is sequential (UTXO chain from same wallet).
+        #[serde(default = "default_sends_per_tick")]
+        sends_per_tick: u32,
     },
     Observer,
     Coordinator {
@@ -210,6 +233,9 @@ pub enum AgentBehavior {
         max_amount: f64,
         #[serde(default = "default_coord_send_probability")]
         send_probability: f64,
+        /// Number of PMS transactions to send per tick (default: 1).
+        #[serde(default = "default_sends_per_tick")]
+        sends_per_tick: u32,
     },
 }
 
@@ -233,6 +259,9 @@ fn default_coord_max_amount() -> f64 {
 }
 fn default_coord_send_probability() -> f64 {
     1.0
+}
+fn default_sends_per_tick() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Deserialize)]

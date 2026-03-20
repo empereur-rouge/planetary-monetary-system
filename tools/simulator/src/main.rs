@@ -326,6 +326,7 @@ async fn main() -> anyhow::Result<()> {
                 min_amount,
                 max_amount,
                 send_probability,
+                sends_per_tick,
             } => {
                 let inbox = comms.register(&name).await;
                 let mut agent = agent::random::RandomAgent::new(
@@ -335,6 +336,7 @@ async fn main() -> anyhow::Result<()> {
                     *min_amount,
                     *max_amount,
                     *send_probability,
+                    *sends_per_tick,
                     agent_def.game.clone(),
                 );
                 if let Some(cubes) = cube_map.get(&name) {
@@ -363,6 +365,7 @@ async fn main() -> anyhow::Result<()> {
                 min_amount,
                 max_amount,
                 send_probability,
+                sends_per_tick: _,
             } = &agent_def.behavior
             {
                 let agent_box: Box<dyn agent::Agent> =

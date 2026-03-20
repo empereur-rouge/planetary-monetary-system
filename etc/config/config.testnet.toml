@@ -69,7 +69,7 @@ mode = "uniform"
 enforce_fee_recipient = false
 coordinator_fee_percent = 65
 treasury_fee_percent = 35
-distribution_interval_sec = 30
+distribution_interval_sec = 10
 # Inflation acceleree pour testnet
 daily_inflation_enabled = true
 daily_inflation_interval_sec = 120

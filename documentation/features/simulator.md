@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-15
-updated: 2026-03-11
-version: v0.1.0
+updated: 2026-03-20
+version: v0.5.18
 ---
 
 # Simulator / Game Engine
@@ -25,7 +25,7 @@ Le simulateur est un binaire Rust indépendant (pas un workspace member du DAG-P
 | | Date |
 |---|---|
 | Créée | 2026-02-15 |
-| Dernière mise à jour | 2026-03-11 |
+| Dernière mise à jour | 2026-03-19 |
 | Version d'introduction | v0.1.0 |
 
 **Commits clés :**
@@ -260,7 +260,7 @@ Le simulateur est un crate standalone dans `tools/simulator/` (pas un workspace 
 | `pms-simulator` | `tools/simulator/src/tui/mod.rs` | `TuiApp` : boucle principale ratatui, gestion clavier (q / Ctrl+C), drain du chat, rendu périodique. |
 | `pms-simulator` | `tools/simulator/src/tui/dashboard.rs` | `render()` : layout ratatui 5 zones (header, sparklines TPS + barres latence, DAG status + table agents, chat P2P, event log). |
 | `pms-simulator` | `tools/simulator/src/web.rs` | Dashboard web Axum : `GET /` (page HTML inline avec CSS dark + JS WebSocket), `GET /ws` (WebSocket fan-out). Affiche les messages agents en temps réel. |
-| `pms-simulator` | `tools/simulator/src/types.rs` | Types de requêtes/réponses pour l'API PMS : `WalletInfo`, `SendSimpleRequest`, `BalanceRequest`, `FaucetRequest`, `CreateLedgerRequest`, `CreateTokenRequest`, `MintTokenRequest`, `MintNftRequest`, `BurnNftSimpleRequest`, `BurnNftBatchSimpleRequest`, etc. |
+| `pms-simulator` | `tools/simulator/src/types.rs` | Types de requêtes/réponses pour l'API PMS : `WalletInfo`, `SendSimpleRequest`, `BalanceRequest`, `FaucetRequest`, `CreateLedgerRequest`, `CreateTokenRequest`, `MintTokenRequest`, `MintNftRequest`, `BurnNftSimpleRequest`, `BurnNftBatchSimpleRequest`, `SendResponse` (avec `transfer_fee` v0.5.17), etc. |
 | `pms-simulator` | `tools/simulator/src/error.rs` | `SimError` enum (Http, ServerError, Gemini, InsufficientBalance, Config, Bootstrap, Json, Other). `SimResult<T>` type alias. |
 | -- | `tools/simulator/simulator.dev.toml` | Config pour développement local (gateway localhost:8443, TUI active, web 9090) |
 | -- | `tools/simulator/simulator.docker.toml` | Config pour Docker (gateway via DNS interne `pms-gateway:8443`, TUI désactivé) |
@@ -277,22 +277,29 @@ Le simulateur définit **4 types d'agents** via l'enum `AgentBehavior`, déploya
 
 ### 1. Random (`AgentBehavior::Random`)
 
-Agent principal pour la génération de trafic. Exécute deux boucles en parallèle à chaque tick :
-- **Boucle PMS** : envoie des montants aléatoires (`min_amount..max_amount`) à des peers aléatoires selon `send_probability`.
-- **Boucle Game** (si `[agents.game]` configuré) : burn cubes -> gagner EDN -> envoyer EDN -> re-mint.
+Agent principal pour la génération de trafic. Exécute deux boucles à chaque tick :
+- **Boucle PMS** : envoie `sends_per_tick` transactions PMS séquentielles à des peers aléatoires selon `send_probability`. Chaque send dépend de l'UTXO du précédent (chaîne séquentielle par wallet). `sends_per_tick` permet de multiplier le débit PMS sans ajouter d'agents.
+- **Boucle Game** (si `[agents.game]` configuré) : burn cubes → gagner EDN → envoyer EDN → re-mint. Lock-free v0.5.17 : write lock tenu uniquement pour les opérations de registre (HashMap insert/remove), jamais pendant les appels HTTP. `burn_cooldown_ticks` empêche le remint immédiat après burn pour laisser `fee_distribution` livrer l'EDN. `edn_sends_per_tick` (v0.5.18) multiplie le nombre d'envois EDN séquentiels en Phase 2 (même pattern que PMS `sends_per_tick`).
 
 Auto-refuel via faucet quand le solde PMS tombe sous 10 PMS (constante `LOW_BALANCE_THRESHOLD`).
 
+**Pourquoi `sends_per_tick` :** Eden agents génèrent ~2000 TPS car chaque `game_tick` mint 80-120 NFT cubes (80-120 blocs). PMS agents ne généraient que ~200 TPS (1 TX par tick par agent). `sends_per_tick` comble cette disparité. Le moteur supporte ~10 000 TPS (prouvé par `test_pms_throughput_benchmark`).
+
+**Pourquoi `edn_sends_per_tick` (v0.5.18) :** Phase 2 (envoi EDN) ne se déclenchait presque jamais car `burn_cooldown_ticks` (10s) < `distribution_interval_sec` (30s) → l'agent remintait AVANT de recevoir ses EDN. Fix : aligner cooldown > distribution interval (10s testnet), et multiplier les envois EDN par tick quand Phase 2 se déclenche.
+
 **Profils déployés :**
 
-| Profil | Prefix | Count (dev) | Interval | Montants PMS | Send % | Game |
-|--------|--------|-------------|----------|-------------|--------|------|
-| **Casual Users** | `user` | 100 | 1000ms | 0.1-5.0 | 30% | oui (5 cubes, 10-50% EDN) |
-| **Fast Traders** | `fast` | 50 | 500ms | 0.01-0.5 | 80% | non |
-| **Miners** | `miner` | 50 | 1000ms | 0.01 | 0% | oui (10 cubes, 5-20% EDN) |
-| **Whales** | `whale` | 10 | 5000ms | 50-200 | 80% | oui (20 cubes, 30-80% EDN) |
-| **Snipers** | `sniper` | 30 | 200ms | 0.001-0.05 | 100% | non |
-| **Savers** | `saver` | 10 | 10000ms | 10-50 | 40% | oui (3 cubes, 40-90% EDN) |
+| Profil | Prefix | Count (dev) | Interval | PMS sends/tick | Game | EDN sends/tick | Cooldown |
+|--------|--------|-------------|----------|---------------|------|---------------|----------|
+| **Casual Users** | `user` | 100 | 1000ms | 5 | oui (5 cubes, 10-50% EDN) | 5 | 15 |
+| **Fast Traders** | `fast` | 50 | 500ms | 15 | non | — | — |
+| **Miners** | `miner` | 50 | 1000ms | 1 | oui (10 cubes, 5-20% EDN) | 10 | 15 |
+| **Whales** | `whale` | 10 | 5000ms | 3 | oui (20 cubes, 30-80% EDN) | 3 | 5 |
+| **Snipers** | `sniper` | 30 | 200ms | 20 | non | — | — |
+| **Savers** | `saver` | 10 | 10000ms | 5 | oui (3 cubes, 40-90% EDN) | 5 | 3 |
+
+**Calcul TPS théorique (dev, sends_per_tick) :** users 150 + fast 1200 + snipers 3000 + whales 4.8 + savers 2 = **~4357 PMS tx/s**
+**Calcul TPS théorique (dev, edn_sends_per_tick) :** users 500 + miners 500 + whales 6 + savers 5 = **~1011 EDN tx/s** (était ~3/s avant fix)
 
 ### 2. Smart (`AgentBehavior::Smart`)
 
@@ -349,7 +356,8 @@ Agent qui utilise le wallet du nœud coordinateur (configuré via `[coordinator]
 |----------|---------|-------------|
 | `spawn_agent()` | `tools/simulator/src/agent/mod.rs` | Spawne un agent comme tokio task avec jitter aléatoire (0..interval_ms) pour éviter le thundering herd |
 | `Agent::tick()` | `tools/simulator/src/agent/mod.rs` | Trait method exécutée à chaque interval_ms. Les erreurs sont loguées mais pas fatales. |
-| `RandomAgent::game_tick()` | `tools/simulator/src/agent/random.rs` | Game loop : Phase 1 (batch burn cubes -> EDN), Phase 2 (send EDN à peer), Phase 3 (re-mint cubes) |
+| `RandomAgent::tick()` PMS loop | `tools/simulator/src/agent/random.rs` | Boucle `sends_per_tick` itérations : chaque itération décide d'envoyer (probabilité), choisit un peer aléatoire, et envoie. Les sends sont séquentiels (dépendance UTXO par wallet). Break on error (UTXO exhaustion). v0.5.17 : `sends_per_tick` multiplie le débit PMS sans ajouter d'agents. |
+| `RandomAgent::game_tick()` | `tools/simulator/src/agent/random.rs` | Game loop (lock-free v0.5.17) : Phase 1 (batch burn cubes → EDN, write lock only for registry drain), Phase 2 (send EDN ×`edn_sends_per_tick` à peers, no lock — cached client, v0.5.18), Phase 3 (re-mint cubes, write lock only for registry insert). `burn_cooldown_ticks` pauses reminting after burn to allow fee_distribution to deliver EDN. |
 | `RandomAgent::refuel()` | `tools/simulator/src/agent/random.rs` | Auto-refuel 50 PMS via `POST /admin/faucet` quand solde < 10 PMS |
 | `SmartAgent::build_context()` | `tools/simulator/src/agent/smart.rs` | Construit la string de contexte pour Gemini (solde, peers, messages, historique) |
 | `SmartAgent::execute_directive()` | `tools/simulator/src/agent/smart.rs` | Exécute la directive Gemini courante (Send, Wait, Observe, Message) |
@@ -364,8 +372,14 @@ Agent qui utilise le wallet du nœud coordinateur (configuré via `[coordinator]
 | `GameEngine::mint_cube()` | `tools/simulator/src/game.rs` | Mint un cube [[nft-system|NFT]] avec attributs aléatoires (weight, size, density) via `POST /v1/nft/mint`. Enregistre dans `cube_registry`. |
 | `GameEngine::burn_cube_for_edenite()` | `tools/simulator/src/game.rs` | Burn un cube [[nft-system|NFT]] via `POST /v1/nft/burn-simple`, calcule le reward, mint EDN via `POST /admin/tokens/mint`. Retire du `cube_registry`. |
 | `GameEngine::burn_cubes_for_edenite()` | `tools/simulator/src/game.rs` | Batch burn de N cubes en un seul appel (`POST /v1/nft/burn-batch-simple`), mint le total EDN. |
-| `GameEngine::send_edenite()` | `tools/simulator/src/game.rs` | Envoie de l'EDN à une adresse via `POST /admin/tokens/mint` (mint direct au destinataire). |
+| `GameEngine::send_edenite()` | `tools/simulator/src/game.rs` | Envoie de l'EDN à une adresse via `POST /v1/wallet/send-simple` (UTXO transfer avec asset_id). Diagnostic logging v0.5.17 : pre-send (montant, destinataire, asset) + post-send (block_id, gas_fee, transfer_fee). |
 | `GameEngine::register_cube()` | `tools/simulator/src/game.rs` | Enregistre un cube pré-mint dans le registre local (utilisé par le `Funder` en bootstrap). |
+| `GameEngine::drain_cubes()` | `tools/simulator/src/game.rs` | (v0.5.17) Lock-free helper : retire les cubes du registre et retourne leurs attributs + total EDN attendu. Appeler sous write lock, puis drop lock avant HTTP. |
+| `GameEngine::restore_cubes()` | `tools/simulator/src/game.rs` | (v0.5.17) Lock-free helper : remet les cubes dans le registre en cas d'échec du burn. |
+| `GameEngine::execute_burn_batch()` | `tools/simulator/src/game.rs` | (v0.5.17) Static : exécute le batch burn HTTP sans lock. |
+| `GameEngine::generate_mint_specs()` | `tools/simulator/src/game.rs` | (v0.5.17) Static : génère les specs de cubes (pure RNG, pas de lock). |
+| `GameEngine::execute_mints_parallel()` | `tools/simulator/src/game.rs` | (v0.5.17) Static : exécute les mints HTTP en parallèle (semaphore 30) sans lock. Retourne `(minted, ok, err)`. |
+| `GameEngine::register_minted()` | `tools/simulator/src/game.rs` | (v0.5.17) Lock-free helper : enregistre les cubes mintés dans le registre. Appeler sous write lock bref. |
 | `CubeAttributes::edenite_reward()` | `tools/simulator/src/game.rs` | Calcule le reward : `(weight * size * density) / divisor`. Diviseur par défaut : `19,300,000,000`. |
 
 ### Client HTTP (`client.rs`)

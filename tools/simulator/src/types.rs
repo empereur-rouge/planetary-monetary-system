@@ -28,6 +28,10 @@ pub struct SendSimpleRequest {
 pub struct SendResponse {
     pub block_id: Option<String>,
     pub fee: Option<String>,
+    /// Transfer fee charged by smart contract (same asset as transfer).
+    /// Present when a TransferFee contract applies.
+    #[serde(default)]
+    pub transfer_fee: Option<String>,
     pub error: Option<String>,
 }
 

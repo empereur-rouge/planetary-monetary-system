@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-03-13
-updated: 2026-03-17
-version: v0.5.10
+updated: 2026-03-19
+version: v0.5.17
 ---
 
 # Smart Contracts (Contrats Déclaratifs)
@@ -95,6 +95,7 @@ Pour désactiver les frais de déploiement : `{ "SetContractDeploymentFee": { "f
 | `pms-core` | `crates/pms-core/tests/contract_validation.rs` | Validation DAG : signature coordinateur, champs vides, scopes, triggers |
 | `pms-storage` | `crates/pms-storage/tests/contract_store_test.rs` | CRUD RocksDB, filtrage par type/scope, toggle enable/disable, wildcard |
 | `pms-contracts` | `crates/pms-contracts/src/engine.rs` (tests inline) | Évaluation des formules, batch burn, scope ledger, contrats désactivés, wildcard |
+| `pms-server` | `crates/pms-server/tests/dag_sandbox.rs` | Test intégration `test_edn_transfer_fee_flow` — lifecycle complet EDN (burn NFT → refund → transfer → fee 5%) (v0.5.17) |
 | `pms-types-contract` | `crates/pms-types-contract/src/lib.rs` (tests inline) | Sérialisation/désérialisation, scope matching |
 
 ## Fonctions Clés
@@ -113,7 +114,7 @@ Pour désactiver les frais de déploiement : `{ "SetContractDeploymentFee": { "f
 | `get_contract()` | `crates/pms-server/src/api_fn/contracts.rs` | Handler API pour récupérer les détails d'un contrat par ID |
 | `update_contract()` | `crates/pms-server/src/api_fn/contracts.rs` | Handler API PUT pour mise à jour partielle d'un contrat (scope, actions, enabled), auto-bump version (v0.5.6) |
 | `toggle_contract()` | `crates/pms-server/src/api_fn/contracts.rs` | Handler API pour activer/désactiver un contrat existant |
-| `evaluate_transfer()` | `crates/pms-contracts/src/engine.rs` | Évalue les contrats `OnTransfer` pour un transfert donné — retourne les `TransferFeeResult` à ajouter comme TxOutput (v0.5.5) |
+| `evaluate_transfer()` | `crates/pms-contracts/src/engine.rs` | Évalue les contrats `OnTransfer` pour un transfert donné — retourne les `TransferFeeResult` à ajouter comme TxOutput (v0.5.5). Diagnostic logging ajouté v0.5.17 : log quand aucun contrat trouvé et quand évaluation en cours. |
 | `evaluate_transfer_formula()` | `crates/pms-contracts/src/engine.rs` | Évalue une `TransferFeeFormula` (`PercentageBps` ou `FixedAmount`) sur un montant Decimal (v0.5.5) |
 | `find_nft_burn_contracts()` | `crates/pms-storage/src/contract_store.rs` | Recherche les contrats actifs matching un trigger `OnNftBurn` + scope ledger |
 | `find_transfer_contracts()` | `crates/pms-storage/src/contract_store.rs` | Recherche les contrats actifs matching un trigger `OnTransfer` + scope ledger (v0.5.5) |

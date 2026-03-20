@@ -67,8 +67,20 @@ pub fn evaluate_transfer(
     };
 
     if contracts.is_empty() {
+        tracing::debug!(
+            "ContractEngine: no transfer contracts for asset={:?} on ledger={}",
+            asset_id, ledger_id,
+        );
         return vec![];
     }
+
+    tracing::debug!(
+        "ContractEngine: evaluating {} transfer contract(s) for {} {} on ledger={}",
+        contracts.len(),
+        transfer_amount,
+        asset_id.unwrap_or("PMS"),
+        ledger_id,
+    );
 
     let mut results = Vec::new();
 
