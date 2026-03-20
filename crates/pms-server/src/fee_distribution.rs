@@ -251,9 +251,11 @@ pub async fn perform_fee_distribution(
         }
     };
 
-    // 1. READ FEE POOL
-    let (total_node_fees, shares, burn_refunds, total_burn_refunds) = {
-        let pool = state.fee_pool.read().await;
+    // 1. ATOMIC SWAP: replace pool with fresh instance, work on the snapshot.
+    //    This eliminates the race condition where fees accumulated between
+    //    snapshot and reset were permanently lost. Single write lock (~1μs).
+    let snapshot = {
+        let mut pool = state.fee_pool.write().await;
         if !pool.has_fees() {
             return Ok(DistributeFeesResult {
                 success: true, // "Success" because nothing to do
@@ -262,13 +264,14 @@ pub async fn perform_fee_distribution(
                 num_recipients: 0,
             });
         }
-        (
-            pool.total_fees,
-            pool.calculate_shares(),
-            pool.get_burn_refunds(),
-            pool.total_burn_refunds(),
-        )
+        std::mem::replace(&mut *pool, crate::fee_pool::FeePool::new())
     };
+    // Pool is now fresh — new fees from concurrent TX go into the new pool.
+    // We work exclusively on the snapshot below.
+    let total_node_fees = snapshot.total_fees;
+    let shares = snapshot.calculate_shares();
+    let burn_refunds = snapshot.get_burn_refunds();
+    let _total_burn_refunds = snapshot.total_burn_refunds();
 
     // 1b. FEE BURN — remove burned portion from distributable fees
     let burn_rate_bps =
@@ -527,11 +530,7 @@ pub async fn perform_fee_distribution(
                     .await;
             }
 
-            // 6. RESET POOL
-            {
-                let mut pool = state.fee_pool.write().await;
-                pool.reset();
-            }
+            // Pool was already swapped atomically in step 1 — no reset needed.
 
             tracing::info!(
                 "📦 Automated fees distributed: {} PMS to {} wallets (block: {})",
@@ -548,13 +547,29 @@ pub async fn perform_fee_distribution(
             })
         }
         Ok(PutResult::AlreadyExists) => {
-            // Should not happen with nonce increment, but possible
+            // Restore fees — persist didn't happen, fees would be lost
+            {
+                let mut pool = state.fee_pool.write().await;
+                pool.merge_from(&snapshot);
+            }
             anyhow::bail!("Reward block already exists")
         }
         Ok(PutResult::Rejected(r)) => {
+            // Restore fees — persist was rejected, fees would be lost
+            {
+                let mut pool = state.fee_pool.write().await;
+                pool.merge_from(&snapshot);
+            }
             anyhow::bail!("Reward block rejected: {}", r)
         }
-        Err(e) => anyhow::bail!("Storage error: {}", e),
+        Err(e) => {
+            // Restore fees — persist errored, fees would be lost
+            {
+                let mut pool = state.fee_pool.write().await;
+                pool.merge_from(&snapshot);
+            }
+            anyhow::bail!("Storage error: {}", e)
+        }
     }
 }
 

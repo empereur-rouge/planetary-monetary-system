@@ -243,25 +243,12 @@ pub async fn admin_create_token(
     .unwrap_or(Decimal::ZERO);
 
     if creation_fee_dec > Decimal::ZERO {
-        if let Some(reward_id) =
-            crate::api_fn::tx_helpers::create_reward_block(&state, creation_fee_dec, &block_id)
-                .await
-        {
-            tracing::info!(
-                "[ADMIN] Token creation fee {} PMS distributed via block {}",
-                creation_fee_dec,
-                &reward_id[..16.min(reward_id.len())]
-            );
-        } else {
-            // Fallback: accumulate in pool if reward block creation fails
-            let mut pool = state.fee_pool.write().await;
-            pool.add_fee(creation_fee_dec, &node_wallet.encoded_public_key());
-            tracing::warn!(
-                "[ADMIN] Token creation fee {} PMS fallback to pool for {}",
-                creation_fee_dec,
-                metadata.asset_id
-            );
-        }
+        crate::api_fn::tx_helpers::accumulate_tx_fee(&state, creation_fee_dec).await;
+        tracing::info!(
+            "[ADMIN] Token creation fee {} PMS accumulated in pool for {}",
+            creation_fee_dec,
+            metadata.asset_id
+        );
     }
 
     tracing::info!(

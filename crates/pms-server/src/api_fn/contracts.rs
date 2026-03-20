@@ -106,22 +106,14 @@ pub async fn register_contract(
     // Charge contract deployment fee (if configured)
     let fee =
         crate::api_fn::tx_helpers::load_contract_deployment_fee(&state.store, Some(&state.effective_fees));
-    let mut fee_block_id = None;
+    let fee_block_id: Option<String> = None;
     if let Some(fee_dec) = fee {
-        // Get parent for fee block
-        if let Ok(tips) = state.srv.adapter_arc().top_tips(1).await {
-            if let Some(tip) = tips.first() {
-                fee_block_id =
-                    crate::api_fn::tx_helpers::create_reward_block(&state, fee_dec, tip).await;
-                if fee_block_id.is_some() {
-                    tracing::info!(
-                        "Contract deployment fee: {} PMS charged for '{}'",
-                        fee_dec,
-                        &contract_id[..16]
-                    );
-                }
-            }
-        }
+        crate::api_fn::tx_helpers::accumulate_tx_fee(&state, fee_dec).await;
+        tracing::info!(
+            "Contract deployment fee: {} PMS accumulated in pool for '{}'",
+            fee_dec,
+            &contract_id[..16]
+        );
     }
 
     tracing::info!(

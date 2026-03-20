@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.19] - 2026-03-20 — Sustained TPS degradation elimination: 4 performance fixes
+
+### Performance
+- **perf(server/critical)**: Coin selection O(N log N) → O(1) fast path. `select_utxos()` now collects at most 256 UTXOs via `utxos_for_selection()` with early-exit from the DashSet address index. For coordinator addresses with millions of fee reward UTXOs, this avoids cloning/sorting the entire set. Falls back to full scan + sort only when 256 UTXOs can't cover the target (rare). New `utxos_by_address_for_selection()` method on `ShardedUtxoSet` + `utxos_for_selection()` trait method on `NetDagAdapter`.
+- **perf(server/critical)**: Eliminate coordinator UTXO proliferation. All 6 callers of `create_reward_block()` (wallet_send_simple, send_tx, token creation, NFT mint, contract deploy, bridge) now use `accumulate_tx_fee()` which pools fees for periodic consolidated distribution. At 2000 TPS with 10s distribution interval, coordinator UTXO creation drops from 7200/hour to ~360/hour (20x reduction). Root cause fix for sustained TPS degradation.
+- **perf(core)**: Background persist batch draining. Consumer loop now drains up to 64 jobs per iteration via non-blocking `try_recv()`. Finality persistence is batched across all jobs in the batch, reducing individual `persist_final()` calls. Reduces channel pressure under high-TPS load.
+
+### Fixed
+- **fix(server/critical)**: FeePool race condition — atomic swap eliminates fee loss. `perform_fee_distribution()` previously used read-lock snapshot + later write-lock reset, losing fees accumulated between the two operations. Now uses `std::mem::replace` atomic swap (single write lock, ~1μs). Error recovery via `merge_from()` restores fees to pool on persist failure. Zero fee loss guaranteed.
+
+### Added
+- **feat(core)**: `FeePool::merge_from()` — merges another pool's data for error recovery after failed distribution.
+- **feat(core)**: `ShardedUtxoSet::utxos_by_address_for_selection()` — early-exit UTXO collection with limit and asset filtering at compact level.
+- **feat(interface)**: `NetDagAdapter::utxos_for_selection()` — trait method for limited coin selection with default fallback implementation.
+- **feat(server)**: `accumulate_tx_fee()` helper in tx_helpers — unified fee accumulation for all transaction types.
+
+### Changed
+- **change(server)**: `create_reward_block()` deprecated in favor of `accumulate_tx_fee()`. Function body preserved for backward compatibility.
+- **change(server)**: Fee distribution timing changed from immediate (per-TX Reward block) to periodic (consolidated via `spawn_fee_distributor_task`). Configurable via `distribution_interval_sec` (default 10s on testnet).
+
+---
+
 ## [0.5.18] - 2026-03-20 — Fix supply endpoint EDN wallet balances + Eden TPS optimization + deploy resilience
 
 ### Added

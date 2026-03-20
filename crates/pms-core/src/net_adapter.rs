@@ -1208,6 +1208,21 @@ where
         self.utxos.utxos_by_address(address).await
     }
 
+    async fn utxos_for_selection(
+        &self,
+        address: &str,
+        asset_id: &Option<String>,
+        target: rust_decimal::Decimal,
+        limit: usize,
+    ) -> (
+        Vec<(pms_types::OutputId, pms_types::TxOutput, rust_decimal::Decimal)>,
+        rust_decimal::Decimal,
+    ) {
+        self.utxos
+            .utxos_by_address_for_selection(address, asset_id, target, limit)
+            .await
+    }
+
     async fn add_utxo(
         &self,
         txid: String,

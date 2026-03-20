@@ -414,28 +414,15 @@ pub async fn mint_nft(
                 }
             }
 
-            // Distribute NFT mint fee via reward block
-            let mut reward_block_id = None;
+            // Accumulate NFT mint fee in pool for periodic distribution
+            let reward_block_id: Option<String> = None;
             if nft_fee > rust_decimal::Decimal::ZERO {
-                if let Some(rid) =
-                    crate::api_fn::tx_helpers::create_reward_block(&state, nft_fee, &block_id).await
-                {
-                    tracing::info!(
-                        "NFT mint fee {} PMS distributed via block {}",
-                        nft_fee,
-                        &rid[..16.min(rid.len())]
-                    );
-                    reward_block_id = Some(rid);
-                } else {
-                    // Fallback: accumulate in pool if reward block fails
-                    let mut pool = state.fee_pool.write().await;
-                    pool.add_fee(nft_fee, &state.node_wallet.encoded_public_key());
-                    tracing::warn!(
-                        "NFT mint fee {} PMS fallback to pool for token {}",
-                        nft_fee,
-                        &req.token_id[..16.min(req.token_id.len())]
-                    );
-                }
+                crate::api_fn::tx_helpers::accumulate_tx_fee(&state, nft_fee).await;
+                tracing::info!(
+                    "NFT mint fee {} PMS accumulated in pool for token {}",
+                    nft_fee,
+                    &req.token_id[..16.min(req.token_id.len())]
+                );
             }
 
             let response = serde_json::json!({

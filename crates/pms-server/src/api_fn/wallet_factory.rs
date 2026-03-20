@@ -696,8 +696,8 @@ pub async fn wallet_send_simple(
                 }
             }
 
-            // Create reward block for fee distribution
-            tx_helpers::create_reward_block(&state, fee_dec, &wb.id).await;
+            // Accumulate fee in pool for periodic consolidated distribution
+            tx_helpers::accumulate_tx_fee(&state, fee_dec).await;
 
             (
                 StatusCode::CREATED,

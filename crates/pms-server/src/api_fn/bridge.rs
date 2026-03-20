@@ -124,23 +124,14 @@ pub async fn admin_bridge_transfer(
                 .round_dp(8);
 
                 if cross_fee > Decimal::ZERO {
-                    if let Ok(tips) = state.srv.adapter_arc().top_tips(1).await {
-                        if let Some(tip) = tips.first() {
-                            let reward_id = crate::api_fn::tx_helpers::create_reward_block(
-                                &state, cross_fee, tip,
-                            )
-                            .await;
-                            if reward_id.is_some() {
-                                tracing::info!(
-                                    "Cross-ledger fee: {} PMS (x{} multiplier) for bridge {} -> {}",
-                                    cross_fee,
-                                    multiplier,
-                                    req.from_ledger,
-                                    req.to_ledger
-                                );
-                            }
-                        }
-                    }
+                    crate::api_fn::tx_helpers::accumulate_tx_fee(&state, cross_fee).await;
+                    tracing::info!(
+                        "Cross-ledger fee: {} PMS (x{} multiplier) accumulated for bridge {} -> {}",
+                        cross_fee,
+                        multiplier,
+                        req.from_ledger,
+                        req.to_ledger
+                    );
                 }
             }
             (StatusCode::CREATED, Json(json!(resp))).into_response()

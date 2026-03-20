@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-01-10
-updated: 2026-03-19
-version: v0.5.18
+updated: 2026-03-20
+version: v0.5.19
 ---
 
 # Fee Distribution (Distribution Automatique des Frais)
@@ -82,9 +82,11 @@ Sur les ledgers custom (ex: eden), le token principal est un custom asset (ex: E
 
 **Fix (v0.5.12)** : Quand un agent n'a pas de PMS pour le protocol fee lors d'un transfert de custom asset, le fee est gracieusement waivé (`fee_dec = 0`). Les smart contract transfer fees (en EDN) s'appliquent toujours et fournissent les revenus au créateur du ledger. Une fois que du PMS apparaît sur le ledger (ex: via bridge), le protocol fee reprend automatiquement.
 
-### 3. Distribution immédiate (Reward blocks)
+### 3. Distribution unifiée via FeePool (v0.5.19)
 
-En parallèle du système périodique, certaines fees sont distribuées immédiatement via des blocs `PlainPayload::Reward` créés par `create_reward_block()`. Ce mécanisme est utilisé pour les fees de création de token et les fees de mint de NFT lorsque le reward block peut être créé avec succès. En cas d'échec, les fees tombent dans le pool pour la distribution périodique.
+**Depuis v0.5.19**, toutes les fees de transaction (wallet_send_simple, send_tx, token creation, NFT mint, contract deploy, bridge) sont accumulées dans le `FeePool` via `accumulate_tx_fee()`, puis distribuées périodiquement via `spawn_fee_distributor_task`. Cette unification remplace les anciens blocs `Reward` per-TX (`create_reward_block()`, désormais déprécié) qui causaient une prolifération d'UTXOs au coordinateur (7200 UTXOs/heure à 2000 TPS → dégradation des performances de coin selection).
+
+**Atomic swap (v0.5.19)**: `perform_fee_distribution()` utilise `std::mem::replace` pour échanger atomiquement le pool avec un pool vide avant de distribuer. Cela élimine une race condition où les fees accumulées entre le snapshot et le reset étaient perdues. En cas d'échec de persistance, `FeePool::merge_from()` restaure les fees dans le pool.
 
 ### 4. Reward blocks chiffrés (EncryptedReward)
 
@@ -194,8 +196,10 @@ Les paramètres suivants peuvent être modifiés à chaud via des blocs `ConfigU
 | `compute_block_reward_outputs()` | `pms-server/src/fee_distribution.rs` | Calcule les outputs de récompense de bloc (creator/treasury/burn). |
 | `spawn_fee_distributor_task()` | `pms-server/src/api.rs` | Lance le timer asynchrone pour la distribution périodique. |
 | `spawn_inflation_mint_task()` | `pms-server/src/api.rs` | Lance le timer asynchrone pour l'inflation programmée. |
-| `create_reward_block()` | `pms-server/src/api_fn/tx_helpers.rs` | Crée un bloc `Reward` immédiat pour les fees de transaction individuelles. |
+| `accumulate_tx_fee()` | `pms-server/src/api_fn/tx_helpers.rs` | Accumule une fee dans le FeePool pour distribution consolidée (v0.5.19). Remplace `create_reward_block()`. |
+| `create_reward_block()` | `pms-server/src/api_fn/tx_helpers.rs` | **DEPRECATED** — Créait un bloc `Reward` immédiat per-TX. Cause prolifération d'UTXOs. Remplacé par `accumulate_tx_fee()`. |
 | `FeePool::add_fee()` | `pms-server/src/fee_pool.rs` | Ajoute une fee au pool avec suivi de contribution du nœud. |
+| `FeePool::merge_from()` | `pms-server/src/fee_pool.rs` | Fusionne un snapshot de pool (récupération d'erreur après swap atomique, v0.5.19). |
 | `FeePool::add_burn_refund()` | `pms-server/src/fee_pool.rs` | Ajoute un remboursement de burn pour un wallet utilisateur. |
 | `FeePool::calculate_shares()` | `pms-server/src/fee_pool.rs` | Calcule les parts proportionnelles de chaque nœud (bloc count / total blocks). |
 | `FeePool::reset()` | `pms-server/src/fee_pool.rs` | Remet le pool à zéro après distribution. |

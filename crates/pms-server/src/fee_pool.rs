@@ -107,6 +107,24 @@ impl FeePool {
         self.burn_refunds.clear();
     }
 
+    /// Merge another pool's data into this one (for error recovery).
+    ///
+    /// Used when fee distribution fails after an atomic swap: the swapped-out
+    /// snapshot must be restored to prevent permanent fee loss.
+    pub fn merge_from(&mut self, other: &FeePool) {
+        self.total_fees += other.total_fees;
+        self.tx_count += other.tx_count;
+        for (pk, count) in &other.node_contributions {
+            *self.node_contributions.entry(pk.clone()).or_insert(0) += count;
+        }
+        for ((addr, asset), amount) in &other.burn_refunds {
+            *self
+                .burn_refunds
+                .entry((addr.clone(), asset.clone()))
+                .or_insert(Decimal::ZERO) += amount;
+        }
+    }
+
     /// Retourne true si le pool a des fees ou refunds à distribuer
     pub fn has_fees(&self) -> bool {
         self.total_fees > Decimal::ZERO || !self.burn_refunds.is_empty()

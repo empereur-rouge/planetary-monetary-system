@@ -47,6 +47,40 @@ pub trait NetDagAdapter: Send + Sync {
         address: &str,
     ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)>;
 
+    /// Returns up to `limit` UTXOs for coin selection, stopping when enough
+    /// value is accumulated. Avoids cloning ALL UTXOs for large addresses
+    /// (e.g., coordinator with millions of fee reward UTXOs).
+    ///
+    /// Default implementation falls back to full `utxos_by_address()` + filter.
+    /// `CoreAdapter` overrides with an optimized early-exit implementation.
+    async fn utxos_for_selection(
+        &self,
+        address: &str,
+        asset_id: &Option<String>,
+        target: rust_decimal::Decimal,
+        limit: usize,
+    ) -> (
+        Vec<(pms_types::OutputId, pms_types::TxOutput, rust_decimal::Decimal)>,
+        rust_decimal::Decimal,
+    ) {
+        let all = self.utxos_by_address(address).await;
+        let mut result = Vec::new();
+        let mut total = rust_decimal::Decimal::ZERO;
+        for (oid, txo) in all {
+            if txo.asset_id != *asset_id {
+                continue;
+            }
+            if let Ok(amt) = rust_decimal::Decimal::from_str_exact(&txo.amount) {
+                result.push((oid, txo, amt));
+                total += amt;
+                if result.len() >= limit && total >= target {
+                    break;
+                }
+            }
+        }
+        (result, total)
+    }
+
     /// Ajoute un UTXO manuellement (utilisé par le coordinateur pour les EncryptedReward)
     async fn add_utxo(
         &self,

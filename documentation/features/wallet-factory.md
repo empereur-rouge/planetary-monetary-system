@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-13
-updated: 2026-03-18
-version: v0.5.15
+updated: 2026-03-20
+version: v0.5.19
 ---
 
 # Wallet Factory (Gestion Custodiale des Wallets)
@@ -66,9 +66,10 @@ La Wallet Factory n'a pas de section de configuration dédiée. Elle s'appuie su
 | `Wallet::get_address` | `crates/pms-wallet/src/wallet.rs` | Calcule l'adresse Bech32m : `SHA256(ECDSA_pub)[0..20] || X25519_pub` (52 bytes payload). |
 | `Wallet::derive_x25519_pair_from_private_key_b64` | `crates/pms-wallet/src/wallet.rs` | Dérive la paire X25519 depuis la clé privée ECDSA via HKDF-SHA256 (`pms/x25519-sk/v1`). Source unique de vérité pour la clé de chiffrement. |
 | `Wallet::x25519_sk_hex` | `crates/pms-wallet/src/wallet.rs` | Retourne la clé secrète X25519 hex (dérivée à la volée, jamais stockée). |
-| `select_utxos` | `crates/pms-server/src/api_fn/tx_helpers.rs` | Sélection d'UTXOs largest-first depuis le cache RAM. Filtre par `asset_id`. |
+| `select_utxos` | `crates/pms-server/src/api_fn/tx_helpers.rs` | Sélection d'UTXOs avec fast path O(1) (256 UTXOs max via `utxos_for_selection()`) et fallback largest-first. v0.5.19. |
+| `accumulate_tx_fee` | `crates/pms-server/src/api_fn/tx_helpers.rs` | Accumule une fee dans le FeePool pour distribution consolidée périodique. Remplace `create_reward_block()` (v0.5.19). |
 | `try_consume_gas` | `crates/pms-server/src/api_fn/tx_helpers.rs` | Consomme du gas depuis le [[economics|gas pool]] du ledger (ledgers custom uniquement). |
-| `create_reward_block` | `crates/pms-server/src/api_fn/tx_helpers.rs` | Crée un bloc Reward distribuant les frais au coordinateur et au treasury via la [[fee-distribution]]. |
+| `create_reward_block` | `crates/pms-server/src/api_fn/tx_helpers.rs` | **DEPRECATED** — Créait un bloc Reward per-TX. Remplacé par `accumulate_tx_fee()`. |
 
 ## Endpoints API
 
@@ -116,13 +117,9 @@ Après persistance d'un transfert chiffré, `wallet_send_simple` indexe l'[[acti
 - Ajoute l'adresse de l'expéditeur si absente (résolu avant la dépense des UTXOs pour éviter la perte du lien input->adresse).
 - Pré-calcule les `ActivityItem` via `precompute_all_items` pour des requêtes O(1) sur `/v1/wallet/{address}/activity`.
 
-### Bloc de reward
+### Accumulation des frais (v0.5.19)
 
-Après chaque transfert payant, `wallet_send_simple` appelle `create_reward_block` qui :
-1. Vérifie que le nœud est le coordinateur.
-2. Calcule la répartition des frais (coordinateur + treasury) via `FeeDistributionConfig`.
-3. Forge un bloc `Reward` avec les outputs de [[fee-distribution|distribution]].
-4. Enregistre les UTXOs de reward dans le cache RAM pour que les récipients puissent les dépenser.
+Après chaque transfert payant, `wallet_send_simple` appelle `accumulate_tx_fee()` qui accumule la fee dans le `FeePool` pour distribution consolidée périodique. Ce mécanisme remplace l'ancien `create_reward_block()` (déprécié) qui créait un bloc `Reward` individuel par transaction, causant une prolifération d'UTXOs au coordinateur (7200 UTXOs/heure à 2000 TPS → dégradation de coin selection). La distribution est effectuée par `spawn_fee_distributor_task` à intervalle configurable (`distribution_interval_sec`, 10s en testnet).
 
 ### Réutilisation par d'autres modules
 

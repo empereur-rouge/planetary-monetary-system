@@ -545,6 +545,93 @@ impl ShardedUtxoSet {
         result
     }
 
+    /// Returns up to `limit` UTXOs for an address matching `asset_id`,
+    /// stopping early once enough value is accumulated.
+    ///
+    /// This avoids cloning ALL OutputIds from the DashSet for addresses
+    /// with millions of UTXOs (e.g., coordinator receiving fee rewards).
+    /// The `limit * 4` over-collection handles asset_id filtering mismatches.
+    ///
+    /// Returns `(selected_utxos_with_amounts, total_amount)`.
+    pub async fn utxos_by_address_for_selection(
+        &self,
+        address: &str,
+        asset_id: &Option<String>,
+        target: Decimal,
+        limit: usize,
+    ) -> (Vec<(OutputId, TxOutput, Decimal)>, Decimal) {
+        // Collect OutputIds with early exit — at most limit*4 to handle asset filtering
+        let collect_cap = limit.saturating_mul(4).max(256);
+        let out_points: Vec<OutputId> = match self.address_index.get(address) {
+            Some(utxo_ids) => {
+                let mut collected = Vec::with_capacity(collect_cap.min(utxo_ids.len()));
+                for r in utxo_ids.iter() {
+                    collected.push(r.key().clone());
+                    if collected.len() >= collect_cap {
+                        break;
+                    }
+                }
+                collected
+            }
+            None => return (Vec::new(), Decimal::ZERO),
+        };
+        // DashMap Ref guard is dropped here
+
+        // Group by shard index to acquire each lock only once
+        let mut by_shard: HashMap<usize, Vec<OutputId>> = HashMap::new();
+        for op in out_points {
+            by_shard.entry(Self::shard_index(&op)).or_default().push(op);
+        }
+
+        let mut result = Vec::new();
+        let mut total = Decimal::ZERO;
+        let mut fallback_needed: Vec<OutputId> = Vec::new();
+
+        for (shard_idx, ops) in &by_shard {
+            let shard = self.shards[*shard_idx].read().await;
+            for op in ops {
+                if let Some(compact) = shard.peek(op) {
+                    let matches = match (&compact.asset_id, asset_id) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => a.as_ref() == b.as_str(),
+                        _ => false,
+                    };
+                    if matches {
+                        result.push((op.clone(), compact.to_tx_output(), compact.amount));
+                        total += compact.amount;
+                        if result.len() >= limit && total >= target {
+                            return (result, total);
+                        }
+                    }
+                } else {
+                    fallback_needed.push(op.clone());
+                }
+            }
+        }
+
+        // Fetch missed UTXOs from RocksDB (only if we haven't met target yet)
+        for op in fallback_needed {
+            if let Some(txo) = self.fetch_from_store(&op) {
+                let matches = match (&txo.asset_id, asset_id) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                };
+                if matches {
+                    if let Ok(amt) = Decimal::from_str(&txo.amount) {
+                        result.push((op, txo, amt));
+                        total += amt;
+                        if result.len() >= limit && total >= target {
+                            return (result, total);
+                        }
+                    }
+                }
+            }
+        }
+
+        (result, total)
+    }
+
     // ─── Bootstrap rebuild ───────────────────────────────────────────
 
     /// Reconstruit l'index adresse, le cache supply et le cache balance
