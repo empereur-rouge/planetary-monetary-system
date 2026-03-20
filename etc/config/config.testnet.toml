@@ -15,11 +15,11 @@ checkpoint_interval_secs = 3600
 #  8 GB VPS:  write_buffer=64, cache=256, db_write=512, docker mem_limit=7g
 # 16 GB VPS:  write_buffer=128, cache=512, db_write=1024, docker mem_limit=14g
 # 32 GB VPS:  write_buffer=256, cache=1024, db_write=2048, docker mem_limit=28g
-write_buffer_size_mb = 64        # Per-CF memtable size (default 128)
+write_buffer_size_mb = 128       # Per-CF memtable size (default 128)
 max_write_buffer_number = 3      # Max memtables per CF before flush
-block_cache_size_mb = 256        # Shared LRU cache (default 512)
-db_write_buffer_size_mb = 512    # Global memtable cap — prevents OOM with 66+ CFs
-max_open_files = 512             # FD limit (OS default ulimit=1024)
+block_cache_size_mb = 512        # Shared LRU cache (default 512)
+db_write_buffer_size_mb = 1024   # Global memtable cap — prevents OOM with 66+ CFs
+max_open_files = 1024            # FD limit
 
 [network]
 mode = "testnet"

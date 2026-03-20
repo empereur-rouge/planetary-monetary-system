@@ -26,8 +26,8 @@ services:
     container_name: pms-engine-testnet
     hostname: pms-engine
     user: "pms"
-    mem_limit: 7g
-    memswap_limit: 7g
+    mem_limit: 14g
+    memswap_limit: 14g
     logging:
       driver: json-file
       options:

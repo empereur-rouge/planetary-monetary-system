@@ -86,7 +86,7 @@ Voir le dossier [[api/README|documentation/api/]] pour la référence complète 
 
 | Système | Fichier | Valeur actuelle |
 |---------|---------|-----------------|
-| Software | `bin/Cargo.toml` | `0.5.17` |
+| Software | `bin/Cargo.toml` | `0.5.18` |
 | Schema DB | `crates/pms-storage/src/migrations.rs` → `CURRENT_VER` | `9` |
 | DAG Protocol | `crates/pms-storage/src/migrations.rs` → `DAG_VERSION` | `1.2.0` |
 | P2P Protocol | `crates/pms-config/src/config.rs` → `protocol_version` | `1` |

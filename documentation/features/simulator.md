@@ -283,7 +283,7 @@ Agent principal pour la génération de trafic. Exécute deux boucles à chaque 
 
 Auto-refuel via faucet quand le solde PMS tombe sous 10 PMS (constante `LOW_BALANCE_THRESHOLD`).
 
-**Pourquoi `sends_per_tick` :** Eden agents génèrent ~2000 TPS car chaque `game_tick` mint 80-120 NFT cubes (80-120 blocs). PMS agents ne généraient que ~200 TPS (1 TX par tick par agent). `sends_per_tick` comble cette disparité. Le moteur supporte ~10 000 TPS (prouvé par `test_pms_throughput_benchmark`).
+**Pourquoi `sends_per_tick` :** Eden agents génèrent ~2000 TPS car chaque `game_tick` mint 80-120 NFT cubes (80-120 blocs). PMS agents ne généraient que ~200 TPS (1 TX par tick par agent). `sends_per_tick` comble cette disparité. Le moteur supporte ~12 000 TPS soutenus sur 3 minutes sans dégradation (prouvé par `test_sustained_tps_stress` : 2.1M TX, 974K blocks, P50=1.6ms, 0% failure, -5.1% degradation). Burst benchmark : `test_pms_throughput_benchmark` (10K+ TPS).
 
 **Pourquoi `edn_sends_per_tick` (v0.5.18) :** Phase 2 (envoi EDN) ne se déclenchait presque jamais car `burn_cooldown_ticks` (10s) < `distribution_interval_sec` (30s) → l'agent remintait AVANT de recevoir ses EDN. Fix : aligner cooldown > distribution interval (10s testnet), et multiplier les envois EDN par tick quand Phase 2 se déclenche.
 

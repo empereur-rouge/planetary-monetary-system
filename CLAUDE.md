@@ -37,6 +37,72 @@
 - Chaque changement doit être complet, testé, et documenté. Pas de "on verra plus tard".
 - **OBLIGATOIRE : Avant de conclure une conversation qui a produit des changements de code, lancer `/simplify` pour détecter et corriger les problèmes de réutilisation, qualité et efficacité.**
 
+## VPS Testnet — Infrastructure de Production
+
+### Serveur
+- **Hébergeur** : IONOS VPS
+- **IP** : `87.106.50.82`
+- **User SSH** : `pms` (clé SSH : `~/.ssh/pms_vps`)
+- **OS** : Debian 12 (kernel 6.1)
+- **Specs** : 8 vCores, 16 Go RAM, 480 Go NVMe SSD
+- **Pas d'accès sudo** — swap et opérations root impossibles depuis le user `pms`.
+
+### Stack Docker (docker-compose.testnet.yml)
+| Service | Container | Image | Ports | Mem Limit |
+|---------|-----------|-------|-------|-----------|
+| Engine | `pms-engine-testnet` | `pms-node:testnet` | 8080 (interne) | **14g** |
+| Gateway | `pms-gateway-testnet` | `pms-gateway:testnet` | 8443 (interne) | 512m |
+| Caddy | `pms-caddy-testnet` | `caddy:2-alpine` | 80, 443 (public) | — |
+| Prometheus | `pms-prometheus-testnet` | `prom/prometheus:v2.45.0` | 9091 (localhost) | 512m |
+| Simulator | `pms-simulator-testnet` | `pms-simulator:testnet` | 9090 (public) | 512m |
+
+### URLs
+- **API Testnet** : `https://testnet.pms-network.com`
+- **Dashboard** : `https://testnet.pms-network.com/dashboard/`
+- **Simulator** : `http://87.106.50.82:9090`
+
+### Accès & Secrets
+- **Backup local** : `/Volumes/Crutial X9 - Macbook Erwan/Misc/pms-key/pms-testnet-*.json` — contient admin token, coordinator keys, SDK API key, treasury keys.
+- **NEVER hardcode secrets in code or config files committed to git.** Toujours utiliser `env:VAR` ou les fichiers secrets du VPS (`/opt/pms/etc/pms/`).
+
+### Dimensionnement mémoire RocksDB (config.testnet.toml)
+Les valeurs RocksDB DOIVENT être adaptées à la RAM du VPS :
+
+| VPS RAM | `write_buffer_size_mb` | `block_cache_size_mb` | `db_write_buffer_size_mb` | Docker `mem_limit` |
+|---------|------------------------|-----------------------|---------------------------|--------------------|
+| 8 Go | 64 | 256 | 512 | 7g |
+| **16 Go** | **128** | **512** | **1024** | **14g** |
+| 32 Go | 256 | 1024 | 2048 | 28g |
+
+### Déploiement
+- **Full deploy** (build + init) : `scripts/deploy-testnet.sh [--yes] <IP> [USER] [SSH_KEY]`
+- **Upgrade** (code only, preserve data) : `scripts/upgrade-testnet.sh <IP> [USER] [SSH_KEY]`
+- Les images Docker sont **cross-compilées localement** (linux/amd64 via buildx) puis transférées au VPS.
+- Le deploy script sauvegarde/restaure automatiquement les clés VPS-specific (coordinator, treasury, signer) dans la config.
+
+### Opérations courantes (sur le VPS)
+```bash
+# Logs
+docker logs -f pms-engine-testnet
+docker logs -f pms-simulator-testnet
+
+# Status
+cd /opt/pms && PMS_ADMIN_TOKEN=xxx docker compose -f docker-compose.testnet.yml ps
+
+# Restart engine seul
+PMS_ADMIN_TOKEN=xxx docker compose -f docker-compose.testnet.yml restart pms-engine
+
+# Diagnostic OOM
+docker events --since '1h' --filter container=pms-engine-testnet | grep oom
+docker inspect pms-engine-testnet --format='RestartCount: {{.RestartCount}} | OOMKilled: {{.State.OOMKilled}}'
+```
+
+### Bug historique : OOM en boucle (v0.5.18, VPS 8 Go)
+- **Symptôme** : Engine restart en boucle (16x), exit code 137 (SIGKILL par cgroup OOM).
+- **Cause** : `mem_limit: 7g` sur un VPS 8 Go sans swap. Le simulator poussait des données en continu → mémoire montait jusqu'au kill.
+- **Fix** : Upgrade VPS à 16 Go + `mem_limit: 14g` + tuning RocksDB pour 16 Go.
+- **Diagnostic** : `docker events` montre l'événement `oom` juste avant le `die exitCode:137`. `docker inspect` peut montrer `OOMKilled: false` même si le cgroup a tué le process (c'est un bug connu de Docker).
+
 ## Related Projects
 
 ### PMS SDK (TypeScript)
@@ -76,6 +142,60 @@
   - Exemple historique : `prune_oldest()` (RAM) a été corrigé pour protéger le dernier tip (commit `9e2922f`), mais `trim_tips()` et `remove_tip()` (RocksDB) n'ont pas reçu la même protection → bug silencieux en production (frais bloqués pendant des heures).
 - Quand un bug est corrigé dans `crates/pms-core/src/concurrent_dag.rs`, vérifier systématiquement `crates/pms-storage/src/rocks_store/store.rs` (et vice-versa).
 - **Tests de boundary/edge-case obligatoires** : toujours tester les scénarios limites (dernier élément, liste vide, overflow) — pas seulement le cas nominal. Les bugs critiques se cachent dans les edge cases que les tests "happy path" ne couvrent pas.
+
+### DAG Sandbox — Tests d'intégration production-like
+
+Le fichier `crates/pms-server/tests/dag_sandbox.rs` fournit un **moteur PMS complet en in-process** (LedgerManager, EventBus, ContractListener, fee distribution) pour les tests d'intégration. C'est le lab de référence pour valider les fonctionnalités end-to-end.
+
+**Commande d'exécution :**
+```bash
+# Tous les tests sandbox (release, ignored, avec output)
+cargo test --release -p pms-server --test dag_sandbox -- --ignored --nocapture
+
+# Un test spécifique
+cargo test --release -p pms-server --test dag_sandbox test_edn_transfer_fee_flow -- --ignored --nocapture
+```
+
+**Quand utiliser la sandbox :**
+- Validation de fee distribution (PMS et EDN) sur main et custom ledgers.
+- Tests de smart contracts (burn → refund, transfer fees).
+- Vérification des endpoints supply/balance avec filtrage d'assets.
+- Tout scénario nécessitant un moteur complet (multi-ledger, gas pool, contracts).
+
+**Benchmark TPS :**
+- `crates/pms-server/tests/local_bench.rs` — mesure le TPS brut du moteur DAG (10K+ TPS prouvé).
+- Commande : `cargo test --release -p pms-server --test local_bench -- --ignored --nocapture`
+
+**Quand écrire un nouveau test sandbox :**
+- Tout bug découvert en production doit d'abord être reproduit dans la sandbox avant d'être corrigé.
+- Toute nouvelle fonctionnalité touchant les transactions, fees, contracts, ou ledgers doit avoir un test sandbox.
+- Réutiliser les helpers existants de `Sandbox` (`create_ledger`, `faucet_mint`, `send_simple`, `burn_nft_simple`, `distribute_fees`, `get_balance`, `get_asset_balance`, `get_supply`, `send_asset`, `register_contract`).
+
+## Critical Patterns
+
+Règles impératives tirées de bugs production. Chaque pattern documente un piège récurrent.
+
+### Supply/Balance API — Filtrage par asset
+
+- **Quand un endpoint balance/supply reçoit un `asset_id`** (ex: `?asset_id=edenite`), toujours utiliser `balance_by_address_and_asset(address, asset_id)` et NON `balance_by_address(address)`.
+- `balance_by_address()` retourne la balance PMS native, ignorant le filtre asset → le dashboard affiche "0 EDN" alors que la supply est > 0.
+- **Fichier de référence** : `crates/pms-server/src/api_fn/supply.rs`.
+- **Bug historique (v0.5.18)** : le dashboard montrait "0 EDN" pour tous les wallets car l'endpoint supply utilisait `balance_by_address()` au lieu de `balance_by_address_and_asset()`.
+
+### Contract Store — Custom Ledgers
+
+- **`AppState.contract_store` pointe TOUJOURS vers le RocksDB main.** Pour évaluer les transfer fees sur un custom ledger, utiliser `state.contract_store`, JAMAIS `state.store`.
+- `state.store` peut être le store du custom ledger (via `LedgerInstance`), qui ne contient PAS les contrats.
+- **Fichier de référence** : `crates/pms-server/src/api_fn/tx_helpers.rs` → `evaluate_transfer()`.
+- **Bug historique (v0.5.10)** : les transfer fees étaient à 0 sur les custom ledgers car `state.store` (le store du ledger eden) était utilisé pour chercher les contrats, qui n'existent que dans le store main.
+
+### UTXO Delta — Plain vs Encrypted Payloads
+
+- `persist_block()` construit un `UtxoDelta` pour les payloads **plain** (transactions normales). Pour les payloads **encrypted**, le delta est `None`.
+- Après `persist_block()`, appeler `apply_utxo_delta()` UNIQUEMENT pour les payloads encrypted. Les payloads plain ont déjà leur delta appliqué dans `persist_block` → double-comptage de la supply si appliqué deux fois.
+- `UtxoFlatItem` DOIT inclure le champ `asset_id` — son absence cause un balance de 0 quand on filtre par asset.
+- **Fichier de référence** : `crates/pms-storage/src/rocks_store/store.rs` → `persist_block()`.
+- **Bug historique (v0.5.15)** : la supply était doublée car `apply_utxo_delta()` était appelé pour les payloads plain ET dans `persist_block`.
 
 ## Versioning
 

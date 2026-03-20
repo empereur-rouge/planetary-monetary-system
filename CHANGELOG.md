@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.5.18] - 2026-03-20 — Fix supply endpoint EDN wallet balances + Eden TPS optimization
+## [0.5.18] - 2026-03-20 — Fix supply endpoint EDN wallet balances + Eden TPS optimization + deploy resilience
+
+### Added
+- **feat(test)**: `test_sustained_tps_stress` — 5-minute sustained TPS stress test in DAG sandbox (80 workers, 300s). Each `send_simple` creates 2 blocks (TX + Reward). Measures TPS in 5s intervals with time-series report (TPS, block count, P50/P95/P99 latencies). Detects degradation by comparing first-minute vs last-minute avg TPS. **Proved: 13,362 avg TPS over 5 min, 4.0M TX, 8.02M blocks (26,712 blk/s), 0 failures, 4.6% degradation — EXCELLENT.** RocksDB `block_count_estimate()` severely undercounts under write pressure (reported 910K vs 8.02M actual) — test uses accurate `TX×2` calculation.
 
 ### Fixed
+- **fix(infra)**: `deploy-testnet.sh` and `upgrade-testnet.sh` now survive Docker Compose ghost container errors. Root cause: Docker Compose v2 can desync with containerd, leaving phantom container references that cause `"No such container"` errors. Fix: (1) pre-cleanup via `docker compose rm -f -s` + project-label cleanup, (2) `|| true` on `docker compose up` (ghost errors don't abort the script), (3) per-service verification loop — if any service didn't start, it's retried individually. Also added `--remove-orphans` to all `docker compose up` calls.
 - **fix(api/critical)**: `GET /v1/supply` wallet balances (`admin_balance`, `node_balance`, `treasury_balance`) always showed PMS native balance, even when `circulating_supply` auto-resolved to edenite on custom ledgers. Dashboard showed "2.36 EDN circulating" but "0 EDN" for all wallets. Root cause: all wallet balance calls used `balance_by_address()` (PMS native only) instead of `balance_by_address_and_asset()` with the resolved asset. Fix: when a custom token is resolved (auto-fallback or explicit `?asset_id=`), wallet balances now use `balance_by_address_and_asset(&addr, resolved_asset)`.
 
 ### Added

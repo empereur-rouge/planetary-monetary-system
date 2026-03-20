@@ -368,12 +368,37 @@ export PMS_API_KEY="$API_KEY"
 export PMS_COORDINATOR_KEY="$COORD_KEY"
 export PMS_COORDINATOR_ADDR="$COORD_ADDR"
 
-docker compose -f $COMPOSE_FILE up -d --force-recreate $SERVICES_TO_RECREATE
+# Clean stale Docker Compose state (ghost container fix).
+# Docker Compose v2 can desync with containerd, leaving phantom container
+# references that cause "No such container" errors on recreate.
+docker compose -f $COMPOSE_FILE rm -f -s $SERVICES_TO_RECREATE 2>/dev/null || true
+docker ps -a --filter "label=com.docker.compose.project=pms" -q | xargs docker rm -f 2>/dev/null || true
+
+# Start services. Use || true because ghost containers may cause a non-zero
+# exit even though the real services are created successfully.
+docker compose -f $COMPOSE_FILE up -d --force-recreate --remove-orphans $SERVICES_TO_RECREATE 2>&1 || true
+
+# Verify each requested service is running (retry individually if ghost blocked it)
+for _compose_svc in $SERVICES_TO_RECREATE; do
+    case \$_compose_svc in
+        pms-engine)    _cname="pms-engine-testnet" ;;
+        pms-gateway)   _cname="pms-gateway-testnet" ;;
+        pms-simulator) _cname="pms-simulator-testnet" ;;
+        caddy)         _cname="pms-caddy-testnet" ;;
+        prometheus)    _cname="pms-prometheus-testnet" ;;
+        *) _cname="" ;;
+    esac
+    if [ -n "\$_cname" ] && ! docker ps --filter "name=\$_cname" --filter "status=running" -q 2>/dev/null | grep -q .; then
+        echo -e "\${YELLOW}   \$_cname not running — retrying individually...\${NC}"
+        docker compose -f $COMPOSE_FILE up -d "\$_compose_svc" 2>/dev/null || true
+        sleep 2
+    fi
+done
 
 # If we upgraded engine or gateway, caddy may need a restart too (depends_on)
 if echo "$SERVICES_TO_RECREATE" | grep -q "pms-gateway"; then
     echo -e "\${YELLOW}   Restarting Caddy (depends on gateway)...\${NC}"
-    docker compose -f $COMPOSE_FILE up -d --force-recreate caddy
+    docker compose -f $COMPOSE_FILE up -d --force-recreate --remove-orphans caddy 2>&1 || true
 fi
 
 echo -e "\${GREEN}   Containers restarted.\${NC}"

@@ -37,7 +37,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
@@ -1844,6 +1844,545 @@ async fn test_pms_throughput_benchmark() -> Result<()> {
     println!("\n   TEST PASSED: Engine supports {:.0} TPS — {:.1}x more than simulator's 200 TPS",
              tps, tps / 200.0);
     println!("   Solution: Use `sends_per_tick` in agent config to multiply PMS throughput.");
+
+    Ok(())
+}
+
+// ============================================================================
+// STRESS TEST: Sustained TPS — measures degradation over time
+// ============================================================================
+
+/// Single measurement interval for the time-series report.
+struct IntervalMetric {
+    /// Seconds since test start.
+    offset_secs: f64,
+    /// Successful transactions in this interval.
+    interval_tx: usize,
+    /// TPS for this interval alone.
+    interval_tps: f64,
+    /// Cumulative successful transactions.
+    cumulative_tx: usize,
+    /// Approximate block count from RocksDB (via `/internal/health`).
+    cumulative_blocks: u64,
+    /// Average latency in milliseconds for this interval.
+    avg_latency_ms: f64,
+    /// P50 latency in milliseconds.
+    p50_latency_ms: f64,
+    /// P95 latency in milliseconds.
+    p95_latency_ms: f64,
+    /// P99 latency in milliseconds.
+    p99_latency_ms: f64,
+    /// Number of failures in this interval.
+    interval_failures: usize,
+}
+
+/// Compute a percentile from a sorted slice. Returns 0.0 if empty.
+fn stress_percentile(sorted: &[f64], pct: u32) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((pct as f64 / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+/// Query approximate block count from the internal health endpoint (O(1)).
+async fn stress_block_count(client: &Client, base_url: &str) -> u64 {
+    match client.get(format!("{}/internal/health", base_url)).send().await {
+        Ok(resp) => {
+            let json: Value = resp.json().await.unwrap_or(json!({}));
+            json["block_count"].as_u64().unwrap_or(0)
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Sustained throughput stress test — runs for 5 minutes targeting 20M+ blocks
+/// and measures TPS degradation as block count increases.
+///
+/// Architecture:
+/// - 80 parallel workers send transactions continuously via `send_simple()`
+/// - A metrics collector samples every 5 seconds
+/// - Time-series report shows TPS, cumulative blocks, latency percentiles
+/// - Final report detects degradation (first minute avg vs last minute avg)
+///
+/// Each `send_simple()` call creates 2 blocks (TX + Reward), so the DAG
+/// accumulates blocks at ~2× the visible TPS rate. The `block_count_estimate()`
+/// from RocksDB is an approximation — the accurate count is `total_tx × 2`.
+///
+/// Run:
+/// ```bash
+/// cargo test --release -p pms-server --test dag_sandbox test_sustained_tps_stress -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+#[ignore]
+async fn test_sustained_tps_stress() -> Result<()> {
+    // ── Configuration ──────────────────────────────────────────────────
+    const WORKERS: usize = 80;
+    const DURATION_SECS: u64 = 300; // 5 minutes
+    const INTERVAL_SECS: u64 = 5;
+    const INITIAL_MINT: &str = "1000000"; // Per worker (21M TX capacity at 0.046/TX)
+    const TX_AMOUNT: &str = "0.01"; // Small amount to maximize TX count
+    /// Each `send_simple()` creates a TX block + a Reward block = 2 blocks.
+    const BLOCKS_PER_TX: u64 = 2;
+
+    // ── 1. Setup ───────────────────────────────────────────────────────
+    let sandbox = boot_sandbox().await?;
+
+    println!("\n╔═══════════════════════════════════════════════════════════╗");
+    println!("║  SUSTAINED TPS STRESS TEST — 20M+ BLOCKS TARGET         ║");
+    println!("║  Duration: {}s | Workers: {} | Interval: {}s            ║",
+             DURATION_SECS, WORKERS, INTERVAL_SECS);
+    println!("╚═══════════════════════════════════════════════════════════╝\n");
+
+    println!(
+        "   [1/4] Creating {} worker wallets and minting {} PMS each...",
+        WORKERS, INITIAL_MINT
+    );
+
+    let mut worker_keys: Vec<String> = Vec::with_capacity(WORKERS);
+    for i in 0..WORKERS {
+        let w = Wallet::generate();
+        let addr = w.get_address("8e");
+        sandbox.faucet_mint(None, &addr, INITIAL_MINT).await?;
+        worker_keys.push(w.private_key_b64.clone());
+        if (i + 1) % 10 == 0 {
+            println!("      Funded worker {}/{}...", i + 1, WORKERS);
+        }
+    }
+
+    // Wait for UTXO propagation
+    sleep(Duration::from_secs(2)).await;
+
+    // Initial block count baseline
+    let initial_blocks_estimate = stress_block_count(&sandbox.client, &sandbox.base_url).await;
+    let initial_blocks_actual = (WORKERS as u64 + 1) * BLOCKS_PER_TX; // mints + genesis
+    println!(
+        "   Initial blocks: ~{} (RocksDB estimate) / {} (actual: genesis + {} mints)\n",
+        initial_blocks_estimate, initial_blocks_actual, WORKERS
+    );
+
+    // ── 2. Shared state ────────────────────────────────────────────────
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let fail_count = Arc::new(AtomicUsize::new(0));
+    let latencies: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::with_capacity(10_000)));
+
+    let admin_addr = sandbox.admin_addr.clone();
+    let base_url = sandbox.base_url.clone();
+    let client = sandbox.client.clone();
+
+    // ── 3. Spawn workers ───────────────────────────────────────────────
+    println!(
+        "   [2/4] Starting {} workers for {}s...\n",
+        WORKERS, DURATION_SECS
+    );
+
+    let benchmark_start = Instant::now();
+    let mut worker_handles = Vec::with_capacity(WORKERS);
+
+    for (i, sk_b64) in worker_keys.iter().enumerate() {
+        let sk = sk_b64.clone();
+        let target = admin_addr.clone();
+        let url = base_url.clone();
+        let cl = client.clone();
+        let stop = stop_flag.clone();
+        let ok_counter = success_count.clone();
+        let fail_counter = fail_count.clone();
+        let lat_buf = latencies.clone();
+
+        let h = tokio::spawn(async move {
+            let mut worker_ok = 0usize;
+            let mut worker_fail = 0usize;
+
+            while !stop.load(Ordering::Relaxed) {
+                let tx_start = Instant::now();
+
+                let body = json!({
+                    "private_key_b64": sk,
+                    "to": target,
+                    "amount": TX_AMOUNT,
+                });
+
+                match cl
+                    .post(format!("{}/v1/wallet/send-simple", url))
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let lat_ms = tx_start.elapsed().as_secs_f64() * 1000.0;
+                        ok_counter.fetch_add(1, Ordering::Relaxed);
+                        worker_ok += 1;
+
+                        // Push latency sample (best-effort, skip if collector is draining)
+                        if let Ok(mut buf) = lat_buf.try_lock() {
+                            buf.push(lat_ms);
+                        }
+                    }
+                    Ok(resp) => {
+                        // Log first few failures per worker for diagnosis
+                        if worker_fail < 3 {
+                            let status = resp.status();
+                            let body_text = resp.text().await.unwrap_or_default();
+                            eprintln!(
+                                "      Worker {} fail #{}: {} — {}",
+                                i,
+                                worker_fail + 1,
+                                status,
+                                &body_text[..100.min(body_text.len())]
+                            );
+                        }
+                        fail_counter.fetch_add(1, Ordering::Relaxed);
+                        worker_fail += 1;
+                        // Brief backoff on rejection (UTXO conflict, etc.)
+                        sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(e) => {
+                        if worker_fail < 3 {
+                            eprintln!("      Worker {} error #{}: {}", i, worker_fail + 1, e);
+                        }
+                        fail_counter.fetch_add(1, Ordering::Relaxed);
+                        worker_fail += 1;
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+
+            (i, worker_ok, worker_fail)
+        });
+        worker_handles.push(h);
+    }
+
+    // ── 4. Timer — stops workers after DURATION_SECS ───────────────────
+    {
+        let stop = stop_flag.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_secs(DURATION_SECS)).await;
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+
+    // ── 5. Metrics collector (main thread, every INTERVAL_SECS) ────────
+    println!("   [3/4] Collecting metrics every {}s...\n", INTERVAL_SECS);
+
+    let mut intervals: Vec<IntervalMetric> = Vec::new();
+    let mut last_success = 0usize;
+    let mut last_fail = 0usize;
+
+    while !stop_flag.load(Ordering::Relaxed) {
+        sleep(Duration::from_secs(INTERVAL_SECS)).await;
+
+        let elapsed = benchmark_start.elapsed();
+        let current_success = success_count.load(Ordering::Relaxed);
+        let current_fail = fail_count.load(Ordering::Relaxed);
+
+        let interval_tx = current_success.saturating_sub(last_success);
+        let interval_failures = current_fail.saturating_sub(last_fail);
+        let interval_tps = interval_tx as f64 / INTERVAL_SECS as f64;
+
+        // Drain latency buffer and compute percentiles
+        let mut samples = {
+            let mut buf = latencies.lock().unwrap();
+            buf.drain(..).collect::<Vec<f64>>()
+        };
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let avg_latency = if samples.is_empty() {
+            0.0
+        } else {
+            samples.iter().sum::<f64>() / samples.len() as f64
+        };
+        let p50 = stress_percentile(&samples, 50);
+        let p95 = stress_percentile(&samples, 95);
+        let p99 = stress_percentile(&samples, 99);
+
+        // Block count: accurate = TX×2 (each send_simple = TX + Reward block)
+        let actual_blocks = current_success as u64 * BLOCKS_PER_TX;
+
+        let metric = IntervalMetric {
+            offset_secs: elapsed.as_secs_f64(),
+            interval_tx,
+            interval_tps,
+            cumulative_tx: current_success,
+            cumulative_blocks: actual_blocks,
+            avg_latency_ms: avg_latency,
+            p50_latency_ms: p50,
+            p95_latency_ms: p95,
+            p99_latency_ms: p99,
+            interval_failures,
+        };
+
+        // Live progress line
+        let blocks_m = actual_blocks as f64 / 1_000_000.0;
+        eprintln!(
+            "   {:>6.1}s | {:>6} tx | {:>7.1} tps | {:>8} total | {:>5.2}M blk | \
+             p50={:.1}ms p95={:.1}ms p99={:.1}ms | {} fail",
+            elapsed.as_secs_f64(),
+            interval_tx,
+            interval_tps,
+            current_success,
+            blocks_m,
+            p50,
+            p95,
+            p99,
+            interval_failures,
+        );
+
+        intervals.push(metric);
+        last_success = current_success;
+        last_fail = current_fail;
+    }
+
+    // ── 6. Wait for all workers ─────────────────────────────────────────
+    let mut per_worker_results = Vec::new();
+    for h in worker_handles {
+        match h.await {
+            Ok((id, ok, fail)) => per_worker_results.push((id, ok, fail)),
+            Err(e) => eprintln!("   Worker panicked: {}", e),
+        }
+    }
+
+    let total_elapsed = benchmark_start.elapsed();
+    let total_ok = success_count.load(Ordering::Relaxed);
+    let total_fail = fail_count.load(Ordering::Relaxed);
+    let overall_tps = total_ok as f64 / total_elapsed.as_secs_f64();
+    let total_blocks = total_ok as u64 * BLOCKS_PER_TX;
+    let rocksdb_estimate = stress_block_count(&client, &base_url).await;
+
+    // ── 7. Report ───────────────────────────────────────────────────────
+    println!("\n   [4/4] Generating report...\n");
+
+    // Time-series table
+    println!("   ╔═══════╦════════╦═════════╦══════════╦══════════╦══════════╦══════════╦══════════╦═══════╗");
+    println!("   ║ Time  ║ TX/int ║   TPS   ║  Cum.TX  ║  Blocks  ║  P50 ms  ║  P95 ms  ║  P99 ms  ║ Fails ║");
+    println!("   ╠═══════╬════════╬═════════╬══════════╬══════════╬══════════╬══════════╬══════════╬═══════╣");
+    for m in &intervals {
+        let blk_m = m.cumulative_blocks as f64 / 1_000_000.0;
+        println!(
+            "   ║ {:>5.0}s ║ {:>6} ║ {:>7.1} ║ {:>8} ║ {:>5.2}M  ║ {:>6.1}ms ║ {:>6.1}ms ║ {:>6.1}ms ║ {:>5} ║",
+            m.offset_secs,
+            m.interval_tx,
+            m.interval_tps,
+            m.cumulative_tx,
+            blk_m,
+            m.p50_latency_ms,
+            m.p95_latency_ms,
+            m.p99_latency_ms,
+            m.interval_failures,
+        );
+    }
+    println!("   ╚═══════╩════════╩═════════╩══════════╩══════════╩══════════╩══════════╩══════════╩═══════╝");
+
+    // Summary statistics
+    let tps_values: Vec<f64> = intervals.iter().map(|m| m.interval_tps).collect();
+    let min_tps = tps_values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max_tps = tps_values.iter().cloned().fold(0.0f64, f64::max);
+    let avg_tps = if tps_values.is_empty() {
+        0.0
+    } else {
+        tps_values.iter().sum::<f64>() / tps_values.len() as f64
+    };
+
+    // Degradation analysis: first minute avg TPS vs last minute avg TPS
+    let first_minute_cutoff = 60.0;
+    let last_minute_start = DURATION_SECS as f64 - 60.0;
+
+    let first_minute_tps: Vec<f64> = intervals
+        .iter()
+        .filter(|m| m.offset_secs <= first_minute_cutoff)
+        .map(|m| m.interval_tps)
+        .collect();
+    let last_minute_tps: Vec<f64> = intervals
+        .iter()
+        .filter(|m| m.offset_secs > last_minute_start)
+        .map(|m| m.interval_tps)
+        .collect();
+
+    let first_avg = if first_minute_tps.is_empty() {
+        0.0
+    } else {
+        first_minute_tps.iter().sum::<f64>() / first_minute_tps.len() as f64
+    };
+    let last_avg = if last_minute_tps.is_empty() {
+        0.0
+    } else {
+        last_minute_tps.iter().sum::<f64>() / last_minute_tps.len() as f64
+    };
+
+    let degradation_pct = if first_avg > 0.0 {
+        ((first_avg - last_avg) / first_avg) * 100.0
+    } else {
+        0.0
+    };
+
+    // Latency summary across all intervals
+    let all_p50: Vec<f64> = intervals.iter().map(|m| m.p50_latency_ms).collect();
+    let all_p99: Vec<f64> = intervals.iter().map(|m| m.p99_latency_ms).collect();
+    let avg_p50 = if all_p50.is_empty() {
+        0.0
+    } else {
+        all_p50.iter().sum::<f64>() / all_p50.len() as f64
+    };
+    let avg_p99 = if all_p99.is_empty() {
+        0.0
+    } else {
+        all_p99.iter().sum::<f64>() / all_p99.len() as f64
+    };
+
+    let blocks_m = total_blocks as f64 / 1_000_000.0;
+    let blocks_per_sec = total_blocks as f64 / total_elapsed.as_secs_f64();
+
+    println!("\n   ╔══════════════════════════════════════════════════════════════╗");
+    println!("   ║  SUSTAINED TPS STRESS TEST — SUMMARY                        ║");
+    println!("   ╠══════════════════════════════════════════════════════════════╣");
+    println!(
+        "   ║  Duration:               {:>28.1}s    ║",
+        total_elapsed.as_secs_f64()
+    );
+    println!("   ║  Workers:                {:>29}    ║", WORKERS);
+    println!(
+        "   ║  Total successful TX:    {:>29}    ║",
+        total_ok
+    );
+    println!(
+        "   ║  Total failed TX:        {:>29}    ║",
+        total_fail
+    );
+    println!(
+        "   ║  Overall TPS:            {:>29.1}    ║",
+        overall_tps
+    );
+    println!(
+        "   ║  ────────────────────────────────────────────────────────    ║"
+    );
+    println!(
+        "   ║  TOTAL BLOCKS (TX+Reward): {:>22.2}M    ║",
+        blocks_m
+    );
+    println!(
+        "   ║  Blocks/sec:               {:>26.0}    ║",
+        blocks_per_sec
+    );
+    println!(
+        "   ║  RocksDB estimate:         {:>26}    ║",
+        rocksdb_estimate
+    );
+    println!(
+        "   ║  ────────────────────────────────────────────────────────    ║"
+    );
+    println!(
+        "   ║  Min interval TPS:       {:>29.1}    ║",
+        min_tps
+    );
+    println!(
+        "   ║  Max interval TPS:       {:>29.1}    ║",
+        max_tps
+    );
+    println!(
+        "   ║  Avg interval TPS:       {:>29.1}    ║",
+        avg_tps
+    );
+    println!(
+        "   ║  ────────────────────────────────────────────────────────    ║"
+    );
+    println!(
+        "   ║  Avg P50 latency:        {:>26.1} ms    ║",
+        avg_p50
+    );
+    println!(
+        "   ║  Avg P99 latency:        {:>26.1} ms    ║",
+        avg_p99
+    );
+    println!(
+        "   ║  ────────────────────────────────────────────────────────    ║"
+    );
+    println!(
+        "   ║  First minute avg TPS:   {:>29.1}    ║",
+        first_avg
+    );
+    println!(
+        "   ║  Last minute avg TPS:    {:>29.1}    ║",
+        last_avg
+    );
+    println!(
+        "   ║  Degradation:            {:>28.1}%    ║",
+        degradation_pct
+    );
+    println!("   ╚══════════════════════════════════════════════════════════════╝");
+
+    // Per-worker breakdown
+    println!("\n   Per-worker results:");
+    for (id, ok, fail) in &per_worker_results {
+        println!("      Worker {:>2}: {:>6} ok, {:>4} fail", id, ok, fail);
+    }
+
+    // Success rate
+    let success_rate = total_ok as f64 / (total_ok + total_fail).max(1) as f64;
+    println!("\n   Success rate: {:.1}%", success_rate * 100.0);
+
+    // ── 8. Assertions ───────────────────────────────────────────────────
+
+    // Must have processed a meaningful number of transactions
+    assert!(
+        total_ok > 1000,
+        "Should have processed at least 1000 transactions in {}s. Got: {}",
+        DURATION_SECS,
+        total_ok
+    );
+
+    // Catastrophic degradation guard (memory leak / unbounded growth)
+    if degradation_pct > 30.0 {
+        eprintln!(
+            "\n   WARNING: TPS degraded by {:.1}% (threshold: 30%)",
+            degradation_pct
+        );
+        eprintln!(
+            "   First minute: {:.1} TPS → Last minute: {:.1} TPS",
+            first_avg, last_avg
+        );
+    }
+
+    assert!(
+        degradation_pct < 50.0,
+        "CRITICAL: TPS degraded by {:.1}% — possible memory leak or unbounded growth. \
+         First minute: {:.1} TPS, Last minute: {:.1} TPS",
+        degradation_pct,
+        first_avg,
+        last_avg
+    );
+
+    // Success rate must be reasonable
+    assert!(
+        success_rate >= 0.5,
+        "Success rate below 50%: {:.1}%. Too many UTXO conflicts or errors.",
+        success_rate * 100.0
+    );
+
+    // Final verdict
+    let verdict = if degradation_pct <= 10.0 {
+        "EXCELLENT"
+    } else if degradation_pct <= 20.0 {
+        "PASS"
+    } else if degradation_pct <= 30.0 {
+        "WARN"
+    } else {
+        "DEGRADED"
+    };
+
+    println!(
+        "\n   ═══════════════════════════════════════════════════════════════"
+    );
+    println!(
+        "   VERDICT: {} — {:.1} avg TPS, {:.1}% degradation over {}s",
+        verdict, avg_tps, degradation_pct, DURATION_SECS
+    );
+    println!(
+        "   DAG accumulated {:.2}M blocks ({:.0} blk/s) without catastrophic slowdown.",
+        blocks_m, blocks_per_sec
+    );
+    println!(
+        "   ═══════════════════════════════════════════════════════════════\n"
+    );
 
     Ok(())
 }

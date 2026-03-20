@@ -248,6 +248,7 @@ if [ "$DO_BUILD" = "true" ]; then
         cd $REMOTE_DIR 2>/dev/null || true
         PMS_ADMIN_TOKEN='placeholder' docker compose -f $COMPOSE_FILE down --remove-orphans 2>/dev/null || true
         docker rm -f pms-engine-testnet pms-gateway-testnet pms-caddy-testnet pms-prometheus-testnet pms-simulator-testnet 2>/dev/null || true
+        docker ps -a --filter 'label=com.docker.compose.project=pms' -q | xargs docker rm -f 2>/dev/null || true
         docker image prune -f 2>/dev/null || true
     "
     echo -e "   ${GREEN}Services stopped, disk cleaned.${NC}"
@@ -616,7 +617,26 @@ if [ "\$DO_BUILD" = "true" ]; then
     export PMS_ADMIN_TOKEN="\$ADMIN_TOKEN"
     export PMS_COORDINATOR_KEY="\$COORD_PRIV_KEY"
     export PMS_COORDINATOR_ADDR="\$COORD_ADDR"
-    docker compose -f \$COMPOSE_FILE up -d --force-recreate pms-engine pms-gateway caddy prometheus
+    # Clean stale Docker Compose state (ghost container fix).
+    # Docker Compose v2 can desync with containerd, leaving phantom container
+    # references that cause "No such container" errors on recreate.
+    docker compose -f \$COMPOSE_FILE rm -f -s 2>/dev/null || true
+    docker ps -a --filter "label=com.docker.compose.project=pms" -q | xargs docker rm -f 2>/dev/null || true
+
+    # Start services. Use || true because ghost containers may cause a non-zero
+    # exit even though the real services are created successfully.
+    docker compose -f \$COMPOSE_FILE up -d --force-recreate --remove-orphans pms-engine pms-gateway caddy prometheus 2>&1 || true
+
+    # Verify each core service is running (retry individually if ghost blocked it)
+    for _svc in pms-engine:pms-engine-testnet pms-gateway:pms-gateway-testnet caddy:pms-caddy-testnet prometheus:pms-prometheus-testnet; do
+        _compose_name=\${_svc%%:*}
+        _container_name=\${_svc##*:}
+        if ! docker ps --filter "name=\$_container_name" --filter "status=running" -q 2>/dev/null | grep -q .; then
+            echo -e "\${YELLOW}   \$_container_name not running — retrying individually...\${NC}"
+            docker compose -f \$COMPOSE_FILE up -d "\$_compose_name" 2>/dev/null || true
+            sleep 2
+        fi
+    done
 
     echo -e "\${GREEN}   Core services started.\${NC}"
 
@@ -696,7 +716,12 @@ if [ "\$DO_BUILD" = "true" ]; then
         export PMS_API_KEY="\$SDK_API_KEY"
         export PMS_COORDINATOR_KEY="\$COORD_PRIV_KEY"
         export PMS_COORDINATOR_ADDR="\$COORD_ADDR"
-        docker compose -f \$COMPOSE_FILE up -d --force-recreate pms-simulator
+        docker compose -f \$COMPOSE_FILE up -d --force-recreate --remove-orphans pms-simulator 2>&1 || true
+        if ! docker ps --filter "name=pms-simulator-testnet" --filter "status=running" -q 2>/dev/null | grep -q .; then
+            echo -e "\${YELLOW}   Simulator not running — retrying...\${NC}"
+            docker compose -f \$COMPOSE_FILE up -d pms-simulator 2>/dev/null || true
+            sleep 2
+        fi
 
         # Wait for Simulator
         echo "   Waiting for Simulator..."
