@@ -12,7 +12,7 @@
 //!                          ↓
 //!         batch drain (up to 64 jobs) via try_recv()
 //!                          ↓
-//!               store.append_block_atomic_with_utxo() per block
+//!               store.append_blocks_batch() — single WriteBatch for all blocks
 //!                          ↓
 //!               batched persist_final() for all finalized blocks
 //! ```
@@ -32,15 +32,16 @@ pub struct PersistJob {
 }
 
 /// Maximum blocks drained per batch iteration.
-/// Higher = more WAL fsync amortization, but higher per-block latency.
+/// Higher = more WAL amortization, but higher per-block latency.
 const MAX_BATCH_SIZE: usize = 64;
 
 /// Spawns the background persistence task with batch draining.
 ///
 /// The consumer drains up to [`MAX_BATCH_SIZE`] jobs per iteration using
-/// non-blocking `try_recv()` after the initial `recv().await`. This
-/// amortizes finality persistence and reduces channel pressure under
-/// sustained high-TPS load.
+/// non-blocking `try_recv()` after the initial `recv().await`. All blocks
+/// in the batch are persisted in a **single** `WriteBatch` via
+/// [`DagStorage::append_blocks_batch`], reducing WAL appends and DB mutex
+/// acquisitions by up to 64×.
 ///
 /// Returns a sender that can be used to queue blocks for persistence.
 ///
@@ -69,7 +70,7 @@ where
 
         while let Some(first_job) = rx.recv().await {
             // Batch drain: collect up to MAX_BATCH_SIZE-1 additional jobs
-            // without blocking. This amortizes finality persist overhead.
+            // without blocking. This amortizes WAL and finality overhead.
             let mut batch = Vec::with_capacity(MAX_BATCH_SIZE);
             batch.push(first_job);
             while batch.len() < MAX_BATCH_SIZE {
@@ -81,27 +82,29 @@ where
 
             let batch_size = batch.len();
 
-            // Persist each block in the batch
-            for job in &batch {
-                match store
-                    .append_block_atomic_with_utxo(&job.block, job.delta.as_ref())
-                    .await
-                {
-                    Ok(true) => {
-                        persisted_count += 1;
-                    }
-                    Ok(false) => {
-                        // Block already exists, not an error
-                    }
-                    Err(e) => {
-                        error_count += 1;
-                        tracing::error!(
-                            target = "pms_persist",
-                            block_id = %job.block.id,
-                            error = %e,
-                            "Failed to persist block"
-                        );
-                    }
+            // Build slice of references for the batch persist call.
+            // This avoids cloning StoredBlock/UtxoDelta — just borrows.
+            let block_refs: Vec<(&StoredBlock, Option<&UtxoDelta>)> = batch
+                .iter()
+                .map(|j| (&j.block, j.delta.as_ref()))
+                .collect();
+
+            // Single atomic write for ALL blocks in the batch.
+            // RocksStore overrides this with a mega WriteBatch (1 WAL append
+            // instead of N), while the default trait impl falls back to
+            // per-block writes for non-RocksDB backends.
+            match store.append_blocks_batch(&block_refs).await {
+                Ok(new_count) => {
+                    persisted_count += new_count as u64;
+                }
+                Err(e) => {
+                    error_count += batch_size as u64;
+                    tracing::error!(
+                        target = "pms_persist",
+                        error = %e,
+                        batch_size,
+                        "Failed to persist block batch"
+                    );
                 }
             }
 

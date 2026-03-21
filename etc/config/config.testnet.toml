@@ -9,14 +9,17 @@ path = "/home/pms/data/rocks"
 prefix = "pms:test"
 tip_limit = 256
 max_dag_blocks = 50000
-max_utxos = 250000
+# UTXO LRU cache size. With simulator generating 2M+ UTXOs, 250K caused
+# 87.5% cache miss rate → every coin selection hit RocksDB for ~900 lookups.
+# 2M keeps the working set in RAM. Memory cost: ~400 MB (acceptable on 16 GB VPS).
+max_utxos = 2000000
 checkpoint_interval_secs = 3600
 # ── Memory tuning (scale with VPS RAM) ──────────────────────────────────────
 #  8 GB VPS:  write_buffer=64, cache=256, db_write=512, docker mem_limit=7g
 # 16 GB VPS:  write_buffer=128, cache=512, db_write=1024, docker mem_limit=14g
 # 32 GB VPS:  write_buffer=256, cache=1024, db_write=2048, docker mem_limit=28g
 write_buffer_size_mb = 128       # Per-CF memtable size (default 128)
-max_write_buffer_number = 3      # Max memtables per CF before flush
+max_write_buffer_number = 6      # 3→6: more memtable buffering before flush stall
 block_cache_size_mb = 512        # Shared LRU cache (default 512)
 db_write_buffer_size_mb = 1024   # Global memtable cap — prevents OOM with 66+ CFs
 max_open_files = 1024            # FD limit

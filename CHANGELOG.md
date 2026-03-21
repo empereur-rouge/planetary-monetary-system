@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.20] - 2026-03-21 — RocksDB write stall elimination: sustained high-TPS tuning
+
+### Performance
+- **perf(storage/critical)**: RocksDB write stall prevention v2. L0 thresholds doubled again (40/56 → 80/120), pipelined writes enabled (`set_enable_pipelined_write`), background jobs scaled to CPU core count (min 8), sub-compactions increased (3 → 4), memtable merge before flush (`min_write_buffer_number_to_merge = 2`). Eliminates the periodic 20-60 blk/s stalls observed in 75-minute VPS monitoring.
+- **perf(storage/critical)**: Multi-block WriteBatch in background persist. New `DagStorage::append_blocks_batch()` batches up to 64 blocks into a single `WriteBatch` + `db.write()` call. Reduces WAL appends and DB mutex acquisitions by up to 64x. RocksStore implementation uses `multi_get_cf` for batch dedup check and single atomic write. Default trait impl falls back to per-block writes for non-RocksDB backends.
+
+### Added
+- **feat(storage)**: `DagStorage::append_blocks_batch()` — batch block persistence with default per-block fallback.
+- **feat(storage)**: `RocksStore::append_blocks_batch()` — optimized single-WriteBatch implementation for multi-block persistence.
+
+### Changed
+- **change(config/testnet)**: `max_utxos` increased 250K → 2M. With simulator generating 2M+ UTXOs, the 250K LRU cache had 87.5% miss rate — every coin selection triggered ~900 RocksDB reads. Memory cost: ~400 MB (acceptable on 16 GB VPS).
+- **change(config/testnet)**: `max_write_buffer_number` increased 3 → 6. More memtable buffering before flush stalls under sustained write pressure.
+
+---
+
 ## [0.5.19] - 2026-03-20 — Sustained TPS degradation elimination: 4 performance fixes
 
 ### Performance

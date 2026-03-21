@@ -98,6 +98,25 @@ pub trait DagStorage: Send + Sync {
         delta: Option<&UtxoDelta>,
     ) -> Result<bool>;
 
+    /// Persist multiple blocks in a single atomic write.
+    ///
+    /// Returns the number of NEW blocks persisted (duplicates are skipped).
+    /// Default implementation falls back to calling `append_block_atomic_with_utxo`
+    /// for each block sequentially. RocksStore overrides with a single `WriteBatch`
+    /// for all blocks — reducing WAL appends and mutex acquisitions by up to 64×.
+    async fn append_blocks_batch(
+        &self,
+        blocks: &[(&StoredBlock, Option<&UtxoDelta>)],
+    ) -> Result<usize> {
+        let mut count = 0usize;
+        for (b, delta) in blocks {
+            if self.append_block_atomic_with_utxo(b, *delta).await? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Paginated reverse-chronological scan of block IDs involving a specific
     /// address.  Returns `(block_ids, next_cursor)`.
     /// Default no-op returns empty results (used by non-RocksDB backends).

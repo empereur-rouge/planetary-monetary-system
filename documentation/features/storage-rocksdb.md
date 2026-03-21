@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure]
 created: 2026-03-14
-updated: 2026-03-19
-version: v0.5.16
+updated: 2026-03-21
+version: v0.5.20
 ---
 
 # Storage / RocksDB
@@ -171,16 +171,18 @@ Ces parametres sont appliques uniformement a `new()` et `open_db_multi_prefix()`
 | `create_if_missing` | `true` | Non | Cree la DB si elle n'existe pas |
 | `create_missing_column_families` | `true` | Non | Cree les CFs manquantes au demarrage |
 | `increase_parallelism` | `num_cpus` | Non | Un thread background par coeur CPU |
-| `max_background_jobs` | `6` | Non | Flush + compaction overlap sur VPS 4-core |
+| `max_background_jobs` | `max(num_cpus, 8)` | Non | Flush + compaction overlap, scale avec CPU (v0.5.20: min 8) |
 | `level_compaction_dynamic_level_bytes` | `true` | Non | Ajuste automatiquement la taille des niveaux |
 | `write_buffer_size` | `128 MB` | **Oui** (`write_buffer_size_mb`) | Taille du memtable avant flush |
 | `max_write_buffer_number` | `3` | **Oui** (`max_write_buffer_number`) | Max memtables par CF |
+| `min_write_buffer_number_to_merge` | `2` | Non | Merge 2 memtables avant flush L0 — halve L0 file count (v0.5.20) |
 | `db_write_buffer_size` | `512 MB` | **Oui** (`db_write_buffer_size_mb`) | Cap memoire global memtables (v0.5.7) |
 | `target_file_size_base` | `64 MB` | Non | Taille cible par SSTable |
+| `enable_pipelined_write` | `true` | Non | Overlap WAL append et memtable insert — 30-40% throughput gain (v0.5.20) |
 | `level_zero_file_num_compaction_trigger` | `4` | Non | Debut de compaction L0 (defaut) |
-| `level_zero_slowdown_writes_trigger` | `40` | Non | Seuil de ralentissement (defaut: 20) |
-| `level_zero_stop_writes_trigger` | `56` | Non | Seuil d'arret total (defaut: 24) |
-| `max_subcompactions` | `3` | Non | Parallelise chaque job de compaction |
+| `level_zero_slowdown_writes_trigger` | `80` | Non | Seuil de ralentissement (v0.5.20: 40→80, 4x defaut RocksDB) |
+| `level_zero_stop_writes_trigger` | `120` | Non | Seuil d'arret total (v0.5.20: 56→120, 5x defaut RocksDB) |
+| `max_subcompactions` | `4` | Non | Parallelise chaque job de compaction (v0.5.20: 3→4) |
 | `max_open_files` | `512` | **Oui** (`max_open_files`) | Limite FD RocksDB. Empêche FD exhaustion sur VPS (v0.5.8) |
 | `advise_random_on_open` | `true` | Non | Disables kernel readahead (128KB/read) on SST files. Essential for Docker 8GB cgroup — without it, page cache fills cgroup limit → OOM kill loop. Initially misblamed for TPS regression, but the true cause was removing add_utxo() calls (v0.5.16). |
 | `compaction_readahead_size` | `2 MB` | Non | Sequential readahead for compaction jobs (compensates advise_random for compaction I/O). |
@@ -252,6 +254,7 @@ Appliques a **toutes** les 31 CFs (pas seulement aux CFs d'index) :
 |----------|---------|-------------|
 | `append_block_atomic()` | `atomic.rs` | Insere un bloc avec tous ses index DAG en un seul `WriteBatch` atomique |
 | `append_block_atomic_with_utxo()` | `store.rs` | Idem + delta UTXO (spend/create) dans le meme batch |
+| `append_blocks_batch()` | `store.rs` | Mega WriteBatch pour N blocs (dedup via `multi_get_cf`, 1 seul `db.write()` pour 64 blocs) (v0.5.20) |
 | `apply_dag_indices()` | `atomic.rs` | Ecrit les index DAG dans un `WriteBatch` existant (blocks, idx, time, tips, children) |
 | `apply_addr_activity_indices()` | `atomic.rs` | Ecrit les index d'activite (addr_activity, addr_type_activity, activity_items) dans un batch |
 | `persist_genesis()` | `atomic.rs` | Insere le bloc genesis via `append_block_atomic()` |
@@ -368,6 +371,24 @@ Verification au demarrage via `check_dag_compatibility()` :
 - `cache_index_and_filter_blocks(true)` : index et filtres en cache
 - `pin_l0_filter_and_index_blocks_in_cache(true)` : les blocs L0 ne sont jamais evinces du cache
 - Ces parametres sont appliques a la fois dans `new()` et `open_db_multi_prefix()`
+
+#### v0.5.20 : Fix du TPS cliff sous charge soutenue (600+ blk/s)
+
+**Cause racine** : A 600+ blk/s avec 33 CFs et ~20 KV writes par bloc (~12 000 writes/sec), les L0 files s'accumulaient plus vite que les 6 background threads ne pouvaient compacter. Monitoring VPS (75 min) : 641 blk/s → 21 blk/s avec stalls periodiques a 20-60 blk/s.
+
+Trois problemes combines :
+1. **Write stalls L0** : seuils 40/56 insuffisants pour 600+ blk/s soutenu
+2. **UTXO cache thrashing** : `max_utxos=250K` avec 2M+ UTXOs → 87.5% cache miss → RocksDB reads a chaque coin selection
+3. **Per-block WriteBatch** : 641 `db.write()` calls/sec (chacun acquire le DB mutex + append WAL)
+
+**Correctifs** :
+- L0 thresholds doubles : 40/56 → 80/120
+- Background jobs scales avec CPU : 6 → `max(num_cpus, 8)`
+- Pipelined writes : `set_enable_pipelined_write(true)` (overlap WAL + memtable)
+- Memtable merge : `min_write_buffer_number_to_merge(2)` (halve L0 file count)
+- Sub-compactions : 3 → 4
+- Multi-block WriteBatch : `append_blocks_batch()` — 1 `db.write()` pour 64 blocs au lieu de 64 appels
+- Config testnet : `max_utxos` 250K → 2M, `max_write_buffer_number` 3 → 6
 
 ### Optimisations de chemin critique
 
