@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.1] - 2026-03-21 — Fix: fd exhaustion crash + metrics counter reset
+
+### Fixed
+- **fix(server/critical)**: Engine crashed silently every ~2-2.5 hours with ExitCode 0 due to **file descriptor exhaustion**. Root cause: Docker default `ulimit -n = 1024` combined with `max_open_files = 1024` in RocksDB config, leaving zero fd headroom for TCP accept, logging, or other I/O. 113K+ "Too many open files" errors occurred before each crash. `listen_tls()` / `listen()` used `?` on `accept()`, causing a single fd error to kill the entire P2P listener and propagate through `srv.run()` to `main()`, which always returned `Ok(())` (exit code 0) regardless of error.
+- **fix(server/critical)**: P2P listener `accept()` errors now use retry-with-backoff instead of `?` propagation. A transient OS error (fd exhaustion, EMFILE) no longer kills the server — the listener logs the error and retries after 1s, recovering automatically once fds are freed.
+- **fix(main)**: `main()` now calls `std::process::exit(1)` when `srv.run()` returns (either Ok or Err), using `eprintln!` (unbuffered) to guarantee the error message is visible even when tracing can't write due to fd exhaustion. Previously, `main()` always returned `Ok(())` → exit code 0 → Docker reported "clean exit" → misleading diagnostics.
+- **fix(metrics/critical)**: `pms_blocks_persisted_total` counter was never initialized for dynamic ledgers (e.g. eden) restored via `load_persisted_ledgers()`. After every engine restart, the dashboard showed a misleading gap (e.g. "DAG Size: 50K" vs "Blocks Persisted: 0") because the Prometheus counter started at 0 while `pms_blocks_total` loaded 50K blocks from RocksDB. Now all dynamic ledgers get their counter seeded from `block_count_estimate()` at startup.
+- **fix(persist)**: `try_send()` in the background persist pipeline silently dropped blocks when the channel buffer (10K) was full. Added warning log with drop counter so operators can detect backpressure-induced data loss. Previously, blocks could be lost without any trace in logs.
+
+### Added
+- **feat(boot)**: Startup now reads `/proc/self/limits` and logs the fd limit. Warns if `ulimit -n < 8192` with instructions to set Docker ulimits.
+
+### Infrastructure
+- **infra(docker)**: `docker-compose.testnet.yml` now sets `ulimits: nofile: { soft: 65536, hard: 65536 }` for the engine container.
+- **infra(config)**: `config.testnet.toml` `max_open_files` increased from 1024 to 4096, leaving ample headroom within the new 65536 fd limit.
+
+---
+
 ## [0.6.0] - 2026-03-21 — Major structural refactoring: module splits + dead code removal
 
 ### Changed

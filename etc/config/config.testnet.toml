@@ -28,7 +28,7 @@ write_buffer_size_mb = 32        # Per-CF memtable (v0.5.22: 128→32 for multi-
 max_write_buffer_number = 3      # Per-CF immutable memtables (v0.5.22: 6→3)
 block_cache_size_mb = 1024       # Shared LRU cache — sole read cache with Direct I/O
 db_write_buffer_size_mb = 512    # Global memtable flush trigger (NOT a hard cap!)
-max_open_files = 1024            # FD limit
+max_open_files = 4096            # FD limit (ulimit=65536 in docker-compose)
 
 [network]
 mode = "testnet"

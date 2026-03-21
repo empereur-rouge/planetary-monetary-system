@@ -33,6 +33,32 @@ async fn main() -> Result<()> {
 
     eprintln!("PMS v{} starting...", env!("CARGO_PKG_VERSION"));
 
+    // Log file descriptor limit at startup — fd exhaustion causes silent crashes.
+    // Read from /proc/self/limits on Linux (Docker containers).
+    if let Ok(contents) = std::fs::read_to_string("/proc/self/limits") {
+        for line in contents.lines() {
+            if line.starts_with("Max open files") {
+                eprintln!("[BOOT] {}", line);
+                // Parse soft limit (second column after the label)
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(soft_str) = parts.get(3) {
+                    if let Ok(soft) = soft_str.parse::<u64>() {
+                        if soft < 8192 {
+                            eprintln!(
+                                "⚠️  WARNING: fd limit ({}) is dangerously low for RocksDB!",
+                                soft
+                            );
+                            eprintln!(
+                                "   Set `ulimits: nofile: {{ soft: 65536, hard: 65536 }}` in docker-compose.yml"
+                            );
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+
     // 1) Settings
     let settings = load_config()?;
     let node_wallet = Wallet::load_from_node_key_file(&settings.secrets.node_identity_key_path)?;
@@ -302,8 +328,21 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         result = srv.run(cfg, store) => {
-            if let Err(e) = result {
-                tracing::error!(error = %e, "Server exited with error");
+            match result {
+                Ok(()) => {
+                    // P2P listener returned Ok — should never happen (infinite loop).
+                    // If it does, something went very wrong.
+                    eprintln!("❌ FATAL: P2P listener exited unexpectedly (Ok). Shutting down.");
+                    tracing::error!("P2P listener exited unexpectedly (Ok) — this should never happen");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    // Use eprintln! (unbuffered stderr) to guarantee the message is
+                    // visible even under fd exhaustion where tracing may fail to write.
+                    eprintln!("❌ FATAL: Server exited with error: {}", e);
+                    tracing::error!(error = %e, "Server exited with error");
+                    std::process::exit(1);
+                }
             }
         }
         _ = shutdown_signal() => {

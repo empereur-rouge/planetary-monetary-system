@@ -28,6 +28,10 @@ services:
     user: "pms"
     mem_limit: 14g
     memswap_limit: 14g
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     logging:
       driver: json-file
       options:
