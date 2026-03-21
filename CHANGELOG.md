@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.21] - 2026-03-21 — Direct I/O: eliminate Docker OOM crashes
+
+### Performance
+- **perf(storage/critical)**: RocksDB Direct I/O enabled (`set_use_direct_reads`, `set_use_direct_io_for_flush_and_compaction`). Bypasses kernel page cache entirely, eliminating 4-10 GB of cgroup-accounted memory that caused Docker OOM kills within hours of sustained operation. All SST reads now go exclusively through RocksDB's own block cache. Root cause fix for production crashes: Linux counts page cache towards cgroup `mem_limit`, so Application RSS (2-3 GB) + page cache (4-10 GB) exceeded the 14 GB Docker limit.
+- **perf(storage)**: `block_cache_size_mb` default increased 512 → 1024 MB. With Direct I/O, the block cache is the ONLY read cache (kernel page cache bypassed). Larger cache ensures index/filter blocks + hot data blocks remain in RAM.
+
+### Changed
+- **change(storage)**: `advise_random_on_open(true)` removed from both `cf_opts_with_bloom()` functions. Direct I/O makes fadvise hints irrelevant — the kernel page cache is no longer used at all.
+- **change(config/testnet)**: `block_cache_size_mb` increased 512 → 1024 MB. Memory sizing guide updated for Direct I/O era (cache column doubled in VPS sizing table).
+
+---
+
 ## [0.5.20] - 2026-03-21 — RocksDB write stall elimination: sustained high-TPS tuning
 
 ### Performance

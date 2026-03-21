@@ -83,7 +83,8 @@ pub struct RocksMemoryConfig {
     pub write_buffer_size_mb: usize,
     /// Max memtables kept in memory per CF. Default: 3.
     pub max_write_buffer_number: i32,
-    /// Shared LRU block cache in MB (all CFs). Default: 512.
+    /// Shared LRU block cache in MB (all CFs). Default: 1024.
+    /// With Direct I/O (v0.5.21), this is the ONLY read cache — size generously.
     pub block_cache_size_mb: usize,
     /// Global memtable budget in MB. 0 = disabled. Default: 512.
     pub db_write_buffer_size_mb: usize,
@@ -96,7 +97,7 @@ impl Default for RocksMemoryConfig {
         Self {
             write_buffer_size_mb: 128,
             max_write_buffer_number: 3,
-            block_cache_size_mb: 512,
+            block_cache_size_mb: 1024,
             db_write_buffer_size_mb: 512,
             max_open_files: 512,
         }
@@ -156,7 +157,8 @@ impl RocksStore {
             db_write_buffer_mb = mem.db_write_buffer_size_mb,
             max_open_files = mem.max_open_files,
             background_jobs = ncpu.max(8),
-            "RocksDB memory tuning applied"
+            direct_io = true,
+            "RocksDB memory tuning applied (Direct I/O enabled)"
         );
 
         // === WRITE STALL PREVENTION (v0.5.20: thresholds doubled again) ===
@@ -173,21 +175,36 @@ impl RocksStore {
         db_opts.set_level_zero_stop_writes_trigger(120); // 56→120: hard stop raised proportionally
         db_opts.set_max_subcompactions(4); // 3→4: more parallelism per compaction job
 
-        // === PAGE CACHE CONTROL (v0.5.16) ===
+        // === DIRECT I/O (v0.5.21) ===
         //
-        // Without this, the kernel applies 128 KB readahead on every SST
-        // file read. With 15M+ blocks across 65+ CFs, the page cache fills
-        // the Docker cgroup memory limit (7 GB) within minutes → OOM kill loop.
+        // **Root cause of production OOM crashes**: Linux counts kernel page cache
+        // against the Docker cgroup memory limit. RocksDB SST file reads are cached
+        // by the kernel (4-10 GB for a 15M+ block DB with 33 CFs), so:
+        //   Application RSS (2-3 GB) + page cache (4-10 GB) > mem_limit (14 GB) → OOM kill
         //
-        // `advise_random_on_open(true)` tells the OS that SST file access is
-        // random (point lookups), disabling readahead. This keeps page cache
-        // usage proportional to actual working set instead of full DB size.
+        // `advise_random_on_open(true)` (v0.5.16) only disabled readahead but still
+        // used the page cache for individual reads. Direct I/O bypasses the kernel
+        // page cache ENTIRELY — all reads go through RocksDB's own block cache
+        // (`block_cache_size_mb`), giving us deterministic memory usage.
         //
-        // HISTORICAL NOTE: This was initially blamed for a 22x TPS regression
-        // (2000→90), but the true cause was removing redundant add_utxo()
-        // calls in 6 code paths (same commit). With add_utxo restored and
-        // advise_random enabled, both OOM prevention AND high TPS are achieved.
-        db_opts.set_compaction_readahead_size(2 * 1024 * 1024); // 2 MB for sequential compaction reads
+        // Memory budget with Direct I/O on 16 GB VPS (mem_limit=14g):
+        //   - Block cache: 1 GB (configurable)
+        //   - Memtables: ~1.5 GB (db_write_buffer_size_mb=1024 + per-CF buffers)
+        //   - UTXO RAM cache: ~400 MB (2M UTXOs)
+        //   - Bloom filters + indexes: ~200 MB (pinned in block cache)
+        //   - Application + runtime: ~500 MB
+        //   - Total: ~3.6 GB — well within 14 GB, with 0 GB page cache pressure
+        //
+        // Tradeoff: slightly higher read latency for cold data (no OS page cache
+        // warmup), but the block cache covers the hot working set. For a write-heavy
+        // DAG engine doing 2000+ blk/s, write throughput stability >> cold read latency.
+        db_opts.set_use_direct_reads(true);
+        db_opts.set_use_direct_io_for_flush_and_compaction(true);
+
+        // Compaction readahead: with Direct I/O enabled, RocksDB performs its own
+        // buffered sequential reads during compaction. 2 MB readahead amortizes
+        // the cost of aligned I/O for compaction's sequential access pattern.
+        db_opts.set_compaction_readahead_size(2 * 1024 * 1024);
     }
 
     /// Build a map of short CF name → full "prefix:name" string.
@@ -297,9 +314,8 @@ impl RocksStore {
         fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
             opts.set_optimize_filters_for_hits(true);
-            // Disable kernel readahead on SST file reads (point lookups are random).
-            // Without this, 128 KB readahead per read fills Docker cgroup page cache → OOM.
-            opts.set_advise_random_on_open(true);
+            // advise_random_on_open removed in v0.5.21: Direct I/O (set at DB level)
+            // bypasses the kernel page cache entirely, making fadvise hints irrelevant.
 
             let mut table_opts = BlockBasedOptions::default();
             table_opts.set_bloom_filter(10.0, false);
@@ -416,9 +432,8 @@ impl RocksStore {
         fn cf_opts_with_bloom(cache: &Cache) -> Options {
             let mut opts = Options::default();
             opts.set_optimize_filters_for_hits(true);
-            // Disable kernel readahead on SST file reads (point lookups are random).
-            // Without this, 128 KB readahead per read fills Docker cgroup page cache → OOM.
-            opts.set_advise_random_on_open(true);
+            // advise_random_on_open removed in v0.5.21: Direct I/O (set at DB level)
+            // bypasses the kernel page cache entirely, making fadvise hints irrelevant.
             let mut table_opts = BlockBasedOptions::default();
             table_opts.set_bloom_filter(10.0, false);
             table_opts.set_block_cache(cache);

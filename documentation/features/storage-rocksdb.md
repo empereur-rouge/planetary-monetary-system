@@ -2,7 +2,7 @@
 tags: [feature, infrastructure]
 created: 2026-03-14
 updated: 2026-03-21
-version: v0.5.20
+version: v0.5.21
 ---
 
 # Storage / RocksDB
@@ -136,7 +136,7 @@ Un CF present dans l'une mais absent de l'autre provoque un crash RocksDB au dem
 | `checkpoint_interval_secs` | `Option<u64>` | `21600` (6h) | Intervalle entre les checkpoints de backup |
 | `write_buffer_size_mb` | `usize` | `128` | Taille du memtable par CF, en MB. Reduire pour multi-ledger (ex: 64) |
 | `max_write_buffer_number` | `i32` | `3` | Nombre max de memtables par CF avant flush |
-| `block_cache_size_mb` | `usize` | `512` | Cache LRU partage entre toutes les CFs, en MB |
+| `block_cache_size_mb` | `usize` | `1024` | Cache LRU partage entre toutes les CFs, en MB. **Seul cache de lecture avec Direct I/O (v0.5.21)** |
 | `db_write_buffer_size_mb` | `usize` | `512` | Budget memtable global (toutes CFs). 0 = desactive. **Critique pour multi-ledger** |
 | `max_open_files` | `i32` | `512` | Limite FD RocksDB. -1 = illimite (dangereux). **Critique pour VPS avec ulimit=1024 et 66+ CFs** (v0.5.8) |
 
@@ -184,8 +184,10 @@ Ces parametres sont appliques uniformement a `new()` et `open_db_multi_prefix()`
 | `level_zero_stop_writes_trigger` | `120` | Non | Seuil d'arret total (v0.5.20: 56→120, 5x defaut RocksDB) |
 | `max_subcompactions` | `4` | Non | Parallelise chaque job de compaction (v0.5.20: 3→4) |
 | `max_open_files` | `512` | **Oui** (`max_open_files`) | Limite FD RocksDB. Empêche FD exhaustion sur VPS (v0.5.8) |
-| `advise_random_on_open` | `true` | Non | Disables kernel readahead (128KB/read) on SST files. Essential for Docker 8GB cgroup — without it, page cache fills cgroup limit → OOM kill loop. Initially misblamed for TPS regression, but the true cause was removing add_utxo() calls (v0.5.16). |
-| `compaction_readahead_size` | `2 MB` | Non | Sequential readahead for compaction jobs (compensates advise_random for compaction I/O). |
+| `use_direct_reads` | `true` | Non | **Direct I/O (v0.5.21)** : bypasse le page cache kernel entierement. Toutes les lectures SST passent par le block cache RocksDB uniquement. Elimine 4-10 GB de memoire cgroup invisible qui causait les OOM Docker. |
+| `use_direct_io_for_flush_and_compaction` | `true` | Non | **Direct I/O (v0.5.21)** : bypasse le page cache pour flush et compaction. Avec `use_direct_reads`, le moteur a un usage memoire 100% deterministe. |
+| `compaction_readahead_size` | `2 MB` | Non | Readahead sequentiel interne a RocksDB pour les jobs de compaction. Necessaire avec Direct I/O car pas de readahead kernel. |
+| ~~`advise_random_on_open`~~ | ~~`true`~~ | ~~Non~~ | **Retire en v0.5.21** : Direct I/O rend les hints fadvise inutiles — le page cache n'est plus utilise du tout. |
 
 ### Block Cache et Bloom Filters
 
@@ -371,6 +373,26 @@ Verification au demarrage via `check_dag_compatibility()` :
 - `cache_index_and_filter_blocks(true)` : index et filtres en cache
 - `pin_l0_filter_and_index_blocks_in_cache(true)` : les blocs L0 ne sont jamais evinces du cache
 - Ces parametres sont appliques a la fois dans `new()` et `open_db_multi_prefix()`
+
+#### v0.5.21 : Direct I/O — Elimination des crashes OOM Docker
+
+**Cause racine** : Linux compte le page cache kernel dans la limite memoire cgroup Docker. Les lectures SST de RocksDB etaient cachees par le kernel (4-10 GB pour une DB de 15M+ blocs avec 33 CFs). Resultat : RSS application (2-3 GB) + page cache (4-10 GB) > `mem_limit` (14 GB) → OOM kill → restart → rebuild UTXOs → OOM kill en boucle.
+
+**Symptomes observes** : 2 crashes en 2h de monitoring. Premier crash : UTXOs tombent de 2.29M a 14K (rebuild), blocs survivent. Deuxieme crash : blocs tombent a 0 (perte de donnees, demarrage frais).
+
+**Correctifs** :
+- `set_use_direct_reads(true)` : bypasse le page cache pour les lectures SST
+- `set_use_direct_io_for_flush_and_compaction(true)` : bypasse le page cache pour flush/compaction
+- `advise_random_on_open(true)` retire des CF options (redondant avec Direct I/O)
+- `block_cache_size_mb` defaut augmente 512 → 1024 MB (seul cache de lecture desormais)
+
+**Budget memoire avec Direct I/O** (VPS 16 GB, `mem_limit=14g`) :
+- Block cache : 1 GB (configurable)
+- Memtables : ~1.5 GB
+- UTXO RAM cache : ~400 MB (2M UTXOs)
+- Bloom filters + indexes : ~200 MB (pinnes dans block cache)
+- Application + runtime : ~500 MB
+- **Total : ~3.6 GB** — aucune pression de page cache, 0 GB invisible
 
 #### v0.5.20 : Fix du TPS cliff sous charge soutenue (600+ blk/s)
 
