@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.22] - 2026-03-21 — Memtable OOM fix: multi-ledger memory scaling
+
+### Fixed
+- **fix(storage/critical)**: RocksDB memtable OOM from multi-ledger CF explosion. With 2 ledgers (66 CFs), `write_buffer_size_mb=128 × max_write_buffer_number=6 × 66 CFs = 50 GB theoretical max` — heap reached 12 GB (confirmed via `/proc/1/smaps_rollup`) within hours, triggering OOM kills (4 restarts). Fixed by reducing `write_buffer_size_mb` default from 128 to 32 and `max_write_buffer_number` from 6 to 3. New worst-case: `66 × 3 × 32 = 6.3 GB` memtables — safe within 14 GB Docker limit.
+- **fix(storage)**: Corrected `db_write_buffer_size_mb` documentation — it is a **flush trigger**, NOT a hard memory cap. Immutable memtables waiting for flush still consume RAM beyond this limit. This misunderstanding was a contributing factor to the v0.5.21 OOM.
+
+### Changed
+- **change(config/testnet)**: `write_buffer_size_mb` reduced 128 → 32, `max_write_buffer_number` reduced 6 → 3, `db_write_buffer_size_mb` reduced 1024 → 512. VPS sizing guide rewritten with multi-ledger CF count warnings.
+- **change(storage)**: `RocksMemoryConfig` default `write_buffer_size_mb` reduced 128 → 32 for multi-ledger safety. Doc-comments updated with memory scaling formula.
+
+---
+
 ## [0.5.21] - 2026-03-21 — Direct I/O: eliminate Docker OOM crashes
 
 ### Performance

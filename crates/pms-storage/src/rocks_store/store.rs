@@ -79,14 +79,19 @@ pub struct RocksStore {
 /// Use `db_write_buffer_size_mb` to cap total memtable memory globally.
 #[derive(Debug, Clone)]
 pub struct RocksMemoryConfig {
-    /// Write buffer (memtable) size per column family, in MB. Default: 128.
+    /// Write buffer (memtable) size per column family, in MB. Default: 32.
+    ///
+    /// **CRITICAL for multi-ledger**: Total memtable RAM ≈ `num_CFs × max_write_buffer_number × write_buffer_size_mb`.
+    /// With 2 ledgers (66 CFs), 128 MB × 3 × 66 = 25 GB → OOM. Use 32 MB for safety.
     pub write_buffer_size_mb: usize,
-    /// Max memtables kept in memory per CF. Default: 3.
+    /// Max memtables kept in memory per CF before stalling writes. Default: 3.
     pub max_write_buffer_number: i32,
     /// Shared LRU block cache in MB (all CFs). Default: 1024.
     /// With Direct I/O (v0.5.21), this is the ONLY read cache — size generously.
     pub block_cache_size_mb: usize,
-    /// Global memtable budget in MB. 0 = disabled. Default: 512.
+    /// Global memtable flush trigger in MB. When total memtable across all CFs exceeds
+    /// this, RocksDB triggers flushes. **NOT a hard memory cap** — immutable memtables
+    /// waiting for flush still consume RAM beyond this limit. Default: 512.
     pub db_write_buffer_size_mb: usize,
     /// Maximum open file descriptors for RocksDB. -1 = unlimited. Default: 512.
     pub max_open_files: i32,
@@ -95,7 +100,7 @@ pub struct RocksMemoryConfig {
 impl Default for RocksMemoryConfig {
     fn default() -> Self {
         Self {
-            write_buffer_size_mb: 128,
+            write_buffer_size_mb: 32,
             max_write_buffer_number: 3,
             block_cache_size_mb: 1024,
             db_write_buffer_size_mb: 512,
@@ -187,13 +192,17 @@ impl RocksStore {
         // page cache ENTIRELY — all reads go through RocksDB's own block cache
         // (`block_cache_size_mb`), giving us deterministic memory usage.
         //
-        // Memory budget with Direct I/O on 16 GB VPS (mem_limit=14g):
-        //   - Block cache: 1 GB (configurable)
-        //   - Memtables: ~1.5 GB (db_write_buffer_size_mb=1024 + per-CF buffers)
+        // Memory budget with Direct I/O on 16 GB VPS (mem_limit=14g, 2 ledgers = 66 CFs):
+        //   - Memtables: 66 CFs × 3 × 32 MB = 6.3 GB worst-case (~3 GB average)
+        //   - Block cache: 1 GB (shared LRU, sole read cache)
         //   - UTXO RAM cache: ~400 MB (2M UTXOs)
         //   - Bloom filters + indexes: ~200 MB (pinned in block cache)
         //   - Application + runtime: ~500 MB
-        //   - Total: ~3.6 GB — well within 14 GB, with 0 GB page cache pressure
+        //   - Total: ~5.1 GB average, ~8.4 GB worst — safe within 14 GB
+        //
+        // WARNING (v0.5.22): db_write_buffer_size_mb is a FLUSH TRIGGER, not a hard cap.
+        // With 66 CFs × 128 MB buffers (v0.5.21), actual heap was 12 GB → OOM.
+        // Keep write_buffer_size_mb ≤ 32 for multi-ledger deployments.
         //
         // Tradeoff: slightly higher read latency for cold data (no OS page cache
         // warmup), but the block cache covers the hot working set. For a write-heavy

@@ -2,7 +2,7 @@
 tags: [feature, infrastructure]
 created: 2026-03-14
 updated: 2026-03-21
-version: v0.5.21
+version: v0.5.22
 ---
 
 # Storage / RocksDB
@@ -134,10 +134,10 @@ Un CF present dans l'une mais absent de l'autre provoque un crash RocksDB au dem
 | `max_spent_outpoints` | `usize` | `500_000` | Outpoints depenses max en RAM (double-spend detection) |
 | `max_utxos` | `usize` | `500_000` | UTXOs max dans le cache LRU RAM. Cache miss -> RocksDB |
 | `checkpoint_interval_secs` | `Option<u64>` | `21600` (6h) | Intervalle entre les checkpoints de backup |
-| `write_buffer_size_mb` | `usize` | `128` | Taille du memtable par CF, en MB. Reduire pour multi-ledger (ex: 64) |
+| `write_buffer_size_mb` | `usize` | `32` | Taille du memtable par CF, en MB. **CRITIQUE multi-ledger** : `N_CFs × max_write_buffer × write_buffer = memtable RAM` (v0.5.22: 128→32) |
 | `max_write_buffer_number` | `i32` | `3` | Nombre max de memtables par CF avant flush |
 | `block_cache_size_mb` | `usize` | `1024` | Cache LRU partage entre toutes les CFs, en MB. **Seul cache de lecture avec Direct I/O (v0.5.21)** |
-| `db_write_buffer_size_mb` | `usize` | `512` | Budget memtable global (toutes CFs). 0 = desactive. **Critique pour multi-ledger** |
+| `db_write_buffer_size_mb` | `usize` | `512` | Declencheur de flush global (toutes CFs). 0 = desactive. **N'est PAS un cap memoire dur** — les memtables immutables en attente de flush depassent cette limite (v0.5.22) |
 | `max_open_files` | `i32` | `512` | Limite FD RocksDB. -1 = illimite (dangereux). **Critique pour VPS avec ulimit=1024 et 66+ CFs** (v0.5.8) |
 
 ### RocksMemoryConfig (v0.5.7, FD limit v0.5.8)
@@ -154,13 +154,15 @@ pub struct RocksMemoryConfig {
 }
 ```
 
-**Recommandations par taille VPS :**
+**Recommandations par taille VPS (v0.5.22, multi-ledger safe) :**
 
-| VPS | `write_buffer_size_mb` | `block_cache_size_mb` | `db_write_buffer_size_mb` |
-|-----|----------------------|---------------------|------------------------|
-| 4 GB RAM | 32 | 128 | 256 |
-| 8 GB RAM (testnet) | 64 | 256 | 512 |
-| 16 GB RAM | 128 (defaut) | 512 (defaut) | 1024 |
+Formule : `memtable_max = num_CFs × max_write_buffer_number × write_buffer_size_mb`
+
+| VPS | Ledgers | CFs | `write_buffer_size_mb` | `max_write_buffer_number` | Memtable max | `block_cache_size_mb` | Total |
+|-----|---------|-----|----------------------|--------------------------|-------------|---------------------|-------|
+| 8 GB | 1 | 33 | 16 | 3 | 1.6 GB | 512 | ~2.5 GB |
+| 16 GB | 2 | 66 | **32** | **3** | 6.3 GB | **1024** | ~8 GB |
+| 32 GB | 4+ | 132+ | 64 | 4 | 33 GB | 2048 | ~36 GB |
 
 ### Parametres `apply_db_tuning()` (configurable + hardcodes)
 
@@ -173,10 +175,10 @@ Ces parametres sont appliques uniformement a `new()` et `open_db_multi_prefix()`
 | `increase_parallelism` | `num_cpus` | Non | Un thread background par coeur CPU |
 | `max_background_jobs` | `max(num_cpus, 8)` | Non | Flush + compaction overlap, scale avec CPU (v0.5.20: min 8) |
 | `level_compaction_dynamic_level_bytes` | `true` | Non | Ajuste automatiquement la taille des niveaux |
-| `write_buffer_size` | `128 MB` | **Oui** (`write_buffer_size_mb`) | Taille du memtable avant flush |
+| `write_buffer_size` | `32 MB` | **Oui** (`write_buffer_size_mb`) | Taille du memtable avant flush (v0.5.22: 128→32 pour multi-ledger) |
 | `max_write_buffer_number` | `3` | **Oui** (`max_write_buffer_number`) | Max memtables par CF |
 | `min_write_buffer_number_to_merge` | `2` | Non | Merge 2 memtables avant flush L0 — halve L0 file count (v0.5.20) |
-| `db_write_buffer_size` | `512 MB` | **Oui** (`db_write_buffer_size_mb`) | Cap memoire global memtables (v0.5.7) |
+| `db_write_buffer_size` | `512 MB` | **Oui** (`db_write_buffer_size_mb`) | Declencheur de flush global — **PAS un cap dur** (v0.5.22 corrige doc) |
 | `target_file_size_base` | `64 MB` | Non | Taille cible par SSTable |
 | `enable_pipelined_write` | `true` | Non | Overlap WAL append et memtable insert — 30-40% throughput gain (v0.5.20) |
 | `level_zero_file_num_compaction_trigger` | `4` | Non | Debut de compaction L0 (defaut) |
@@ -388,11 +390,28 @@ Verification au demarrage via `check_dag_compatibility()` :
 
 **Budget memoire avec Direct I/O** (VPS 16 GB, `mem_limit=14g`) :
 - Block cache : 1 GB (configurable)
-- Memtables : ~1.5 GB
+- Memtables : ~3 GB en moyenne (66 CFs × 1.5 avg × 32 MB), 6.3 GB max
 - UTXO RAM cache : ~400 MB (2M UTXOs)
 - Bloom filters + indexes : ~200 MB (pinnes dans block cache)
 - Application + runtime : ~500 MB
-- **Total : ~3.6 GB** — aucune pression de page cache, 0 GB invisible
+- **Total : ~5.1 GB moyen, ~8.4 GB max** — aucune pression de page cache, 0 GB invisible
+
+#### v0.5.22 : Fix OOM memtable multi-ledger
+
+**Cause racine** : Avec 2 ledgers (main + Eden), RocksDB cree 66 CFs (33 par ledger). `write_buffer_size_mb=128 × max_write_buffer_number=6 × 66 CFs = 50 GB theorique max`. En pratique, ~1.5 memtables actives par CF = **12.7 GB de heap** confirme par `/proc/1/smaps_rollup`. Le `db_write_buffer_size_mb=1024` n'est qu'un declencheur de flush, PAS un cap dur.
+
+**Symptomes** : 4 restarts OOM en 1 nuit. `docker stats` montre 11.58 GiB / 14 GiB. Direct I/O confirme fonctionnel (Pss_File = 21 MB seulement).
+
+**Correctifs** :
+- `write_buffer_size_mb` : 128 → **32** (default et config testnet)
+- `max_write_buffer_number` : 6 → **3** (config testnet)
+- `db_write_buffer_size_mb` : 1024 → **512** (config testnet)
+- Documentation corrigee : `db_write_buffer_size_mb` est un flush trigger, pas un memory cap
+
+**Budget memoire corrige** (2 ledgers, 66 CFs, VPS 16 GB) :
+- Memtables max : 66 × 3 × 32 MB = **6.3 GB** (au lieu de 50 GB theorique)
+- Memtables moyen : 66 × 1.5 × 32 MB = **~3.2 GB**
+- + Block cache (1 GB) + UTXO (0.4 GB) + App (0.5 GB) = **~5.1 GB moyen** — safe dans 14 GB
 
 #### v0.5.20 : Fix du TPS cliff sous charge soutenue (600+ blk/s)
 
@@ -410,7 +429,7 @@ Trois problemes combines :
 - Memtable merge : `min_write_buffer_number_to_merge(2)` (halve L0 file count)
 - Sub-compactions : 3 → 4
 - Multi-block WriteBatch : `append_blocks_batch()` — 1 `db.write()` pour 64 blocs au lieu de 64 appels
-- Config testnet : `max_utxos` 250K → 2M, `max_write_buffer_number` 3 → 6
+- Config testnet : `max_utxos` 250K → 2M, `max_write_buffer_number` 3 → 6 (**reverte en v0.5.22** : causait OOM avec 66 CFs)
 
 ### Optimisations de chemin critique
 

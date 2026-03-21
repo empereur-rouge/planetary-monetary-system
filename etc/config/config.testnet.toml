@@ -16,14 +16,18 @@ max_utxos = 2000000
 checkpoint_interval_secs = 3600
 # ── Memory tuning (scale with VPS RAM) ──────────────────────────────────────
 # Direct I/O (v0.5.21): kernel page cache bypassed → block_cache is the ONLY read cache.
-# Size block_cache generously: all SST reads go through it.
-#  8 GB VPS:  write_buffer=64,  cache=512,  db_write=512,  docker mem_limit=7g
-# 16 GB VPS:  write_buffer=128, cache=1024, db_write=1024, docker mem_limit=14g
-# 32 GB VPS:  write_buffer=256, cache=2048, db_write=2048, docker mem_limit=28g
-write_buffer_size_mb = 128       # Per-CF memtable size (default 128)
-max_write_buffer_number = 6      # 3→6: more memtable buffering before flush stall
+# CRITICAL: write_buffer_size_mb × max_write_buffer_number × num_CFs = memtable RAM.
+# With multi-ledger (2 ledgers = 66 CFs), keep write_buffer SMALL:
+#   66 CFs × 3 buffers × 32 MB = 6.3 GB max memtable (safe)
+#   66 CFs × 6 buffers × 128 MB = 50 GB max memtable (OOM!)
+#
+#  8 GB VPS:  write_buffer=16,  buffers=3, cache=512,  docker mem_limit=7g
+# 16 GB VPS:  write_buffer=32,  buffers=3, cache=1024, docker mem_limit=14g
+# 32 GB VPS:  write_buffer=64,  buffers=4, cache=2048, docker mem_limit=28g
+write_buffer_size_mb = 32        # Per-CF memtable (v0.5.22: 128→32 for multi-ledger safety)
+max_write_buffer_number = 3      # Per-CF immutable memtables (v0.5.22: 6→3)
 block_cache_size_mb = 1024       # Shared LRU cache — sole read cache with Direct I/O
-db_write_buffer_size_mb = 1024   # Global memtable cap — prevents OOM with 66+ CFs
+db_write_buffer_size_mb = 512    # Global memtable flush trigger (NOT a hard cap!)
 max_open_files = 1024            # FD limit
 
 [network]
