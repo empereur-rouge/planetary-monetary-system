@@ -12,6 +12,7 @@ use anyhow::Result;
 use axum_server::bind_rustls;
 use axum_server::tls_rustls::RustlsConfig;
 use pms_config::{TreasuryWallets, ServerConfig, load_config, load_treasury_wallets};
+use pms_storage::DagStorage;
 use pms_storage::rocks_store::store::RocksStore;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -104,6 +105,35 @@ pub async fn serve_api(
     if let Some(ref mgr) = ledger_mgr {
         if let Err(e) = mgr.load_persisted_ledgers(store.as_ref()).await {
             tracing::warn!("Failed to load persisted ledger defs: {e}");
+        }
+
+        // Initialize BLOCKS_PERSISTED counters for dynamic ledgers that were
+        // restored above. The main.rs init loop only covers ledgers present at
+        // bootstrap time — dynamic ledgers (e.g. eden) are loaded here and
+        // their counters would otherwise start at 0, causing the dashboard to
+        // show a misleading gap between "DAG Size" and "Blocks Persisted".
+        for instance in mgr.list_all() {
+            let current = crate::metrics::BLOCKS_PERSISTED
+                .with_label_values(&[&instance.id])
+                .get();
+            if current == 0 {
+                if let Ok(total) = instance.store.block_count_estimate().await {
+                    if total > 0 {
+                        crate::metrics::BLOCKS_PERSISTED
+                            .with_label_values(&[&instance.id])
+                            .inc_by(total);
+                        crate::metrics::PMS_BLOCKS_TOTAL
+                            .with_label_values(&[&instance.id])
+                            .set(instance.dag.len() as i64);
+                        tracing::info!(
+                            ledger = %instance.id,
+                            persisted_total = total,
+                            dag_size = instance.dag.len(),
+                            "Initialized metrics for dynamic ledger"
+                        );
+                    }
+                }
+            }
         }
     }
 

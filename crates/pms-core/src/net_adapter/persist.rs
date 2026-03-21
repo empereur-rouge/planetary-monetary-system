@@ -997,8 +997,24 @@ where
             delta,
             newly_finalized,
         };
-        // send() is non-blocking if buffer has space, drops if full (acceptable for high TPS)
-        let _ = self.persist_tx.try_send(job);
+        // Non-blocking send: if the persist channel buffer (10K) is full,
+        // the block is DROPPED and never written to RocksDB — a silent data loss.
+        // Log a warning so operators can detect backpressure issues.
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = self.persist_tx.try_send(job)
+        {
+            static DROP_COUNT: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let dropped = DROP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            // Log every drop but avoid spam: detailed log every 100th drop
+            if dropped <= 10 || dropped % 100 == 0 {
+                tracing::warn!(
+                    target = "pms_persist",
+                    block_id = %sb.id,
+                    total_dropped = dropped,
+                    "⚠️ Persist channel full — block dropped! Increase buffer or reduce TPS"
+                );
+            }
+        }
 
         let t_total = t0.elapsed();
 

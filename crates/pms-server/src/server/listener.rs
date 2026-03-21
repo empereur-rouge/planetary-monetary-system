@@ -227,8 +227,35 @@ impl Server {
 
         tracing::info!("P2P TLS listening on {addr}");
 
+        let mut consecutive_errors: u32 = 0;
         loop {
-            let (tcp, sa) = listener.accept().await?;
+            let (tcp, sa) = match listener.accept().await {
+                Ok(conn) => {
+                    consecutive_errors = 0;
+                    conn
+                }
+                Err(e) => {
+                    consecutive_errors += 1;
+                    // Log the accept error but DON'T propagate — a single fd
+                    // exhaustion or transient OS error must NOT kill the server.
+                    if consecutive_errors <= 5 || consecutive_errors % 100 == 0 {
+                        tracing::error!(
+                            error = %e,
+                            consecutive_errors,
+                            "P2P TLS accept() failed — retrying in 1s"
+                        );
+                        eprintln!(
+                            "[P2P] accept() error #{}: {} — retrying in 1s",
+                            consecutive_errors, e
+                        );
+                    }
+                    // Back off to avoid busy-looping on persistent errors
+                    // (e.g. fd exhaustion until some connections close).
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
             let acceptor = acceptor.clone();
             let this = Arc::clone(&self);
             let permit = match this.conn_semaphore.clone().try_acquire_owned() {
@@ -263,14 +290,38 @@ impl Server {
     ///     2) tâche **lecture**  : lit ligne par ligne (JSONL), traite les messages, gossip des blocs
     pub async fn listen(self: Arc<Self>, addr: &str) -> anyhow::Result<()> {
         let lis = TcpListener::bind(addr).await?;
+        let mut consecutive_errors: u32 = 0;
         loop {
-            let (stream, sa) = lis.accept().await?;
+            let (stream, sa) = match lis.accept().await {
+                Ok(conn) => {
+                    consecutive_errors = 0;
+                    conn
+                }
+                Err(e) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors <= 5 || consecutive_errors % 100 == 0 {
+                        tracing::error!(
+                            error = %e,
+                            consecutive_errors,
+                            "P2P TCP accept() failed — retrying in 1s"
+                        );
+                        eprintln!(
+                            "[P2P] accept() error #{}: {} — retrying in 1s",
+                            consecutive_errors, e
+                        );
+                    }
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
             if self.conn_semaphore.available_permits() == 0 {
                 tracing::warn!(peer = %sa, "P2P connection rejected: max connections ({}) reached", self.max_connections);
                 drop(stream);
                 continue;
             }
-            self.handle_new_peer(stream, sa).await?;
+            if let Err(e) = self.handle_new_peer(stream, sa).await {
+                tracing::error!(error = %e, "handle_new_peer failed");
+            }
         }
     }
 
@@ -282,14 +333,34 @@ impl Server {
     ) -> anyhow::Result<()> {
         let lis = TcpListener::bind(addr).await?;
         let _ = ready.send(()); // ✅ signal "bind OK"
+        let mut consecutive_errors: u32 = 0;
         loop {
-            let (stream, sa) = lis.accept().await?;
+            let (stream, sa) = match lis.accept().await {
+                Ok(conn) => {
+                    consecutive_errors = 0;
+                    conn
+                }
+                Err(e) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors <= 5 || consecutive_errors % 100 == 0 {
+                        tracing::error!(
+                            error = %e,
+                            consecutive_errors,
+                            "P2P TCP accept() failed — retrying in 1s"
+                        );
+                    }
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
             if self.conn_semaphore.available_permits() == 0 {
                 tracing::warn!(peer = %sa, "P2P connection rejected: max connections ({}) reached", self.max_connections);
                 drop(stream);
                 continue;
             }
-            self.handle_new_peer(stream, sa).await?;
+            if let Err(e) = self.handle_new_peer(stream, sa).await {
+                tracing::error!(error = %e, "handle_new_peer failed");
+            }
         }
     }
 
