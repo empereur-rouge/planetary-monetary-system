@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-28
-updated: 2026-03-12
-version: v0.2.0
+updated: 2026-03-21
+version: v0.6.0
 ---
 
 # Activity System (Index, Pré-calcul, Cache)
@@ -78,29 +78,38 @@ Les items d'activité sont classifiés et sérialisés au moment de la persistan
 
 | Paramètre | Valeur par défaut | Localisation | Description |
 |-----------|-------------------|--------------|-------------|
-| Limite max par requête | 2000 | `activity.rs` L148 (`q.limit.unwrap_or(50).min(2000)`) | Plafond du paramètre `limit` |
-| Limite par défaut | 50 | `activity.rs` L148 | Valeur si `limit` absent |
-| Batch size (scan interne) | 500 | `activity.rs` L180 (`BATCH_SIZE`) | Nombre d'entrées fetchées par itération de scan |
-| Cache max entries | 10 000 | `api.rs` L849, `main.rs` L263 | Taille max du `ActivityCache` |
-| Cache TTL | 30s | `api.rs` L849, `main.rs` L263 | Durée de vie des entrées cache |
-| Cache eviction | 10% des expirées | `activity.rs` L116-128 | Stratégie d'éviction quand plein |
+| Limite max par requête | 2000 | `activity/handler.rs` (`q.limit.unwrap_or(50).min(2000)`) | Plafond du paramètre `limit` |
+| Limite par défaut | 50 | `activity/handler.rs` | Valeur si `limit` absent |
+| Batch size (scan interne) | 500 | `activity/handler.rs` (`BATCH_SIZE`) | Nombre d'entrées fetchées par itération de scan |
+| Cache max entries | 10 000 | `api/state.rs`, `main.rs` | Taille max du `ActivityCache` |
+| Cache TTL | 30s | `api/state.rs`, `main.rs` | Durée de vie des entrées cache |
+| Cache eviction | 10% des expirées | `activity/cache.rs` | Stratégie d'éviction quand plein |
 | Reindex batch flush | 1000 | `store.rs` (`reindex_all_activity_items`, `FLUSH_EVERY`) | WriteBatch flush pendant reindex |
 
 ## Crates et Fichiers
 
 | Crate | Fichier | Rôle |
 |-------|---------|------|
-| `pms-storage` | `crates/pms-storage/src/helpers.rs` | Fonctions de construction/parsing de clés, extraction d'adresses, classification pour storage (`classify_for_storage`, `precompute_all_items`), enum `ActivityCategory` |
+| `pms-storage` | `crates/pms-storage/src/helpers/mod.rs` | Re-exports des sous-modules helpers |
+| `pms-storage` | `crates/pms-storage/src/helpers/encoding.rs` | Fonctions de construction/parsing de clés (`key_addr_activity`, `prefix_addr_activity`, etc.) |
+| `pms-storage` | `crates/pms-storage/src/helpers/activity_keys.rs` | Fonctions de clés d'activité typées (`key_addr_type_activity`, `prefix_addr_type_activity`, etc.) |
+| `pms-storage` | `crates/pms-storage/src/helpers/classify.rs` | Classification pour storage (`classify_for_storage`, `precompute_all_items`), enum `ActivityCategory`, extraction d'adresses |
 | `pms-storage` | `crates/pms-storage/src/activity_item.rs` | Struct `StoredActivityItem` sérialisable en JSON |
 | `pms-storage` | `crates/pms-storage/src/lib.rs` | Ré-export de `activity_item::StoredActivityItem` |
 | `pms-storage` | `crates/pms-storage/src/traits.rs` | Trait `DagStorage` avec méthodes `recent_ids_by_address` et `recent_ids_by_address_and_categories` |
-| `pms-storage` | `crates/pms-storage/src/rocks_store/store.rs` | Implémentation RocksDB : CF declarations, scan paginé, write entries, reindex |
+| `pms-storage` | `crates/pms-storage/src/rocks_store/store.rs` | Implémentation RocksDB : CF declarations, scan paginé, write entries |
+| `pms-storage` | `crates/pms-storage/src/rocks_store/activity_index.rs` | Reindex activity, activity item queries |
 | `pms-storage` | `crates/pms-storage/src/rocks_store/atomic.rs` | `apply_addr_activity_indices()` dans le WriteBatch atomique |
 | `pms-storage` | `crates/pms-storage/src/rocks_store/migration.rs` | Migrations 3->4 (`addr_activity`), 4->5 (`addr_type_activity`), 5->6 (fee output reindex) |
 | `pms-storage` | `crates/pms-storage/tests/addr_activity_test.rs` | Tests unitaires pour indexation, pagination, reindex |
-| `pms-server` | `crates/pms-server/src/api_fn/activity.rs` | Handler HTTP GET + SSE, structs `ActivityItem`/`ActivityResp`/`ActivityCache`, logique de classification async/sync |
+| `pms-server` | `crates/pms-server/src/api_fn/activity/mod.rs` | Re-exports du module activity |
+| `pms-server` | `crates/pms-server/src/api_fn/activity/handler.rs` | Handler HTTP GET `get_wallet_activity()`, `ActivityCache` |
+| `pms-server` | `crates/pms-server/src/api_fn/activity/stream.rs` | Handler SSE `stream_wallet_activity()` |
+| `pms-server` | `crates/pms-server/src/api_fn/activity/cache.rs` | `ActivityCache` struct (LRU in-memory, DashMap + TTL) |
+| `pms-server` | `crates/pms-server/src/api_fn/activity/classify.rs` | Logique de classification async/sync, `classify_activity()`, `classify_activity_sync()` |
 | `pms-server` | `crates/pms-server/src/api_fn/mod.rs` | Déclaration `pub mod activity` |
-| `pms-server` | `crates/pms-server/src/api.rs` | Routes (`/v1/wallet/{address}/activity`, `.../activity/stream`), champ `activity_cache` dans `AppState` |
+| `pms-server` | `crates/pms-server/src/api/routes.rs` | Routes (`/v1/wallet/{address}/activity`, `.../activity/stream`) |
+| `pms-server` | `crates/pms-server/src/api/state.rs` | Champ `activity_cache` dans `AppState` |
 | `pms-server` | `crates/pms-server/src/admin.rs` | Handlers admin `POST /admin/reindex-activity` et `POST /admin/reindex-activity-items` |
 | `pms-server` | `crates/pms-server/tests/activity_e2e.rs` | Tests e2e couvrant les 19 types d'activité |
 | `pms-event` | `crates/pms-event/src/events.rs` | Variant `PmsEvent::BlockPersisted` utilisé par le SSE stream |
@@ -112,18 +121,18 @@ Les items d'activité sont classifiés et sérialisés au moment de la persistan
 
 | Fonction | Fichier | Description |
 |----------|---------|-------------|
-| `extract_involved_addresses()` | `helpers.rs` | Extrait toutes les adresses impliquées d'un `PlainPayload` (sans catégorie) |
-| `extract_involved_with_category()` | `helpers.rs` | Extrait les paires `(adresse, ActivityCategory)` avec distinction fee/reward/transfer |
-| `classify_for_storage()` | `helpers.rs` | Classifie un payload en `Vec<StoredActivityItem>` pour une adresse donnée (sync, sender pré-résolu) |
-| `precompute_all_items()` | `helpers.rs` | Appelle `classify_for_storage` pour chaque adresse impliquée, retourne `HashMap<addr, Vec<StoredActivityItem>>` |
-| `is_fee_output_only()` | `helpers.rs` | Détecte si une adresse est exclusivement un collecteur de fees dans un TxUtxo (montant outputs == tx.fee) |
-| `key_addr_activity()` | `helpers.rs` | Construit la clé `[addr][0x00][ts_be][block_id]` |
-| `prefix_addr_activity()` | `helpers.rs` | Construit le prefix `[addr][0x00]` pour scan |
-| `parse_addr_activity_key()` | `helpers.rs` | Parse une clé addr_activity en `(ts_ms, block_id)` |
-| `key_addr_type_activity()` | `helpers.rs` | Construit la clé `[addr][0x00][cat][ts_be][block_id]` |
-| `prefix_addr_type_activity()` | `helpers.rs` | Construit le prefix `[addr][0x00][cat]` pour scan typé |
-| `parse_addr_type_activity_key()` | `helpers.rs` | Parse une clé addr_type_activity en `(cat, ts_ms, block_id)` |
-| `ActivityCategory::from_filter_type()` | `helpers.rs` | Mappe un filtre API string vers un `ActivityCategory` |
+| `extract_involved_addresses()` | `helpers/classify.rs` | Extrait toutes les adresses impliquées d'un `PlainPayload` (sans catégorie) |
+| `extract_involved_with_category()` | `helpers/classify.rs` | Extrait les paires `(adresse, ActivityCategory)` avec distinction fee/reward/transfer |
+| `classify_for_storage()` | `helpers/classify.rs` | Classifie un payload en `Vec<StoredActivityItem>` pour une adresse donnée (sync, sender pré-résolu) |
+| `precompute_all_items()` | `helpers/classify.rs` | Appelle `classify_for_storage` pour chaque adresse impliquée, retourne `HashMap<addr, Vec<StoredActivityItem>>` |
+| `is_fee_output_only()` | `helpers/classify.rs` | Détecte si une adresse est exclusivement un collecteur de fees dans un TxUtxo (montant outputs == tx.fee) |
+| `key_addr_activity()` | `helpers/activity_keys.rs` | Construit la clé `[addr][0x00][ts_be][block_id]` |
+| `prefix_addr_activity()` | `helpers/activity_keys.rs` | Construit le prefix `[addr][0x00]` pour scan |
+| `parse_addr_activity_key()` | `helpers/activity_keys.rs` | Parse une clé addr_activity en `(ts_ms, block_id)` |
+| `key_addr_type_activity()` | `helpers/activity_keys.rs` | Construit la clé `[addr][0x00][cat][ts_be][block_id]` |
+| `prefix_addr_type_activity()` | `helpers/activity_keys.rs` | Construit le prefix `[addr][0x00][cat]` pour scan typé |
+| `parse_addr_type_activity_key()` | `helpers/activity_keys.rs` | Parse une clé addr_type_activity en `(cat, ts_ms, block_id)` |
+| `ActivityCategory::from_filter_type()` | `helpers/classify.rs` | Mappe un filtre API string vers un `ActivityCategory` |
 | `apply_addr_activity_indices()` | `atomic.rs` | Écrit les 3 CFs (addr_activity, addr_type_activity, activity_items) dans un WriteBatch atomique |
 | `recent_ids_by_address()` | `store.rs` | Scan paginé reverse du CF `addr_activity` pour une adresse |
 | `recent_ids_by_address_and_categories()` | `store.rs` | Scan paginé du CF `addr_type_activity` avec k-way merge multi-catégorie |
@@ -131,22 +140,22 @@ Les items d'activité sont classifiés et sérialisés au moment de la persistan
 | `recent_activity_items_by_address_and_categories()` | `store.rs` | Comme ci-dessus avec filtre par catégories |
 | `write_addr_activity_entries()` | `store.rs` | Écriture standalone (hors batch) des index pour un bloc avec adresses pré-calculées |
 | `write_addr_activity_entries_with_categories()` | `store.rs` | Écriture standalone des 3 CFs avec catégories et items pré-calculés |
-| `reindex_all_activity()` | `store.rs` | Reconstruit `addr_activity` + `addr_type_activity` pour tous les blocs |
-| `reindex_all_activity_items()` | `store.rs` | Reconstruit le CF `activity_items` pour tous les blocs |
+| `reindex_all_activity()` | `activity_index.rs` | Reconstruit `addr_activity` + `addr_type_activity` pour tous les blocs |
+| `reindex_all_activity_items()` | `activity_index.rs` | Reconstruit le CF `activity_items` pour tous les blocs |
 
 ### Couche Serveur (`pms-server`)
 
 | Fonction | Fichier | Description |
 |----------|---------|-------------|
-| `get_wallet_activity()` | `activity.rs` | Handler HTTP GET : cache lookup, scan index, fast path (pré-calculé) + fallback (block fetch + classify) |
-| `stream_wallet_activity()` | `activity.rs` | Handler SSE : subscribe à l'EventBus, filtre par adresse en mémoire, classification sync |
-| `classify_activity()` | `activity.rs` | Classification async avec résolution UTXO du sender |
-| `classify_activity_sync()` | `activity.rs` | Classification sync (SSE) : classification par outputs uniquement, sans lookup UTXO |
-| `resolve_sender()` | `activity.rs` | Résolution du sender TxUtxo via le cache UTXO (`adapter.get_utxo()`) |
-| `parse_type_filter()` | `activity.rs` | Parse le paramètre `?type=a,b,c` en `Vec<&str>` |
-| `ActivityCache::new()` | `activity.rs` | Constructeur du cache LRU (DashMap + TTL) |
-| `ActivityCache::get()` / `put()` | `activity.rs` | Lecture/écriture cache avec éviction TTL |
-| `ActivityCache::invalidate_address()` | `activity.rs` | Invalide toutes les entrées cache pour une adresse |
+| `get_wallet_activity()` | `activity/handler.rs` | Handler HTTP GET : cache lookup, scan index, fast path (pré-calculé) + fallback (block fetch + classify) |
+| `stream_wallet_activity()` | `activity/stream.rs` | Handler SSE : subscribe à l'EventBus, filtre par adresse en mémoire, classification sync |
+| `classify_activity()` | `activity/classify.rs` | Classification async avec résolution UTXO du sender |
+| `classify_activity_sync()` | `activity/classify.rs` | Classification sync (SSE) : classification par outputs uniquement, sans lookup UTXO |
+| `resolve_sender()` | `activity/classify.rs` | Résolution du sender TxUtxo via le cache UTXO (`adapter.get_utxo()`) |
+| `parse_type_filter()` | `activity/handler.rs` | Parse le paramètre `?type=a,b,c` en `Vec<&str>` |
+| `ActivityCache::new()` | `activity/cache.rs` | Constructeur du cache LRU (DashMap + TTL) |
+| `ActivityCache::get()` / `put()` | `activity/cache.rs` | Lecture/écriture cache avec éviction TTL |
+| `ActivityCache::invalidate_address()` | `activity/cache.rs` | Invalide toutes les entrées cache pour une adresse |
 | `admin_reindex_activity()` | `admin.rs` | Handler admin POST pour réindexer `addr_activity` + `addr_type_activity` |
 | `admin_reindex_activity_items()` | `admin.rs` | Handler admin POST pour réindexer le CF `activity_items` |
 
@@ -273,7 +282,7 @@ Note : `block_id`, `ts_ms`, et `ledger_id` ne sont PAS stockés dans `StoredActi
 
 ## Activity Categories
 
-9 catégories définies dans `ActivityCategory` (`helpers.rs`), chacune mappée à un discriminant `u8` :
+9 catégories définies dans `ActivityCategory` (`helpers/classify.rs`), chacune mappée à un discriminant `u8` :
 
 | Discriminant | Catégorie | Types d'activité mappés | Description |
 |:---:|-----------|------------------------|-------------|

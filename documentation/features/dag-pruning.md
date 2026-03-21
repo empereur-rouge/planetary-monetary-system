@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-17
-updated: 2026-03-19
-version: v0.5.16
+updated: 2026-03-21
+version: v0.6.0
 ---
 
 # DAG Pruning (Gestion Mémoire du DAG)
@@ -111,10 +111,10 @@ Phase 4 : Prune unique post-chargement
 
 | Constante | Valeur | Fichier | Rôle |
 |-----------|--------|---------|------|
-| `PRUNE_CHECK_INTERVAL` | `1000` | `concurrent_dag.rs` | Pruning RAM amorti toutes les N insertions |
+| `PRUNE_CHECK_INTERVAL` | `1000` | `concurrent_dag/pruning.rs` | Pruning RAM amorti toutes les N insertions |
 | `TRIM_TIPS_INTERVAL` | `64` | `store.rs` | Trim tips RocksDB amorti toutes les N persistances |
-| `MAX_TIPS_CAP` | `64` | `concurrent_dag.rs` | Nombre max de tips retournés par `find_tips()` |
-| `TIP_CHILDREN_THRESHOLD` | `4` | `concurrent_dag.rs` | Seuil de children pour la pondération des tips |
+| `MAX_TIPS_CAP` | `64` | `concurrent_dag/tips.rs` | Nombre max de tips retournés par `find_tips()` |
+| `TIP_CHILDREN_THRESHOLD` | `4` | `concurrent_dag/tips.rs` | Seuil de children pour la pondération des tips |
 
 ### Exemple de configuration
 
@@ -132,20 +132,25 @@ checkpoint_interval_secs = 3600
 
 | Crate | Fichier | Rôle |
 |-------|---------|------|
-| `pms-core` | `crates/pms-core/src/concurrent_dag.rs` | Pruning RAM : `prune_oldest()`, `insert_block()`, `bootstrap_insert()`, `bootstrap_from_store_with_capacity()` |
+| `pms-core` | `crates/pms-core/src/concurrent_dag/mod.rs` | Struct `ConcurrentDag`, constructors, `insert_block()` |
+| `pms-core` | `crates/pms-core/src/concurrent_dag/pruning.rs` | `prune_oldest()`, pruning FIFO logic |
+| `pms-core` | `crates/pms-core/src/concurrent_dag/bootstrap.rs` | `bootstrap_insert()`, `bootstrap_from_store_with_capacity()`, `cleanup_ghost_entries()` |
+| `pms-core` | `crates/pms-core/src/concurrent_dag/tips.rs` | `find_tips()`, tip DashSet management |
+| `pms-core` | `crates/pms-core/src/concurrent_dag/spent.rs` | `mark_spent()`, spent outpoints management |
+| `pms-core` | `crates/pms-core/src/concurrent_dag/finality.rs` | FinalityState integration |
 | `pms-storage` | `crates/pms-storage/src/rocks_store/store.rs` | Pruning RocksDB : `trim_tips()`, `maybe_trim_tips()`, `remove_tip()`, `top_tips()` |
 | `pms-storage` | `crates/pms-storage/src/rocks_store/atomic.rs` | Appel de `maybe_trim_tips()` après chaque `append_block_atomic()` |
 | `pms-config` | `crates/pms-config/src/config.rs` | Struct `Rocks` : `max_dag_blocks`, `max_spent_outpoints`, `tip_limit` |
 | `pms-ledger` | `crates/pms-ledger/src/instance.rs` | `LedgerInstance::bootstrap()` : passe `max_dag_blocks` à `bootstrap_from_store_with_capacity()` |
 | `pms-ledger` | `crates/pms-ledger/src/manager.rs` | `LedgerManager` : propage `max_dag_blocks` vers les instances |
-| `pms-server` | `crates/pms-server/src/api.rs` | `sync_dag_size_metric()` : synchronise la gauge Prometheus `pms_blocks_total` avec `dag.len()` |
+| `pms-server` | `crates/pms-server/src/api/routes.rs` | `sync_dag_size_metric()` : synchronise la gauge Prometheus `pms_blocks_total` avec `dag.len()` |
 | `pms-server` | `crates/pms-server/src/metrics.rs` | `PMS_BLOCKS_TOTAL` : gauge Prometheus reflétant la taille RAM du DAG |
-| `pms-server` | `crates/pms-server/src/fee_distribution.rs` | [[fee-distribution|Distribution des frais]] : dépend de `top_tips()` pour trouver un parent |
+| `pms-server` | `crates/pms-server/src/fee_distribution/distribute.rs` | [[fee-distribution|Distribution des frais]] : dépend de `top_tips()` pour trouver un parent |
 | `pms-core` | `crates/pms-core/tests/bootstrap_pruning.rs` | Tests d'intégration pour `bootstrap_from_store_with_capacity` avec mock store |
 
 ## Fonctions Clés
 
-### Couche RAM (`crates/pms-core/src/concurrent_dag.rs`)
+### Couche RAM (`crates/pms-core/src/concurrent_dag/`)
 
 | Fonction | Description |
 |----------|-------------|
@@ -173,7 +178,7 @@ checkpoint_interval_secs = 3600
 | `RocksStore::newest_block_ids_by_time(n)` | Reverse iterator sur `by_time` CF pour chargement chronologique. Fallback sur lexicographique si `by_time` vide. |
 | `RocksStore::block_count_estimate()` | O(1) via `rocksdb.estimate-num-keys` property. Fallback sur `block_count()`. |
 
-### Métriques (`crates/pms-server/src/api.rs` + `crates/pms-server/src/metrics.rs`)
+### Métriques (`crates/pms-server/src/api/routes.rs` + `crates/pms-server/src/metrics.rs`)
 
 | Fonction | Description |
 |----------|-------------|
@@ -274,7 +279,7 @@ Le DAG Pruning a connu une série de bugs critiques découverts progressivement 
 
 ## Interactions
 
-### Distribution des frais (`fee_distribution.rs`)
+### Distribution des frais (`fee_distribution/`)
 
 La [[fee-distribution|distribution des frais]] dépend directement des tips :
 - `perform_fee_distribution()` appelle `top_tips(1)` pour trouver un bloc parent où attacher le bloc de récompense.

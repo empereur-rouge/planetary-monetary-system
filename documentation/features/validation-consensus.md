@@ -1,8 +1,8 @@
 ---
 tags: [feature, security]
 created: 2025-12-15
-updated: 2026-03-14
-version: v0.3.0
+updated: 2026-03-21
+version: v0.6.0
 ---
 
 # Validation & Consensus Rules
@@ -32,7 +32,7 @@ WireBlock recu du reseau
          |
          v
 +========================================+
-|  PHASE 1 : WIRE-LEVEL (net_adapter.rs) |
+|  PHASE 1 : WIRE-LEVEL (net_adapter/)   |
 +========================================+
 |                                        |
 |  1.a) network_id / protocol_version   |
@@ -384,11 +384,11 @@ Genesis --> A --> C --> E
 
 ### Enforcement (2 niveaux)
 
-1. **Niveau WireBlock** (`net_adapter.rs`, etape 1.e) :
+1. **Niveau WireBlock** (`net_adapter/persist.rs`, etape 1.e) :
    - Tous les blocs doivent etre signes par `coordinator_public_key`.
    - Si le signataire differe : `PutResult::Rejected("single_writer: only Coordinator can create blocks")`.
 
-2. **Niveau structure** (`net_adapter.rs`, etape 2.f + `parents.rs`) :
+2. **Niveau structure** (`net_adapter/persist.rs`, etape 2.f + `parents.rs`) :
    - Non-genesis : exactement 1 parent (`wb.parents.len() != 1` -> rejet).
    - Genesis : 0 parents.
    - Fonction `enforce_single_parent()` dans `parents.rs`.
@@ -443,7 +443,7 @@ Les payloads suivants requierent la signature du Coordinator. La verification es
 | `Reverse` | `require_coordinator_signature()` |
 | `ContractRegister` | `require_coordinator_signature()` |
 | `ContractUpdate` | `require_coordinator_signature()` |
-| `Mint` | `validate_mint_security()` (dans `net_adapter.rs`) |
+| `Mint` | `validate_mint_security()` (dans `net_adapter/persist.rs`) |
 
 ### Verification cryptographique des blocs
 
@@ -514,10 +514,11 @@ Apres validation, les effets sont appliques en RAM via `apply_block_mem()` dans 
 
 | Fichier | Role |
 |---------|------|
-| `crates/pms-core/src/net_adapter.rs` | `persist_block()` -- pipeline wire-level complet |
+| `crates/pms-core/src/net_adapter/mod.rs` | Re-exports du module net_adapter |
+| `crates/pms-core/src/net_adapter/persist.rs` | `persist_block()` -- pipeline wire-level complet |
 | `crates/pms-core/src/crypto/crypto.rs` | `verify_block_signature()` -- ECDSA secp256k1 |
 | `crates/pms-core/src/finality.rs` | `FinalityState`, `has_k_confirmations_dag()` |
-| `crates/pms-core/src/concurrent_dag.rs` | `ConcurrentDag` -- DAG lock-free avec DashMap |
+| `crates/pms-core/src/concurrent_dag/mod.rs` | `ConcurrentDag` -- DAG lock-free avec DashMap |
 
 ### pms-consensus
 

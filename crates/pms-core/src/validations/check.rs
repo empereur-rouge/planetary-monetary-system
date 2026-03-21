@@ -106,8 +106,8 @@ impl ValidatePolicy {
         // Logic for Platform Address Security via Signed Config
         // We use the same Coordinator Key (Master Key) for config signing
         let target_master_key = match settings.network.mode {
-            pms_config::NetworkMode::Mainnet => Some(pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET),
-            pms_config::NetworkMode::Testnet => Some(pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET),
+            pms_config::NetworkMode::Mainnet => Some(pms_config::COORDINATOR_PUBLIC_KEY_MAINNET),
+            pms_config::NetworkMode::Testnet => Some(pms_config::COORDINATOR_PUBLIC_KEY_TESTNET),
             pms_config::NetworkMode::Dev => None, // Dev mode = no signature required
         };
 
@@ -150,9 +150,9 @@ impl ValidatePolicy {
                 pms_config::NetworkMode::Dev => {
                     // Dev mode must NOT use production keys
                     let is_mainnet_key =
-                        custom_key == pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET;
+                        custom_key == pms_config::COORDINATOR_PUBLIC_KEY_MAINNET;
                     let is_testnet_key =
-                        custom_key == pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET;
+                        custom_key == pms_config::COORDINATOR_PUBLIC_KEY_TESTNET;
 
                     if is_mainnet_key || is_testnet_key {
                         return Err(ValidationError::ProdKeyInDevMode {
@@ -165,7 +165,7 @@ impl ValidatePolicy {
                     }
                 }
                 pms_config::NetworkMode::Mainnet => {
-                    if custom_key != pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET {
+                    if custom_key != pms_config::COORDINATOR_PUBLIC_KEY_MAINNET {
                         tracing::warn!(
                             "coordinator_public_key differs from hardcoded mainnet key \
                              — using custom key from config"
@@ -173,7 +173,7 @@ impl ValidatePolicy {
                     }
                 }
                 pms_config::NetworkMode::Testnet => {
-                    if custom_key != pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET {
+                    if custom_key != pms_config::COORDINATOR_PUBLIC_KEY_TESTNET {
                         tracing::warn!(
                             "coordinator_public_key differs from hardcoded testnet key \
                              — using custom key from config"
@@ -189,11 +189,11 @@ impl ValidatePolicy {
             match settings.network.mode {
                 pms_config::NetworkMode::Mainnet => {
                     p.coordinator_public_key =
-                        Some(pms_consensus::COORDINATOR_PUBLIC_KEY_MAINNET.to_string());
+                        Some(pms_config::COORDINATOR_PUBLIC_KEY_MAINNET.to_string());
                 }
                 pms_config::NetworkMode::Testnet => {
                     p.coordinator_public_key =
-                        Some(pms_consensus::COORDINATOR_PUBLIC_KEY_TESTNET.to_string());
+                        Some(pms_config::COORDINATOR_PUBLIC_KEY_TESTNET.to_string());
                 }
                 pms_config::NetworkMode::Dev => {
                     // Dev mode without explicit key = no coordinator check

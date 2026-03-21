@@ -2,7 +2,7 @@
 tags: [feature, infrastructure]
 created: 2026-03-14
 updated: 2026-03-21
-version: v0.5.22
+version: v0.6.0
 ---
 
 # Storage / RocksDB
@@ -35,7 +35,7 @@ Le systeme utilise une architecture a deux couches complementaires :
 +-------------------+          +-------------------+
 ```
 
-**ConcurrentDag** (`crates/pms-core/src/concurrent_dag.rs`) :
+**ConcurrentDag** (`crates/pms-core/src/concurrent_dag/mod.rs`) :
 - Stockage RAM borne (`max_dag_blocks`, defaut 50 000 blocs) pour les operations chaudes : selection de parents (tips), detection de double-spend, finality BFS
 - Utilise `DashMap` (16 segments internes) pour des insertions concurrentes lock-free
 - Pruning amorti (`prune_oldest()` toutes les 1000 insertions) : supprime les blocs les plus anciens non-tip
@@ -207,11 +207,15 @@ Appliques a **toutes** les 31 CFs (pas seulement aux CFs d'index) :
 
 | Crate | Fichier | Role |
 |-------|---------|------|
-| `pms-storage` | `src/rocks_store/store.rs` | Structure `RocksStore`, `CF_NAMES`, `apply_db_tuning()`, `new()`, `open_db_multi_prefix()`, `from_shared_db()`, `trim_tips()`, `top_tips()`, pagination |
+| `pms-storage` | `src/rocks_store/store.rs` | Structure `RocksStore`, `CF_NAMES`, `apply_db_tuning()`, `new()`, `open_db_multi_prefix()`, `from_shared_db()`, `trim_tips()`, `top_tips()`, pagination (trimmed) |
+| `pms-storage` | `src/rocks_store/activity_index.rs` | Activity reindex, activity item queries |
+| `pms-storage` | `src/rocks_store/dag_storage_impl.rs` | `DagStorage` trait implementation for RocksStore |
+| `pms-storage` | `src/rocks_store/maintenance.rs` | `spawn_background_maintenance()`, compaction, WAL flush, stats |
+| `pms-storage` | `src/rocks_store/secondary.rs` | `open_read_only()`, `open_secondary()` |
 | `pms-storage` | `src/rocks_store/mod.rs` | Declaration des sous-modules : `atomic`, `cf_operation`, `compliance_registry`, `config_storage`, `contract_storage`, `gas_pool_storage`, `helpers`, `migration`, `nft_storage`, `node_rewards_storage`, `token_registry`, `utxo` |
 | `pms-storage` | `src/rocks_store/atomic.rs` | `append_block_atomic()`, `persist_genesis()`, `apply_dag_indices()`, `apply_addr_activity_indices()` |
 | `pms-storage` | `src/rocks_store/cf_operation.rs` | Helper `cf()` : resolution short name -> handle CF (sans allocation) |
-| `pms-storage` | `src/rocks_store/helpers.rs` | `flush_wal()`, `compact_all()`, `log_stats()`, `create_checkpoint()` |
+| `pms-storage` | `src/rocks_store/helpers.rs` | `flush_wal()`, `compact_all()`, `log_stats()`, `create_checkpoint()` (now also see `maintenance.rs`) |
 | `pms-storage` | `src/rocks_store/migration.rs` | Migrations `mig_0_to_1()` a `mig_7_to_8()`, `ensure_schema()`, `get_version()`, `get_dag_version()` |
 | `pms-storage` | `src/rocks_store/utxo.rs` | `utxo_apply_tx_atomic()`, `get_utxo()`, `iter_all_utxos()`, `stream_all_utxos()` |
 | `pms-storage` | `src/rocks_store/nft_storage.rs` | Implementation de `NftStorage` : ownership, reverse index, block references |
@@ -234,7 +238,10 @@ Appliques a **toutes** les 31 CFs (pas seulement aux CFs d'index) :
 | `pms-storage` | `src/node_rewards.rs` | Trait `NodeRewardsStorage` |
 | `pms-storage` | `src/mutation.rs` | Enum `LedgerMutation` : abstraction des types de mutations |
 | `pms-config` | `src/config.rs` | Structure `Rocks` : configuration TOML de la couche stockage |
-| `pms-core` | `src/concurrent_dag.rs` | `ConcurrentDag` : couche RAM, `prune_oldest()`, tip selection |
+| `pms-core` | `src/concurrent_dag/mod.rs` | `ConcurrentDag` : couche RAM, struct + constructors |
+| `pms-core` | `src/concurrent_dag/pruning.rs` | `prune_oldest()`, pruning logic |
+| `pms-core` | `src/concurrent_dag/tips.rs` | Tip selection, `find_tips()` |
+| `pms-core` | `src/concurrent_dag/bootstrap.rs` | `bootstrap_from_store_with_capacity()`, `bootstrap_insert()` |
 
 ## Fonctions Cles
 
@@ -245,8 +252,8 @@ Appliques a **toutes** les 31 CFs (pas seulement aux CFs d'index) :
 | `RocksStore::new()` | `store.rs` | Ouverture single-prefix : cree les 31 CFs prefixees, applique le tuning, bloom filters sur toutes les CFs |
 | `RocksStore::open_db_multi_prefix()` | `store.rs` | Ouverture multi-prefix : cree les CFs pour N ledgers, retourne `Arc<PmsDb>` partageable |
 | `RocksStore::from_shared_db()` | `store.rs` | Cree un `RocksStore` a partir d'un `Arc<PmsDb>` deja ouvert (multi-ledger) |
-| `RocksStore::open_read_only()` | `store.rs` | Ouvre la DB en lecture seule (pas de lock exclusif) |
-| `RocksStore::open_secondary()` | `store.rs` | Ouvre une instance secondaire (replica read-only avec catch-up) |
+| `RocksStore::open_read_only()` | `secondary.rs` | Ouvre la DB en lecture seule (pas de lock exclusif) |
+| `RocksStore::open_secondary()` | `secondary.rs` | Ouvre une instance secondaire (replica read-only avec catch-up) |
 | `apply_db_tuning()` | `store.rs` | Centralise le tuning RocksDB (L0 thresholds, parallelism, memtables) |
 | `build_cf_names()` | `store.rs` | Pre-calcule le mapping short name -> `"prefix:name"` (elimine les allocations `format!()`) |
 | `ensure_column_families()` | `store.rs` | Cree les CFs manquantes au bootstrap (supporte les upgrades de schema) |
@@ -278,7 +285,7 @@ Appliques a **toutes** les 31 CFs (pas seulement aux CFs d'index) :
 
 | Fonction | Fichier | Description |
 |----------|---------|-------------|
-| `spawn_background_maintenance()` | `store.rs` | Tache async de maintenance : flush WAL, compaction, stats, checkpoints |
+| `spawn_background_maintenance()` | `maintenance.rs` | Tache async de maintenance : flush WAL, compaction, stats, checkpoints |
 | `flush_wal()` | `helpers.rs` | Flush le WAL sur disque avec fsync |
 | `compact_all()` | `helpers.rs` | Compacte toutes les CFs avec rate-limiting (200ms entre chaque CF) |
 | `log_stats()` | `helpers.rs` | Log des statistiques RocksDB (L0 files, stalls, compactions pending) |
@@ -290,8 +297,8 @@ Appliques a **toutes** les 31 CFs (pas seulement aux CFs d'index) :
 
 | Fonction | Fichier | Description |
 |----------|---------|-------------|
-| `reindex_all_activity()` | `store.rs` | Reconstruit `addr_activity` + `addr_type_activity` pour tous les blocs existants |
-| `reindex_all_activity_items()` | `store.rs` | Reconstruit `activity_items` (pre-calcul) pour tous les blocs, avec flush par batch de 1000 |
+| `reindex_all_activity()` | `activity_index.rs` | Reconstruit `addr_activity` + `addr_type_activity` pour tous les blocs existants |
+| `reindex_all_activity_items()` | `activity_index.rs` | Reconstruit `activity_items` (pre-calcul) pour tous les blocs, avec flush par batch de 1000 |
 
 ### Queries paginee
 

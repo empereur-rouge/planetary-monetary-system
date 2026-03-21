@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure]
 created: 2026-03-14
-updated: 2026-03-15
-version: v0.4.3
+updated: 2026-03-21
+version: v0.6.0
 ---
 
 # Server / Engine (Serveur Axum)
@@ -33,13 +33,24 @@ Les taches de fond incluent : distribution periodique des fees, inflation mint p
 |-------|---------|------|
 | `bin` | `bin/src/main.rs` | Point d'entree : bootstrap, config, RocksDB init, multi-ledger, P2P server, API launch, peer connection, periodic sync |
 | `pms-server` | `crates/pms-server/src/lib.rs` | Re-exports publics (`Server`, `resolve_admin_token`) et declaration des modules |
-| `pms-server` | `crates/pms-server/src/server.rs` | Struct `Server` P2P : gossip, broadcast batche, orphan management, multi-ledger routing, TLS listener |
-| `pms-server` | `crates/pms-server/src/api.rs` | `AppState`, `serve_api()`, `build_api_router()`, middlewares (admin, API key, rate limit), routes, taches de fond |
+| `pms-server` | `crates/pms-server/src/server/mod.rs` | Struct `Server` P2P : constructors, shared state |
+| `pms-server` | `crates/pms-server/src/server/peer.rs` | Peer handling (handshake, message dispatch) |
+| `pms-server` | `crates/pms-server/src/server/broadcast.rs` | Broadcast/unicast, batched Inv worker |
+| `pms-server` | `crates/pms-server/src/server/listener.rs` | TCP/TLS listener, `run()` main loop |
+| `pms-server` | `crates/pms-server/src/server/sync.rs` | Sync, `connect_to_peer()`, orphan retry |
+| `pms-server` | `crates/pms-server/src/server/blocks.rs` | Block processing (`process_incoming_blocks`) |
+| `pms-server` | `crates/pms-server/src/api/mod.rs` | Re-exports publics du module API |
+| `pms-server` | `crates/pms-server/src/api/state.rs` | `AppState` struct et constructors |
+| `pms-server` | `crates/pms-server/src/api/routes.rs` | `build_api_router()`, route assembly |
+| `pms-server` | `crates/pms-server/src/api/serve.rs` | `serve_api()`, HTTP/HTTPS bind |
+| `pms-server` | `crates/pms-server/src/api/middleware.rs` | Middlewares (admin, API key, rate limit) |
+| `pms-server` | `crates/pms-server/src/api/tasks.rs` | Background tasks (fee distributor, inflation mint) |
+| `pms-server` | `crates/pms-server/src/api/ledger_dispatch.rs` | `dynamic_ledger_handler()` multi-ledger routing |
 | `pms-server` | `crates/pms-server/src/internal_api.rs` | API interne (Gateway) : health, tips, UTXOs, block, submit_block, metrics, config |
 | `pms-server` | `crates/pms-server/src/admin.rs` | Handlers admin : ping, compact, reindex-activity, runtime config hot-swap (GET/POST) |
 | `pms-server` | `crates/pms-server/src/api_keys.rs` | Gestion des cles API SDK : hash SHA-256, scopes, CRUD, fichier JSON persistant |
 | `pms-server` | `crates/pms-server/src/fee_pool.rs` | `FeePool` : accumulation des fees en memoire, calcul des shares proportionnels, burn refunds |
-| `pms-server` | `crates/pms-server/src/fee_distribution.rs` | Distribution periodique des fees : Mint blocks, N-way split, fee burn, inflation |
+| `pms-server` | `crates/pms-server/src/fee_distribution/mod.rs` | Distribution periodique des fees : Mint blocks, N-way split, fee burn, inflation |
 | `pms-server` | `crates/pms-server/src/node_registry.rs` | Registre dynamique des noeuds : TTL 24h, heartbeat, block counts, reward distribution |
 | `pms-server` | `crates/pms-server/src/metrics.rs` | Metriques Prometheus : `pms_blocks_total`, `pms_blocks_persisted_total`, `pms_blocks_rejected_total` |
 | `pms-server` | `crates/pms-server/src/stats.rs` | Statistiques atomiques P2P : persist ok/dup/err, gossip ok/reject/err |
@@ -57,7 +68,7 @@ Les taches de fond incluent : distribution periodique des fees, inflation mint p
 | `mod.rs` | Declaration de tous les sous-modules API |
 | `blocks.rs` | `submit_block`, `get_block_by_id` -- ingestion et lecture de blocs |
 | `transaction.rs` | `prepare_tx`, `wallet_send_tx` -- preparation et envoi de transactions UTXO |
-| `tx_helpers.rs` | `EffectiveFees`, `resolve_effective_fees()`, `forge_and_sign_block()`, `persist_and_broadcast()`, `select_utxos()`, `create_reward_block()`, fee policy loading, dynamic fee multiplier, gas consumption |
+| `tx_helpers/mod.rs` | `EffectiveFees`, `resolve_effective_fees()`, `forge_and_sign_block()`, `persist_and_broadcast()`, `select_utxos()`, `create_reward_block()`, fee policy loading, dynamic fee multiplier, gas consumption |
 | `wallet.rs` | `wallet_balance`, `balance_by_address`, `get_utxos_by_address` |
 | `wallet_factory.rs` | `wallet_create`, `wallet_restore_mnemonic`, `wallet_restore_private_key`, `wallet_send_simple`, `faucet_mint` |
 | `nft.rs` | `mint_nft`, `burn_nft`, `burn_nft_simple`, `burn_nft_batch_simple`, `get_nft`, `get_nfts_by_owner`, `prepare_nft_transfer` |
@@ -71,7 +82,7 @@ Les taches de fond incluent : distribution periodique des fees, inflation mint p
 | `token.rs` | `admin_create_token`, `admin_mint_token`, `get_token`, `list_tokens` |
 | `nodes.rs` | `register_node`, `list_nodes`, `list_peers`, `connect_peer`, `node_heartbeat` |
 | `history.rs` | `get_encrypted_history`, `get_plain_history`, `get_wallet_history` |
-| `activity.rs` | `get_wallet_activity`, `stream_wallet_activity` (SSE), `ActivityCache` (LRU in-memory) |
+| `activity/mod.rs` | `get_wallet_activity`, `stream_wallet_activity` (SSE), `ActivityCache` (LRU in-memory) |
 | `stream_blocks.rs` | `stream_blocks` (SSE live block stream) |
 | `dag.rs` | `get_tips` |
 | `config.rs` | `get_config` (public config endpoint) |
@@ -88,7 +99,7 @@ Les taches de fond incluent : distribution periodique des fees, inflation mint p
 | `init_logging()` | Init `tracing-subscriber` avec `EnvFilter` (RUST_LOG), format JSON, `tracing-log` bridge. Once-guard pour eviter double-init |
 | `print_instructions()` | Affiche les endpoints P2P et health dans la console avec `owo-colors` |
 
-### Serveur P2P (`crates/pms-server/src/server.rs`)
+### Serveur P2P (`crates/pms-server/src/server/`)
 
 | Fonction | Description |
 |----------|-------------|
@@ -103,17 +114,17 @@ Les taches de fond incluent : distribution periodique des fees, inflation mint p
 | `Server::trigger_sync()` | Cleanup inflight + broadcast GetTips a tous les pairs |
 | `Server::connect_to_peer()` | Connexion sortante : DNS lookup, TCP connect, TLS handshake optionnel (SNI IP ou DNS) |
 
-### API HTTP (`crates/pms-server/src/api.rs`)
+### API HTTP (`crates/pms-server/src/api/`)
 
 | Fonction | Description |
 |----------|-------------|
-| `serve_api()` | Initialise l'AppState complet, spawn les taches de fond (fee distributor, inflation mint), construit le router, bind HTTP ou HTTPS (conditionne par `api_tls_enabled`) |
-| `build_api_router()` | Assemble toutes les routes (public, auth, admin, internal, per-ledger, debug, dashboard) avec les layers globaux |
-| `build_ledger_scoped_routes()` | Construit les routes qui dependent du contexte ledger (wallet, blocks, NFT, supply, etc.). Retourne (public, auth) |
-| `build_ledger_admin_routes()` | Routes admin per-ledger (token create/mint, faucet) avec middleware admin-token-only |
-| `dynamic_ledger_handler()` | Handler generique `/l/{ledger_id}/{*rest}` : resout le ledger, construit AppState per-ledger, forward via `oneshot` |
-| `spawn_fee_distributor_task()` | Lance la tache periodique de distribution des fees (defaut: 600s). Appelle `perform_fee_distribution()` |
-| `spawn_inflation_mint_task()` | Lance la tache periodique d'inflation mint (defaut: 86400s / 24h). Appelle `perform_daily_inflation_mint()` |
+| `serve_api()` | Initialise l'AppState complet, spawn les taches de fond (fee distributor, inflation mint), construit le router, bind HTTP ou HTTPS (conditionne par `api_tls_enabled`). Fichier : `api/serve.rs` |
+| `build_api_router()` | Assemble toutes les routes (public, auth, admin, internal, per-ledger, debug, dashboard) avec les layers globaux. Fichier : `api/routes.rs` |
+| `build_ledger_scoped_routes()` | Construit les routes qui dependent du contexte ledger (wallet, blocks, NFT, supply, etc.). Retourne (public, auth). Fichier : `api/routes.rs` |
+| `build_ledger_admin_routes()` | Routes admin per-ledger (token create/mint, faucet) avec middleware admin-token-only. Fichier : `api/routes.rs` |
+| `dynamic_ledger_handler()` | Handler generique `/l/{ledger_id}/{*rest}` : resout le ledger, construit AppState per-ledger, forward via `oneshot`. Fichier : `api/ledger_dispatch.rs` |
+| `spawn_fee_distributor_task()` | Lance la tache periodique de distribution des fees (defaut: 600s). Appelle `perform_fee_distribution()`. Fichier : `api/tasks.rs` |
+| `spawn_inflation_mint_task()` | Lance la tache periodique d'inflation mint (defaut: 86400s / 24h). Appelle `perform_daily_inflation_mint()`. Fichier : `api/tasks.rs` |
 
 ### Middlewares
 
@@ -430,7 +441,7 @@ Les routes publiques authentifiees sont protegees par le middleware `require_api
 - **Dev/Testnet** : Fallback en HTTP/TCP clair si les fichiers TLS manquent
 - **ALPN** : Supporte h2 (HTTP/2) et http/1.1
 - **Mutual TLS** : Support pour le P2P client avec CA custom
-- **Separation API / P2P (v0.4.3)** : le champ `api_tls_enabled` (defaut: `true`) dans `[client]` permet de desactiver TLS sur l'API HTTP tout en gardant le P2P en TLS. Utile en deploiement Docker ou le Gateway communique avec l'Engine via un reseau interne non expose (`pms-internal`). `serve_api()` dans `api.rs` verifie `api_tls_enabled` avant d'appliquer TLS sur le listener HTTP
+- **Separation API / P2P (v0.4.3)** : le champ `api_tls_enabled` (defaut: `true`) dans `[client]` permet de desactiver TLS sur l'API HTTP tout en gardant le P2P en TLS. Utile en deploiement Docker ou le Gateway communique avec l'Engine via un reseau interne non expose (`pms-internal`). `serve_api()` dans `api/serve.rs` verifie `api_tls_enabled` avant d'appliquer TLS sur le listener HTTP
 
 ## Metriques Prometheus
 
