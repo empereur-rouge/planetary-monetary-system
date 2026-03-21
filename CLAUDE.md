@@ -140,7 +140,7 @@ docker inspect pms-engine-testnet --format='RestartCount: {{.RestartCount}} | OO
 ### Dual-Layer Consistency (RAM + RocksDB)
 - **CRITICAL: Tout fix appliqué sur une couche (RAM DAG) DOIT être vérifié et appliqué sur l'autre couche (RocksDB) si la même logique existe.**
   - Exemple historique : `prune_oldest()` (RAM) a été corrigé pour protéger le dernier tip (commit `9e2922f`), mais `trim_tips()` et `remove_tip()` (RocksDB) n'ont pas reçu la même protection → bug silencieux en production (frais bloqués pendant des heures).
-- Quand un bug est corrigé dans `crates/pms-core/src/concurrent_dag.rs`, vérifier systématiquement `crates/pms-storage/src/rocks_store/store.rs` (et vice-versa).
+- Quand un bug est corrigé dans `crates/pms-core/src/concurrent_dag/` (module directory), vérifier systématiquement `crates/pms-storage/src/rocks_store/` (et vice-versa).
 - **Tests de boundary/edge-case obligatoires** : toujours tester les scénarios limites (dernier élément, liste vide, overflow) — pas seulement le cas nominal. Les bugs critiques se cachent dans les edge cases que les tests "happy path" ne couvrent pas.
 
 ### DAG Sandbox — Tests d'intégration production-like
@@ -186,7 +186,7 @@ Règles impératives tirées de bugs production. Chaque pattern documente un pi�
 
 - **`AppState.contract_store` pointe TOUJOURS vers le RocksDB main.** Pour évaluer les transfer fees sur un custom ledger, utiliser `state.contract_store`, JAMAIS `state.store`.
 - `state.store` peut être le store du custom ledger (via `LedgerInstance`), qui ne contient PAS les contrats.
-- **Fichier de référence** : `crates/pms-server/src/api_fn/tx_helpers.rs` → `evaluate_transfer()`.
+- **Fichier de référence** : `crates/pms-contracts/src/engine.rs` → `evaluate_transfer()`, called from `crates/pms-server/src/api_fn/tx_helpers/` modules.
 - **Bug historique (v0.5.10)** : les transfer fees étaient à 0 sur les custom ledgers car `state.store` (le store du ledger eden) était utilisé pour chercher les contrats, qui n'existent que dans le store main.
 
 ### UTXO Delta — Plain vs Encrypted Payloads
@@ -194,7 +194,7 @@ Règles impératives tirées de bugs production. Chaque pattern documente un pi�
 - `persist_block()` construit un `UtxoDelta` pour les payloads **plain** (transactions normales). Pour les payloads **encrypted**, le delta est `None`.
 - Après `persist_block()`, appeler `apply_utxo_delta()` UNIQUEMENT pour les payloads encrypted. Les payloads plain ont déjà leur delta appliqué dans `persist_block` → double-comptage de la supply si appliqué deux fois.
 - `UtxoFlatItem` DOIT inclure le champ `asset_id` — son absence cause un balance de 0 quand on filtre par asset.
-- **Fichier de référence** : `crates/pms-storage/src/rocks_store/store.rs` → `persist_block()`.
+- **Fichier de référence** : `crates/pms-storage/src/rocks_store/dag_storage_impl.rs` → `persist_block()`.
 - **Bug historique (v0.5.15)** : la supply était doublée car `apply_utxo_delta()` était appelé pour les payloads plain ET dans `persist_block`.
 
 ## Versioning

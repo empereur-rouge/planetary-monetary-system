@@ -1,8 +1,8 @@
 ---
 tags: [feature, api]
 created: 2026-03-14
-updated: 2026-03-14
-version: v0.3.0
+updated: 2026-03-21
+version: v0.6.0
 ---
 
 # Streaming API (Server-Sent Events)
@@ -200,10 +200,12 @@ Commentaire SSE periodique (configurable via `KeepAlive::default()`) pour empech
 | `pms-event` | `crates/pms-event/src/events.rs` | Enum `PmsEvent` (tous les types d'evenements) |
 | `pms-interface` | `crates/pms-interface/src/net_adapter.rs` | Trait `NetDagAdapter` avec methode `event_bus()` |
 | `pms-core` | `crates/pms-core/src/core_adapter.rs` | `CoreAdapter` : champ `event_bus: EventBus`, capacite 4096 |
-| `pms-core` | `crates/pms-core/src/net_adapter.rs` | `persist_block()` : emission `BlockPersisted` (etape 9) |
-| `pms-server` | `crates/pms-server/src/api_fn/activity.rs` | Handler SSE `stream_wallet_activity()` + `ActivityCache` |
+| `pms-core` | `crates/pms-core/src/net_adapter/persist.rs` | `persist_block()` : emission `BlockPersisted` (etape 9) |
+| `pms-server` | `crates/pms-server/src/api_fn/activity/stream.rs` | Handler SSE `stream_wallet_activity()` |
+| `pms-server` | `crates/pms-server/src/api_fn/activity/cache.rs` | `ActivityCache` |
+| `pms-server` | `crates/pms-server/src/api_fn/activity/classify.rs` | `classify_activity_sync()` |
 | `pms-server` | `crates/pms-server/src/api_fn/stream_blocks.rs` | Handler `stream_blocks()` (polling JSON) |
-| `pms-server` | `crates/pms-server/src/api.rs` | Enregistrement des routes SSE dans le router Axum |
+| `pms-server` | `crates/pms-server/src/api/routes.rs` | Enregistrement des routes SSE dans le router Axum |
 | `pms-gateway` | `crates/pms-gateway/src/routes.rs` | Handler `proxy_stream()` pour proxying SSE |
 | `pms-gateway` | `crates/pms-gateway/src/client.rs` | `EngineClient::proxy_stream()` : streaming non-buffered |
 | `pms-gateway` | `crates/pms-gateway/src/main.rs` | Routes SSE explicites dans le router Gateway |
@@ -224,10 +226,10 @@ Commentaire SSE periodique (configurable via `KeepAlive::default()`) pour empech
 `crates/pms-interface/src/net_adapter.rs` -- Methode du trait pour acceder au bus. Retourne `None` par defaut (mocks). `CoreAdapter` retourne `Some(self.event_bus.clone())`.
 
 ### `stream_wallet_activity(State, Path, Query) -> Result<Sse<...>>`
-`crates/pms-server/src/api_fn/activity.rs` -- Handler SSE principal. Souscrit au bus, filtre par adresse et type, gere le dechiffrement, emet les `ActivityItem` en JSON via SSE.
+`crates/pms-server/src/api_fn/activity/stream.rs` -- Handler SSE principal. Souscrit au bus, filtre par adresse et type, gere le dechiffrement, emet les `ActivityItem` en JSON via SSE.
 
 ### `classify_activity_sync(plain: &PlainPayload, addr: &str) -> Vec<ActivityItem>`
-`crates/pms-server/src/api_fn/activity.rs` -- Version synchrone de la classification (pas de UTXO lookup). Utilisee par le SSE pour eviter les acces DB dans la boucle de streaming.
+`crates/pms-server/src/api_fn/activity/classify.rs` -- Version synchrone de la classification (pas de UTXO lookup). Utilisee par le SSE pour eviter les acces DB dans la boucle de streaming.
 
 ### `stream_blocks(State, Query) -> Result<Json<Vec<WireBlock>>>`
 `crates/pms-server/src/api_fn/stream_blocks.rs` -- Retourne les N derniers blocs du DAG en JSON (polling, pas SSE).
@@ -242,7 +244,7 @@ Commentaire SSE periodique (configurable via `KeepAlive::default()`) pour empech
 `crates/pms-wallet/src/history.rs` -- Extrait toutes les adresses impliquees dans un payload (outputs, inputs, fee recipients). Utilisee par le `CoreAdapter` pour pre-calculer les adresses au moment de l'emission.
 
 ### `parse_type_filter(filter: &Option<String>) -> Vec<&str>`
-`crates/pms-server/src/api_fn/activity.rs` -- Parse le parametre `?type=fee_received,mint` en liste de filtres.
+`crates/pms-server/src/api_fn/activity/handler.rs` -- Parse le parametre `?type=fee_received,mint` en liste de filtres.
 
 ## Dependencies
 

@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-01-10
-updated: 2026-03-14
-version: v0.3.0
+updated: 2026-03-21
+version: v0.6.0
 ---
 
 # Node Rewards & Distribution
@@ -24,7 +24,7 @@ Les deux systemes coexistent : le premier est le mecanisme historique de distrib
 A chaque bloc valide persiste dans le DAG (dans `CoreAdapter::persist_block()`), le compteur du signataire est incremente :
 
 ```rust
-// crates/pms-core/src/net_adapter.rs, apres la persistance du bloc (etape 8)
+// crates/pms-core/src/net_adapter/persist.rs, apres la persistance du bloc (etape 8)
 if !wb.signer_pk_hex.trim().is_empty() {
     self.store.increment_node_block_count(&wb.signer_pk_hex)?;
 }
@@ -37,7 +37,7 @@ Le compteur est stocke dans le CF RocksDB `node_block_counts` en format `u64` li
 Lors du traitement des transactions avec fees dans `CoreAdapter::persist_block()`, la portion treasury des fees est ajoutee au pool RocksDB :
 
 ```rust
-// crates/pms-core/src/net_adapter.rs, dans le traitement TxUtxo
+// crates/pms-core/src/net_adapter/persist.rs, dans le traitement TxUtxo
 let treasury_portion = (fee_sats * treasury_fee_bps / 10000) as u64;
 self.store.add_to_fee_pool(treasury_portion)?;
 ```
@@ -143,7 +143,7 @@ La somme `coordinator_fee_bps + treasury_fee_bps` doit etre exactement 10000 (10
 
 ### BlockRewardConfig
 
-Structure de configuration pour les recompenses de bloc (inflation) dans `fee_distribution.rs` :
+Structure de configuration pour les recompenses de bloc (inflation) dans `fee_distribution/compute.rs` :
 
 | Champ | Type | Defaut | Description |
 |-------|------|--------|-------------|
@@ -170,12 +170,15 @@ Les trois CFs sont declares dans les deux listes de `store.rs` (`CF_NAMES` et le
 | `pms-storage` | `src/node_rewards.rs` | Trait `NodeRewardsStorage` -- interface abstraite pour le stockage des recompenses |
 | `pms-storage` | `src/rocks_store/node_rewards_storage.rs` | Implementation RocksDB de `NodeRewardsStorage` + `increment_total_burned()` / `get_total_burned()` |
 | `pms-storage` | `src/rocks_store/store.rs` | Declaration des CFs `node_block_counts`, `node_fee_pool`, `node_reward_addresses` |
-| `pms-core` | `src/net_adapter.rs` | `persist_block()` -- increment compteur, accumulation fee pool, distribution Milestone |
+| `pms-core` | `src/net_adapter/persist.rs` | `persist_block()` -- increment compteur, accumulation fee pool, distribution Milestone |
 | `pms-server` | `src/fee_pool.rs` | Structure `FeePool` -- accumulation RAM des fees, calcul des parts, burn refunds |
-| `pms-server` | `src/fee_distribution.rs` | `perform_fee_distribution()`, `perform_daily_inflation_mint()`, `compute_fee_outputs()`, `compute_block_reward_outputs()`, `BlockRewardConfig` |
+| `pms-server` | `src/fee_distribution/mod.rs` | Re-exports du module fee_distribution |
+| `pms-server` | `src/fee_distribution/distribute.rs` | `perform_fee_distribution()` |
+| `pms-server` | `src/fee_distribution/inflation.rs` | `perform_daily_inflation_mint()` |
+| `pms-server` | `src/fee_distribution/compute.rs` | `compute_fee_outputs()`, `compute_block_reward_outputs()`, `BlockRewardConfig` |
 | `pms-server` | `src/api_fn/milestone.rs` | Endpoints `POST /admin/distribute_fees`, `GET /v1/fee_pool` |
 | `pms-server` | `src/api_fn/blocks.rs` | Accumulation des fees dans le `FeePool` lors de la validation des blocs |
-| `pms-server` | `src/api.rs` | `spawn_fee_distributor_task()`, `spawn_inflation_mint_task()` |
+| `pms-server` | `src/api/tasks.rs` | `spawn_fee_distributor_task()`, `spawn_inflation_mint_task()` |
 | `pms-server` | `src/node_registry.rs` | `NodeRegistry`, `NodeInfo` -- registre des noeuds avec `wallet_address` pour la distribution |
 | `pms-config` | `src/config.rs` | `FeesSettings` -- parametres TOML de fees et distribution |
 | `pms-config` | `src/runtime.rs` | `RuntimeConfig`, `ConfigUpdate` -- hot-swap des parametres de fees |
@@ -206,7 +209,7 @@ Les trois CFs sont declares dans les deux listes de `store.rs` (`CF_NAMES` et le
 | `increment_total_burned(amount)` | Incremente atomiquement le total cumule des fees brulees (Decimal) |
 | `get_total_burned()` | Lit le total cumule des fees brulees |
 
-### Distribution Core (`pms-core/src/net_adapter.rs`)
+### Distribution Core (`pms-core/src/net_adapter/persist.rs`)
 
 | Zone | Description |
 |------|-------------|
@@ -214,7 +217,7 @@ Les trois CFs sont declares dans les deux listes de `store.rs` (`CF_NAMES` et le
 | Etape 6a (finality lock) | Distribution Milestone : lecture pool/mineurs, calcul proportionnel, creation UTXOs |
 | Etape 6c (post-lock) | Ajout des UTXOs au `ShardedUtxoSet`, emission `PmsEvent::NodeRewardDistributed` |
 
-### Distribution Server (`pms-server/src/fee_distribution.rs`)
+### Distribution Server (`pms-server/src/fee_distribution/`)
 
 | Fonction | Description |
 |----------|-------------|
@@ -317,7 +320,7 @@ La chaine de priorite est : RuntimeConfig > EffectiveFees (per-ledger) > FeesSet
 | `crates/pms-storage/tests/node_rewards_test.rs` | Tests unitaires du trait `NodeRewardsStorage` : compteurs, pool, get_all_miners, reset, RuntimeConfig treasury |
 | `crates/pms-core/tests/node_rewards_wallets.rs` | Test E2E complet : 3 noeuds minent des blocs, fees accumulees, Milestone distribue, UTXOs crees, balances proportionnelles |
 | `crates/pms-server/tests/automated_distribution_test.rs` | Test de la distribution automatique avec MockAdapter, timer 1s, verification que le pool est draine |
-| `crates/pms-server/src/fee_distribution.rs` (mod tests) | Tests unitaires : validation config, N-way split, `BlockRewardConfig`, `compute_block_reward_outputs()` |
+| `crates/pms-server/src/fee_distribution/` (mod tests) | Tests unitaires : validation config, N-way split, `BlockRewardConfig`, `compute_block_reward_outputs()` |
 | `crates/pms-server/src/fee_pool.rs` (mod tests) | Tests unitaires : shares proportionnelles (75%/25%), precision Decimal (66.66666667 / 33.33333333) |
 
 ## Securite

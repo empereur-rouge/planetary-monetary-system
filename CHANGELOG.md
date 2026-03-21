@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.0] - 2026-03-21 — Major structural refactoring: module splits + dead code removal
+
+### Changed
+- **refactor(storage)**: Split `rocks_store/store.rs` (2,426 lines) into 5 sub-modules: `activity_index.rs`, `dag_storage_impl.rs`, `maintenance.rs`, `secondary.rs`, and a trimmed `store.rs`. All `pub use` re-exports preserved.
+- **refactor(server)**: Split `server.rs` (1,465 lines) into 6 sub-modules: `mod.rs`, `broadcast.rs`, `listener.rs`, `peer.rs`, `sync.rs`, `blocks.rs`.
+- **refactor(server)**: Split `api.rs` (1,197 lines) into 7 sub-modules: `mod.rs`, `state.rs`, `middleware.rs`, `routes.rs`, `serve.rs`, `ledger_dispatch.rs`, `tasks.rs`.
+- **refactor(server)**: Split `api_fn/activity.rs` (2,334 lines) into 6 sub-modules: `mod.rs`, `cache.rs`, `handler.rs`, `stream.rs`, `classify.rs`, `tests.rs`.
+- **refactor(server)**: Split `fee_distribution.rs` (961 lines) into 5 sub-modules: `mod.rs`, `compute.rs`, `distribute.rs`, `inflation.rs`, `tests.rs`.
+- **refactor(server)**: Split `api_fn/tx_helpers.rs` (896 lines) into 6 sub-modules: `mod.rs`, `fee_policy.rs`, `coin_selection.rs`, `block_ops.rs`, `fee_accumulation.rs`, `tests.rs`.
+- **refactor(core)**: Split `concurrent_dag.rs` (1,829 lines) into 9 sub-modules: `mod.rs`, `core.rs`, `tips.rs`, `spent.rs`, `pruning.rs`, `finality.rs`, `bootstrap.rs`, `forge.rs`, `tests.rs`.
+- **refactor(core)**: Split `net_adapter.rs` (1,282 lines) into 6 sub-modules: `mod.rs`, `persist.rs`, `query.rs`, `supply.rs`, `utxo.rs`, `helpers.rs`. Uses delegate-to-helper pattern (Rust constraint: single `impl Trait for Type` per file).
+- **refactor(storage)**: Split `helpers.rs` (923 lines) into 5 sub-modules: `mod.rs`, `encoding.rs`, `time_index.rs`, `activity_keys.rs`, `classify.rs`, `tests.rs`.
+- **refactor(config)**: Coordinator public key constants (`COORDINATOR_PUBLIC_KEY_MAINNET`, `COORDINATOR_PUBLIC_KEY_TESTNET`) moved from dead `pms-consensus` crate to `pms-config`. Added `NetworkMode::coordinator_public_key()` helper.
+
+### Removed
+- **remove(crate)**: Deleted `pms-crypto` — dead code (dummy `add()` function, empty `ed25519.rs`). Zero dependents.
+- **remove(crate)**: Deleted `pms-consensus` — dead code (2 unused coordinator key constants, now in `pms-config`). Zero runtime dependents.
+
+### Infrastructure
+- **infra**: All 10 file splits preserve public API via `pub use` re-exports. Zero breaking changes.
+- **infra**: 8 clippy warnings fixed (empty line after doc comment in server sub-modules).
+- **infra**: Activity test imports fixed after module split (`classify::*` explicit import in tests.rs).
+
+---
+
 ## [0.5.22] - 2026-03-21 — Memtable OOM fix: multi-ledger memory scaling
 
 ### Fixed

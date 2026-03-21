@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure, networking]
 created: 2025-12-28
-updated: 2026-03-17
-version: v0.5.9
+updated: 2026-03-21
+version: v0.6.0
 ---
 
 # P2P Network (Reseau Pair-a-Pair)
@@ -110,7 +110,12 @@ Le systeme P2P de DAG-PMS implemente un protocole de gossip pour la diffusion et
 | `pms-network` | `src/peer.rs` | Module peer (actuellement vide) |
 | `pms-network` | `src/lib.rs` | Re-exports (`adapter`, `messages`, `peer`) |
 | `pms-interface` | `src/net_adapter.rs` | Trait `NetDagAdapter` (interface reseau-core active) |
-| `pms-server` | `src/server.rs` | Struct `Server` : listener, handshake, gossip, orphan management |
+| `pms-server` | `src/server/mod.rs` | Struct `Server` : constructors, shared state |
+| `pms-server` | `src/server/peer.rs` | Peer handling (handshake, message dispatch) |
+| `pms-server` | `src/server/broadcast.rs` | Broadcast/unicast, batched Inv worker |
+| `pms-server` | `src/server/listener.rs` | TCP/TLS listener, `run()` main loop |
+| `pms-server` | `src/server/sync.rs` | Sync, `connect_to_peer()`, orphan retry |
+| `pms-server` | `src/server/blocks.rs` | Block processing (`process_incoming_blocks`) |
 | `pms-server` | `src/tls.rs` | `load_tls()`, `load_client_config()` (chargement PEM rustls) |
 | `pms-server` | `src/limits.rs` | Constantes anti-abus (rate limits, tailles max, timeouts) |
 | `pms-server` | `src/rate.rs` | `TokenBucket` (rate limiter par pair) |
@@ -119,7 +124,12 @@ Le systeme P2P de DAG-PMS implemente un protocole de gossip pour la diffusion et
 | `pms-server` | `src/node_registry.rs` | `NodeRegistry` (decouverte dynamique de noeuds via API REST) |
 | `pms-server` | `src/api_fn/nodes.rs` | Endpoints REST : `POST /v1/register`, `GET /v1/nodes`, `GET /v1/peers`, `POST /v1/peers/connect` |
 | `pms-server` | `src/internal_api.rs` | API interne Gateway (`/internal/health`, `/internal/tips`, `/internal/submit_block`) |
-| `pms-core` | `src/net_adapter.rs` | Implementation de `NetDagAdapter` pour `CoreAdapter<S>` |
+| `pms-core` | `src/net_adapter/mod.rs` | Implementation de `NetDagAdapter` pour `CoreAdapter<S>` (re-exports) |
+| `pms-core` | `src/net_adapter/persist.rs` | `persist_block()` pipeline |
+| `pms-core` | `src/net_adapter/query.rs` | Block queries (`get_block`, `get_blocks_by_ids`, `have_block`) |
+| `pms-core` | `src/net_adapter/supply.rs` | Supply calculation |
+| `pms-core` | `src/net_adapter/utxo.rs` | UTXO operations |
+| `pms-core` | `src/net_adapter/helpers.rs` | Shared helpers |
 | `pms-config` | `src/config.rs` | Structs `P2pConfig`, `TlsConfig`, `Network`, `Client` |
 | `pms-config` | `src/settings.rs` | `Settings` (configuration globale avec `p2p: P2pConfig`) |
 | `pms-utils` | `src/handshake.rs` | `do_handshake()` (helper client pour les tests) |
@@ -194,7 +204,7 @@ pub struct WireMeta {
 
 ## Fonctions Cles
 
-### Serveur P2P (`pms-server/src/server.rs`)
+### Serveur P2P (`pms-server/src/server/`)
 
 | Fonction | Description |
 |----------|-------------|
@@ -246,7 +256,7 @@ Quand un bloc arrive avec des parents manquants :
 | `load_tls()` | Charge la config TLS serveur depuis les fichiers PEM (cert + cle). ALPN : `h2`, `http/1.1`. |
 | `load_client_config()` | Charge la config TLS client pour mTLS (cert + cle + CA optionnel). |
 
-### Interface Reseau-Core (`pms-interface/src/net_adapter.rs`)
+### Interface Reseau-Core (`pms-interface/src/net_adapter.rs`, `pms-core/src/net_adapter/`)
 
 Le trait `NetDagAdapter` definit l'interface entre le serveur P2P et le moteur DAG :
 

@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-01-10
-updated: 2026-03-20
-version: v0.5.19
+updated: 2026-03-21
+version: v0.6.0
 ---
 
 # Fee Distribution (Distribution Automatique des Frais)
@@ -168,15 +168,23 @@ Les paramètres suivants peuvent être modifiés à chaud via des blocs `ConfigU
 
 | Crate | Fichier | Rôle |
 |-------|---------|------|
-| `pms-server` | `src/fee_distribution.rs` | Logique principale : `perform_fee_distribution()`, `perform_daily_inflation_mint()`, `compute_fee_outputs()`, `compute_block_reward_outputs()` |
+| `pms-server` | `src/fee_distribution/mod.rs` | Re-exports du module fee_distribution |
+| `pms-server` | `src/fee_distribution/compute.rs` | `compute_fee_outputs()`, `compute_block_reward_outputs()` |
+| `pms-server` | `src/fee_distribution/distribute.rs` | `perform_fee_distribution()` |
+| `pms-server` | `src/fee_distribution/inflation.rs` | `perform_daily_inflation_mint()` |
 | `pms-server` | `src/fee_pool.rs` | Structure `FeePool` : accumulation des fees, calcul des parts, burn refunds |
 | `pms-server` | `src/api_fn/milestone.rs` | Endpoints : `POST /admin/distribute_fees`, `GET /v1/fee_pool` |
-| `pms-server` | `src/api_fn/tx_helpers.rs` | `create_reward_block()`, `compute_fee_outputs()`, `EffectiveFees`, `load_burn_rate_bps()`, `resolve_effective_fees()` |
+| `pms-server` | `src/api_fn/tx_helpers/mod.rs` | `EffectiveFees`, `resolve_effective_fees()`, re-exports |
+| `pms-server` | `src/api_fn/tx_helpers/fee_policy.rs` | `load_burn_rate_bps()`, fee policy resolution |
+| `pms-server` | `src/api_fn/tx_helpers/fee_accumulation.rs` | `accumulate_tx_fee()`, `create_reward_block()` (deprecated) |
+| `pms-server` | `src/api_fn/tx_helpers/coin_selection.rs` | `select_utxos()`, coin selection logic |
+| `pms-server` | `src/api_fn/tx_helpers/block_ops.rs` | `forge_and_sign_block()`, `persist_and_broadcast()` |
 | `pms-server` | `src/api_fn/supply.rs` | `GET /v1/supply` : expose `total_burned` |
 | `pms-server` | `src/api_fn/blocks.rs` | Accumulation des fees dans le pool lors de la validation des blocs |
 | `pms-server` | `src/api_fn/token.rs` | Accumulation des fees de mint/création de token |
 | `pms-server` | `src/api_fn/nft.rs` | Accumulation des fees de mint NFT et burn refunds (contrats) |
-| `pms-server` | `src/api.rs` | `spawn_fee_distributor_task()`, `spawn_inflation_mint_task()`, `AppState.fee_pool` |
+| `pms-server` | `src/api/tasks.rs` | `spawn_fee_distributor_task()`, `spawn_inflation_mint_task()` |
+| `pms-server` | `src/api/state.rs` | `AppState.fee_pool` |
 | `pms-config` | `src/config.rs` | `FeesSettings`, `FeeDistributionConfig`, `FeeBeneficiary`, `LedgerFeesOverride` |
 | `pms-config` | `src/runtime.rs` | `RuntimeConfig`, `ConfigUpdate` (hot-swap des paramètres de fees) |
 | `pms-config` | `src/treasury_wallets.rs` | `TreasuryWallets`, `TreasuryWalletsFile` : chargement et vérification des wallets treasury signés |
@@ -190,25 +198,25 @@ Les paramètres suivants peuvent être modifiés à chaud via des blocs `ConfigU
 
 | Fonction | Fichier | Description |
 |----------|---------|-------------|
-| `perform_fee_distribution()` | `pms-server/src/fee_distribution.rs` | Distribue les fees accumulées : burn, treasury tax, node rewards. Crée un bloc `Mint`. |
-| `perform_daily_inflation_mint()` | `pms-server/src/fee_distribution.rs` | Mint quotidien d'inflation basé sur le supply en circulation. |
-| `compute_fee_outputs()` | `pms-server/src/fee_distribution.rs` | Calcule les outputs de distribution N-way à partir du total et de la config. |
-| `compute_block_reward_outputs()` | `pms-server/src/fee_distribution.rs` | Calcule les outputs de récompense de bloc (creator/treasury/burn). |
-| `spawn_fee_distributor_task()` | `pms-server/src/api.rs` | Lance le timer asynchrone pour la distribution périodique. |
-| `spawn_inflation_mint_task()` | `pms-server/src/api.rs` | Lance le timer asynchrone pour l'inflation programmée. |
-| `accumulate_tx_fee()` | `pms-server/src/api_fn/tx_helpers.rs` | Accumule une fee dans le FeePool pour distribution consolidée (v0.5.19). Remplace `create_reward_block()`. |
-| `create_reward_block()` | `pms-server/src/api_fn/tx_helpers.rs` | **DEPRECATED** — Créait un bloc `Reward` immédiat per-TX. Cause prolifération d'UTXOs. Remplacé par `accumulate_tx_fee()`. |
+| `perform_fee_distribution()` | `pms-server/src/fee_distribution/distribute.rs` | Distribue les fees accumulées : burn, treasury tax, node rewards. Crée un bloc `Mint`. |
+| `perform_daily_inflation_mint()` | `pms-server/src/fee_distribution/inflation.rs` | Mint quotidien d'inflation basé sur le supply en circulation. |
+| `compute_fee_outputs()` | `pms-server/src/fee_distribution/compute.rs` | Calcule les outputs de distribution N-way à partir du total et de la config. |
+| `compute_block_reward_outputs()` | `pms-server/src/fee_distribution/compute.rs` | Calcule les outputs de récompense de bloc (creator/treasury/burn). |
+| `spawn_fee_distributor_task()` | `pms-server/src/api/tasks.rs` | Lance le timer asynchrone pour la distribution périodique. |
+| `spawn_inflation_mint_task()` | `pms-server/src/api/tasks.rs` | Lance le timer asynchrone pour l'inflation programmée. |
+| `accumulate_tx_fee()` | `pms-server/src/api_fn/tx_helpers/fee_accumulation.rs` | Accumule une fee dans le FeePool pour distribution consolidée (v0.5.19). Remplace `create_reward_block()`. |
+| `create_reward_block()` | `pms-server/src/api_fn/tx_helpers/fee_accumulation.rs` | **DEPRECATED** — Créait un bloc `Reward` immédiat per-TX. Cause prolifération d'UTXOs. Remplacé par `accumulate_tx_fee()`. |
 | `FeePool::add_fee()` | `pms-server/src/fee_pool.rs` | Ajoute une fee au pool avec suivi de contribution du nœud. |
 | `FeePool::merge_from()` | `pms-server/src/fee_pool.rs` | Fusionne un snapshot de pool (récupération d'erreur après swap atomique, v0.5.19). |
 | `FeePool::add_burn_refund()` | `pms-server/src/fee_pool.rs` | Ajoute un remboursement de burn pour un wallet utilisateur. |
 | `FeePool::calculate_shares()` | `pms-server/src/fee_pool.rs` | Calcule les parts proportionnelles de chaque nœud (bloc count / total blocks). |
 | `FeePool::reset()` | `pms-server/src/fee_pool.rs` | Remet le pool à zéro après distribution. |
 | `calculate_fee_burn()` | `pms-economics/src/fee_burn.rs` | Calcule le montant à brûler vs distribuer selon `burn_rate_bps`. |
-| `resolve_effective_fees()` | `pms-server/src/api_fn/tx_helpers.rs` | Merge les fees globales avec les overrides per-ledger. |
-| `load_burn_rate_bps()` | `pms-server/src/api_fn/tx_helpers.rs` | Charge le taux de burn (priorité RuntimeConfig > EffectiveFees). |
+| `resolve_effective_fees()` | `pms-server/src/api_fn/tx_helpers/fee_policy.rs` | Merge les fees globales avec les overrides per-ledger. |
+| `load_burn_rate_bps()` | `pms-server/src/api_fn/tx_helpers/fee_policy.rs` | Charge le taux de burn (priorité RuntimeConfig > EffectiveFees). |
 | `increment_total_burned()` | `pms-storage/src/rocks_store/node_rewards_storage.rs` | Persiste le total cumulatif de fees brûlées dans RocksDB. |
 | `get_total_burned()` | `pms-storage/src/rocks_store/node_rewards_storage.rs` | Lit le total cumulatif de fees brûlées. |
-| `resolve_beneficiary_address()` | `pms-server/src/fee_distribution.rs` | Résout l'adresse d'un bénéficiaire par son rôle (coordinator, treasury, custom). |
+| `resolve_beneficiary_address()` | `pms-server/src/fee_distribution/distribute.rs` | Résout l'adresse d'un bénéficiaire par son rôle (coordinator, treasury, custom). |
 
 ## Endpoints API
 
@@ -280,7 +288,7 @@ Dans `perform_fee_distribution()`, les parts de chaque nœud sont calculées pro
 | `crates/pms-server/tests/fee_consistency_test.rs` | Test de cohérence des fees (somme des outputs = total pool) |
 | `crates/pms-server/tests/fee_treasury_test.rs` | Test du split coordinator/treasury et edge cases |
 | `crates/pms-server/tests/fee_helpers_test.rs` | Tests des fonctions helper (load_*, resolve_effective_fees, etc.) |
-| `crates/pms-server/src/fee_distribution.rs` (mod tests) | Tests unitaires : validation config, N-way split, block reward outputs |
+| `crates/pms-server/src/fee_distribution/` (mod tests) | Tests unitaires : validation config, N-way split, block reward outputs |
 | `crates/pms-server/src/fee_pool.rs` (mod tests) | Tests unitaires : shares proportionnelles, précision décimale |
 
 ## Column Families RocksDB

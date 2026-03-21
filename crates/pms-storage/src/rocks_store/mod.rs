@@ -12,3 +12,9 @@ pub mod node_rewards_storage;
 pub mod store;
 pub mod token_registry;
 pub mod utxo;
+
+// Split from store.rs — additional impl blocks on RocksStore
+pub(crate) mod activity_index;
+mod dag_storage_impl;
+mod maintenance;
+pub mod secondary;
