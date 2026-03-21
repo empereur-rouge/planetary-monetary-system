@@ -42,27 +42,30 @@ COPY crates/pms-types-block/Cargo.toml crates/pms-types-block/Cargo.toml
 COPY crates/pms-network/Cargo.toml crates/pms-network/Cargo.toml
 COPY crates/pms-interface/Cargo.toml crates/pms-interface/Cargo.toml
 COPY crates/pms-wire/Cargo.toml crates/pms-wire/Cargo.toml
-COPY crates/pms-crypto/Cargo.toml crates/pms-crypto/Cargo.toml
 COPY crates/tools-cli/Cargo.toml crates/tools-cli/Cargo.toml
 COPY crates/pms-config/Cargo.toml crates/pms-config/Cargo.toml
 COPY crates/pms-testkit/Cargo.toml crates/pms-testkit/Cargo.toml
 COPY crates/pms-types-dag/Cargo.toml crates/pms-types-dag/Cargo.toml
 COPY crates/pms-errors/Cargo.toml crates/pms-errors/Cargo.toml
 COPY crates/pms-ledger/Cargo.toml crates/pms-ledger/Cargo.toml
-COPY crates/pms-consensus/Cargo.toml crates/pms-consensus/Cargo.toml
 COPY crates/pms-event/Cargo.toml crates/pms-event/Cargo.toml
 COPY crates/pms-types-nft/Cargo.toml crates/pms-types-nft/Cargo.toml
 COPY crates/pms-gateway/Cargo.toml crates/pms-gateway/Cargo.toml
 COPY crates/pms-bridge/Cargo.toml crates/pms-bridge/Cargo.toml
+COPY crates/pms-types-contract/Cargo.toml crates/pms-types-contract/Cargo.toml
+COPY crates/pms-types-economics/Cargo.toml crates/pms-types-economics/Cargo.toml
+COPY crates/pms-economics/Cargo.toml crates/pms-economics/Cargo.toml
+COPY crates/pms-contracts/Cargo.toml crates/pms-contracts/Cargo.toml
 
 # --- Step B: Create dummy source files so cargo resolves the dependency graph ---
 RUN mkdir -p bin/src && echo 'fn main() {}' > bin/src/main.rs \
     && for crate in \
         pms-wallet pms-core pms-server pms-storage pms-utils pms-token \
         pms-types-transaction pms-types-mint pms-types-payload pms-types \
-        pms-types-block pms-network pms-interface pms-wire pms-crypto \
+        pms-types-block pms-network pms-interface pms-wire \
         tools-cli pms-config pms-testkit pms-types-dag pms-errors \
-        pms-ledger pms-consensus pms-event pms-types-nft pms-bridge; do \
+        pms-ledger pms-event pms-types-nft pms-bridge \
+        pms-types-contract pms-types-economics pms-economics pms-contracts; do \
         mkdir -p "crates/$crate/src" && echo '' > "crates/$crate/src/lib.rs"; \
     done \
     && mkdir -p crates/pms-gateway/src && echo 'fn main() {}' > crates/pms-gateway/src/main.rs \
