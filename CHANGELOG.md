@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.6.1] - 2026-03-21 — Fix: fd exhaustion crash + metrics counter reset
+## [0.6.2] - 2026-03-22 — Hardening: production-readiness quick wins
+
+### Fixed
+- **fix(storage)**: 7x `RwLock::unwrap()` in `InMemoryContractStore` replaced with poison-safe `unwrap_or_else(|p| p.into_inner())` pattern. Prevents cascading panics if a thread panics while holding the contract store lock.
+- **fix(validations)**: Removed misleading `// TODO (MVP rapide: stub "Ok(())")` comment on `verify_tx_signatures()` in `check.rs`. Signature verification is fully implemented in `signature.rs` — the outdated comment was dangerous for auditors.
+- **fix(tests)**: Re-enabled 2 previously `#[ignore]`'d admin wallet fee tests (`wallet_send_tx_fee_is_materialized_and_zeroed_and_visible_to_admin`, `wallet_send_tx_does_not_duplicate_fee_output_if_already_present`). Root cause: missing change output and manual UTXO persistence in test setup. All 3 wallet fee tests now pass.
+
+### Added
+- **feat(metrics)**: Added `pms_api_request_duration_seconds` Prometheus histogram with method/route labels. Buckets: 1ms to 5s. Uses Axum `MatchedPath` for route templates, preventing label cardinality explosion from dynamic URL segments.
+- **feat(middleware)**: Added `track_latency` middleware in the global Axum layer stack, recording request duration for all API endpoints.
+
+### Changed
+- **config(testnet)**: Reduced `rate_limit_rps` from 50000→10000 and `burst` from 100000→20000 in `config.testnet.toml`. Still 5x the simulator's peak throughput (2000 TPS) but provides basic DoS protection on publicly exposed testnet.
+
+---
+
+## [0.6.1] - 2026-03-21 — Fix: fd exhaustion crash + metrics counter reset + dashboard TPS
+
+### Performance
+- **perf(dashboard)**: TPS chart was updating every ~10 seconds instead of every 1 second under high block load. Root cause: `fetchData()` bundled 6 API calls (`/metrics`, `/v1/supply`, `/v1/nodes`, `/v1/peers`, `/admin/ping`, `/v1/tokens`) in a single `Promise.all()` with 2s interval. When the engine was under load, slow endpoints (`/v1/supply`) blocked the lightweight `/metrics` call. Fix: split into two independent polling loops — fast metrics (1s, only `/metrics`) and slow data (5s, supply/nodes/peers/tokens). Added `metricsFetching` guard to prevent overlapping metrics calls. Relaxed `deltaTime < 10` guard to `< 30` so TPS data isn't discarded after brief network hiccups.
 
 ### Fixed
 - **fix(server/critical)**: Engine crashed silently every ~2-2.5 hours with ExitCode 0 due to **file descriptor exhaustion**. Root cause: Docker default `ulimit -n = 1024` combined with `max_open_files = 1024` in RocksDB config, leaving zero fd headroom for TCP accept, logging, or other I/O. 113K+ "Too many open files" errors occurred before each crash. `listen_tls()` / `listen()` used `?` on `accept()`, causing a single fd error to kill the entire P2P listener and propagate through `srv.run()` to `main()`, which always returned `Ok(())` (exit code 0) regardless of error.

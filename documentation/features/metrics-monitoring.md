@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure]
 created: 2025-12-28
-updated: 2026-03-19
-version: v0.5.16
+updated: 2026-03-22
+version: v0.6.2
 ---
 
 # Metrics & Monitoring (Prometheus)
@@ -28,6 +28,7 @@ La couche interne (`internal_api.rs`) fournit un endpoint `/internal/metrics` ut
 | `pms_blocks_persisted_total`  | `IntCounterVec` | `ledger_id`  | Nombre total de blocs valides et persistes (monotone croissant)     | `crates/pms-server/src/metrics.rs:14`   |
 | `pms_blocks_rejected_total`   | `IntCounterVec` | `ledger_id`  | Nombre total de blocs rejetes lors de la persistance                | `crates/pms-server/src/metrics.rs:5`    |
 | `pms_blocks_total`            | `IntGaugeVec`   | `ledger_id`  | Taille actuelle du DAG en memoire (nombre de blocs connus)          | `crates/pms-server/src/metrics.rs:23`   |
+| `pms_api_request_duration_seconds` | `HistogramVec` | `method`, `route` | Latence des requetes API en secondes (buckets: 1ms-5s). Utilise `MatchedPath` d'Axum pour les templates de routes, evitant l'explosion de cardinalite. | `crates/pms-server/src/metrics.rs:32` |
 
 ### Metriques referencees dans le dashboard Grafana (reservees / futures)
 
@@ -215,7 +216,8 @@ Module de diagnostic qui enregistre les metriques de throughput toutes les 10 mi
 
 | Fichier                                                       | Role                                                                      |
 |---------------------------------------------------------------|---------------------------------------------------------------------------|
-| `crates/pms-server/src/metrics.rs`                            | Definition des metriques Prometheus (counters, gauges) et fonctions render |
+| `crates/pms-server/src/metrics.rs`                            | Definition des metriques Prometheus (counters, gauges, histogramme latence) et fonctions render |
+| `crates/pms-server/src/api/middleware.rs`                     | Middleware `track_latency` — enregistre la duree de chaque requete API dans l'histogramme |
 | `crates/pms-server/src/internal_api.rs`                       | Endpoint `/internal/metrics` pour le proxy Gateway                        |
 | `crates/pms-server/src/api.rs`                                | Routes `/metrics`, `/metrics/all`, `/l/{id}/metrics` + sync DAG size      |
 | `crates/pms-server/src/stats.rs`                              | Compteurs atomiques internes (non-Prometheus) pour les logs               |
@@ -243,6 +245,7 @@ Module de diagnostic qui enregistre les metriques de throughput toutes les 10 mi
 | `BLOCKS_REJECTED`           | `Lazy<IntCounterVec>`                            | Counter multi-ledger des blocs rejetes                                        |
 | `BLOCKS_PERSISTED`          | `Lazy<IntCounterVec>`                            | Counter multi-ledger des blocs persistes                                      |
 | `PMS_BLOCKS_TOTAL`          | `Lazy<IntGaugeVec>`                              | Gauge multi-ledger de la taille du DAG                                        |
+| `API_LATENCY`               | `Lazy<HistogramVec>`                             | Histogramme de latence API (labels: method, route). Buckets: 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s |
 | `render()`                  | `fn render() -> String`                          | Serialise toutes les metriques au format Prometheus text (avec labels)         |
 | `render_for_ledger()`       | `fn render_for_ledger(ledger_id: &str) -> String` | Serialise les metriques d'un ledger specifique (format simplifie sans labels) |
 

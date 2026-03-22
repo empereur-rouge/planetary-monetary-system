@@ -322,8 +322,7 @@ pub fn validate_block(
                 // (MVP) : autres règles mint ici si besoin
             }
             PlainPayload::TxUtxo(tx) => {
-                // ⚠️ Ces fonctions sont des *hooks* : implémenter dans pms-ledger/pms-crypto plus tard.
-                verify_tx_signatures(tx)?; // TODO (MVP rapide: stub “Ok(())”)
+                verify_tx_signatures(tx)?;
                 validate_fee_recipient_output(tx, policy)?;
                 tx_amounts_valid(tx, policy)?; // basique sur chaînes décimales
 

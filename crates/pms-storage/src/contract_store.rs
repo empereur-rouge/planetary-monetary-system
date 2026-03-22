@@ -79,18 +79,18 @@ impl InMemoryContractStore {
 
 impl ContractStorage for InMemoryContractStore {
     fn get_contract(&self, contract_id: &str) -> Result<Option<Contract>> {
-        let map = self.contracts.read().unwrap();
+        let map = self.contracts.read().unwrap_or_else(|p| p.into_inner());
         Ok(map.get(contract_id).cloned())
     }
 
     fn put_contract(&self, contract: &Contract) -> Result<()> {
-        let mut map = self.contracts.write().unwrap();
+        let mut map = self.contracts.write().unwrap_or_else(|p| p.into_inner());
         map.insert(contract.contract_id.clone(), contract.clone());
         Ok(())
     }
 
     fn list_contracts(&self) -> Result<Vec<Contract>> {
-        let map = self.contracts.read().unwrap();
+        let map = self.contracts.read().unwrap_or_else(|p| p.into_inner());
         Ok(map.values().cloned().collect())
     }
 
@@ -99,7 +99,7 @@ impl ContractStorage for InMemoryContractStore {
         nft_type: Option<&str>,
         ledger_id: &str,
     ) -> Result<Vec<Contract>> {
-        let map = self.contracts.read().unwrap();
+        let map = self.contracts.read().unwrap_or_else(|p| p.into_inner());
         let results = map
             .values()
             .filter(|c| {
@@ -132,7 +132,7 @@ impl ContractStorage for InMemoryContractStore {
         asset_id: Option<&str>,
         ledger_id: &str,
     ) -> Result<Vec<Contract>> {
-        let map = self.contracts.read().unwrap();
+        let map = self.contracts.read().unwrap_or_else(|p| p.into_inner());
         let results = map
             .values()
             .filter(|c| {
@@ -158,7 +158,7 @@ impl ContractStorage for InMemoryContractStore {
     }
 
     fn update_contract(&self, contract_id: &str, contract: &Contract) -> Result<()> {
-        let mut map = self.contracts.write().unwrap();
+        let mut map = self.contracts.write().unwrap_or_else(|p| p.into_inner());
         if !map.contains_key(contract_id) {
             anyhow::bail!("Contract '{}' not found", contract_id);
         }
@@ -167,7 +167,7 @@ impl ContractStorage for InMemoryContractStore {
     }
 
     fn set_enabled(&self, contract_id: &str, enabled: bool) -> Result<()> {
-        let mut map = self.contracts.write().unwrap();
+        let mut map = self.contracts.write().unwrap_or_else(|p| p.into_inner());
         if let Some(c) = map.get_mut(contract_id) {
             c.enabled = enabled;
         }

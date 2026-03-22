@@ -1,9 +1,9 @@
-// pms-server/src/api/middleware — Authentication and authorization middleware.
+// pms-server/src/api/middleware — Authentication, authorization, and observability middleware.
 
 use super::state::AppState;
 use crate::api_keys;
 use axum::Json;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, MatchedPath, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::middleware::Next;
@@ -165,4 +165,26 @@ pub(super) async fn require_api_key(
     // Libérer le lock avant de continuer
     drop(store);
     next.run(request).await
+}
+
+/// Middleware to record API request latency as a Prometheus histogram.
+///
+/// Uses `MatchedPath` to get the route template (e.g. `/v1/wallet/{addr}/balance`)
+/// instead of the actual path, preventing label cardinality explosion from dynamic segments.
+pub(super) async fn track_latency(
+    matched_path: Option<MatchedPath>,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let method = request.method().as_str().to_owned();
+    let route = matched_path
+        .map(|mp| mp.as_str().to_owned())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let start = std::time::Instant::now();
+    let response = next.run(request).await;
+    let elapsed = start.elapsed().as_secs_f64();
+    crate::metrics::API_LATENCY
+        .with_label_values(&[&method, &route])
+        .observe(elapsed);
+    response
 }

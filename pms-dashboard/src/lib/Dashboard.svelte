@@ -6,7 +6,8 @@
     import ServiceStatusBar from "./ServiceStatusBar.svelte";
     import { fade, fly } from "svelte/transition";
 
-    let interval: any;
+    let metricsInterval: any;
+    let dataInterval: any;
 
     function safeFormat(value: any, fractionDigits: number = 8): string {
         if (value === null || value === undefined || value === "") return "-";
@@ -20,6 +21,7 @@
     let chartLabels: string[] = new Array(30).fill("");
     let lastBlockCount = 0;
     let lastTime = Date.now();
+    let metricsFetching = false;
 
     // Data States
     let supplyInfo: any = null;
@@ -53,14 +55,28 @@
         }
     }
 
+    // Fast-path: only fetch /metrics for TPS chart (1s interval)
+    async function fetchMetrics() {
+        if (metricsFetching) return; // skip if previous call still pending
+        metricsFetching = true;
+        try {
+            const metricsText = await ledgerApiCall("/metrics").catch((err) => {
+                console.error("Metrics failed", err);
+                return "";
+            });
+            if (metricsText) parseMetrics(metricsText);
+        } catch (e) {
+            console.error("Failed to fetch metrics", e);
+        } finally {
+            metricsFetching = false;
+        }
+    }
+
+    // Slow-path: fetch supply, nodes, peers, tokens, ping (5s interval)
     async function fetchData() {
         try {
-            const [metricsText, registryRes, p2pRes, supplyRes, nodeRes, tokensRes] =
+            const [registryRes, p2pRes, supplyRes, nodeRes, tokensRes] =
                 await Promise.all([
-                    ledgerApiCall("/metrics").catch((err) => {
-                        console.error("Metrics failed", err);
-                        return "";
-                    }),
                     apiCall("/v1/nodes").catch((err) => {
                         console.error("Nodes failed", err);
                         return { nodes: [] };
@@ -82,8 +98,6 @@
                         return { tokens: [] };
                     }),
                 ]);
-
-            if (metricsText) parseMetrics(metricsText);
 
             if (supplyRes) supplyInfo = supplyRes;
             if (nodeRes) nodeInfo = nodeRes;
@@ -131,7 +145,7 @@
             const deltaBlocks = currentBlocks - lastBlockCount;
             const deltaTime = (now - lastTime) / 1000;
 
-            if (deltaTime > 0 && deltaTime < 10) {
+            if (deltaTime > 0 && deltaTime < 30) {
                 const tps = Math.max(0, deltaBlocks / deltaTime);
                 tpsHistory = [...tpsHistory.slice(1), tps];
                 const timeStr = new Date().toLocaleTimeString();
@@ -161,12 +175,14 @@
         const value = select.value;
         selectedLedgerId.set(value === "" ? null : value);
         resetDashboardData();
+        fetchMetrics();
         fetchData();
     }
 
     function selectLedger(id: string) {
         selectedLedgerId.set(id);
         resetDashboardData();
+        fetchMetrics();
         fetchData();
     }
 
@@ -186,6 +202,7 @@
             newPrefix = "";
             showCreateForm = false;
             resetDashboardData();
+            fetchMetrics();
             fetchData();
         } catch (e: any) {
             createError = e.message || "Creation failed";
@@ -196,12 +213,17 @@
 
     onMount(async () => {
         await fetchLedgers();
+        fetchMetrics();
         fetchData();
-        interval = setInterval(fetchData, 2000);
+        // Fast metrics polling (1s) — TPS chart stays responsive under load
+        metricsInterval = setInterval(fetchMetrics, 1000);
+        // Slow data polling (5s) — supply, nodes, peers, tokens
+        dataInterval = setInterval(fetchData, 5000);
     });
 
     onDestroy(() => {
-        if (interval) clearInterval(interval);
+        if (metricsInterval) clearInterval(metricsInterval);
+        if (dataInterval) clearInterval(dataInterval);
     });
 
     function logout() {

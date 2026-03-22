@@ -69,8 +69,8 @@ whitelist_fp256 = []
 [limits]
 max_body_bytes = 1048576
 request_timeout_ms = 30000
-rate_limit_rps = 50000
-burst = 100000
+rate_limit_rps = 10000
+burst = 20000
 
 [fees]
 epsilon = "0.001"

@@ -1,7 +1,7 @@
 // pms-server/src/api/routes — Router construction (ledger-scoped, admin, full API).
 
 use super::ledger_dispatch::dynamic_ledger_handler;
-use super::middleware::{require_admin_token, require_api_key, require_local_or_admin};
+use super::middleware::{require_admin_token, require_api_key, require_local_or_admin, track_latency};
 use super::state::{sync_all_dag_size_metrics, sync_dag_size_metric, sync_dag_size_metric_for, AppState};
 use crate::admin::{
     admin_compact, admin_get_config, admin_ping, admin_reindex_activity,
@@ -442,6 +442,8 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
+        // 1.5 API latency histogram (records after response, before tracing)
+        .layer(middleware::from_fn(track_latency))
         // 1. Tracing (Top)
         .layer(TraceLayer::new_for_http())
         // 0. Catch panics in handlers → 500 instead of killing the server

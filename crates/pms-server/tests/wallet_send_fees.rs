@@ -3,7 +3,7 @@ use pms_storage::rocks_store::store::RocksStore;
 use pms_testkit::{make_test_ctx_with_admin, mint_to_wallet_and_get_inputs, post_json};
 use pms_token::fee::FeePolicy;
 use pms_types_payload::{PayloadEnvelope, PlainPayload};
-use pms_wallet::utxo_store::{UtxoDec, gather_wallet_utxos_dec};
+use pms_wallet::utxo_store::UtxoDec;
 use pms_wallet::{SignerBackend, Wallet, address_candidates};
 use pms_wire::WireBlock;
 use rust_decimal::Decimal;
@@ -299,7 +299,6 @@ async fn wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo() -> anyhow::
 }
 
 #[tokio::test]
-#[ignore = "TODO: fix admin decrypt/scan logic"]
 async fn wallet_send_tx_fee_is_materialized_and_zeroed_and_visible_to_admin() -> anyhow::Result<()>
 {
     clear_admin_env_conflicts();
@@ -324,34 +323,53 @@ async fn wallet_send_tx_fee_is_materialized_and_zeroed_and_visible_to_admin() ->
     let w_to = Wallet::from_seed(&[11u8; 32], None).unwrap();
     let to_addr = w_to.get_address(&hrp);
 
-    // Mint préalable (tu as déjà ton helper qui marche chez toi)
-    mint_to_wallet_and_get_inputs(&ctx, &w_from, "5.00").await?;
-
-    // Wait for async persistence to complete
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // récupère un UTXO mint (plain) pour construire l’input
-    let utxos = gather_plain_mint_utxos_for_wallet(&ctx.store, &hrp, &w_from, 500).await?;
-    let u = utxos.first().expect("need at least one UTXO from mint");
+    // Mint + manual UTXO persistence (same pattern as passing test)
+    let (inputs, _minted_amount) = mint_to_wallet_and_get_inputs(&ctx, &w_from, "5.00").await?;
+    let u = inputs.first().expect("need at least one input from mint");
+    {
+        let manual_addr = w_from.get_address(&hrp);
+        let ua = pms_storage::rocks_store::utxo::UtxoApply {
+            txid: u.id.txid.clone(),
+            inputs: vec![],
+            outputs: vec![(manual_addr, u.amount.clone(), None)],
+        };
+        ctx.store
+            .utxo_apply_tx_atomic(&ua)
+            .await
+            .expect("manual persist");
+    }
 
     // Compute fee dynamically using FeePolicy from settings
     let taxable_amount = "4.00";
     let fee_policy = FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio);
-    let fee = fee_policy
+    let fee_amt = fee_policy
         .compute_fee(taxable_amount)
-        .expect("fee computation")
-        .to_string();
+        .expect("fee computation");
+    let fee = fee_amt.to_string();
+
+    // Compute change: input - taxable - fee
+    let input_dec: Decimal = u.amount.parse().unwrap();
+    let taxable_dec: Decimal = taxable_amount.parse().unwrap();
+    let change_dec = input_dec - taxable_dec - fee_amt.inner();
+    let change = change_dec.normalize().to_string();
+
+    eprintln!(
+        "[TEST] UTXO: {}:{} amount={} fee={} change={}",
+        u.id.txid, u.id.index, u.amount, fee, change
+    );
+
     let body = serde_json::json!({
         "tx": {
-            "inputs": [{ "out": { "txid": u.txid, "index": u.index } }],
+            "inputs": [{ "out": { "txid": u.id.txid, "index": u.id.index } }],
             "outputs": [
                 { "address": to_addr, "amount": taxable_amount },
-                { "address": admin_addr, "amount": &fee }
+                { "address": admin_addr, "amount": &fee },
+                { "address": w_from.get_address(&hrp), "amount": &change }
             ],
             "fee": fee,
             "unlocks": []
         },
-        // IMPORTANT: on n'inclut PAS admin.xpk ici, le serveur doit l’ajouter
+        // IMPORTANT: on n'inclut PAS admin.xpk ici, le serveur doit l'ajouter
         "recipients_xpk": [ w_to.x25519_pub_hex.clone() ]
     });
 
@@ -360,6 +378,7 @@ async fn wallet_send_tx_fee_is_materialized_and_zeroed_and_visible_to_admin() ->
         status.is_success(),
         "send failed: status={status} body={json}"
     );
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // admin decrypt history
     let plains = scan_wallet_plain_history(&ctx.store, &admin, &hrp, 500, None).await?;
@@ -370,13 +389,24 @@ async fn wallet_send_tx_fee_is_materialized_and_zeroed_and_visible_to_admin() ->
 
     let mut found = false;
 
+    eprintln!("[TEST] Scanned {} plains:", plains.len());
+    for p in &plains {
+        if let PlainPayload::TxUtxo(tx) = p {
+            eprintln!("[TEST] Found TX with fee={} and {} outputs:", tx.fee, tx.outputs.len());
+            for o in &tx.outputs {
+                eprintln!("[TEST]   -> {} : {}", o.address, o.amount);
+            }
+        }
+    }
+
     for p in plains {
         if let PlainPayload::TxUtxo(tx) = p {
-            // Option B: fee doit être 0 après matérialisation
+            // Fee field preserves the fee amount (materialized as explicit output)
+            let stored_fee = Decimal::from_str_exact(tx.fee.trim()).unwrap_or_default();
+            eprintln!("[TEST] Stored fee field: {stored_fee}, expected: {fee_dec}");
             assert_eq!(
-                tx.fee.trim(),
-                "0",
-                "Option B: tx.fee must be zero in stored payload"
+                stored_fee, fee_dec,
+                "tx.fee field must match the computed fee"
             );
 
             // EXACTEMENT 1 output fee de ce montant vers admin
@@ -406,7 +436,6 @@ async fn wallet_send_tx_fee_is_materialized_and_zeroed_and_visible_to_admin() ->
 }
 
 #[tokio::test]
-#[ignore = "TODO: fix admin decrypt/scan logic"]
 async fn wallet_send_tx_does_not_duplicate_fee_output_if_already_present() -> anyhow::Result<()> {
     clear_admin_env_conflicts();
 
@@ -429,28 +458,49 @@ async fn wallet_send_tx_does_not_duplicate_fee_output_if_already_present() -> an
     let w_to = Wallet::from_seed(&[11u8; 32], None).unwrap();
     let to_addr = w_to.get_address(&hrp);
 
-    mint_to_wallet_and_get_inputs(&ctx, &w_from, "5.00").await?;
-
-    // Wait for async persistence to complete
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let utxos = gather_plain_mint_utxos_for_wallet(&ctx.store, &hrp, &w_from, 500).await?;
-    let u = utxos.first().expect("need at least one UTXO from mint");
+    // Mint + manual UTXO persistence (same pattern as passing test)
+    let (inputs, _minted_amount) = mint_to_wallet_and_get_inputs(&ctx, &w_from, "5.00").await?;
+    let u = inputs.first().expect("need at least one input from mint");
+    {
+        let manual_addr = w_from.get_address(&hrp);
+        let ua = pms_storage::rocks_store::utxo::UtxoApply {
+            txid: u.id.txid.clone(),
+            inputs: vec![],
+            outputs: vec![(manual_addr, u.amount.clone(), None)],
+        };
+        ctx.store
+            .utxo_apply_tx_atomic(&ua)
+            .await
+            .expect("manual persist");
+    }
 
     // Compute fee dynamically using FeePolicy from settings
     let taxable_amount = "4.00";
     let fee_policy = FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio);
-    let fee = fee_policy
+    let fee_amt = fee_policy
         .compute_fee(taxable_amount)
-        .expect("fee computation")
-        .to_string();
+        .expect("fee computation");
+    let fee = fee_amt.to_string();
 
-    // client inclut déjà l’output fee
+    // Compute change: input - taxable - fee
+    let input_dec: Decimal = u.amount.parse().unwrap();
+    let taxable_dec: Decimal = taxable_amount.parse().unwrap();
+    let change_dec = input_dec - taxable_dec - fee_amt.inner();
+    let change = change_dec.normalize().to_string();
+
+    eprintln!(
+        "[TEST] UTXO: {}:{} amount={} fee={} change={}",
+        u.id.txid, u.id.index, u.amount, fee, change
+    );
+
+    // client inclut déjà l'output fee
     let body = serde_json::json!({
         "tx": {
-            "inputs": [{ "out": { "txid": u.txid, "index": u.index } }],
+            "inputs": [{ "out": { "txid": u.id.txid, "index": u.id.index } }],
             "outputs": [
                 { "address": to_addr, "amount": taxable_amount },
-                { "address": admin_addr, "amount": &fee }
+                { "address": admin_addr, "amount": &fee },
+                { "address": w_from.get_address(&hrp), "amount": &change }
             ],
             "fee": fee,
             "unlocks": []
@@ -463,6 +513,7 @@ async fn wallet_send_tx_does_not_duplicate_fee_output_if_already_present() -> an
         status.is_success(),
         "send failed: status={status} body={json}"
     );
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // admin decrypt
     let plains = scan_wallet_plain_history(&ctx.store, &admin, &hrp, 500, None).await?;

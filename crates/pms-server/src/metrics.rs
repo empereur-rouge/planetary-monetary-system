@@ -1,6 +1,6 @@
 // pms-server/src/metrics.rs
 use once_cell::sync::Lazy;
-use prometheus::{Encoder, IntCounterVec, IntGaugeVec, TextEncoder};
+use prometheus::{Encoder, HistogramVec, IntCounterVec, IntGaugeVec, TextEncoder};
 
 pub static BLOCKS_REJECTED: Lazy<IntCounterVec> = Lazy::new(|| {
     prometheus::register_int_counter_vec!(
@@ -25,6 +25,20 @@ pub static PMS_BLOCKS_TOTAL: Lazy<IntGaugeVec> = Lazy::new(|| {
         "pms_blocks_total",
         "Nombre total de blocs connus (DAG size)",
         &["ledger_id"]
+    )
+    .unwrap()
+});
+
+/// API request latency histogram (seconds) — labels: method, route.
+///
+/// Uses `MatchedPath` from axum to get route templates (e.g. `/v1/wallet/{addr}/balance`)
+/// instead of actual paths, preventing label cardinality explosion.
+pub static API_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    prometheus::register_histogram_vec!(
+        "pms_api_request_duration_seconds",
+        "API request latency in seconds",
+        &["method", "route"],
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
     )
     .unwrap()
 });
