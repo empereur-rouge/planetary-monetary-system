@@ -18,7 +18,8 @@ use crate::api_fn::compliance::{
     admin_shadow_balance, admin_unfreeze,
 };
 use crate::api_fn::contracts::{
-    get_contract, list_contracts, register_contract, toggle_contract, update_contract,
+    get_contract, list_contracts, register_contract, simulate_contract_handler,
+    toggle_contract, update_contract,
 };
 use crate::api_fn::coordinator::get_coordinator_info;
 use crate::api_fn::gas_pool::{admin_gas_pool_deposit, admin_gas_pool_withdraw, get_gas_pool};
@@ -350,6 +351,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         // Admin Contract API - Declarative smart contracts
         .route("/admin/contracts", post(register_contract))
         .route("/admin/contracts", get(list_contracts))
+        .route("/admin/contracts/simulate", post(simulate_contract_handler))
         .route("/admin/contracts/{contract_id}", get(get_contract).put(update_contract))
         .route(
             "/admin/contracts/{contract_id}/toggle",

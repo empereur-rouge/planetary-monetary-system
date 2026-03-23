@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-03-13
-updated: 2026-03-19
-version: v0.5.17
+updated: 2026-03-23
+version: v0.6.8
 ---
 
 # Smart Contracts (Contrats Déclaratifs)
@@ -96,6 +96,8 @@ Pour désactiver les frais de déploiement : `{ "SetContractDeploymentFee": { "f
 | `pms-storage` | `crates/pms-storage/tests/contract_store_test.rs` | CRUD RocksDB, filtrage par type/scope, toggle enable/disable, wildcard |
 | `pms-contracts` | `crates/pms-contracts/src/engine.rs` (tests inline) | Évaluation des formules, batch burn, scope ledger, contrats désactivés, wildcard |
 | `pms-server` | `crates/pms-server/tests/dag_sandbox.rs` | Test intégration `test_edn_transfer_fee_flow` — lifecycle complet EDN (burn NFT → refund → transfer → fee 5%) (v0.5.17) |
+| `pms-server` | `crates/pms-server/tests/dag_sandbox.rs` | Test intégration `test_contract_simulate_endpoint` — simulate dry-run + sandbox mode lifecycle (v0.6.8) |
+| `pms-server` | `crates/pms-server/tests/dag_sandbox.rs` | Test intégration `test_contract_registration_concurrent` — 10 registrations concurrentes + vérification enabled=false (v0.6.8) |
 | `pms-types-contract` | `crates/pms-types-contract/src/lib.rs` (tests inline) | Sérialisation/désérialisation, scope matching |
 
 ## Fonctions Clés
@@ -122,6 +124,8 @@ Pour désactiver les frais de déploiement : `{ "SetContractDeploymentFee": { "f
 | `load_contract_deployment_fee()` | `crates/pms-server/src/api_fn/tx_helpers.rs` | Charge le montant des frais de déploiement depuis `RuntimeConfig` ou `EffectiveFees` |
 | `require_coordinator_signature()` | `crates/pms-core/src/validations/check.rs` | Valide que le bloc est signé par le coordinateur (utilisée pour `ContractRegister` et `ContractUpdate`) |
 | `ContractScope::matches()` | `crates/pms-types-contract/src/lib.rs` | Vérifie si un contrat s'applique à un ledger donné (`Global` = tous, `Ledger(ids)` = liste spécifique) |
+| `simulate_contract()` | `crates/pms-contracts/src/engine.rs` | Dry-run : évalue un contrat candidat contre un événement fictif sans persister. Construit un `InMemoryContractStore` éphémère, force-enable le candidat, évalue, filtre les résultats, détecte les contrats existants qui matchent. (v0.6.8) |
+| `simulate_contract_handler()` | `crates/pms-server/src/api_fn/contracts.rs` | Handler HTTP pour `POST /admin/contracts/simulate`. Valide le contrat, appelle `simulate_contract()`, retourne `SimulationResult`. (v0.6.8) |
 
 ## Endpoints API
 
@@ -129,10 +133,11 @@ Tous les endpoints de gestion des contrats sont sous le préfixe `/admin/` et ac
 
 | Méthode | Path | Description |
 |---------|------|-------------|
-| `POST` | `/admin/contracts` | Enregistre un nouveau contrat. Génère un `contract_id` (SHA-256 de name+trigger+actions). Charge les frais de déploiement si configurés. Retourne `201 Created`. |
+| `POST` | `/admin/contracts` | Enregistre un nouveau contrat (`enabled: false` par défaut, sandbox mode v0.6.8). Génère un `contract_id` (SHA-256 de name+trigger+actions). Charge les frais de déploiement si configurés. Retourne `201 Created`. |
 | `GET` | `/admin/contracts` | Liste tous les contrats enregistrés (actifs et inactifs). Retourne `{ "contracts": [...] }`. |
 | `GET` | `/admin/contracts/{contract_id}` | Récupère les détails d'un contrat par son ID. Retourne `404` si inexistant. |
 | `PUT` | `/admin/contracts/{contract_id}` | Met à jour un contrat (scope, actions, enabled — partial update). Auto-bumpe la version. Valide les splits TransferFee. (v0.5.6) |
+| `POST` | `/admin/contracts/simulate` | **Dry-run** : simule un contrat candidat contre un événement fictif. Retourne `SimulationResult` sans persister. (v0.6.8) |
 | `POST` | `/admin/contracts/{contract_id}/toggle` | Active ou désactive un contrat. Body : `{ "enabled": bool, "reason": "..." }`. |
 
 ### Exemple : enregistrer un contrat
@@ -159,9 +164,12 @@ POST /admin/contracts
         }
       }
     }
-  ]
+  ],
+  "enabled": true
 }
 ```
+
+> **Note (v0.6.8)** : Le champ `enabled` est optionnel et vaut `false` par défaut (sandbox mode). Passer `"enabled": true` pour activer immédiatement.
 
 **Réponse :**
 
@@ -224,6 +232,69 @@ PUT /admin/contracts/{contract_id}
 ```
 
 **Résultat :** Le contrat est mis à jour avec un nouveau taux (3%) et 3 bénéficiaires (50/30/20). La version du contrat est auto-incrémentée. Seuls les champs fournis sont modifiés (partial update).
+
+### Sandbox Mode (v0.6.8)
+
+Depuis v0.6.8, les contrats sont enregistrés avec `enabled: false` par défaut (sandbox mode). Cela permet de simuler et vérifier un contrat avant de l'activer en production.
+
+**Workflow recommandé :**
+1. **Simuler** : `POST /admin/contracts/simulate` avec le contrat candidat + un événement fictif → vérifier le `SimulationResult`.
+2. **Enregistrer** : `POST /admin/contracts` (sans `"enabled": true`) → contrat créé mais inactif.
+3. **Activer** : `POST /admin/contracts/{id}/toggle` avec `{ "enabled": true }` → contrat activé en production.
+
+Pour activer immédiatement (backward-compatible) : passer `"enabled": true` dans le body de registration.
+
+### Exemple : simuler un contrat de frais de transfert (v0.6.8)
+
+**Requête :**
+
+```json
+POST /admin/contracts/simulate
+{
+  "contract": {
+    "name": "eden-transfer-fee-5pct",
+    "scope": { "Ledger": ["eden"] },
+    "trigger": { "OnTransfer": { "asset_id": null } },
+    "actions": [
+      {
+        "TransferFee": {
+          "formula": { "PercentageBps": { "rate_bps": 500 } },
+          "splits": [
+            { "address": "pms1creator...", "share_bps": 10000 }
+          ]
+        }
+      }
+    ]
+  },
+  "event": {
+    "Transfer": {
+      "ledger_id": "eden",
+      "asset_id": "edenite",
+      "transfer_amount": "100.0"
+    }
+  }
+}
+```
+
+**Réponse :**
+
+```json
+{
+  "matched": true,
+  "match_reason": "Trigger OnTransfer matches Transfer event, scope matches ledger eden",
+  "burn_results": [],
+  "transfer_fee_results": [
+    {
+      "contract_id": "sim_...",
+      "contract_name": "eden-transfer-fee-5pct",
+      "beneficiary_address": "pms1creator...",
+      "fee_amount": "5.00000000"
+    }
+  ],
+  "warnings": [],
+  "existing_contract_matches": []
+}
+```
 
 ### Exemple : désactiver un contrat
 
@@ -416,6 +487,70 @@ pub struct ContractResult {
     pub refund_amount: Decimal,   // Montant du refund
     pub asset_id: Option<String>, // Asset du refund (None = PMS natif)
     pub details: String,          // Détails d'exécution (audit/logging)
+}
+```
+
+### `SimulationEvent` (v0.6.8)
+
+Événement fictif pour la simulation d'un contrat. Utilisé par `POST /admin/contracts/simulate`.
+
+```rust
+pub enum SimulationEvent {
+    NftBurn {
+        ledger_id: String,
+        burner_address: String,
+        nft_type: Option<String>,
+        metadata: Option<NftMetadata>,
+        token_count: u64,
+    },
+    Transfer {
+        ledger_id: String,
+        asset_id: Option<String>,
+        transfer_amount: String,  // Decimal en string pour la précision JSON
+    },
+    TokenBurn {
+        ledger_id: String,
+        asset_id: String,
+        burn_amount: String,
+    },
+}
+```
+
+- `NftBurn` : simule un burn de NFT(s). `metadata` optionnel pour tester les `AttributeFormula`.
+- `Transfer` : simule un transfert de tokens. `transfer_amount` en string pour éviter les pertes de précision JSON.
+- `TokenBurn` : simule un burn de tokens fungibles. Retourne un warning "not yet implemented" (trigger `OnTokenBurn` non encore intégré).
+
+### `SimulationResult` (v0.6.8)
+
+Résultat de la simulation d'un contrat candidat.
+
+```rust
+pub struct SimulationResult {
+    pub matched: bool,
+    pub match_reason: Option<String>,
+    pub burn_results: Vec<ContractResult>,
+    pub transfer_fee_results: Vec<TransferFeeResult>,
+    pub warnings: Vec<String>,
+    pub existing_contract_matches: Vec<ExistingContractMatch>,
+}
+```
+
+- `matched` : `true` si le contrat candidat match le scope et le trigger de l'événement.
+- `match_reason` : explication textuelle du match/mismatch.
+- `burn_results` : résultats pour les triggers `OnNftBurn` (montants de refund).
+- `transfer_fee_results` : résultats pour les triggers `OnTransfer` (montants de fees).
+- `warnings` : avertissements (ex: "OnTokenBurn not yet implemented").
+- `existing_contract_matches` : contrats déjà enregistrés qui matchent aussi l'événement (alerte de conflit).
+
+### `ExistingContractMatch` (v0.6.8)
+
+Contrat existant qui match le même événement que le candidat simulé.
+
+```rust
+pub struct ExistingContractMatch {
+    pub contract_id: String,
+    pub contract_name: String,
+    pub version: u32,
 }
 ```
 

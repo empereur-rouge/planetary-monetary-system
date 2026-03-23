@@ -1060,7 +1060,8 @@ async fn test_edn_transfer_fee_flow() -> Result<()> {
                     "asset_id": "edenite",
                     "formula": { "FixedRate": { "rate_numerator": 1, "rate_denominator": 10 } }
                 }
-            }]
+            }],
+            "enabled": true
         }))
         .await?;
     println!("      Burn contract ID: {}...", &burn_contract_id[..16]);
@@ -1077,7 +1078,8 @@ async fn test_edn_transfer_fee_flow() -> Result<()> {
                     "formula": { "PercentageBps": { "rate_bps": 500 } },
                     "splits": [{ "address": coord_addr, "share_bps": 10000 }]
                 }
-            }]
+            }],
+            "enabled": true
         }))
         .await?;
     println!("      Fee contract ID:  {}...", &fee_contract_id[..16]);
@@ -1421,7 +1423,8 @@ async fn test_supply_endpoint_edn_balances() -> Result<()> {
                     "formula": { "PercentageBps": { "rate_bps": 500 } },
                     "splits": [{ "address": coord_addr, "share_bps": 10000 }]
                 }
-            }]
+            }],
+            "enabled": true
         }))
         .await?;
 
@@ -1436,7 +1439,8 @@ async fn test_supply_endpoint_edn_balances() -> Result<()> {
                     "asset_id": "edenite",
                     "formula": { "FixedRate": { "rate_numerator": 1, "rate_denominator": 10 } }
                 }
-            }]
+            }],
+            "enabled": true
         }))
         .await?;
 
@@ -1645,6 +1649,266 @@ async fn test_supply_endpoint_edn_balances() -> Result<()> {
              Cannot validate the supply fix."
         );
     }
+
+    Ok(())
+}
+
+// ============================================================================
+// TEST: Contract simulation endpoint (dry-run)
+// ============================================================================
+
+/// Tests the `POST /admin/contracts/simulate` endpoint:
+/// - Simulates a transfer fee contract against a fictitious event → correct fee returned.
+/// - Verifies that NO contract is persisted after simulation.
+/// - Tests sandbox mode: register_contract defaults to `enabled: false`.
+/// - Toggles the contract to `enabled: true` and verifies.
+#[tokio::test]
+#[ignore]
+async fn test_contract_simulate_endpoint() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    println!("\n╔═══════════════════════════════════════════════════════════╗");
+    println!("║  TEST: Contract Simulation Endpoint                      ║");
+    println!("╚═══════════════════════════════════════════════════════════╝\n");
+
+    // ── 1. Create eden ledger ────────────────────────────────────────
+    println!("   [1/6] Creating eden ledger...");
+    sandbox
+        .create_ledger("eden", "Edenite", "edenite", "EDN")
+        .await?;
+    sandbox.deposit_gas_pool("eden", "50000").await?;
+
+    // ── 2. Simulate a 5% transfer fee contract ───────────────────────
+    println!("   [2/6] Simulating transfer fee contract (5% on 100 EDN)...");
+    let coord_addr = sandbox.admin_addr.clone();
+    let sim_body = json!({
+        "contract": {
+            "name": "eden-transfer-fee-5pct",
+            "scope": { "Ledger": ["eden"] },
+            "trigger": { "OnTransfer": { "asset_id": null } },
+            "actions": [{
+                "TransferFee": {
+                    "formula": { "PercentageBps": { "rate_bps": 500 } },
+                    "splits": [{ "address": coord_addr, "share_bps": 10000 }]
+                }
+            }]
+        },
+        "event": {
+            "Transfer": {
+                "ledger_id": "eden",
+                "asset_id": "edenite",
+                "transfer_amount": "100"
+            }
+        }
+    });
+
+    let (status, resp) = sandbox.admin_post("/admin/contracts/simulate", sim_body).await;
+    println!("      Simulate status: {}", status);
+    println!("      Simulate response: {}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+
+    assert_eq!(status, 200, "Simulate should return 200");
+    assert_eq!(resp["matched"], true, "Contract should match the event");
+    assert!(resp["match_reason"].is_null(), "No mismatch reason expected");
+
+    let fee_results = resp["transfer_fee_results"].as_array().expect("transfer_fee_results");
+    assert_eq!(fee_results.len(), 1, "Should have 1 transfer fee result");
+    println!("      Fee amount: {}", fee_results[0]["fee_amount"]);
+    // Accept both string "5" and number 5 — Decimal serializes as string in serde_json
+    let fee_dec: rust_decimal::Decimal = serde_json::from_value(fee_results[0]["fee_amount"].clone())
+        .unwrap_or(rust_decimal::Decimal::ZERO);
+    assert_eq!(fee_dec, rust_decimal::Decimal::from(5), "5% of 100 = 5");
+    println!("      5% of 100 EDN = {} fee: OK", fee_dec);
+
+    // ── 3. Verify NO contract was persisted ──────────────────────────
+    println!("   [3/6] Verifying no contract was persisted...");
+    let (status, resp) = sandbox.admin_get("/admin/contracts").await;
+    assert_eq!(status, 200);
+    let contracts = resp["contracts"].as_array().expect("contracts array");
+    assert_eq!(contracts.len(), 0, "No contracts should exist after simulation");
+    println!("      Contract list is empty: OK");
+
+    // ── 4. Register the contract (sandbox mode: enabled=false) ───────
+    println!("   [4/6] Registering contract (default enabled=false)...");
+    let register_body = json!({
+        "name": "eden-transfer-fee-5pct",
+        "scope": { "Ledger": ["eden"] },
+        "trigger": { "OnTransfer": { "asset_id": null } },
+        "actions": [{
+            "TransferFee": {
+                "formula": { "PercentageBps": { "rate_bps": 500 } },
+                "splits": [{ "address": coord_addr, "share_bps": 10000 }]
+            }
+        }]
+    });
+
+    let (status, resp) = sandbox.admin_post("/admin/contracts", register_body).await;
+    println!("      Register status: {}", status);
+    println!("      Register response: {}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+    assert_eq!(status, 201, "Registration should return 201");
+    assert_eq!(resp["enabled"], false, "Contract should be disabled by default (sandbox mode)");
+    let contract_id = resp["contract_id"].as_str().unwrap().to_string();
+    println!("      Contract registered as disabled: OK (id={}...)", &contract_id[..16]);
+
+    // ── 5. Toggle to enabled ─────────────────────────────────────────
+    println!("   [5/6] Toggling contract to enabled...");
+    let toggle_body = json!({
+        "enabled": true,
+        "reason": "Simulation validated, activating"
+    });
+    let (status, resp) = sandbox
+        .admin_post(
+            &format!("/admin/contracts/{}/toggle", contract_id),
+            toggle_body,
+        )
+        .await;
+    println!("      Toggle status: {}", status);
+    assert_eq!(status, 200);
+    assert_eq!(resp["enabled"], true, "Contract should be enabled after toggle");
+    println!("      Contract toggled to enabled: OK");
+
+    // ── 6. Verify contract is now enabled ────────────────────────────
+    println!("   [6/6] Verifying contract is enabled...");
+    let (status, resp) = sandbox
+        .admin_get(&format!("/admin/contracts/{}", contract_id))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(resp["enabled"], true, "Contract should be enabled");
+    println!("      Contract enabled in store: OK");
+
+    println!("\n   TEST PASSED: Contract simulation endpoint works correctly!");
+    println!("   - Dry-run returns accurate fee calculations");
+    println!("   - Simulation does NOT persist contracts");
+    println!("   - Sandbox mode: contracts default to disabled");
+    println!("   - Toggle enables contracts after validation");
+
+    Ok(())
+}
+
+// ============================================================================
+// TEST: Concurrent contract registration
+// ============================================================================
+
+/// Tests concurrent contract registration under load:
+/// - 10 concurrent tasks register unique contracts.
+/// - 5 concurrent tasks read the contract list.
+/// - Verifies all 10 contracts are persisted with `enabled: false`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn test_contract_registration_concurrent() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    println!("\n╔═══════════════════════════════════════════════════════════╗");
+    println!("║  TEST: Concurrent Contract Registration                  ║");
+    println!("╚═══════════════════════════════════════════════════════════╝\n");
+
+    let coord_addr = sandbox.admin_addr.clone();
+    let base_url = sandbox.base_url.clone();
+    let client = sandbox.client.clone();
+    let admin_token = sandbox.admin_token.clone();
+
+    // ── 1. Spawn 10 concurrent registrations + 5 concurrent reads ────
+    println!("   [1/2] Spawning 10 register + 5 list tasks concurrently...");
+
+    let mut handles = Vec::new();
+
+    for i in 0..10 {
+        let cl = client.clone();
+        let url = base_url.clone();
+        let addr = coord_addr.clone();
+        let token = admin_token.clone();
+
+        let h = tokio::spawn(async move {
+            let body = json!({
+                "name": format!("concurrent-fee-{}", i),
+                "scope": { "Ledger": [format!("ledger-{}", i)] },
+                "trigger": { "OnTransfer": { "asset_id": null } },
+                "actions": [{
+                    "TransferFee": {
+                        "formula": { "PercentageBps": { "rate_bps": 100 + i * 50 } },
+                        "splits": [{ "address": addr, "share_bps": 10000 }]
+                    }
+                }]
+            });
+
+            let resp = cl
+                .post(format!("{}/admin/contracts", url))
+                .header("Authorization", format!("Bearer {}", token))
+                .json(&body)
+                .send()
+                .await
+                .expect("HTTP request failed");
+
+            let status = resp.status().as_u16();
+            let json: serde_json::Value = resp.json().await.unwrap_or(json!({}));
+            println!("      Register task {} → status {}", i, status);
+            (i, status, json)
+        });
+        handles.push(h);
+    }
+
+    // Concurrent reads
+    for j in 0..5 {
+        let cl = client.clone();
+        let url = base_url.clone();
+        let token = admin_token.clone();
+
+        let h = tokio::spawn(async move {
+            let resp = cl
+                .get(format!("{}/admin/contracts", url))
+                .header("Authorization", format!("Bearer {}", token))
+                .send()
+                .await
+                .expect("HTTP request failed");
+
+            let status = resp.status().as_u16();
+            println!("      List task {} → status {} (concurrent read)", j, status);
+            (100 + j, status, json!({}))
+        });
+        handles.push(h);
+    }
+
+    let results: Vec<(usize, u16, serde_json::Value)> =
+        futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.expect("Task panicked"))
+            .collect();
+
+    // ── 2. Verify results ────────────────────────────────────────────
+    println!("\n   [2/2] Verifying results...");
+
+    // All 10 registrations should succeed (201)
+    let register_results: Vec<_> = results.iter().filter(|(i, _, _)| *i < 100).collect();
+    assert_eq!(register_results.len(), 10, "Should have 10 registration results");
+    for (i, status, resp) in &register_results {
+        assert_eq!(*status, 201, "Registration {} should return 201, got {}: {:?}", i, status, resp);
+        assert_eq!(resp["enabled"], false, "Contract {} should be disabled by default", i);
+    }
+    println!("      All 10 registrations returned 201 with enabled=false: OK");
+
+    // All 5 reads should succeed (200)
+    let read_results: Vec<_> = results.iter().filter(|(i, _, _)| *i >= 100).collect();
+    assert_eq!(read_results.len(), 5, "Should have 5 list results");
+    for (i, status, _) in &read_results {
+        assert_eq!(*status, 200, "List task {} should return 200", i);
+    }
+    println!("      All 5 concurrent reads returned 200: OK");
+
+    // Final list should have exactly 10 contracts
+    let (status, resp) = sandbox.admin_get("/admin/contracts").await;
+    assert_eq!(status, 200);
+    let contracts = resp["contracts"].as_array().expect("contracts array");
+    assert_eq!(contracts.len(), 10, "Should have exactly 10 contracts");
+    println!("      Final contract list: {} contracts: OK", contracts.len());
+
+    // All should be disabled
+    let all_disabled = contracts.iter().all(|c| c["enabled"] == false);
+    assert!(all_disabled, "All contracts should be disabled (sandbox mode)");
+    println!("      All contracts disabled (sandbox mode): OK");
+
+    println!("\n   TEST PASSED: Concurrent contract registration is safe!");
+    println!("   - 10 concurrent registrations + 5 concurrent reads: no lost writes");
+    println!("   - All contracts default to enabled=false");
 
     Ok(())
 }

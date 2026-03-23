@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.8] - Unreleased — Smart Contract Simulation & Sandbox Mode
+
+### Added
+- **feat(contracts)**: `POST /admin/contracts/simulate` dry-run endpoint. Accepts a candidate contract + a simulated event (`NftBurn`, `Transfer`, `TokenBurn`), evaluates the contract against an ephemeral in-memory store (existing contracts + candidate), and returns `SimulationResult` with `matched`, `match_reason`, `burn_results`, `transfer_fee_results`, `warnings`, and `existing_contract_matches`. No state is persisted — pure dry-run. Protected by `require_local_or_admin`.
+- **feat(contracts)**: Sandbox mode — contracts now default to `enabled: false` on registration. The `RegisterContractRequest` accepts an optional `enabled` field (`#[serde(default)]`). Pass `"enabled": true` to activate immediately, or use `POST /admin/contracts/{id}/toggle` to activate later. Backward-compatible: existing clients passing no `enabled` field get `false`.
+- **feat(contracts)**: New simulation types in `pms-contracts`: `SimulationEvent` (enum: `NftBurn`, `Transfer`, `TokenBurn`), `SimulationResult`, `ExistingContractMatch`. All derive `Serialize`/`Deserialize` for JSON API.
+- **feat(contracts)**: `simulate_contract()` function in `pms-contracts::engine` — builds ephemeral `InMemoryContractStore`, force-enables candidate, evaluates against event, filters results, detects existing contract matches.
+- **test(contracts)**: 8 new unit tests for simulation engine: transfer fee, NFT burn, existing contracts detection, scope mismatch, trigger mismatch, token burn warning, attribute formula, disabled candidate force-evaluation.
+- **test(contracts)**: Integration test `test_contract_simulate_endpoint` — full lifecycle: simulate → verify no persistence → register (enabled=false) → toggle → verify enabled.
+- **test(contracts)**: Integration test `test_contract_registration_concurrent` — 10 concurrent registrations + 5 concurrent reads, verifies all 10 succeed with `enabled: false`.
+
+### Changed
+- **breaking(contracts)**: Contracts now default to `enabled: false` on registration (was `true`). Existing API consumers must pass `"enabled": true` in the registration body to activate immediately.
+- **bump(api)**: `API_VERSION` 8 → 9 (new simulate endpoint + sandbox mode default change).
+- **bump(version)**: Software version 0.6.7 → 0.6.8.
+
+---
+
 ## [0.6.7] - 2026-03-23 — Performance: O(1) token balance, activity backfill, UTXO consolidation
 
 ### Performance

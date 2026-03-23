@@ -8,6 +8,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use pms_contracts::SimulationEvent;
 use pms_storage::ContractStorage;
 use pms_types_contract::Contract;
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,21 @@ pub struct RegisterContractRequest {
     pub scope: pms_types_contract::ContractScope,
     pub trigger: pms_types_contract::ContractTrigger,
     pub actions: Vec<pms_types_contract::ContractAction>,
+    /// Si omis, le contrat est créé en mode **sandbox** (`enabled: false`).
+    /// Passer `true` pour activer immédiatement.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Requête pour `POST /admin/contracts/simulate` — dry-run d'un contrat.
+///
+/// Évalue un contrat candidat contre un événement fictif sans rien persister.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SimulateContractRequest {
+    /// Définition du contrat à simuler (mêmes champs que l'enregistrement).
+    pub contract: RegisterContractRequest,
+    /// Événement fictif à évaluer.
+    pub event: SimulationEvent,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -91,7 +107,7 @@ pub async fn register_contract(
         scope: req.scope,
         trigger: req.trigger,
         actions: req.actions,
-        enabled: true,
+        enabled: req.enabled,
         version: 1,
     };
 
@@ -323,4 +339,93 @@ pub async fn update_contract(
         })),
     )
         .into_response()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POST /admin/contracts/simulate — Dry-run a contract
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Simule l'évaluation d'un contrat candidat contre un événement fictif.
+///
+/// Le contrat n'est **PAS** persisté. L'endpoint retourne les résultats
+/// détaillés (frais calculés, splits, contrats existants qui matcheraient)
+/// pour permettre à l'admin de valider avant enregistrement.
+///
+/// # Erreurs
+/// - `400 BAD_REQUEST` — Validation du contrat échouée (nom vide, actions invalides, montant invalide).
+/// - `500 INTERNAL_SERVER_ERROR` — Erreur lors de l'évaluation.
+pub async fn simulate_contract_handler(
+    State(state): State<AppState>,
+    Json(req): Json<SimulateContractRequest>,
+) -> impl IntoResponse {
+    // ── 1. Validation identique à register_contract ────────────────────
+    if req.contract.name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "name cannot be empty" })),
+        )
+            .into_response();
+    }
+    if req.contract.actions.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "at least one action required" })),
+        )
+            .into_response();
+    }
+    for (i, action) in req.contract.actions.iter().enumerate() {
+        if let Err(e) = action.validate() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("action[{i}]: {e}") })),
+            )
+                .into_response();
+        }
+    }
+
+    // ── 2. Générer un contract_id temporaire (même algo que register) ──
+    let content_bytes = serde_json::to_vec(&(
+        &req.contract.name,
+        &req.contract.trigger,
+        &req.contract.actions,
+    ))
+    .unwrap_or_default();
+    let contract_id = hex::encode(Sha256::digest(&content_bytes));
+
+    let candidate = Contract {
+        contract_id,
+        name: req.contract.name,
+        scope: req.contract.scope,
+        trigger: req.contract.trigger,
+        actions: req.contract.actions,
+        enabled: true, // Force-enabled pour la simulation
+        version: 1,
+    };
+
+    // ── 3. Lancer la simulation ────────────────────────────────────────
+    match pms_contracts::simulate_contract(
+        state.contract_store.as_ref(),
+        &candidate,
+        &req.event,
+    ) {
+        Ok(result) => {
+            tracing::info!(
+                "Contract simulation '{}': matched={}, burn_results={}, transfer_fees={}, existing={}",
+                candidate.name,
+                result.matched,
+                result.burn_results.len(),
+                result.transfer_fee_results.len(),
+                result.existing_contract_matches.len(),
+            );
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Contract simulation failed for '{}': {e}", candidate.name);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Simulation failed: {e}") })),
+            )
+                .into_response()
+        }
+    }
 }

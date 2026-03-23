@@ -3,14 +3,15 @@
 //! Évalue les contrats enregistrés lors des événements de trigger (NFT burn, etc.).
 //! Les résultats sont des refunds à accumuler via le trait [`RefundSink`](crate::listener::RefundSink).
 
-use pms_storage::ContractStorage;
-use pms_types_contract::{ContractAction, MintFormula, TransferFeeFormula};
+use pms_storage::{ContractStorage, InMemoryContractStore};
+use pms_types_contract::{Contract, ContractAction, ContractTrigger, MintFormula, TransferFeeFormula};
 use pms_types_nft::NftMetadata;
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 /// Résultat de l'exécution d'un contrat.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractResult {
     /// ID du contrat qui a été déclenché
     pub contract_id: String,
@@ -30,7 +31,7 @@ pub struct ContractResult {
 ///
 /// Produit par [`evaluate_transfer()`] — chaque résultat correspond à un
 /// `TxOutput` additionnel à insérer dans la transaction (déductif).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferFeeResult {
     /// ID du contrat qui a été déclenché
     pub contract_id: String,
@@ -338,6 +339,306 @@ fn find_attribute(value: &serde_json::Value, path: &str) -> Option<Decimal> {
         serde_json::Value::String(s) => Decimal::from_str(s).ok(),
         _ => None,
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Simulation / Dry-run
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Événement fictif fourni par l'admin pour simuler l'évaluation d'un contrat.
+///
+/// Permet de tester le comportement d'un contrat candidat contre un événement
+/// réaliste sans persister quoi que ce soit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SimulationEvent {
+    /// Simule un burn de NFT.
+    NftBurn {
+        /// Ledger où le burn a lieu.
+        ledger_id: String,
+        /// Adresse du wallet qui burn.
+        burner_address: String,
+        /// Type de NFT (optionnel — `None` = wildcard).
+        nft_type: Option<String>,
+        /// Metadata du NFT (nécessaire pour `AttributeFormula`).
+        metadata: Option<NftMetadata>,
+        /// Nombre de NFTs burnés.
+        token_count: u64,
+    },
+    /// Simule un transfert de tokens.
+    Transfer {
+        /// Ledger où le transfert a lieu.
+        ledger_id: String,
+        /// Asset transféré (`None` = PMS natif).
+        asset_id: Option<String>,
+        /// Montant du transfert (chaîne décimale pour précision JSON).
+        transfer_amount: String,
+    },
+    /// Simule un burn de token fungible (pas encore implémenté dans le moteur).
+    TokenBurn {
+        /// Ledger où le burn a lieu.
+        ledger_id: String,
+        /// Asset brûlé.
+        asset_id: String,
+        /// Montant brûlé (chaîne décimale).
+        burn_amount: String,
+    },
+}
+
+impl SimulationEvent {
+    /// Retourne le `ledger_id` de l'événement.
+    pub fn ledger_id(&self) -> &str {
+        match self {
+            SimulationEvent::NftBurn { ledger_id, .. } => ledger_id,
+            SimulationEvent::Transfer { ledger_id, .. } => ledger_id,
+            SimulationEvent::TokenBurn { ledger_id, .. } => ledger_id,
+        }
+    }
+}
+
+/// Résultat complet d'une simulation de contrat (dry-run).
+///
+/// Contient les résultats d'évaluation, les raisons de non-match,
+/// et la liste des contrats existants qui seraient aussi déclenchés.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulationResult {
+    /// Le contrat candidat a-t-il matché l'événement (trigger + scope) ?
+    pub matched: bool,
+    /// Raison du non-match (rempli si `matched == false`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_reason: Option<String>,
+    /// Résultats des actions `AccumulateRefund` (NFT burn).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub burn_results: Vec<ContractResult>,
+    /// Résultats des actions `TransferFee`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub transfer_fee_results: Vec<TransferFeeResult>,
+    /// Avertissements (ex: `OnTokenBurn` non implémenté).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Contrats existants qui matcheraient le même événement
+    /// (utile pour détecter les conflits/interactions).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub existing_contract_matches: Vec<ExistingContractMatch>,
+}
+
+/// Résumé d'un contrat existant qui matche le même événement simulé.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExistingContractMatch {
+    /// ID du contrat existant.
+    pub contract_id: String,
+    /// Nom du contrat existant.
+    pub contract_name: String,
+    /// Version actuelle du contrat existant.
+    pub version: u32,
+}
+
+/// Simule l'évaluation d'un contrat candidat contre un événement fictif.
+///
+/// Le contrat n'est **PAS** persisté. Un `InMemoryContractStore` éphémère est
+/// créé avec le contrat candidat + les contrats existants du store réel, puis
+/// l'évaluation est lancée.
+///
+/// # Arguments
+/// * `existing_store` — Store réel contenant les contrats déjà enregistrés.
+/// * `candidate` — Le contrat à simuler (pas encore enregistré).
+/// * `event` — L'événement fictif à évaluer.
+///
+/// # Returns
+/// Un [`SimulationResult`] avec les résultats détaillés, ou une erreur si
+/// les paramètres de l'événement sont invalides.
+pub fn simulate_contract(
+    existing_store: &dyn ContractStorage,
+    candidate: &Contract,
+    event: &SimulationEvent,
+) -> anyhow::Result<SimulationResult> {
+    let event_ledger = event.ledger_id();
+
+    // ── 1. Vérifier scope match ────────────────────────────────────────
+    if !candidate.scope.matches(event_ledger) {
+        return Ok(SimulationResult {
+            matched: false,
+            match_reason: Some(format!(
+                "Contract scope {:?} does not match event ledger \"{}\"",
+                candidate.scope, event_ledger,
+            )),
+            burn_results: vec![],
+            transfer_fee_results: vec![],
+            warnings: vec![],
+            existing_contract_matches: vec![],
+        });
+    }
+
+    // ── 2. Vérifier trigger match ──────────────────────────────────────
+    let trigger_mismatch = match (&candidate.trigger, event) {
+        (ContractTrigger::OnNftBurn { .. }, SimulationEvent::NftBurn { .. }) => None,
+        (ContractTrigger::OnTransfer { .. }, SimulationEvent::Transfer { .. }) => None,
+        (ContractTrigger::OnTokenBurn { .. }, SimulationEvent::TokenBurn { .. }) => None,
+        (trigger, _) => Some(format!(
+            "Contract trigger {:?} does not match event type {}",
+            trigger,
+            match event {
+                SimulationEvent::NftBurn { .. } => "NftBurn",
+                SimulationEvent::Transfer { .. } => "Transfer",
+                SimulationEvent::TokenBurn { .. } => "TokenBurn",
+            },
+        )),
+    };
+
+    if let Some(reason) = trigger_mismatch {
+        return Ok(SimulationResult {
+            matched: false,
+            match_reason: Some(reason),
+            burn_results: vec![],
+            transfer_fee_results: vec![],
+            warnings: vec![],
+            existing_contract_matches: vec![],
+        });
+    }
+
+    // ── 3. Construire le store éphémère ────────────────────────────────
+    let ephemeral = InMemoryContractStore::new();
+
+    // Copier les contrats existants
+    let existing_contracts = existing_store.list_contracts()?;
+    for c in &existing_contracts {
+        ephemeral.put_contract(c)?;
+    }
+
+    // Insérer le candidat (force enabled = true pour la simulation)
+    let mut candidate_enabled = candidate.clone();
+    candidate_enabled.enabled = true;
+    ephemeral.put_contract(&candidate_enabled)?;
+
+    // ── 4. Évaluer selon le type d'événement ───────────────────────────
+    let mut burn_results = Vec::new();
+    let mut transfer_fee_results = Vec::new();
+    let mut warnings = Vec::new();
+
+    match event {
+        SimulationEvent::NftBurn {
+            ledger_id,
+            burner_address,
+            nft_type,
+            metadata,
+            token_count,
+        } => {
+            // Évaluer sur le store éphémère (candidat + existants)
+            let all_results = evaluate_nft_burn(
+                &ephemeral,
+                ledger_id,
+                burner_address,
+                nft_type.as_deref(),
+                metadata.as_ref(),
+                *token_count,
+            );
+            // Filtrer les résultats du candidat uniquement
+            burn_results = all_results
+                .into_iter()
+                .filter(|r| r.contract_id == candidate.contract_id)
+                .collect();
+        }
+
+        SimulationEvent::Transfer {
+            ledger_id,
+            asset_id,
+            transfer_amount,
+        } => {
+            let amount = Decimal::from_str(transfer_amount)
+                .map_err(|e| anyhow::anyhow!("Invalid transfer_amount '{}': {}", transfer_amount, e))?;
+
+            let all_results = evaluate_transfer(
+                &ephemeral,
+                ledger_id,
+                asset_id.as_deref(),
+                amount,
+            );
+            transfer_fee_results = all_results
+                .into_iter()
+                .filter(|r| r.contract_id == candidate.contract_id)
+                .collect();
+        }
+
+        SimulationEvent::TokenBurn { .. } => {
+            warnings.push(
+                "OnTokenBurn evaluation is not yet implemented in the contract engine. \
+                 The contract definition is valid, but simulation cannot produce results \
+                 for this trigger type."
+                    .to_string(),
+            );
+        }
+    }
+
+    // ── 5. Trouver les contrats existants qui matcheraient aussi ────────
+    let existing_contract_matches = match event {
+        SimulationEvent::NftBurn {
+            ledger_id,
+            burner_address,
+            nft_type,
+            metadata,
+            token_count,
+        } => {
+            let orig_results = evaluate_nft_burn(
+                existing_store,
+                ledger_id,
+                burner_address,
+                nft_type.as_deref(),
+                metadata.as_ref(),
+                *token_count,
+            );
+            dedup_existing_matches(&orig_results.iter().map(|r| (&r.contract_id, &r.contract_name)).collect::<Vec<_>>(), &existing_contracts)
+        }
+        SimulationEvent::Transfer {
+            ledger_id,
+            asset_id,
+            transfer_amount,
+        } => {
+            // Parsing already validated above
+            if let Ok(amount) = Decimal::from_str(transfer_amount) {
+                let orig_results = evaluate_transfer(
+                    existing_store,
+                    ledger_id,
+                    asset_id.as_deref(),
+                    amount,
+                );
+                dedup_existing_matches(&orig_results.iter().map(|r| (&r.contract_id, &r.contract_name)).collect::<Vec<_>>(), &existing_contracts)
+            } else {
+                vec![]
+            }
+        }
+        SimulationEvent::TokenBurn { .. } => vec![],
+    };
+
+    Ok(SimulationResult {
+        matched: true,
+        match_reason: None,
+        burn_results,
+        transfer_fee_results,
+        warnings,
+        existing_contract_matches,
+    })
+}
+
+/// Dé-duplique les contrats existants matchés et retourne un résumé.
+fn dedup_existing_matches(
+    result_ids: &[(&String, &String)],
+    existing_contracts: &[Contract],
+) -> Vec<ExistingContractMatch> {
+    let mut seen = std::collections::HashSet::new();
+    let mut matches = Vec::new();
+
+    for (contract_id, _) in result_ids {
+        if seen.insert(contract_id.as_str()) {
+            if let Some(c) = existing_contracts.iter().find(|c| &c.contract_id == *contract_id) {
+                matches.push(ExistingContractMatch {
+                    contract_id: c.contract_id.clone(),
+                    contract_name: c.name.clone(),
+                    version: c.version,
+                });
+            }
+        }
+    }
+
+    matches
 }
 
 #[cfg(test)]
@@ -872,5 +1173,334 @@ mod tests {
         assert_eq!(results[0].fee_amount, Decimal::from(5));
         assert_eq!(results[0].beneficiary_address, "pms1creator");
         println!("Single split 100% → {} fee: OK", results[0].fee_amount);
+    }
+
+    // ─── Simulation / Dry-run tests ─────────────────────────────────────
+
+    #[test]
+    fn test_simulate_transfer_fee() {
+        let store = InMemoryContractStore::new();
+        let candidate = Contract {
+            contract_id: "sim-transfer-fee".into(),
+            name: "eden-5pct-fee".into(),
+            scope: ContractScope::Ledger(vec!["eden".into()]),
+            trigger: ContractTrigger::OnTransfer { asset_id: None },
+            actions: vec![ContractAction::TransferFee {
+                formula: TransferFeeFormula::PercentageBps { rate_bps: 500 },
+                splits: vec![TransferFeeSplit {
+                    address: "pms1creator".into(),
+                    share_bps: 10_000,
+                }],
+            }],
+            enabled: true,
+            version: 1,
+        };
+
+        let event = SimulationEvent::Transfer {
+            ledger_id: "eden".into(),
+            asset_id: Some("edenite".into()),
+            transfer_amount: "100".into(),
+        };
+
+        let result = simulate_contract(&store, &candidate, &event).unwrap();
+        println!("Simulate transfer fee result: {result:?}");
+
+        assert!(result.matched);
+        assert!(result.match_reason.is_none());
+        assert_eq!(result.transfer_fee_results.len(), 1);
+        assert_eq!(result.transfer_fee_results[0].fee_amount, Decimal::from(5));
+        assert_eq!(result.transfer_fee_results[0].beneficiary_address, "pms1creator");
+        assert!(result.existing_contract_matches.is_empty());
+        println!("Simulate 5% transfer fee on 100 EDN → {} fee: OK", result.transfer_fee_results[0].fee_amount);
+    }
+
+    #[test]
+    fn test_simulate_nft_burn() {
+        let store = InMemoryContractStore::new();
+        let candidate = Contract {
+            contract_id: "sim-cube-burn".into(),
+            name: "cube-burn-pms".into(),
+            scope: ContractScope::Global,
+            trigger: ContractTrigger::OnNftBurn { nft_type: Some("cube".into()) },
+            actions: vec![ContractAction::AccumulateRefund {
+                asset_id: None,
+                formula: MintFormula::FixedRate {
+                    rate_numerator: 1,
+                    rate_denominator: 10,
+                },
+            }],
+            enabled: true,
+            version: 1,
+        };
+
+        let event = SimulationEvent::NftBurn {
+            ledger_id: "main".into(),
+            burner_address: "pms1alice".into(),
+            nft_type: Some("cube".into()),
+            metadata: None,
+            token_count: 3,
+        };
+
+        let result = simulate_contract(&store, &candidate, &event).unwrap();
+        println!("Simulate NFT burn result: {result:?}");
+
+        assert!(result.matched);
+        assert_eq!(result.burn_results.len(), 1);
+        assert_eq!(result.burn_results[0].refund_amount, Decimal::from_str("0.3").unwrap());
+        assert_eq!(result.burn_results[0].refund_address, "pms1alice");
+        println!("Simulate 3 cube burn → {} PMS refund: OK", result.burn_results[0].refund_amount);
+    }
+
+    #[test]
+    fn test_simulate_with_existing_contracts() {
+        let store = InMemoryContractStore::new();
+        // Pre-populate with an existing contract on eden
+        let existing = Contract {
+            contract_id: "existing-eden-fee".into(),
+            name: "existing-eden-fee".into(),
+            scope: ContractScope::Ledger(vec!["eden".into()]),
+            trigger: ContractTrigger::OnTransfer { asset_id: None },
+            actions: vec![ContractAction::TransferFee {
+                formula: TransferFeeFormula::PercentageBps { rate_bps: 300 },
+                splits: vec![TransferFeeSplit {
+                    address: "pms1treasury".into(),
+                    share_bps: 10_000,
+                }],
+            }],
+            enabled: true,
+            version: 2,
+        };
+        store.put_contract(&existing).unwrap();
+
+        // Candidate: another fee on eden
+        let candidate = Contract {
+            contract_id: "new-eden-fee".into(),
+            name: "new-eden-fee".into(),
+            scope: ContractScope::Ledger(vec!["eden".into()]),
+            trigger: ContractTrigger::OnTransfer { asset_id: None },
+            actions: vec![ContractAction::TransferFee {
+                formula: TransferFeeFormula::PercentageBps { rate_bps: 200 },
+                splits: vec![TransferFeeSplit {
+                    address: "pms1creator".into(),
+                    share_bps: 10_000,
+                }],
+            }],
+            enabled: true,
+            version: 1,
+        };
+
+        let event = SimulationEvent::Transfer {
+            ledger_id: "eden".into(),
+            asset_id: None,
+            transfer_amount: "100".into(),
+        };
+
+        let result = simulate_contract(&store, &candidate, &event).unwrap();
+        println!("Simulate with existing contracts: {result:?}");
+
+        assert!(result.matched);
+        // Candidate: 2% of 100 = 2
+        assert_eq!(result.transfer_fee_results.len(), 1);
+        assert_eq!(result.transfer_fee_results[0].fee_amount, Decimal::from(2));
+        // Existing contract also matches
+        assert_eq!(result.existing_contract_matches.len(), 1);
+        assert_eq!(result.existing_contract_matches[0].contract_id, "existing-eden-fee");
+        assert_eq!(result.existing_contract_matches[0].version, 2);
+        println!(
+            "Candidate fee: {}, existing matches: {}: OK",
+            result.transfer_fee_results[0].fee_amount,
+            result.existing_contract_matches.len(),
+        );
+    }
+
+    #[test]
+    fn test_simulate_scope_mismatch() {
+        let store = InMemoryContractStore::new();
+        let candidate = Contract {
+            contract_id: "eden-only".into(),
+            name: "eden-only-fee".into(),
+            scope: ContractScope::Ledger(vec!["eden".into()]),
+            trigger: ContractTrigger::OnTransfer { asset_id: None },
+            actions: vec![ContractAction::TransferFee {
+                formula: TransferFeeFormula::PercentageBps { rate_bps: 500 },
+                splits: vec![TransferFeeSplit {
+                    address: "pms1a".into(),
+                    share_bps: 10_000,
+                }],
+            }],
+            enabled: true,
+            version: 1,
+        };
+
+        // Event on "main" — scope is "eden" → mismatch
+        let event = SimulationEvent::Transfer {
+            ledger_id: "main".into(),
+            asset_id: None,
+            transfer_amount: "100".into(),
+        };
+
+        let result = simulate_contract(&store, &candidate, &event).unwrap();
+        println!("Scope mismatch result: {result:?}");
+
+        assert!(!result.matched);
+        assert!(result.match_reason.as_ref().unwrap().contains("main"));
+        assert!(result.transfer_fee_results.is_empty());
+        println!("Scope mismatch correctly detected: OK");
+    }
+
+    #[test]
+    fn test_simulate_trigger_mismatch() {
+        let store = InMemoryContractStore::new();
+        let candidate = Contract {
+            contract_id: "burn-contract".into(),
+            name: "burn-contract".into(),
+            scope: ContractScope::Global,
+            trigger: ContractTrigger::OnNftBurn { nft_type: Some("cube".into()) },
+            actions: vec![ContractAction::AccumulateRefund {
+                asset_id: None,
+                formula: MintFormula::FixedRate {
+                    rate_numerator: 1,
+                    rate_denominator: 10,
+                },
+            }],
+            enabled: true,
+            version: 1,
+        };
+
+        // Event is Transfer, not NftBurn
+        let event = SimulationEvent::Transfer {
+            ledger_id: "main".into(),
+            asset_id: None,
+            transfer_amount: "100".into(),
+        };
+
+        let result = simulate_contract(&store, &candidate, &event).unwrap();
+        println!("Trigger mismatch result: {result:?}");
+
+        assert!(!result.matched);
+        assert!(result.match_reason.as_ref().unwrap().contains("Transfer"));
+        println!("Trigger mismatch correctly detected: OK");
+    }
+
+    #[test]
+    fn test_simulate_token_burn_warning() {
+        let store = InMemoryContractStore::new();
+        let candidate = Contract {
+            contract_id: "token-burn".into(),
+            name: "token-burn-refund".into(),
+            scope: ContractScope::Global,
+            trigger: ContractTrigger::OnTokenBurn { asset_id: "edenite".into() },
+            actions: vec![ContractAction::AccumulateRefund {
+                asset_id: None,
+                formula: MintFormula::FixedAmount { amount: "1.0".into() },
+            }],
+            enabled: true,
+            version: 1,
+        };
+
+        let event = SimulationEvent::TokenBurn {
+            ledger_id: "main".into(),
+            asset_id: "edenite".into(),
+            burn_amount: "100".into(),
+        };
+
+        let result = simulate_contract(&store, &candidate, &event).unwrap();
+        println!("TokenBurn simulation result: {result:?}");
+
+        assert!(result.matched);
+        assert!(!result.warnings.is_empty());
+        assert!(result.warnings[0].contains("not yet implemented"));
+        assert!(result.burn_results.is_empty());
+        assert!(result.transfer_fee_results.is_empty());
+        println!("TokenBurn warning: {}: OK", result.warnings[0]);
+    }
+
+    #[test]
+    fn test_simulate_attribute_formula_nft_burn() {
+        let store = InMemoryContractStore::new();
+        let candidate = Contract {
+            contract_id: "attr-burn".into(),
+            name: "edenite-formula".into(),
+            scope: ContractScope::Global,
+            trigger: ContractTrigger::OnNftBurn { nft_type: Some("cube".into()) },
+            actions: vec![ContractAction::AccumulateRefund {
+                asset_id: Some("edenite".into()),
+                formula: MintFormula::AttributeFormula {
+                    attribute_names: vec![
+                        "attributes.weight".into(),
+                        "attributes.size".into(),
+                    ],
+                    divisor: 1_000,
+                },
+            }],
+            enabled: true,
+            version: 1,
+        };
+
+        let metadata = NftMetadata {
+            name: Some("Cube #42".into()),
+            description: None,
+            uri: None,
+            nft_type: Some("cube".into()),
+            extra: Some(r#"{"attributes":{"weight":100,"size":50}}"#.into()),
+        };
+
+        let event = SimulationEvent::NftBurn {
+            ledger_id: "main".into(),
+            burner_address: "pms1bob".into(),
+            nft_type: Some("cube".into()),
+            metadata: Some(metadata),
+            token_count: 2,
+        };
+
+        let result = simulate_contract(&store, &candidate, &event).unwrap();
+        println!("Attribute formula simulation: {result:?}");
+
+        assert!(result.matched);
+        assert_eq!(result.burn_results.len(), 1);
+        // 100 * 50 / 1000 * 2 = 10.0
+        assert_eq!(result.burn_results[0].refund_amount, Decimal::from(10));
+        assert_eq!(result.burn_results[0].asset_id.as_deref(), Some("edenite"));
+        println!(
+            "AttributeFormula: weight=100, size=50, div=1000, count=2 → {} edenite: OK",
+            result.burn_results[0].refund_amount,
+        );
+    }
+
+    #[test]
+    fn test_simulate_disabled_candidate_still_evaluated() {
+        let store = InMemoryContractStore::new();
+        let candidate = Contract {
+            contract_id: "disabled-candidate".into(),
+            name: "disabled-fee".into(),
+            scope: ContractScope::Global,
+            trigger: ContractTrigger::OnTransfer { asset_id: None },
+            actions: vec![ContractAction::TransferFee {
+                formula: TransferFeeFormula::PercentageBps { rate_bps: 1000 },
+                splits: vec![TransferFeeSplit {
+                    address: "pms1a".into(),
+                    share_bps: 10_000,
+                }],
+            }],
+            enabled: false, // Disabled, but simulation should still evaluate
+            version: 1,
+        };
+
+        let event = SimulationEvent::Transfer {
+            ledger_id: "main".into(),
+            asset_id: None,
+            transfer_amount: "50".into(),
+        };
+
+        let result = simulate_contract(&store, &candidate, &event).unwrap();
+        println!("Disabled candidate simulation: {result:?}");
+
+        assert!(result.matched);
+        assert_eq!(result.transfer_fee_results.len(), 1);
+        assert_eq!(result.transfer_fee_results[0].fee_amount, Decimal::from(5)); // 10% of 50
+        println!(
+            "Disabled candidate force-evaluated: {} fee: OK",
+            result.transfer_fee_results[0].fee_amount,
+        );
     }
 }

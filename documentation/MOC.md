@@ -86,11 +86,11 @@ Voir le dossier [[api/README|documentation/api/]] pour la référence complète 
 
 | Système | Fichier | Valeur actuelle |
 |---------|---------|-----------------|
-| Software | `bin/Cargo.toml` | `0.6.7` |
+| Software | `bin/Cargo.toml` | `0.6.8` |
 | Schema DB | `crates/pms-storage/src/migrations.rs` → `CURRENT_VER` | `9` |
 | DAG Protocol | `crates/pms-storage/src/migrations.rs` → `DAG_VERSION` | `1.2.0` |
 | P2P Protocol | `crates/pms-config/src/config.rs` → `protocol_version` | `1` |
-| API | `crates/pms-server/src/api_fn/version.rs` → `API_VERSION` | `8` |
+| API | `crates/pms-server/src/api_fn/version.rs` → `API_VERSION` | `9` |
 
 Voir [[../../CHANGELOG|CHANGELOG.md]] pour l'historique complet des versions.
 
