@@ -18,18 +18,45 @@ use super::block_ops::{forge_and_sign_block, persist_and_broadcast};
 ///
 /// At 2000 TPS with 10s distribution interval, this reduces coordinator UTXO
 /// creation from 7200/hour to ~360/hour (20x improvement).
+///
+/// For custom ledgers (ledger_id != "main"), fees are credited to the ledger owner
+/// instead of the coordinator, so the owner receives the node rewards during
+/// periodic distribution.
 pub async fn accumulate_tx_fee(state: &AppState, fee: Decimal) {
     if fee <= Decimal::ZERO {
         return;
     }
-    let signer_pk = state.node_wallet.encoded_public_key();
+
+    // For main ledger: credit fees to coordinator (who creates the blocks)
+    // For custom ledgers: credit fees to ledger owner (who created/owns the ledger)
+    let beneficiary_pk = if state.ledger_id == "main" {
+        state.node_wallet.encoded_public_key()
+    } else {
+        // For custom ledgers, use the owner's public key
+        if let Some(ref mgr) = state.ledger_mgr {
+            if let Some(instance) = mgr.get(&state.ledger_id) {
+                instance
+                    .def
+                    .owner_pubkey
+                    .clone()
+                    .unwrap_or_else(|| state.node_wallet.encoded_public_key())
+            } else {
+                // Ledger not found (shouldn't happen), fallback to coordinator
+                state.node_wallet.encoded_public_key()
+            }
+        } else {
+            // No ledger manager (shouldn't happen), fallback to coordinator
+            state.node_wallet.encoded_public_key()
+        }
+    };
+
     {
         let mut pool = state.fee_pool.write().await;
-        pool.add_fee(fee, &signer_pk);
+        pool.add_fee(fee, &beneficiary_pk);
     }
     {
         let mut registry = state.node_registry.write().await;
-        registry.increment_block_count(&signer_pk);
+        registry.increment_block_count(&beneficiary_pk);
     }
 }
 

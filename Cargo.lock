@@ -333,7 +333,7 @@ checksum = "cf9ff0bbfd639f15c74af777d81383cf53efb7c93613f6cab67c6c11e05bbf8b"
 
 [[package]]
 name = "bin"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2601,6 +2601,7 @@ dependencies = [
  "axum-macros",
  "axum-server",
  "base64 0.22.1",
+ "bech32",
  "chrono",
  "config",
  "dashmap 7.0.0-rc2",

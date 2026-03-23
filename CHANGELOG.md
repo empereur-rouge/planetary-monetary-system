@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.5] - 2026-03-23 — Fix: Custom ledger fees not distributed to owner
+
+### Fixed
+- **fix(fees/critical)**: Custom ledger owners (e.g., Eden creator) were not receiving accumulated transaction fees. Root cause: `accumulate_tx_fee()` always credited fees to the coordinator's `node_pk`, but for custom ledgers, fees should be credited to the ledger owner instead. The NodeRegistry was empty, so fees fell back to Treasury. **Solutions**:
+  1. Modified `accumulate_tx_fee()` to detect custom ledgers (`ledger_id != "main"`) and credit fees to `ledger.owner_pubkey` instead of `coordinator.node_pk`.
+  2. Added auto-registration of custom ledger owners in the NodeRegistry at startup. The owner's wallet address is derived from their Ed25519 + X25519 public keys (same bech32m logic as `Wallet::get_address()`). This enables the periodic fee distribution task to map `owner_pubkey` → `wallet_address` and distribute accumulated fees correctly.
+- **fix(fees)**: Added `bech32 = "0.8.1"` dependency to `pms-server` for deriving wallet addresses from public keys in `derive_address_from_keys()` helper.
+
+---
+
 ## [0.6.4] - 2026-03-23 — Fix: UTXO double-count destroying supply & address index
 
 ### Fixed

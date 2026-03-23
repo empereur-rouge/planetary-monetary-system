@@ -21,6 +21,28 @@ use std::sync::{
     atomic::AtomicBool,
 };
 
+/// Derives a wallet address from Ed25519 and X25519 public keys.
+/// This mirrors the logic in `pms_wallet::Wallet::get_address()`.
+fn derive_address_from_keys(
+    ed25519_hex: &str,
+    x25519_hex: &str,
+    hrp: &str,
+) -> anyhow::Result<String> {
+    use bech32::{ToBase32, Variant, encode};
+    use sha2::{Digest, Sha256};
+
+    let pub_bytes = hex::decode(ed25519_hex)?;
+    let hash = Sha256::digest(&pub_bytes);
+    let h20 = &hash[..20];
+    let xpk = hex::decode(x25519_hex)?;
+
+    let mut payload = Vec::with_capacity(52);
+    payload.extend_from_slice(h20);
+    payload.extend_from_slice(&xpk);
+
+    Ok(encode(hrp, payload.to_base32(), Variant::Bech32m)?)
+}
+
 pub async fn serve_api(
     addr: &str,
     srv: Arc<Server>,
@@ -206,6 +228,58 @@ pub async fn serve_api(
         });
         pms_contracts::spawn_contract_listener(bus, main_store_for_contracts, sink);
         tracing::info!("ContractListener spawned on EventBus");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // AUTO-REGISTER CUSTOM LEDGER OWNERS IN NODE REGISTRY
+    // ═══════════════════════════════════════════════════════════════════════
+    // Custom ledger owners are auto-registered in the NodeRegistry so they can
+    // receive node fees from their ledgers during periodic fee distribution.
+    // Without this, fees would fallback to Treasury even though the owner
+    // should be rewarded for creating/maintaining the ledger.
+    if let Some(ref mgr) = state.ledger_mgr {
+        let mut registry = state.node_registry.write().await;
+
+        for ledger_id in mgr.list_ids() {
+            if ledger_id == "main" {
+                continue; // Skip main ledger (coordinator handles it)
+            }
+
+            if let Some(instance) = mgr.get(&ledger_id) {
+                if let (Some(owner_pk), Some(owner_x25519)) =
+                    (&instance.def.owner_pubkey, &instance.def.owner_x25519_pubkey)
+                {
+                    // Derive wallet address from owner's public keys
+                    match derive_address_from_keys(owner_pk, owner_x25519, "8e") {
+                        Ok(wallet_addr) => {
+                            // Use ledger's API URL or dummy URL for owner registration
+                            // (addr is still &str here, not yet parsed to SocketAddr)
+                            let api_url = format!("https://{}", addr);
+
+                            registry.register(
+                                owner_pk.clone(),
+                                api_url.clone(),
+                                Some(wallet_addr.clone()),
+                            );
+
+                            tracing::info!(
+                                "📝 Ledger '{}' owner auto-registered: {} (wallet: {})",
+                                ledger_id,
+                                &owner_pk[..20.min(owner_pk.len())],
+                                &wallet_addr[..20.min(wallet_addr.len())]
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "❌ Failed to derive wallet address for ledger '{}' owner: {}",
+                                ledger_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // 🔹 Construit le Router complet
