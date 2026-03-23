@@ -345,23 +345,10 @@ pub async fn perform_fee_distribution(
                 .inc();
             let _ = state.srv.enqueue_broadcast(reward_wb.id.clone()).await;
 
-            // 5. UPDATE UTXOS DIRECTLY
-            // Note: persist_block already handles UTXO creation via the Reward
-            // payload delta. This loop is a defensive redundancy that ensures
-            // UTXOs are visible in RAM even if persist_block's delta path missed them.
-            for (idx, output) in all_outputs.iter().enumerate() {
-                state
-                    .srv
-                    .adapter_arc()
-                    .add_utxo(
-                        reward_wb.id.clone(),
-                        idx as u32,
-                        output.address.clone(),
-                        output.amount.clone(),
-                        output.asset_id.clone(), // multi-asset support (PMS or custom token)
-                    )
-                    .await;
-            }
+            // NOTE: No add_utxo here — PlainPayload::Mint is a plain payload,
+            // so persist_block() already constructs the UtxoDelta and applies it
+            // via apply_diff(). Calling add_utxo again would double-count supply
+            // AND destroy the address index (LRU re-insert evicts existing entry).
 
             // Pool was already swapped atomically in step 1 -- no reset needed.
 

@@ -302,10 +302,14 @@ pub async fn faucet_mint(
         }
     };
 
-    // 5) Persist + broadcast + UTXO
+    // 5) Persist + broadcast
+    // NOTE: Do NOT call apply_utxo_delta here — PlainPayload::Mint is a plain payload,
+    // so persist_block() already constructs the UtxoDelta and applies it via apply_diff().
+    // Calling apply_utxo_delta again would double-count supply AND destroy the address
+    // index (LRU re-insert evicts the existing entry, then addr_index_remove deletes the
+    // outpoint that addr_index_add just re-added).
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
         Ok(PutResult::Inserted) => {
-            tx_helpers::apply_utxo_delta(&adapter, &wb.id, &[], &[mint_output]).await;
             (
                 StatusCode::CREATED,
                 Json(json!(FaucetResponse {

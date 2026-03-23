@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.4] - 2026-03-23 — Fix: UTXO double-count destroying supply & address index
+
+### Fixed
+- **fix(utxo/critical)**: All plain-payload handlers (`faucet_mint`, `admin_seize`, `admin_reverse`, `create_reward_block`, `perform_fee_distribution`, `perform_daily_inflation_mint`) called `apply_utxo_delta()` or `add_utxo()` AFTER `persist_block()` for plain payloads. Since `persist_block()` already constructs and applies the `UtxoDelta` via `apply_diff()` for plain payloads, the second call caused:
+  1. **Supply double-counting**: `supply_add_compact()` called twice per UTXO → supply inflated 2x.
+  2. **Address index destruction**: LRU `push()` on existing OutputId evicted the existing entry, then `addr_index_remove(evicted)` deleted the entry that `addr_index_add` just re-added → UTXOs invisible to address queries.
+  - Affected: faucet minting, compliance (seize/reverse), fee distribution, inflation minting.
+  - Symptom on VPS: simulator agents failed to refuel ("no UTXOs found for address") despite successful faucet calls.
+
+### Infrastructure
+- **infra(docker)**: Fixed `Dockerfile.testnet` for `bindgen 0.72+` which no longer uses `clang-sys/runtime` (dlopen). Build scripts now link statically against LLVM. Added `zlib-static`, `llvm18-static`, `ncurses-static` packages and `libstdc++.a` symlink.
+
+---
+
 ## [0.6.3] - 2026-03-22 — Fix: OOM crash loop on VPS testnet
 
 ### Fixed

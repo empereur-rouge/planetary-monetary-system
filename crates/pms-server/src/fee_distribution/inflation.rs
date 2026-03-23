@@ -200,19 +200,10 @@ pub async fn perform_daily_inflation_mint(state: &AppState) -> Result<Distribute
                 .inc();
             let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
 
-            for (idx, output) in all_outputs.iter().enumerate() {
-                state
-                    .srv
-                    .adapter_arc()
-                    .add_utxo(
-                        wb.id.clone(),
-                        idx as u32,
-                        output.address.clone(),
-                        output.amount.clone(),
-                        None, // inflation always PMS
-                    )
-                    .await;
-            }
+            // NOTE: No add_utxo here — PlainPayload::Mint is a plain payload,
+            // so persist_block() already constructs the UtxoDelta and applies it
+            // via apply_diff(). Calling add_utxo again would double-count supply
+            // AND destroy the address index (LRU re-insert evicts existing entry).
 
             tracing::info!(
                 "📊 Daily inflation minted: {} PMS to {} wallets (block: {})",

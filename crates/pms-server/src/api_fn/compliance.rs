@@ -323,23 +323,8 @@ pub async fn admin_seize(
 
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
         Ok(pms_storage::PutResult::Inserted) => {
-            // Update RAM UTXO cache
-            tx_helpers::apply_utxo_delta(
-                &adapter,
-                &wb.id,
-                &target_utxos
-                    .iter()
-                    .map(|(oid, _)| TxInput {
-                        out: OutputId {
-                            txid: oid.txid.clone(),
-                            index: oid.index,
-                        },
-                    })
-                    .collect::<Vec<_>>(),
-                &outputs,
-            )
-            .await;
-
+            // NOTE: No apply_utxo_delta here — PlainPayload::Seize is a plain payload,
+            // persist_block() already constructs the UtxoDelta and applies it via apply_diff().
             (
                 StatusCode::OK,
                 Json(json!({
@@ -565,8 +550,8 @@ pub async fn admin_reverse(
 
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
         Ok(pms_storage::PutResult::Inserted) => {
-            tx_helpers::apply_utxo_delta(&adapter, &wb.id, &reverse_inputs, &reverse_outputs).await;
-
+            // NOTE: No apply_utxo_delta here — PlainPayload::Reverse is a plain payload,
+            // persist_block() already constructs the UtxoDelta and applies it via apply_diff().
             let refunded: Vec<String> = refund_amounts.keys().map(|(a, _)| a.clone()).collect();
             (
                 StatusCode::OK,

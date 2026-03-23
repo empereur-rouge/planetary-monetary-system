@@ -125,19 +125,10 @@ pub async fn create_reward_block(
 
     match persist_and_broadcast(state, &wb).await {
         Ok(PutResult::Inserted) => {
-            // Register fee UTXOs so recipients can spend them
-            let adapter = state.srv.adapter_arc();
-            for (idx, fo) in fee_outputs_raw.iter().enumerate() {
-                adapter
-                    .add_utxo(
-                        wb.id.clone(),
-                        idx as u32,
-                        fo.address.clone(),
-                        fo.amount.clone(),
-                        None, // fees always in PMS native
-                    )
-                    .await;
-            }
+            // NOTE: No add_utxo here — PlainPayload::Reward is a plain payload,
+            // so persist_block() already constructs the UtxoDelta and applies it
+            // via apply_diff(). Calling add_utxo again would double-count supply
+            // AND destroy the address index (LRU re-insert evicts existing entry).
             Some(wb.id)
         }
         Ok(other) => {

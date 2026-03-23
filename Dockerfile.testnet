@@ -2,7 +2,14 @@
 FROM rust:1.89-alpine AS build-base
 # make: required for jemalloc (tikv-jemallocator) build
 # clang18-dev: provides libclang.so for bindgen (librocksdb-sys)
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev make clang18-dev g++ linux-headers
+# Static libs: bindgen 0.72+ links against libclang at compile time (no dlopen),
+# so we need static LLVM/ncurses/zlib libraries for the build script linker.
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev make clang18-dev g++ linux-headers \
+    zlib-static llvm18-static ncurses-static \
+    && if [ ! -f /usr/lib/libstdc++.a ]; then \
+         SRC=$(find /usr -name 'libstdc++.a' 2>/dev/null | head -1); \
+         [ -n "$SRC" ] && ln -sf "$SRC" /usr/lib/libstdc++.a || true; \
+       fi
 ENV LIBCLANG_PATH=/usr/lib/llvm18/lib
 # Disable static CRT linking so build scripts are dynamically linked against musl.
 # This allows dlopen(libclang.so) to work in build scripts (static musl can't dlopen).
