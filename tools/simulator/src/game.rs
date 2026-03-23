@@ -1,7 +1,8 @@
-//! Game logic for Edenite — cubes are NFTs with attributes (weight, size, density).
+//! Game logic for Edenite — cubes are NFTs with obfuscated attributes and rarity tiers.
 //!
-//! When a cube NFT is burned, the agent earns edenite based on:
-//! `Edenite = (Weight * Size * Density) / 19,300,000,000`
+//! Attribute names are SHA256-obfuscated (not stored in clear text) in both NFT metadata
+//! and smart contract definitions. Rarity is encoded in the token_id via leading zeros:
+//! Basic (0), Common (1), Uncommon (2), Rare (3), Legendary (4), Unique (5).
 
 use crate::client::DagClient;
 use crate::config::GameConfig;
@@ -19,8 +20,128 @@ use x25519_dalek::{PublicKey as XPublic, StaticSecret};
 /// Max concurrent API calls for parallel cube minting
 const MINT_CONCURRENCY: usize = 30;
 
-/// Default divisor for the edenite formula
-const DEFAULT_DIVISOR: f64 = 19_300_000_000.0;
+/// Default divisor for the edenite formula.
+///
+/// Calibrated for cube ranges: weight 1-30 kg, size 0.5-5 cm, density 0.1-1.0.
+/// Yields ~0.00171 EDN/cube → ~277 EDN/month at 9 cubes/min (10h/day).
+const DEFAULT_DIVISOR: f64 = 13_700.0;
+
+/// Salt used for attribute name obfuscation (SHA256-based)
+const ATTR_OBFUSCATION_SALT: &[u8] = b"pms-cube-attrs-v1";
+
+/// Round an f64 to 2 decimal places.
+pub fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+/// Rarity tier for a cube NFT, encoded in the token_id via leading zeros.
+///
+/// Probabilities are based on a roll over 100,000,000:
+/// - Basic:     roll >= 100,000       (99.9%)
+/// - Common:    10,000 <= roll < 100,000  (0.09%)
+/// - Uncommon:  1,000 <= roll < 10,000    (0.009%)
+/// - Rare:      10 <= roll < 1,000        (0.00099%)
+/// - Legendary: 1 <= roll < 10            (0.000009%)
+/// - Unique:    roll < 1                  (0.000001%)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CubeRarity {
+    Basic,
+    Common,
+    Uncommon,
+    Rare,
+    Legendary,
+    Unique,
+}
+
+impl CubeRarity {
+    /// Roll a rarity tier using weighted probability (out of 100,000,000).
+    pub fn roll(rng: &mut impl Rng) -> Self {
+        let r = rng.random_range(0u64..100_000_000);
+        if r < 1 {
+            CubeRarity::Unique
+        } else if r < 10 {
+            CubeRarity::Legendary
+        } else if r < 1_000 {
+            CubeRarity::Rare
+        } else if r < 10_000 {
+            CubeRarity::Uncommon
+        } else if r < 100_000 {
+            CubeRarity::Common
+        } else {
+            CubeRarity::Basic
+        }
+    }
+
+    /// Number of leading zeros in the token_id for this rarity tier.
+    pub fn leading_zeros(&self) -> usize {
+        match self {
+            CubeRarity::Basic => 0,
+            CubeRarity::Common => 1,
+            CubeRarity::Uncommon => 2,
+            CubeRarity::Rare => 3,
+            CubeRarity::Legendary => 4,
+            CubeRarity::Unique => 5,
+        }
+    }
+
+    /// Human-readable label for this rarity tier.
+    pub fn label(&self) -> &str {
+        match self {
+            CubeRarity::Basic => "Basic",
+            CubeRarity::Common => "Common",
+            CubeRarity::Uncommon => "Uncommon",
+            CubeRarity::Rare => "Rare",
+            CubeRarity::Legendary => "Legendary",
+            CubeRarity::Unique => "Unique",
+        }
+    }
+}
+
+impl std::fmt::Display for CubeRarity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Obfuscate an attribute name using SHA256(salt || name), truncated to 16 hex chars.
+///
+/// Produces deterministic, opaque identifiers so that attribute keys in NFT metadata
+/// and contract definitions cannot be read in clear text.
+fn obfuscate_attr(name: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(ATTR_OBFUSCATION_SALT);
+    hasher.update(name.as_bytes());
+    let hash = hasher.finalize();
+    hex::encode(&hash[..8])
+}
+
+/// Generate a 64-char hex token_id with leading zeros determined by rarity.
+///
+/// The first character after the zeros is guaranteed to be `1-f` (non-zero)
+/// to prevent ambiguity between rarity tiers.
+pub fn generate_token_id(rarity: &CubeRarity, rng: &mut impl Rng) -> String {
+    let zeros = rarity.leading_zeros();
+    let remaining = 64 - zeros;
+
+    let mut id = String::with_capacity(64);
+
+    // Leading zeros
+    for _ in 0..zeros {
+        id.push('0');
+    }
+
+    // First non-zero character (1-f) to prevent tier ambiguity
+    if remaining > 0 {
+        id.push_str(&format!("{:x}", rng.random_range(1u8..16)));
+    }
+
+    // Fill remaining characters with random hex
+    for _ in 1..remaining {
+        id.push_str(&format!("{:x}", rng.random_range(0u8..16)));
+    }
+
+    id
+}
 
 /// Derive public keys (ECDSA k256 + X25519) from a secp256k1 private key hex.
 /// Returns `(public_key_hex, x25519_pubkey_hex)` or None on error.
@@ -69,18 +190,48 @@ fn derive_address_from_keys(ecdsa_pub_hex: &str, x25519_pub_hex: &str, hrp: &str
     encode(hrp, payload.to_base32(), Variant::Bech32m).expect("valid bech32m")
 }
 
-/// Attributes of a cube NFT
+/// Attributes of a cube NFT.
+///
+/// `rarity` is cosmetic (encoded in the token_id via leading zeros)
+/// and does NOT affect the edenite reward formula.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CubeAttributes {
     pub weight: f64,
     pub size: f64,
     pub density: f64,
+    pub rarity: CubeRarity,
 }
 
 impl CubeAttributes {
-    /// Calculate edenite reward: (weight * size * density) / divisor
+    /// Calculate edenite reward: (weight * size * density) / divisor.
+    /// Rarity is purely cosmetic and does not affect the formula.
     pub fn edenite_reward(&self, divisor: f64) -> f64 {
         (self.weight * self.size * self.density) / divisor
+    }
+
+    /// Serialize attributes to JSON with SHA256-obfuscated key names.
+    ///
+    /// Produces something like `{"a1b2c3d4e5f60718": 543.2, ...}` instead of
+    /// `{"weight": 543.2, ...}` — attribute keys are opaque hex identifiers.
+    pub fn to_obfuscated_extra(&self) -> String {
+        serde_json::json!({
+            obfuscate_attr("weight"): self.weight,
+            obfuscate_attr("size"): self.size,
+            obfuscate_attr("density"): self.density,
+        })
+        .to_string()
+    }
+
+    /// Return obfuscated attribute names for smart contract registration.
+    ///
+    /// Must match the keys produced by [`to_obfuscated_extra`] so the contract
+    /// engine can locate attribute values in the NFT's `extra` JSON.
+    pub fn obfuscated_attr_names() -> Vec<String> {
+        vec![
+            obfuscate_attr("weight"),
+            obfuscate_attr("size"),
+            obfuscate_attr("density"),
+        ]
     }
 }
 
@@ -226,7 +377,7 @@ impl GameEngine {
 
         // 5. Register smart contract: cube burn → EDN reward via contract engine
         // The contract evaluates on every NFT burn on the Edenite ledger where nft_type="cube".
-        // It computes: (weight * size * density) / divisor → EDN amount, accumulated in FeePool.
+        // Attribute names are SHA256-obfuscated so the formula is not readable in clear text.
         // Fee distribution then creates EDN UTXOs for the burner.
         let divisor = config.divisor.unwrap_or(DEFAULT_DIVISOR) as u64;
         tracing::info!(
@@ -244,11 +395,7 @@ impl GameEngine {
                 actions: vec![ContractActionSim::AccumulateRefund {
                     asset_id: Some("edenite".to_string()),
                     formula: MintFormulaSim::AttributeFormula {
-                        attribute_names: vec![
-                            "weight".to_string(),
-                            "size".to_string(),
-                            "density".to_string(),
-                        ],
+                        attribute_names: CubeAttributes::obfuscated_attr_names(),
                         divisor,
                     },
                 }],
@@ -334,17 +481,17 @@ impl GameEngine {
         let (token_id, attrs, extra) = {
             let mut rng = rand::rng();
 
-            let token_id: String = (0..64)
-                .map(|_| format!("{:x}", rng.random_range(0u8..16)))
-                .collect();
+            let rarity = CubeRarity::roll(&mut rng);
+            let token_id = generate_token_id(&rarity, &mut rng);
 
             let attrs = CubeAttributes {
-                weight: rng.random_range(100.0..1000.0),
-                size: rng.random_range(100.0..500.0),
-                density: rng.random_range(1.0..20.0),
+                weight: round2(rng.random_range(1.0..30.0)),
+                size: round2(rng.random_range(0.5..5.0)),
+                density: round2(rng.random_range(0.1..1.0)),
+                rarity,
             };
 
-            let extra = serde_json::to_string(&attrs).unwrap_or_default();
+            let extra = attrs.to_obfuscated_extra();
             (token_id, attrs, extra)
         };
 
@@ -355,11 +502,12 @@ impl GameEngine {
                 owner_address: owner_address.to_string(),
                 owner_x25519_pubkey: owner_x25519_pubkey.to_string(),
                 metadata: NftMetadataSim {
-                    name: Some(format!("Cube Edenite #{}", &token_id[..8])),
-                    description: Some(format!(
-                        "w={:.0} s={:.0} d={:.1}",
-                        attrs.weight, attrs.size, attrs.density
+                    name: Some(format!(
+                        "[{}] Cube Edenite #{}",
+                        attrs.rarity.label(),
+                        &token_id[..8]
                     )),
+                    description: Some(format!("[{}]", attrs.rarity.label())),
                     uri: None,
                     nft_type: Some("cube".to_string()),
                     extra: Some(extra),
@@ -369,11 +517,9 @@ impl GameEngine {
 
         let reward = attrs.edenite_reward(self.divisor);
         tracing::info!(
-            "Minted cube {} (w={:.0}, s={:.0}, d={:.1}) → potential {:.10} EDN",
+            "Minted [{}] cube {} → potential {:.10} EDN",
+            attrs.rarity.label(),
             &token_id[..16],
-            attrs.weight,
-            attrs.size,
-            attrs.density,
             reward
         );
 
@@ -401,15 +547,15 @@ impl GameEngine {
             let mut rng = rand::rng();
             (0..count)
                 .map(|_| {
-                    let token_id: String = (0..64)
-                        .map(|_| format!("{:x}", rng.random_range(0u8..16)))
-                        .collect();
+                    let rarity = CubeRarity::roll(&mut rng);
+                    let token_id = generate_token_id(&rarity, &mut rng);
                     let attrs = CubeAttributes {
-                        weight: rng.random_range(100.0..1000.0),
-                        size: rng.random_range(100.0..500.0),
-                        density: rng.random_range(1.0..20.0),
+                        weight: round2(rng.random_range(1.0..30.0)),
+                        size: round2(rng.random_range(0.5..5.0)),
+                        density: round2(rng.random_range(0.1..1.0)),
+                        rarity,
                     };
-                    let extra = serde_json::to_string(&attrs).unwrap_or_default();
+                    let extra = attrs.to_obfuscated_extra();
                     (token_id, attrs, extra)
                 })
                 .collect()
@@ -426,7 +572,7 @@ impl GameEngine {
             let token_id = token_id.clone();
             let owner_address = owner_address.to_string();
             let owner_x25519 = owner_x25519_pubkey.to_string();
-            let attrs_clone = attrs.clone();
+            let rarity_label = attrs.rarity.label().to_string();
             let extra = extra.clone();
 
             tasks.push(tokio::spawn(async move {
@@ -437,11 +583,12 @@ impl GameEngine {
                         owner_address,
                         owner_x25519_pubkey: owner_x25519,
                         metadata: NftMetadataSim {
-                            name: Some(format!("Cube Edenite #{}", &token_id[..8])),
-                            description: Some(format!(
-                                "w={:.0} s={:.0} d={:.1}",
-                                attrs_clone.weight, attrs_clone.size, attrs_clone.density
+                            name: Some(format!(
+                                "[{}] Cube Edenite #{}",
+                                rarity_label,
+                                &token_id[..8]
                             )),
+                            description: Some(format!("[{}]", rarity_label)),
                             uri: None,
                             nft_type: Some("cube".to_string()),
                             extra: Some(extra),
@@ -686,15 +833,15 @@ impl GameEngine {
         let mut rng = rand::rng();
         (0..count)
             .map(|_| {
-                let token_id: String = (0..64)
-                    .map(|_| format!("{:x}", rng.random_range(0u8..16)))
-                    .collect();
+                let rarity = CubeRarity::roll(&mut rng);
+                let token_id = generate_token_id(&rarity, &mut rng);
                 let attrs = CubeAttributes {
-                    weight: rng.random_range(100.0..1000.0),
-                    size: rng.random_range(100.0..500.0),
-                    density: rng.random_range(1.0..20.0),
+                    weight: round2(rng.random_range(1.0..30.0)),
+                    size: round2(rng.random_range(0.5..5.0)),
+                    density: round2(rng.random_range(0.1..1.0)),
+                    rarity,
                 };
-                let extra = serde_json::to_string(&attrs).unwrap_or_default();
+                let extra = attrs.to_obfuscated_extra();
                 (token_id, attrs, extra)
             })
             .collect()
@@ -722,6 +869,7 @@ impl GameEngine {
             let owner_address = owner_address.to_string();
             let owner_x25519 = owner_x25519_pubkey.to_string();
             let attrs_clone = attrs.clone();
+            let rarity_label = attrs.rarity.label().to_string();
             let extra = extra.clone();
 
             tasks.push(tokio::spawn(async move {
@@ -732,11 +880,12 @@ impl GameEngine {
                         owner_address,
                         owner_x25519_pubkey: owner_x25519,
                         metadata: NftMetadataSim {
-                            name: Some(format!("Cube Edenite #{}", &token_id[..8])),
-                            description: Some(format!(
-                                "w={:.0} s={:.0} d={:.1}",
-                                attrs_clone.weight, attrs_clone.size, attrs_clone.density
+                            name: Some(format!(
+                                "[{}] Cube Edenite #{}",
+                                rarity_label,
+                                &token_id[..8]
                             )),
+                            description: Some(format!("[{}]", rarity_label)),
                             uri: None,
                             nft_type: Some("cube".to_string()),
                             extra: Some(extra),
@@ -805,6 +954,7 @@ mod tests {
                 weight: 500.0 + i as f64,
                 size: 250.0,
                 density: 10.0,
+                rarity: CubeRarity::Basic,
             };
             registry.insert(token_id, attrs);
         }
@@ -851,23 +1001,218 @@ mod tests {
 
     #[test]
     fn edenite_reward_formula_correct() {
+        // Max values: weight 30kg, size 5cm, density 1.0
         let attrs = CubeAttributes {
-            weight: 1000.0,
-            size: 500.0,
-            density: 19.3,
+            weight: 30.0,
+            size: 5.0,
+            density: 1.0,
+            rarity: CubeRarity::Basic,
         };
         let reward = attrs.edenite_reward(DEFAULT_DIVISOR);
-        // Expected: (1000 * 500 * 19.3) / 19_300_000_000 = 9_650_000 / 19_300_000_000 = 0.0005
-        let expected = 0.0005;
+        // Expected: (30 * 5.0 * 1.0) / 13_700 = 150 / 13_700
+        let expected = 150.0 / DEFAULT_DIVISOR;
         println!(
-            "Reward for w=1000, s=500, d=19.3: {:.10} (expected {:.10})",
+            "Reward for w=30, s=5.0, d=1.0: {:.10} EDN (expected {:.10})",
             reward, expected
         );
         assert!(
-            (reward - expected).abs() < 1e-12,
+            (reward - expected).abs() < 1e-18,
             "reward {} != expected {}",
             reward,
             expected
+        );
+    }
+
+    #[test]
+    fn obfuscate_attr_is_deterministic() {
+        // Same input must always produce the same output
+        let h1 = obfuscate_attr("weight");
+        let h2 = obfuscate_attr("weight");
+        assert_eq!(h1, h2, "obfuscate_attr must be deterministic");
+        println!("obfuscate_attr(\"weight\") = {}", h1);
+
+        // Different inputs must produce different outputs
+        let h_size = obfuscate_attr("size");
+        let h_density = obfuscate_attr("density");
+        println!("obfuscate_attr(\"size\")    = {}", h_size);
+        println!("obfuscate_attr(\"density\") = {}", h_density);
+        assert_ne!(h1, h_size);
+        assert_ne!(h1, h_density);
+        assert_ne!(h_size, h_density);
+
+        // Must be 16 hex chars (8 bytes)
+        assert_eq!(h1.len(), 16, "obfuscated key must be 16 hex chars");
+        assert_eq!(h_size.len(), 16);
+        assert_eq!(h_density.len(), 16);
+    }
+
+    #[test]
+    fn obfuscated_extra_has_no_cleartext_attrs() {
+        let attrs = CubeAttributes {
+            weight: 543.2,
+            size: 234.5,
+            density: 15.3,
+            rarity: CubeRarity::Basic,
+        };
+        let extra = attrs.to_obfuscated_extra();
+        println!("Obfuscated extra JSON: {}", extra);
+
+        // Must NOT contain clear-text attribute names
+        assert!(!extra.contains("weight"), "extra must not contain 'weight'");
+        assert!(!extra.contains("size"), "extra must not contain 'size'");
+        assert!(!extra.contains("density"), "extra must not contain 'density'");
+
+        // Must contain the obfuscated keys
+        let key_w = obfuscate_attr("weight");
+        let key_s = obfuscate_attr("size");
+        let key_d = obfuscate_attr("density");
+        assert!(extra.contains(&key_w), "extra must contain obfuscated weight key");
+        assert!(extra.contains(&key_s), "extra must contain obfuscated size key");
+        assert!(extra.contains(&key_d), "extra must contain obfuscated density key");
+
+        // Must be valid JSON with the correct values
+        let parsed: serde_json::Value = serde_json::from_str(&extra).expect("valid JSON");
+        let val_w = parsed[&key_w].as_f64().expect("weight value");
+        let val_s = parsed[&key_s].as_f64().expect("size value");
+        let val_d = parsed[&key_d].as_f64().expect("density value");
+        println!("Parsed values: w={}, s={}, d={}", val_w, val_s, val_d);
+        assert!((val_w - 543.2).abs() < 0.01);
+        assert!((val_s - 234.5).abs() < 0.01);
+        assert!((val_d - 15.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn obfuscated_attr_names_match_extra_keys() {
+        let names = CubeAttributes::obfuscated_attr_names();
+        let attrs = CubeAttributes {
+            weight: 100.0,
+            size: 200.0,
+            density: 3.0,
+            rarity: CubeRarity::Rare,
+        };
+        let extra = attrs.to_obfuscated_extra();
+        let parsed: serde_json::Value = serde_json::from_str(&extra).expect("valid JSON");
+
+        println!("Contract attribute_names: {:?}", names);
+        println!("Extra JSON keys: {:?}", parsed.as_object().unwrap().keys().collect::<Vec<_>>());
+
+        for name in &names {
+            assert!(
+                parsed.get(name).is_some(),
+                "contract attr '{}' missing from extra JSON",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn generate_token_id_leading_zeros() {
+        let mut rng = rand::rng();
+
+        for rarity in [
+            CubeRarity::Basic,
+            CubeRarity::Common,
+            CubeRarity::Uncommon,
+            CubeRarity::Rare,
+            CubeRarity::Legendary,
+            CubeRarity::Unique,
+        ] {
+            let zeros = rarity.leading_zeros();
+            let tid = generate_token_id(&rarity, &mut rng);
+            println!(
+                "[{}] token_id = {} (expected {} leading zeros)",
+                rarity.label(),
+                tid,
+                zeros
+            );
+
+            assert_eq!(tid.len(), 64, "token_id must be 64 chars");
+
+            // Check leading zeros
+            let leading = tid.chars().take_while(|c| *c == '0').count();
+            assert!(
+                leading >= zeros,
+                "[{}] expected >= {} leading zeros, got {} in {}",
+                rarity.label(),
+                zeros,
+                leading,
+                tid
+            );
+
+            // For non-Basic tiers, the first non-zero char must be 1-f
+            if zeros > 0 && zeros < 64 {
+                let first_nonzero = tid.chars().nth(zeros).unwrap();
+                assert!(
+                    first_nonzero != '0',
+                    "[{}] first char after zeros must be 1-f, got '0' in {}",
+                    rarity.label(),
+                    tid
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rarity_roll_distribution() {
+        // Roll 100K times and check that Basic dominates
+        let mut rng = rand::rng();
+        let mut counts = [0u32; 6]; // Basic, Common, Uncommon, Rare, Legendary, Unique
+
+        let n = 100_000;
+        for _ in 0..n {
+            match CubeRarity::roll(&mut rng) {
+                CubeRarity::Basic => counts[0] += 1,
+                CubeRarity::Common => counts[1] += 1,
+                CubeRarity::Uncommon => counts[2] += 1,
+                CubeRarity::Rare => counts[3] += 1,
+                CubeRarity::Legendary => counts[4] += 1,
+                CubeRarity::Unique => counts[5] += 1,
+            }
+        }
+
+        println!("Rarity distribution over {} rolls:", n);
+        println!("  Basic:     {} ({:.2}%)", counts[0], counts[0] as f64 / n as f64 * 100.0);
+        println!("  Common:    {} ({:.4}%)", counts[1], counts[1] as f64 / n as f64 * 100.0);
+        println!("  Uncommon:  {} ({:.4}%)", counts[2], counts[2] as f64 / n as f64 * 100.0);
+        println!("  Rare:      {} ({:.6}%)", counts[3], counts[3] as f64 / n as f64 * 100.0);
+        println!("  Legendary: {} ({:.6}%)", counts[4], counts[4] as f64 / n as f64 * 100.0);
+        println!("  Unique:    {} ({:.8}%)", counts[5], counts[5] as f64 / n as f64 * 100.0);
+
+        // Basic must be the vast majority (>99%)
+        assert!(
+            counts[0] as f64 / n as f64 > 0.99,
+            "Basic should be >99%, got {:.2}%",
+            counts[0] as f64 / n as f64 * 100.0
+        );
+    }
+
+    #[test]
+    fn rarity_reward_is_independent() {
+        // Same attributes, different rarities → same reward
+        let attrs_basic = CubeAttributes {
+            weight: 500.0,
+            size: 300.0,
+            density: 10.0,
+            rarity: CubeRarity::Basic,
+        };
+        let attrs_legendary = CubeAttributes {
+            weight: 500.0,
+            size: 300.0,
+            density: 10.0,
+            rarity: CubeRarity::Legendary,
+        };
+
+        let r1 = attrs_basic.edenite_reward(DEFAULT_DIVISOR);
+        let r2 = attrs_legendary.edenite_reward(DEFAULT_DIVISOR);
+        println!(
+            "Basic reward: {:.10}, Legendary reward: {:.10} (should be equal)",
+            r1, r2
+        );
+        assert!(
+            (r1 - r2).abs() < 1e-15,
+            "rarity must not affect reward: {} vs {}",
+            r1,
+            r2
         );
     }
 }

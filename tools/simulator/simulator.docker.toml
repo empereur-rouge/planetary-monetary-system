@@ -26,7 +26,7 @@ faucet_amount = "50.00"                 # PMS fauceted to each agent at startup
 ledger_id = "eden"
 network_id = "eden-net"
 symbol = "EDN"
-divisor = 19300000000
+divisor = 13700
 gas_pool_deposit = "10000"             # PMS deposited into Edenite gas pool (anti-spam)
 
 [tui]

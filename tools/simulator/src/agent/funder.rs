@@ -1,6 +1,6 @@
 use crate::client::DagClient;
 use crate::error::SimResult;
-use crate::game::{CubeAttributes, GameEngine};
+use crate::game::{CubeAttributes, CubeRarity, GameEngine, generate_token_id};
 use crate::metrics::MetricEvent;
 use crate::types::{
     MintNftRequest, NftMetadataSim, SendSimpleRequest, WalletInfo,
@@ -129,13 +129,13 @@ impl Funder {
                 for _ in 0..*cubes_per_agent {
                     let (token_id, attrs) = {
                         let mut rng = rand::rng();
-                        let token_id: String = (0..64)
-                            .map(|_| format!("{:x}", rng.random_range(0u8..16)))
-                            .collect();
+                        let rarity = CubeRarity::roll(&mut rng);
+                        let token_id = generate_token_id(&rarity, &mut rng);
                         let attrs = CubeAttributes {
-                            weight: rng.random_range(100.0..1000.0),
-                            size: rng.random_range(100.0..500.0),
-                            density: rng.random_range(1.0..20.0),
+                            weight: crate::game::round2(rng.random_range(1.0..30.0)),
+                            size: crate::game::round2(rng.random_range(0.5..5.0)),
+                            density: crate::game::round2(rng.random_range(0.1..1.0)),
+                            rarity,
                         };
                         (token_id, attrs)
                     };
@@ -178,17 +178,19 @@ impl Funder {
 
                 mint_tasks.push(tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
-                    let extra = serde_json::to_string(&attrs).unwrap_or_default();
+                    let extra = attrs.to_obfuscated_extra();
+                    let rarity_label = attrs.rarity.label().to_string();
                     client.admin_mint_nft(&MintNftRequest {
                         token_id: token_id.clone(),
                         owner_address: owner_addr,
                         owner_x25519_pubkey: owner_x25519,
                         metadata: NftMetadataSim {
-                            name: Some(format!("Cube Edenite #{}", &token_id[..8])),
-                            description: Some(format!(
-                                "w={:.0} s={:.0} d={:.1}",
-                                attrs.weight, attrs.size, attrs.density
+                            name: Some(format!(
+                                "[{}] Cube Edenite #{}",
+                                rarity_label,
+                                &token_id[..8]
                             )),
+                            description: Some(format!("[{}]", rarity_label)),
                             uri: None,
                             nft_type: Some("cube".to_string()),
                             extra: Some(extra),
@@ -197,12 +199,10 @@ impl Funder {
 
                     let reward = attrs.edenite_reward(divisor);
                     tracing::info!(
-                        "[{}] Minted cube {} (w={:.0}, s={:.0}, d={:.1}) → {:.10} EDN",
+                        "[{}] Minted [{}] cube {} → {:.10} EDN",
                         agent_name,
+                        rarity_label,
                         &token_id[..16],
-                        attrs.weight,
-                        attrs.size,
-                        attrs.density,
                         reward,
                     );
                     Ok::<_, crate::error::SimError>(())
