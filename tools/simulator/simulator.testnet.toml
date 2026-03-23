@@ -21,7 +21,7 @@ faucet_amount = "100.00"
 ledger_id = "eden"
 network_id = "eden-net"
 symbol = "EDN"
-divisor = 19300000000
+divisor = 13700
 gas_pool_deposit = "50000"             # PMS deposited into Edenite gas pool (anti-spam, testnet charge)
 
 [coordinator]

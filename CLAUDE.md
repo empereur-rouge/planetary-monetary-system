@@ -171,6 +171,66 @@ cargo test --release -p pms-server --test dag_sandbox test_edn_transfer_fee_flow
 - Toute nouvelle fonctionnalité touchant les transactions, fees, contracts, ou ledgers doit avoir un test sandbox.
 - Réutiliser les helpers existants de `Sandbox` (`create_ledger`, `faucet_mint`, `send_simple`, `burn_nft_simple`, `distribute_fees`, `get_balance`, `get_asset_balance`, `get_supply`, `send_asset`, `register_contract`).
 
+## Edenite Game Engine (Simulator)
+
+Le simulateur embarque un **game engine** qui gère un ledger custom "eden" avec un token "edenite" (EDN). Les agents mintent des cubes NFT, les burn pour recevoir de l'EDN, et s'échangent l'EDN entre eux.
+
+### Fichiers clés
+- Game engine : `tools/simulator/src/game.rs`
+- Bootstrap funder : `tools/simulator/src/agent/funder.rs`
+- Configs : `tools/simulator/simulator.{dev,docker,testnet}.toml`
+
+### Attributs de cube — Obfuscation SHA256
+- Les attributs (`weight`, `size`, `density`) sont **obfusqués** dans le JSON `extra` et le contrat.
+- Algorithme : `SHA256("pms-cube-attrs-v1" || attr_name)[..8]` → 16 hex chars.
+- Clés obfusquées : `weight` → `e6c84244b96fe92d`, `size` → `7f41d7f9c843a618`, `density` → `c0d4a83995fb0edb`.
+- Le contrat `edenite-cube-burn` utilise `CubeAttributes::obfuscated_attr_names()` pour matcher les clés.
+- **CRITICAL** : Le contrat sur le testnet DOIT utiliser les mêmes clés obfusquées. Si le contrat est recréé, les anciennes clés en clair causeront un reward de 0.
+
+### Ranges d'attributs
+| Attribut | Range | Unité | Décimales |
+|----------|-------|-------|-----------|
+| weight | 1.0 – 30.0 | kg | 2 |
+| size | 0.5 – 5.0 | cm | 2 |
+| density | 0.1 – 1.0 | — | 2 |
+
+### Formule de reward
+```
+EDN = (weight × size × density) / divisor
+```
+- **Divisor** : `13,700` (configuré dans `[simulation.game].divisor` du TOML).
+- Produit moyen par cube : ~23.44 → ~0.00171 EDN/cube.
+
+### Calibration économique (9 cubes/min, 10h/jour)
+| Période | Cubes | EDN |
+|---------|-------|-----|
+| 1 minute | 9 | ~0.0154 |
+| 1 heure | 540 | ~0.924 |
+| 1 jour (10h) | 5,400 | ~9.24 |
+| 1 mois (30j) | 162,000 | ~277 |
+
+### Système de rareté — 6 tiers
+Tirage sur 100,000,000. La rareté est **purement cosmétique** — elle n'affecte PAS la formule de reward.
+
+| Tier | Probabilité | Leading zeros dans token_id |
+|------|-------------|----------------------------|
+| Basic | 99.9% | 0 |
+| Common | 0.09% | 1 |
+| Uncommon | 0.009% | 2 |
+| Rare | 0.00099% | 3 |
+| Legendary | 0.000009% | 4 |
+| Unique | 0.000001% | 5 |
+
+- Le `token_id` fait 64 hex chars. Le premier char non-zero est garanti `1-f` (pas d'ambiguïté entre tiers).
+- Exemple Rare : `000e8c1d5f7a...` (3 leading zeros).
+
+### Contrats smart
+Le simulateur enregistre 2 contrats au setup :
+1. **`edenite-cube-burn`** : `OnNftBurn{nft_type: "cube"}` → `AccumulateRefund{edenite, AttributeFormula{obfuscated_attrs, divisor}}`.
+2. **`eden-transfer-fee`** : `OnTransfer` → 5% fee → coordinator wallet.
+
+Les handlers 409 (already exists) sont idempotents. **Attention** : le `contract_id` est `SHA-256(name + trigger + actions)` — si les actions changent (ex: nouveau divisor), un NOUVEAU contrat est créé au lieu de mettre à jour l'ancien. Il faut alors désactiver l'ancien via `PUT /admin/contracts/{id}`.
+
 ## Critical Patterns
 
 Règles impératives tirées de bugs production. Chaque pattern documente un piège récurrent.
