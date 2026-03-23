@@ -1,4 +1,4 @@
-// pms-server/src/api/tasks — Background tasks (fee distribution, inflation mint).
+// pms-server/src/api/tasks — Background tasks (fee distribution, inflation mint, activity backfill).
 
 use super::state::AppState;
 use std::sync::Arc;
@@ -147,4 +147,73 @@ pub fn spawn_inflation_mint_task(state: AppState) {
             }
         });
     }
+}
+
+/// Spawns a background task to backfill missing `activity_items` entries.
+///
+/// Runs once at startup (after a 30s stabilization delay) to ensure 100%
+/// fast-path coverage for activity/history queries. Without pre-computed
+/// `activity_items`, ~30% of blocks fall back to block fetch + classification
+/// (10-50ms instead of 1-2ms per page).
+///
+/// Enabled via `rocks.auto_reindex_activity_items = true` (default: true).
+/// Idempotent — safe to run on every restart.
+pub fn spawn_activity_backfill_task(state: AppState) {
+    if !state.settings.rocks.auto_reindex_activity_items {
+        return;
+    }
+
+    let store = state.store.clone();
+    let ledger_id = state.ledger_id.clone();
+
+    tokio::spawn(async move {
+        // Wait for system stabilization before background work
+        tokio::time::sleep(Duration::from_secs(30)).await;
+
+        tracing::info!(
+            ledger = %ledger_id,
+            "Starting activity_items backfill (background)..."
+        );
+
+        // Run the reindex in a blocking task to avoid stalling the async runtime
+        let store_bg = store.clone();
+        let lid = ledger_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            store_bg.reindex_all_activity_items()
+        })
+        .await;
+
+        match result {
+            Ok(Ok(stats)) => {
+                if stats.indexed > 0 {
+                    tracing::info!(
+                        ledger = %ledger_id,
+                        indexed = stats.indexed,
+                        skipped_encrypted = stats.skipped_encrypted,
+                        total = stats.total_blocks,
+                        "Activity items backfill complete"
+                    );
+                } else {
+                    tracing::info!(
+                        ledger = %ledger_id,
+                        "Activity items: all blocks already indexed"
+                    );
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::error!(
+                    ledger = %lid,
+                    error = %e,
+                    "Activity items backfill failed"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    ledger = %lid,
+                    error = %e,
+                    "Activity items backfill task panicked"
+                );
+            }
+        }
+    });
 }

@@ -336,9 +336,10 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
             "/admin/compliance/shadow_balance",
             get(admin_shadow_balance),
         )
-        // Admin Maintenance - Reindex activity
+        // Admin Maintenance - Reindex activity, UTXO consolidation
         .route("/admin/reindex-activity", post(admin_reindex_activity))
         .route("/admin/reindex-activity-items", post(admin_reindex_activity_items))
+        .route("/admin/consolidate-utxos", post(crate::api_fn::consolidation::admin_consolidate_utxos))
         // Admin API Key CRUD endpoints
         .route("/admin/api-keys", post(admin_create_api_key))
         .route("/admin/api-keys", get(admin_list_api_keys))

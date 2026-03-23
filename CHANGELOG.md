@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.7] - 2026-03-23 — Performance: O(1) token balance, activity backfill, UTXO consolidation
+
+### Performance
+- **perf(utxo/critical)**: Token balance queries are now **O(1)** instead of O(k) shard scan. Added `token_balance_cache: DashMap<(Arc<str>, Arc<str>), Decimal>` to `ShardedUtxoSet`, mirroring the existing `native_balance_cache` pattern but keyed by `(address, asset_id)`. Maintained incrementally in `supply_add_compact()` / `supply_sub_compact()` with zero-balance cleanup. Eliminates shard locks + RocksDB fallback for token balance lookups (EDN, custom assets).
+- **perf(config)**: Increased `max_utxos` default from 500K to 2M (~64 MB RAM). 500K was too small for production DAGs with millions of UTXOs, causing excessive LRU eviction + RocksDB fallback. 2M covers most production deployments.
+- **perf(config)**: Increased `block_cache_size_mb` default from 512 to 1024. With Direct I/O (v0.5.21), RocksDB block cache is the ONLY read cache — 1 GB is the production minimum.
+
+### Added
+- **feat(activity)**: Auto activity items backfill on startup. New config flag `rocks.auto_reindex_activity_items` (default: `true`). On startup, waits 30s then calls `reindex_all_activity_items()` in a background `spawn_blocking` task. Ensures 100% of blocks have pre-computed activity items for fast-path queries (1-2ms instead of 10-50ms fallback). Idempotent, safe to run on every restart.
+- **feat(admin)**: UTXO consolidation endpoint `POST /admin/consolidate-utxos`. Merges multiple coordinator UTXOs into a single UTXO via self-transfer. Accepts `asset_id` (optional) and `max_inputs` (2-256, default 64). Returns `{ block_id, consolidated_inputs, new_utxo_amount, fee }`. Protected by `require_local_or_admin`. Solves coordinator UTXO proliferation from fee distribution (7200+ UTXOs/hour at 2000 TPS).
+- **fix(consolidation)**: Fee output in consolidation endpoint now uses the same `asset_id` as the consolidated inputs. Without this, consolidating custom tokens (EDN) would produce a fee output in PMS, violating UTXO conservation (sum inputs != sum outputs).
+
+---
+
+## [0.6.6] - 2026-03-23 — Fix: Simulator Eden ledger owner keys missing
+
+### Fixed
+- **fix(simulator/critical)**: Simulator created Eden ledger without valid `owner_pubkey`/`owner_x25519_pubkey`, preventing fee distribution to creator. Root cause: `GameEngine::setup()` passed `coordinator_address` (bech32m address string) instead of the actual public keys (hex). Solution:
+  1. Added `derive_public_keys_from_privkey_hex()` to derive ECDSA k256 + X25519 public keys from the coordinator's secp256k1 private key (same logic as `pms-wallet`).
+  2. Modified `GameEngine::setup()` to accept `coordinator_private_key_hex` instead of `coordinator_address`, derive both keys, and pass them as `owner_pubkey`/`owner_x25519_pubkey` when creating the Eden ledger.
+  3. Added `derive_address_from_keys()` helper to compute bech32m address for the transfer fee contract.
+- **dependencies(simulator)**: Added crypto deps for key derivation: `k256`, `bech32`, `sha2`, `hkdf`, `x25519-dalek` (with `static_secrets` feature).
+
+---
+
 ## [0.6.5] - 2026-03-23 — Fix: Custom ledger fees not distributed to owner
 
 ### Fixed

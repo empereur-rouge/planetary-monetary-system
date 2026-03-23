@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-28
-updated: 2026-03-21
-version: v0.6.0
+updated: 2026-03-23
+version: v0.6.7
 ---
 
 # Activity System (Index, Pré-calcul, Cache)
@@ -85,6 +85,8 @@ Les items d'activité sont classifiés et sérialisés au moment de la persistan
 | Cache TTL | 30s | `api/state.rs`, `main.rs` | Durée de vie des entrées cache |
 | Cache eviction | 10% des expirées | `activity/cache.rs` | Stratégie d'éviction quand plein |
 | Reindex batch flush | 1000 | `store.rs` (`reindex_all_activity_items`, `FLUSH_EVERY`) | WriteBatch flush pendant reindex |
+| Auto backfill | `true` | `config.*.toml` → `[rocks].auto_reindex_activity_items` | Backfill automatique au demarrage (v0.6.7) |
+| Backfill delay | 30s | `tasks.rs` (`spawn_activity_backfill_task`) | Delai avant lancement pour laisser le boot se stabiliser |
 
 ## Crates et Fichiers
 
@@ -111,6 +113,7 @@ Les items d'activité sont classifiés et sérialisés au moment de la persistan
 | `pms-server` | `crates/pms-server/src/api/routes.rs` | Routes (`/v1/wallet/{address}/activity`, `.../activity/stream`) |
 | `pms-server` | `crates/pms-server/src/api/state.rs` | Champ `activity_cache` dans `AppState` |
 | `pms-server` | `crates/pms-server/src/admin.rs` | Handlers admin `POST /admin/reindex-activity` et `POST /admin/reindex-activity-items` |
+| `pms-server` | `crates/pms-server/src/api/tasks.rs` | `spawn_activity_backfill_task()` — auto-backfill au demarrage (v0.6.7) |
 | `pms-server` | `crates/pms-server/tests/activity_e2e.rs` | Tests e2e couvrant les 19 types d'activité |
 | `pms-event` | `crates/pms-event/src/events.rs` | Variant `PmsEvent::BlockPersisted` utilisé par le SSE stream |
 | `pms-wallet` | `crates/pms-wallet/src/history.rs` | `involves_address()`, `history_plain_for_address()` (utilise l'index `addr_activity`), decryption helpers |
@@ -365,3 +368,11 @@ Un cas spécial : dans un `TxUtxo`, si une adresse reçoit exactement le montant
 - `POST /admin/reindex-activity-items` : appelle `store.reindex_all_activity_items()`, reconstruit le CF `activity_items` par batches de 1000. Idempotent.
 - Les deux endpoints sont protégés par authentification admin (`is_admin_authorized`).
 - Retournent des `ReindexStats { total_blocks, indexed, skipped_encrypted, skipped_no_payload }`.
+
+### Auto-backfill au demarrage (v0.6.7)
+
+- Config flag `rocks.auto_reindex_activity_items` (defaut `true`) dans `config.rs`.
+- Au demarrage, `spawn_activity_backfill_task()` (dans `tasks.rs`) attend 30s puis appelle `store.reindex_all_activity_items()` via `spawn_blocking` pour ne pas bloquer le runtime async.
+- L'operation est idempotente : si tous les blocs ont deja des items pre-calcules, le backfill n'ecrit rien.
+- Apres backfill, 100% des blocs utilisent le fast path (1-2ms au lieu du fallback 10-50ms).
+- Lance dans `serve.rs` juste apres `spawn_inflation_mint_task()`.

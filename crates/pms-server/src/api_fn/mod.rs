@@ -3,6 +3,7 @@ pub mod blocks;
 pub mod bridge;
 pub mod compliance;
 pub mod config;
+pub mod consolidation;
 pub mod contracts;
 pub mod coordinator;
 pub mod gas_pool;

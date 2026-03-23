@@ -28,7 +28,7 @@ fn default_max_spent_outpoints() -> usize {
 }
 
 fn default_max_utxos() -> usize {
-    500_000
+    2_000_000
 }
 
 fn default_write_buffer_size_mb() -> usize {
@@ -40,7 +40,7 @@ fn default_max_write_buffer_number() -> i32 {
 }
 
 fn default_block_cache_size_mb() -> usize {
-    512
+    1024
 }
 
 fn default_db_write_buffer_size_mb() -> usize {
@@ -69,13 +69,20 @@ pub struct Rocks {
     pub max_spent_outpoints: usize,
     /// Maximum UTXOs kept in the in-memory LRU cache (ShardedUtxoSet).
     /// On cache miss, falls back to RocksDB. 0 = unlimited (all UTXOs in RAM).
-    /// Default: 500 000 (~50 MB RAM).
+    /// Default: 2 000 000 (~64 MB RAM with CompactOutput ~32 bytes).
     #[serde(default = "default_max_utxos")]
     pub max_utxos: usize,
     /// Intervalle entre chaque backup (checkpoint) en secondes.
     /// Défaut: 21600 (6 heures).
     #[serde(default)]
     pub checkpoint_interval_secs: Option<u64>,
+
+    /// Auto-backfill missing `activity_items` in background on startup.
+    /// Processes blocks that have `addr_activity` entries but no pre-computed
+    /// `activity_items`, ensuring 100% fast-path coverage for history queries.
+    /// Idempotent and safe for production. Default: true.
+    #[serde(default = "default_true")]
+    pub auto_reindex_activity_items: bool,
 
     // ── RocksDB memory tuning ──────────────────────────────────────────
 
@@ -93,8 +100,8 @@ pub struct Rocks {
 
     /// Shared LRU block cache size in MB, shared across ALL column families.
     /// Holds data blocks, index blocks, and filter blocks.
-    /// Must be large enough to hold L0 index+filter for all CFs.
-    /// Default: 512 MB.
+    /// With Direct I/O (v0.5.21), this is the ONLY read cache — size generously.
+    /// Default: 1024 MB.
     #[serde(default = "default_block_cache_size_mb")]
     pub block_cache_size_mb: usize,
 

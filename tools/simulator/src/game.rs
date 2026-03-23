@@ -12,12 +12,62 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use hkdf::Hkdf;
+use sha2::{Digest, Sha256};
+use x25519_dalek::{PublicKey as XPublic, StaticSecret};
 
 /// Max concurrent API calls for parallel cube minting
 const MINT_CONCURRENCY: usize = 30;
 
 /// Default divisor for the edenite formula
 const DEFAULT_DIVISOR: f64 = 19_300_000_000.0;
+
+/// Derive public keys (ECDSA k256 + X25519) from a secp256k1 private key hex.
+/// Returns `(public_key_hex, x25519_pubkey_hex)` or None on error.
+///
+/// Matches the derivation logic in `pms-wallet/src/wallet.rs`:
+/// - ECDSA public key from secp256k1 scalar
+/// - X25519 key derived via HKDF-SHA256(ecdsa_privkey, "pms/x25519-sk/v1")
+fn derive_public_keys_from_privkey_hex(private_key_hex: &str) -> Option<(String, String)> {
+    use k256::ecdsa::SigningKey;
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+
+    // 1. Parse secp256k1 private key (32 bytes hex)
+    let priv_bytes = hex::decode(private_key_hex).ok()?;
+    let signing_key = SigningKey::from_slice(&priv_bytes).ok()?;
+
+    // 2. Derive ECDSA public key (k256/secp256k1) — 33 bytes compressed
+    let verifying_key = signing_key.verifying_key();
+    let pub_point = verifying_key.to_encoded_point(true); // compressed
+    let pub_hex = hex::encode(pub_point.as_bytes());
+
+    // 3. Derive X25519 keypair via HKDF-SHA256 (same as pms-wallet)
+    let hk = Hkdf::<Sha256>::new(None, &priv_bytes);
+    let mut sk_bytes = [0u8; 32];
+    hk.expand(b"pms/x25519-sk/v1", &mut sk_bytes).ok()?;
+    let sk = StaticSecret::from(sk_bytes);
+    let xpk = XPublic::from(&sk);
+    let x25519_hex = hex::encode(xpk.as_bytes());
+
+    Some((pub_hex, x25519_hex))
+}
+
+/// Derive a bech32m address from ECDSA public key + X25519 public key.
+/// Matches the address derivation in `pms-wallet/src/wallet.rs::get_address()`.
+fn derive_address_from_keys(ecdsa_pub_hex: &str, x25519_pub_hex: &str, hrp: &str) -> String {
+    use bech32::{ToBase32, Variant, encode};
+
+    let pub_bytes = hex::decode(ecdsa_pub_hex).expect("valid pub hex");
+    let hash = Sha256::digest(&pub_bytes);
+    let h20 = &hash[..20];
+    let xpk = hex::decode(x25519_pub_hex).expect("valid x25519 hex");
+
+    let mut payload = Vec::with_capacity(52);
+    payload.extend_from_slice(h20);
+    payload.extend_from_slice(&xpk);
+
+    encode(hrp, payload.to_base32(), Variant::Bech32m).expect("valid bech32m")
+}
 
 /// Attributes of a cube NFT
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,13 +114,38 @@ impl GameEngine {
     /// 1. `edenite-cube-burn` — NFT burn → EDN reward via AttributeFormula
     /// 2. `eden-transfer-fee` — transfer fee (5%) → creator (coordinator) revenue
     /// Ignores 409 CONFLICT (already exists) for idempotent restarts.
+    ///
+    /// # Arguments
+    /// * `coordinator_private_key_hex` - Coordinator's secp256k1 private key (32 bytes hex).
+    ///   Used to derive public keys for ledger ownership.
     pub async fn setup(
         client: &DagClient,
         config: &GameConfig,
-        coordinator_address: Option<&str>,
+        coordinator_private_key_hex: Option<&str>,
     ) -> SimResult<Self> {
         let ledger_id = config.ledger_id.clone();
         let network_id = config.network_id.clone();
+
+        // Derive coordinator public keys (ECDSA + X25519) for ledger ownership
+        let (owner_pubkey, owner_x25519_pubkey, coordinator_address) =
+            if let Some(privkey_hex) = coordinator_private_key_hex {
+                match derive_public_keys_from_privkey_hex(privkey_hex) {
+                    Some((pub_hex, x25519_hex)) => {
+                        // Derive bech32m address for transfer fee contract
+                        let addr = derive_address_from_keys(&pub_hex, &x25519_hex, "8e");
+                        (Some(pub_hex), Some(x25519_hex), Some(addr))
+                    }
+                    None => {
+                        tracing::warn!(
+                            "Failed to derive public keys from coordinator private key — \
+                             ledger will be created without owner keys"
+                        );
+                        (None, None, None)
+                    }
+                }
+            } else {
+                (None, None, None)
+            };
 
         // 1. Create game ledger
         tracing::info!("Creating game ledger '{}'...", ledger_id);
@@ -80,8 +155,8 @@ impl GameEngine {
                 network_id: network_id.clone(),
                 prefix: ledger_id.clone(),
                 symbol: config.symbol.clone(),
-                owner_pubkey: coordinator_address.map(|s| s.to_string()),
-                owner_x25519_pubkey: None, // Simulator doesn't need X25519 for ownership
+                owner_pubkey: owner_pubkey.clone(),
+                owner_x25519_pubkey: owner_x25519_pubkey.clone(),
             })
             .await
         {
@@ -197,7 +272,7 @@ impl GameEngine {
         }
 
         // 6. Register transfer fee contract: 5% fee on all transfers → coordinator
-        if let Some(coord_addr) = coordinator_address {
+        if let Some(ref coord_addr) = coordinator_address {
             tracing::info!(
                 "Registering transfer fee contract on ledger '{}' (5% → {})...",
                 ledger_id,
@@ -211,7 +286,7 @@ impl GameEngine {
                     actions: vec![ContractActionSim::TransferFee {
                         formula: TransferFeeFormulaSim::PercentageBps { rate_bps: 500 },
                         splits: vec![TransferFeeSplitSim {
-                            address: coord_addr.to_string(),
+                            address: coord_addr.clone(),
                             share_bps: 10_000,
                         }],
                     }],

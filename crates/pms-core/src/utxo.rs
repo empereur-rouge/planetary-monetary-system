@@ -95,6 +95,12 @@ pub struct ShardedUtxoSet {
     /// Per-address native (PMS) balance cache — avoids shard read lock starvation
     /// under continuous write load (e.g. heavy token minting).
     native_balance_cache: DashMap<String, Decimal>,
+    /// Per-address per-asset token balance cache — O(1) lookup for custom tokens.
+    /// Mirrors `native_balance_cache` but keyed by `(address, asset_id)`.
+    /// Uses interned `Arc<str>` keys to avoid String allocation per lookup.
+    /// Zero-balance entries are removed to prevent unbounded growth.
+    /// Memory: ~80 bytes per entry. 100K unique (addr, asset) pairs ≈ 8 MB.
+    token_balance_cache: DashMap<(Arc<str>, Arc<str>), Decimal>,
     /// Interner pour dédupliquer addresses et asset_ids
     interner: Interner,
     /// Fallback vers RocksDB pour les cache misses
@@ -122,6 +128,7 @@ impl ShardedUtxoSet {
             address_index: DashMap::new(),
             supply_cache: Mutex::new(SupplyCache::new()),
             native_balance_cache: DashMap::new(),
+            token_balance_cache: DashMap::new(),
             interner: Interner::new(),
             fallback,
         }
@@ -174,6 +181,14 @@ impl ShardedUtxoSet {
                 .and_modify(|b| *b += output.amount)
                 .or_insert(output.amount);
         }
+
+        // Maintain token balance cache (lock-free DashMap, O(1) per lookup)
+        if let Some(ref asset_arc) = output.asset_id {
+            self.token_balance_cache
+                .entry((output.address.clone(), asset_arc.clone()))
+                .and_modify(|b| *b += output.amount)
+                .or_insert(output.amount);
+        }
     }
 
     fn supply_sub_compact(&self, output: &CompactOutput) {
@@ -199,6 +214,19 @@ impl ShardedUtxoSet {
                     let addr = entry.key().clone();
                     drop(entry);
                     self.native_balance_cache.remove(&addr);
+                }
+            }
+        }
+
+        // Maintain token balance cache — remove zero-balance entries to prevent leak
+        if let Some(ref asset_arc) = output.asset_id {
+            let key = (output.address.clone(), asset_arc.clone());
+            if let Some(mut entry) = self.token_balance_cache.get_mut(&key) {
+                *entry.value_mut() -= output.amount;
+                if entry.value().is_zero() {
+                    let k = entry.key().clone();
+                    drop(entry);
+                    self.token_balance_cache.remove(&k);
                 }
             }
         }
@@ -454,68 +482,25 @@ impl ShardedUtxoSet {
     }
 
     /// Calcule la balance d'une adresse pour un asset spécifique.
-    /// Native (None): lecture directe du cache O(1), pas de shard lock.
-    /// Token (Some): utilise l'index secondaire + shard read locks + fallback RocksDB.
+    /// Native (None) et Token (Some): lecture directe du cache O(1), pas de shard lock.
     pub async fn balance_by_address_and_asset(
         &self,
         address: &str,
         asset_id: Option<&str>,
     ) -> Decimal {
-        // Native PMS: use the lock-free balance cache
+        // Native PMS: use the lock-free native balance cache
         if asset_id.is_none() {
             return self.balance_by_address(address).await;
         }
 
-        // Token balance: shard-based approach (not in hot path during heavy minting)
-        // Collect OutputIds first, then DROP the DashMap guard before awaiting shard locks.
-        let out_points: Vec<OutputId> = match self.address_index.get(address) {
-            Some(utxo_ids) => utxo_ids.iter().map(|r| r.key().clone()).collect(),
-            None => return Decimal::ZERO,
-        };
-
-        // Group by shard index to acquire each lock only once
-        let mut by_shard: HashMap<usize, Vec<OutputId>> = HashMap::new();
-        for op in out_points {
-            by_shard.entry(Self::shard_index(&op)).or_default().push(op);
-        }
-
-        let mut total = Decimal::ZERO;
-        let mut fallback_needed: Vec<OutputId> = Vec::new();
-
-        for (shard_idx, ops) in by_shard {
-            let shard = self.shards[shard_idx].read().await;
-            for op in &ops {
-                if let Some(compact) = shard.peek(op) {
-                    let matches = match (&compact.asset_id, asset_id) {
-                        (Some(a), Some(b)) => a.as_ref() == b,
-                        _ => false,
-                    };
-                    if matches {
-                        total += compact.amount;
-                    }
-                } else {
-                    // Cache miss — collect for fallback after releasing shard lock
-                    fallback_needed.push(op.clone());
-                }
-            }
-        }
-
-        // Fetch missed UTXOs from RocksDB
-        for op in &fallback_needed {
-            if let Some(txo) = self.fetch_from_store(op) {
-                let matches = match (&txo.asset_id, asset_id) {
-                    (Some(a), Some(b)) => a == b,
-                    _ => false,
-                };
-                if matches {
-                    if let Ok(amt) = Decimal::from_str(&txo.amount) {
-                        total += amt;
-                    }
-                }
-            }
-        }
-
-        total
+        // Token balance: O(1) via token_balance_cache (no shard lock, no RocksDB fallback)
+        let asset = asset_id.unwrap(); // safe: None case handled above
+        let addr_arc = self.interner.intern(address);
+        let asset_arc = self.interner.intern(asset);
+        self.token_balance_cache
+            .get(&(addr_arc, asset_arc))
+            .map(|r| *r.value())
+            .unwrap_or(Decimal::ZERO)
     }
 
     /// Retourne tous les UTXOs d'une adresse (tous les assets).
@@ -662,6 +647,7 @@ impl ShardedUtxoSet {
     pub async fn rebuild_indexes(&self) {
         self.address_index.clear();
         self.native_balance_cache.clear();
+        self.token_balance_cache.clear();
         let mut new_supply = SupplyCache::new();
 
         for shard in &self.shards {
@@ -686,6 +672,14 @@ impl ShardedUtxoSet {
                         .and_modify(|b| *b += compact.amount)
                         .or_insert(compact.amount);
                 }
+
+                // Token balance cache
+                if let Some(ref asset_arc) = compact.asset_id {
+                    self.token_balance_cache
+                        .entry((compact.address.clone(), asset_arc.clone()))
+                        .and_modify(|b| *b += compact.amount)
+                        .or_insert(compact.amount);
+                }
             }
         }
 
@@ -703,6 +697,7 @@ impl ShardedUtxoSet {
     pub async fn rebuild_indexes_from_utxos(&self, all_utxos: &[(OutputId, TxOutput)]) {
         self.address_index.clear();
         self.native_balance_cache.clear();
+        self.token_balance_cache.clear();
         let mut new_supply = SupplyCache::new();
 
         for (outpoint, txo) in all_utxos {
@@ -724,6 +719,16 @@ impl ShardedUtxoSet {
             if txo.asset_id.is_none() {
                 self.native_balance_cache
                     .entry(txo.address.clone())
+                    .and_modify(|b| *b += amount)
+                    .or_insert(amount);
+            }
+
+            // Token balance cache
+            if let Some(ref asset_id_str) = txo.asset_id {
+                let addr_arc = self.interner.intern(&txo.address);
+                let asset_arc = self.interner.intern(asset_id_str);
+                self.token_balance_cache
+                    .entry((addr_arc, asset_arc))
                     .and_modify(|b| *b += amount)
                     .or_insert(amount);
             }

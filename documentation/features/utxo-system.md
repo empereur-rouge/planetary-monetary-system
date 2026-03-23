@@ -1,8 +1,8 @@
 ---
 tags: [feature, core, performance]
 created: 2026-01-08
-updated: 2026-03-11
-version: v0.3.0
+updated: 2026-03-23
+version: v0.6.7
 ---
 
 # UTXO System
@@ -13,9 +13,10 @@ Le systeme UTXO (Unspent Transaction Output) de PMS est une implementation shard
 
 L'architecture repose sur `ShardedUtxoSet`, un ensemble partitionne en 256 shards (un par premier octet du TxId), chacun protege par un `RwLock` independant et borne par un `LruCache`. Cette conception permet un acces concurrent massif sans lock global, condition necessaire pour atteindre un TPS eleve dans une architecture DAG de type IOTA.
 
-Trois caches secondaires sont maintenus de maniere incrementale pour eviter les scans complets :
+Quatre caches secondaires sont maintenus de maniere incrementale pour eviter les scans complets :
 - **`supply_cache`** : supply total par asset (PMS natif + tokens custom), mis a jour a chaque add/remove.
 - **`native_balance_cache`** : balance PMS native par adresse, O(1) via `DashMap` lock-free.
+- **`token_balance_cache`** (v0.6.7) : balance par `(address, asset_id)` pour tokens custom (EDN, etc.), O(1) via `DashMap` lock-free. Meme pattern que `native_balance_cache` mais cle par paire `(Arc<str>, Arc<str>)`.
 - **`address_index`** : index inverse adresse -> set d'`OutputId`, pour les requetes UTXO par adresse.
 
 ## Architecture
@@ -37,6 +38,9 @@ Trois caches secondaires sont maintenus de maniere incrementale pour eviter les 
 |                                                             |
 |  native_balance_cache: DashMap<String, Decimal>             |
 |    - Balance PMS native O(1), lock-free                     |
+|                                                             |
+|  token_balance_cache: DashMap<(Arc<str>,Arc<str>), Decimal> |
+|    - Balance token custom O(1) par (addr, asset_id)         |
 |                                                             |
 |  interner: Interner (Mutex<HashSet<Arc<str>>>)              |
 |    - Deduplication addresses et asset_ids                   |
@@ -62,7 +66,7 @@ L'`Interner` utilise un `Mutex<HashSet<Arc<str>>>` pour deduplication. La conten
 
 | Parametre | Fichier | Section | Defaut | Description |
 |---|---|---|---|---|
-| `max_utxos` | `config.*.toml` | `[rocks]` | `500_000` | Capacite maximale du cache LRU (repartie sur 256 shards). `0` = illimite. |
+| `max_utxos` | `config.*.toml` | `[rocks]` | `2_000_000` | Capacite maximale du cache LRU (repartie sur 256 shards). `0` = illimite. (~64 MB RAM) |
 | `max_spent_outpoints` | `config.*.toml` | `[rocks]` | `500_000` | Outpoints depenses en RAM pour detection double-spend. |
 
 ## Crates et Fichiers
@@ -89,7 +93,7 @@ L'`Interner` utilise un `Mutex<HashSet<Arc<str>>>` pour deduplication. La conten
 | `ShardedUtxoSet::apply_diff(spends, creates)` | `utxo.rs` | Application batch d'un delta (spend + create). Groupement par shard pour minimiser les locks. Index DashMap differe apres release du shard lock (previent deadlock). |
 | `ShardedUtxoSet::circulating_supply()` | `utxo.rs` | Retourne le supply PMS natif depuis le cache incremental. O(1). |
 | `ShardedUtxoSet::balance_by_address(addr)` | `utxo.rs` | Balance PMS native via `native_balance_cache`. O(1), pas de shard lock. |
-| `ShardedUtxoSet::balance_by_address_and_asset(addr, asset)` | `utxo.rs` | Balance par asset. Native = O(1). Token = index secondaire + shard read locks + fallback. |
+| `ShardedUtxoSet::balance_by_address_and_asset(addr, asset)` | `utxo.rs` | Balance par asset. Native = O(1) via `native_balance_cache`. Token = O(1) via `token_balance_cache` (v0.6.7). |
 | `ShardedUtxoSet::utxos_by_address(addr)` | `utxo.rs` | Tous les UTXOs d'une adresse. Groupement par shard. Cache miss -> fallback RocksDB. |
 | `ShardedUtxoSet::rebuild_indexes()` | `utxo.rs` | Reconstruction post-bootstrap depuis le contenu des shards LRU. |
 | `ShardedUtxoSet::rebuild_indexes_from_utxos(all)` | `utxo.rs` | Reconstruction post-bootstrap depuis une liste complete (quand > capacite LRU). |
@@ -114,3 +118,4 @@ L'`Interner` utilise un `Mutex<HashSet<Arc<str>>>` pour deduplication. La conten
 3. **Caches incrementaux (supply, balance)** : Evitent les full scans O(n) qui causeraient un stall du pipeline de validation. Le `native_balance_cache` est lock-free (`DashMap`) pour eviter la famine de read lock pendant le minting massif.
 4. **Interning via `Arc<str>`** : Reduit de ~4.6x l'empreinte memoire par UTXO. Essentiel pour supporter des millions d'UTXOs en RAM.
 5. **Deferred index updates** : Les mises a jour DashMap (address_index) sont collectees pendant le shard lock et appliquees apres release, evitant l'inversion de lock order qui causait des deadlocks en production (fix `f21a510`).
+6. **Token balance cache (v0.6.7)** : Meme pattern que `native_balance_cache` mais cle composite `(Arc<str>, Arc<str>)` pour supporter le multi-asset. Utilise des `Arc<str>` interned pour eviter les allocations par lookup. Zero-balance cleanup dans `supply_sub_compact()` pour prevenir les fuites memoire. Rebuild complet dans `rebuild_indexes()` / `rebuild_indexes_from_utxos()` pour coherence post-bootstrap.
