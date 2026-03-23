@@ -1,3 +1,11 @@
+/// PMS Engine — main entry point.
+///
+/// Uses jemalloc as the global allocator to prevent glibc malloc fragmentation
+/// under high-throughput multi-threaded RocksDB workloads (v0.6.3).
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use anyhow::Result;
 use clap::Parser;
 

@@ -1,10 +1,15 @@
 # ---------- build base ----------
 FROM rust:1.89-alpine AS build-base
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev
+# make: required for jemalloc (tikv-jemallocator) build
+# clang18-dev: provides libclang.so for bindgen (librocksdb-sys)
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev make clang18-dev g++ linux-headers
+ENV LIBCLANG_PATH=/usr/lib/llvm18/lib
+# Disable static CRT linking so build scripts are dynamically linked against musl.
+# This allows dlopen(libclang.so) to work in build scripts (static musl can't dlopen).
+ENV RUSTFLAGS="-C target-feature=-crt-static"
 WORKDIR /app
 COPY . .
 
-# Features: tls + ops_api (POST /submit/block, etc.)
 # Build node
 FROM build-base AS build-node
 RUN cargo build --release -p bin
@@ -15,7 +20,8 @@ RUN cargo build --release -p tools-cli
 
 # ---------- runtime node ----------
 FROM alpine:3.20 AS node
-RUN apk add --no-cache ca-certificates
+# libstdc++ + libgcc: required because binary is dynamically linked (-crt-static off)
+RUN apk add --no-cache ca-certificates libstdc++ libgcc
 COPY --from=build-node /app/target/release/bin /usr/local/bin/pms-node
 USER 65532:65532
 EXPOSE 8050 8080
@@ -24,7 +30,7 @@ ENTRYPOINT ["/usr/local/bin/pms-node"]
 
 # ---------- runtime cli ----------
 FROM alpine:3.20 AS cli
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates libstdc++ libgcc
 COPY --from=build-cli /app/target/release/tools-cli /usr/local/bin/tools-cli
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/tools-cli"]

@@ -191,10 +191,15 @@ impl ShardedUtxoSet {
         }
         drop(cache);
 
-        // Maintain native balance cache
+        // Maintain native balance cache — remove zero-balance entries to prevent leak
         if output.asset_id.is_none() {
             if let Some(mut entry) = self.native_balance_cache.get_mut(&*output.address) {
                 *entry.value_mut() -= output.amount;
+                if entry.value().is_zero() {
+                    let addr = entry.key().clone();
+                    drop(entry);
+                    self.native_balance_cache.remove(&addr);
+                }
             }
         }
     }
@@ -243,19 +248,22 @@ impl ShardedUtxoSet {
     }
 
     /// Ajoute un UTXO (écriture ciblée).
-    /// L'éviction LRU est silencieuse — les caches supply/balance ne sont pas affectés
-    /// car ils traquent l'état réel, pas l'état du cache.
+    /// Supply/balance caches restent exacts (non affectés par l'éviction LRU).
+    /// L'`address_index` est nettoyé pour les entrées évincées du LRU.
     pub async fn add(&self, out_point: OutputId, output: TxOutput) {
         let compact = self.compact(&output);
         let address = compact.address.to_string();
         self.supply_add_compact(&compact);
         let idx = Self::shard_index(&out_point);
-        {
+        let evicted = {
             let mut shard = self.shards[idx].write().await;
-            shard.put(out_point.clone(), compact);
-            // LRU eviction is silent — no supply/balance update needed
-        } // shard write lock dropped before touching DashMap
+            shard.push(out_point.clone(), compact)
+        }; // shard write lock dropped before touching DashMap
         self.addr_index_add(&address, &out_point);
+        // Clean up address_index for LRU-evicted entry (prevents unbounded growth)
+        if let Some((evicted_id, evicted_compact)) = evicted {
+            self.addr_index_remove(&evicted_compact.address, &evicted_id);
+        }
     }
 
     /// Supprime un UTXO (spend).
@@ -332,6 +340,9 @@ impl ShardedUtxoSet {
         // Spends that missed the LRU cache — need fallback after shard lock is released
         let mut missed_spends: Vec<OutputId> = Vec::new();
 
+        // LRU-evicted entries that need address_index cleanup (after lock release)
+        let mut evicted_entries: Vec<(OutputId, CompactOutput)> = Vec::new();
+
         // Process each shard with a single write lock
         for shard_idx in affected {
             {
@@ -355,7 +366,7 @@ impl ShardedUtxoSet {
                 }
 
                 // Creates: insert into shard, defer index update
-                // LRU eviction is silent — no supply/balance update for evicted entries
+                // Capture LRU-evicted entries for address_index cleanup
                 if let Some(cr_list) = create_by_shard.get(&shard_idx) {
                     for (id, compact) in cr_list.iter().map(|item| (&item.0, &item.1)) {
                         deferred_index_ops.push((
@@ -364,14 +375,16 @@ impl ShardedUtxoSet {
                             true, // add
                         ));
                         self.supply_add_compact(compact);
-                        shard.put(
+                        if let Some(evicted) = shard.push(
                             id.clone(),
                             CompactOutput {
                                 address: compact.address.clone(),
                                 amount: compact.amount,
                                 asset_id: compact.asset_id.clone(),
                             },
-                        );
+                        ) {
+                            evicted_entries.push(evicted);
+                        }
                     }
                 }
             } // shard write lock dropped here
@@ -392,6 +405,11 @@ impl ShardedUtxoSet {
             } else {
                 self.addr_index_remove(&address, &outpoint);
             }
+        }
+
+        // Clean up address_index for LRU-evicted entries (prevents unbounded growth)
+        for (evicted_id, evicted_compact) in evicted_entries {
+            self.addr_index_remove(&evicted_compact.address, &evicted_id);
         }
     }
 

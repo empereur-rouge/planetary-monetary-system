@@ -1,6 +1,6 @@
 [package]
 name = "bin"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 
 [dependencies]
@@ -27,3 +27,9 @@ rustls = { workspace = true }
 clap = { version = "4.5.51", features = ["derive"] }
 webbrowser = "1.0"
 dashmap = "6.1.0"
+
+# jemalloc — prevents glibc malloc fragmentation under high-throughput multi-threaded
+# RocksDB workloads. Without it, RSS grows ~4 GiB/min at 400 TPS due to per-thread
+# arena fragmentation in ptmalloc2. jemalloc returns freed pages to OS aggressively.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"

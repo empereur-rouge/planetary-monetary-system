@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.3] - 2026-03-22 — Fix: OOM crash loop on VPS testnet
+
+### Fixed
+- **fix(memory/critical)**: Engine OOM crash loop on 16 GB VPS (RestartCount: 48+, exit code 137). Root cause: glibc ptmalloc2 per-thread arena fragmentation under high-throughput multi-threaded RocksDB workloads caused RSS to grow ~4 GiB/min at 400 TPS. Solution: **jemalloc global allocator** via `tikv-jemallocator` — returns freed pages to OS aggressively, eliminates fragmentation-induced memory bloat.
+- **fix(memory)**: `address_index` (DashMap<String, DashSet<OutputId>>) in `ShardedUtxoSet` grew without bound. When LRU cache evicted UTXOs, their `address_index` entries were never cleaned up. Fixed: `add()` and `apply_diff()` now use `push()` instead of `put()` to capture evicted entries and remove them from `address_index`.
+- **fix(memory)**: `native_balance_cache` (DashMap<String, Decimal>) never removed zero-balance entries. Fixed: `supply_sub_compact()` now removes entries when balance reaches zero.
+
+### Changed
+- **config(testnet)**: Reduced RocksDB memory settings for 16 GB VPS — `write_buffer_size_mb` 32→16, `block_cache_size_mb` 1024→256, `db_write_buffer_size_mb` 512→256, `max_utxos` 2M→250K.
+- **config(testnet)**: Reduced simulator TPS from ~2000 to ~300 (snipers 10→3, fast traders 20→8, reduced sends_per_tick across agents).
+
+### Infrastructure
+- **infra(docker)**: Overhauled `Dockerfile.testnet` for jemalloc + RocksDB on Alpine/musl:
+  - Added `clang18-dev`, `g++`, `linux-headers` build deps for RocksDB C++ compilation + bindgen.
+  - Set `RUSTFLAGS="-C target-feature=-crt-static"` — dynamically links musl so build scripts can `dlopen(libclang.so)` (static musl blocks `dlopen`, breaking bindgen's runtime linking).
+  - Added `libstdc++`, `libgcc` to runtime Alpine image for dynamically-linked binary.
+  - Runtime container uses `user: "1000:1000"` (matching host `pms` user) instead of nonroot UID 65532.
+
+---
+
 ## [0.6.2] - 2026-03-22 — Hardening: production-readiness quick wins
 
 ### Fixed
