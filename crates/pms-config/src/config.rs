@@ -32,7 +32,7 @@ fn default_max_utxos() -> usize {
 }
 
 fn default_write_buffer_size_mb() -> usize {
-    128
+    16
 }
 
 fn default_max_write_buffer_number() -> i32 {
@@ -40,7 +40,7 @@ fn default_max_write_buffer_number() -> i32 {
 }
 
 fn default_block_cache_size_mb() -> usize {
-    1024
+    512
 }
 
 fn default_db_write_buffer_size_mb() -> usize {
@@ -88,8 +88,9 @@ pub struct Rocks {
 
     /// Write buffer (memtable) size per column family, in MB.
     /// Each CF can hold up to `max_write_buffer_number` memtables of this size.
-    /// Lower this when running many ledgers (many CFs) to reduce per-CF memory.
-    /// Default: 128 MB.
+    /// CRITICAL: Total memtable RAM = num_CFs × max_write_buffer_number × this value.
+    /// With 2 ledgers (67 CFs), 16 MB × 3 = 3.2 GiB max; 32 MB × 3 = 6.4 GiB (OOM risk).
+    /// Default: 16 MB (safe for multi-ledger on 16 GB VPS).
     #[serde(default = "default_write_buffer_size_mb")]
     pub write_buffer_size_mb: usize,
 
@@ -100,8 +101,8 @@ pub struct Rocks {
 
     /// Shared LRU block cache size in MB, shared across ALL column families.
     /// Holds data blocks, index blocks, and filter blocks.
-    /// With Direct I/O (v0.5.21), this is the ONLY read cache — size generously.
-    /// Default: 1024 MB.
+    /// With Direct I/O (v0.5.21), this is the ONLY read cache.
+    /// Default: 512 MB. Scale with available RAM after memtable budget.
     #[serde(default = "default_block_cache_size_mb")]
     pub block_cache_size_mb: usize,
 

@@ -66,13 +66,15 @@
 - **NEVER hardcode secrets in code or config files committed to git.** Toujours utiliser `env:VAR` ou les fichiers secrets du VPS (`/opt/pms/etc/pms/`).
 
 ### Dimensionnement mémoire RocksDB (config.testnet.toml)
-Les valeurs RocksDB DOIVENT être adaptées à la RAM du VPS :
+Les valeurs RocksDB DOIVENT être adaptées à la RAM du VPS. Avec 67 CFs (2 ledgers × 33 CFs + default), la formule memtable max est : `num_CFs × max_write_buffer_number × write_buffer_size_mb`.
 
-| VPS RAM | `write_buffer_size_mb` | `block_cache_size_mb` | `db_write_buffer_size_mb` | Docker `mem_limit` |
-|---------|------------------------|-----------------------|---------------------------|--------------------|
-| 8 Go | 64 | 256 | 512 | 7g |
-| **16 Go** | **128** | **512** | **1024** | **14g** |
-| 32 Go | 256 | 1024 | 2048 | 28g |
+| VPS RAM | `write_buffer_size_mb` | `max_write_buffer_number` | `block_cache_size_mb` | `db_write_buffer_size_mb` | `max_dag_blocks` | Docker `mem_limit` |
+|---------|------------------------|---------------------------|-----------------------|---------------------------|-------------------|--------------------|
+| 8 Go | 8 | 2 | 128 | 128 | 5000 | 7g |
+| **16 Go** | **16** | **2** | **256** | **256** | **10000** | **14g** |
+| 32 Go | 32 | 3 | 1024 | 512 | 50000 | 28g |
+
+**Observation (v0.7.1, 16 Go)** : avec 20M blocs en DB, mémoire suit un pattern dent de scie (compaction RocksDB) : trough ~6-7 GiB, peak ~12.4 GiB. Stable à ~20 tx/s + game activity.
 
 ### Déploiement
 - **Full deploy** (build + init) : `scripts/deploy-testnet.sh [--yes] <IP> [USER] [SSH_KEY]`

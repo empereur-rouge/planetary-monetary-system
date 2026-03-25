@@ -8,26 +8,33 @@
 path = "/home/pms/data/rocks"
 prefix = "pms:test"
 tip_limit = 256
-max_dag_blocks = 50000
-# UTXO LRU cache size. With simulator generating 2M+ UTXOs, 250K caused
-# 87.5% cache miss rate → every coin selection hit RocksDB for ~900 lookups.
-# 2M keeps the working set in RAM. Memory cost: ~400 MB (acceptable on 16 GB VPS).
-max_utxos = 2000000
+max_dag_blocks = 10000           # RAM DAG window (v0.7.1: 50K→10K to reduce baseline from 8→0.6 GiB)
+# UTXO LRU cache size. Testnet has ~21K UTXOs. 500K gives ~24x headroom.
+# Higher values increase baseline memory without benefit on testnet.
+max_utxos = 500000
+auto_reindex_activity_items = false  # Disabled: reindex consumes significant memory during bootstrap
 checkpoint_interval_secs = 3600
-# ── Memory tuning (scale with VPS RAM) ──────────────────────────────────────
+# ── Memory tuning for 16 GB VPS (v0.7.1) ─────────────────────────────────────
 # Direct I/O (v0.5.21): kernel page cache bypassed → block_cache is the ONLY read cache.
 # CRITICAL: write_buffer_size_mb × max_write_buffer_number × num_CFs = memtable RAM.
-# With multi-ledger (2 ledgers = 66 CFs), keep write_buffer SMALL:
-#   66 CFs × 3 buffers × 32 MB = 6.3 GB max memtable (safe)
-#   66 CFs × 6 buffers × 128 MB = 50 GB max memtable (OOM!)
+# With multi-ledger (2 ledgers × 33 CFs = 67 CFs total), keep ALL values SMALL:
 #
-#  8 GB VPS:  write_buffer=16,  buffers=3, cache=512,  docker mem_limit=7g
-# 16 GB VPS:  write_buffer=32,  buffers=3, cache=1024, docker mem_limit=14g
-# 32 GB VPS:  write_buffer=64,  buffers=4, cache=2048, docker mem_limit=28g
-write_buffer_size_mb = 32        # Per-CF memtable (v0.5.22: 128→32 for multi-ledger safety)
-max_write_buffer_number = 3      # Per-CF immutable memtables (v0.5.22: 6→3)
-block_cache_size_mb = 1024       # Shared LRU cache — sole read cache with Direct I/O
-db_write_buffer_size_mb = 512    # Global memtable flush trigger (NOT a hard cap!)
+#   Memtable budget:  67 CFs × 2 buffers × 16 MB = 2.1 GB max
+#   Block cache:      256 MB (holds bloom filters + index blocks + hot data)
+#   Flush trigger:    256 MB global (flush eagerly to limit memtable peak)
+#
+# Observed behavior with 20M blocks across 67 CFs:
+#   - Trough: ~6-7 GiB (45-51%), Peak: ~12.4 GiB (89%) during compaction
+#   - Compaction cycles: ~2-3 min period, all 8 cores engaged
+#   - Stable at ~20 tx/s with game activity (~30 total blocks/s)
+#
+#  8 GB VPS:  write_buffer=8,   buffers=2, cache=128,  docker mem_limit=7g
+# 16 GB VPS:  write_buffer=16,  buffers=2, cache=256,  docker mem_limit=14g
+# 32 GB VPS:  write_buffer=32,  buffers=3, cache=1024, docker mem_limit=28g
+write_buffer_size_mb = 16        # Per-CF memtable (v0.7.1: 32→16)
+max_write_buffer_number = 2      # Per-CF immutable memtables (v0.7.1: 3→2)
+block_cache_size_mb = 256        # Shared LRU cache (v0.7.1: 512→256)
+db_write_buffer_size_mb = 256    # Global memtable flush trigger (v0.7.1: 512→256)
 max_open_files = 4096            # FD limit (ulimit=65536 in docker-compose)
 
 [network]

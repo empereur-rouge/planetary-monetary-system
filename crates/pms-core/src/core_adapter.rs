@@ -53,8 +53,9 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
         // Force l'utilisation du ShardedUtxoSet (Phase 4)
         p.skip_utxo_checks = true;
 
-        // Spawn background persist task (buffer 10k blocks)
-        let (persist_tx, _handle) = spawn_background_persist(store.clone(), 10_000);
+        // Spawn background persist task (buffer 2K blocks — smaller buffer limits
+        // RAM usage under write pressure; back-pressure in persist.rs ensures no drops)
+        let (persist_tx, _handle) = spawn_background_persist(store.clone(), 2_000);
 
         // Event bus avec capacité 4096 (haut débit)
         let event_bus = EventBus::new(4096);
@@ -89,8 +90,9 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
             policy.min_parents_after_boot = 1;
         }
 
-        // Spawn background persist task (buffer 10k blocks)
-        let (persist_tx, _handle) = spawn_background_persist(store.clone(), 10_000);
+        // Spawn background persist task (buffer 2K blocks — smaller buffer limits
+        // RAM usage under write pressure; back-pressure in persist.rs ensures no drops)
+        let (persist_tx, _handle) = spawn_background_persist(store.clone(), 2_000);
 
         // Event bus avec capacité 4096
         let event_bus = EventBus::new(4096);

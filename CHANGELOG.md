@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.6.8] - Unreleased — Smart Contract Simulation & Sandbox Mode
+## [0.7.1] - 2026-03-24 — Fix: OOM crash loop + software_version endpoint
+
+### Fixed
+- **fix(rocksdb/critical)**: Engine OOM crash loop on testnet VPS (12 restarts in 24h, exit code 137). Root cause: with 2 ledgers (67 column families) and 20M blocks in DB, RocksDB compaction memory spikes exceeded the 14 GiB Docker limit. Aggressive tuning: `write_buffer_size_mb` 32→16, `max_write_buffer_number` 3→2, `block_cache_size_mb` 512→256, `db_write_buffer_size_mb` 512→256, `max_dag_blocks` 50K→10K. New memtable budget: 2.1 GiB (67 × 2 × 16 MB). Memory follows saw-tooth pattern: trough ~6-7 GiB, peak ~12.4 GiB during compaction. Stable at ~20 tx/s + game activity.
+- **fix(persist/critical)**: Background persist channel used `try_send()` which **silently dropped blocks** when the 10K buffer was full — a data loss bug in a financial system. Replaced with `send().await` + 5-second timeout: API callers now block (natural back-pressure) instead of losing data. Timeout prevents indefinite blocking if RocksDB stalls. Both channel-closed and timeout scenarios log errors.
+- **fix(api)**: `GET /v1/version` returned `software_version: "0.1.0"` instead of the actual binary version. Root cause: `env!("CARGO_PKG_VERSION")` in `pms-server` crate read that crate's own Cargo.toml version (0.1.0), not the binary version. Fix: introduced `[workspace.package] version` in root Cargo.toml, inherited by `bin` and `pms-server` via `version.workspace = true`. Now all report the correct version.
+
+### Performance
+- **perf(persist)**: Reduced background persist channel buffer from 10K to 2K blocks. With back-pressure enabled, the large buffer only consumed RAM without benefit. 2K blocks × ~1 KB = ~2 MB vs ~10 MB, with 31 batches of headroom at MAX_BATCH_SIZE=64.
+
+### Changed
+- **refactor(versioning)**: Software version now defined once in `Cargo.toml` workspace (`[workspace.package] version = "0.7.1"`), inherited by `bin` and `pms-server`. Bumping version requires changing only the workspace root.
+- **bump(version)**: Software version 0.7.0 → 0.7.1.
+
+### Infrastructure
+- **ops(testnet)**: Updated `config.testnet.toml` with aggressive memory tuning for 16 GB VPS: `max_write_buffer_number` 3→2, `block_cache_size_mb` 512→256, `db_write_buffer_size_mb` 512→256, `max_dag_blocks` 50K→10K, `max_utxos` 2M→500K. Memory sizing table updated in CLAUDE.md.
+- **ops(testnet)**: Reduced simulator `agents_testnet.toml` from ~1,800 tx/s (original) to ~20 tx/s (30 agents). 16 GB VPS can sustain ~20 PMS tx/s + game activity with saw-tooth compaction pattern staying under 14 GiB limit.
+
+---
+
+## [0.7.0] - 2026-03-24 — Cube Obfuscation, Rarity System & Calibrated Economics
+
+_See git log for full details (commit bf33f90)._
+
+---
+
+## [0.6.8] - 2026-03-23 — Smart Contract Simulation & Sandbox Mode
 
 ### Added
 - **feat(contracts)**: `POST /admin/contracts/simulate` dry-run endpoint. Accepts a candidate contract + a simulated event (`NftBurn`, `Transfer`, `TokenBurn`), evaluates the contract against an ephemeral in-memory store (existing contracts + candidate), and returns `SimulationResult` with `matched`, `match_reason`, `burn_results`, `transfer_fee_results`, `warnings`, and `existing_contract_matches`. No state is persisted — pure dry-run. Protected by `require_local_or_admin`.

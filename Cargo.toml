@@ -1,3 +1,6 @@
+[workspace.package]
+version = "0.7.1"
+
 [workspace]
 members = [
     "crates/pms-wallet",
