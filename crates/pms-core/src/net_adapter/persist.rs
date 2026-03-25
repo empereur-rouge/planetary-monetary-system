@@ -989,29 +989,45 @@ where
         }
 
         // ============================================================
-        // 7) FIRE-AND-FORGET: Send to background persist channel
+        // 7) BACK-PRESSURE: Send to background persist channel
         // ============================================================
+        // CRITICAL: A financial system must NEVER silently drop blocks.
+        // We use a blocking send with timeout: when the persist pipeline
+        // can't keep up, API callers slow down (natural back-pressure)
+        // rather than losing data. The 5s timeout prevents indefinite
+        // blocking if RocksDB is completely stalled.
         use crate::background_persist::PersistJob;
         let job = PersistJob {
             block: sb.clone(),
             delta,
             newly_finalized,
         };
-        // Non-blocking send: if the persist channel buffer (10K) is full,
-        // the block is DROPPED and never written to RocksDB — a silent data loss.
-        // Log a warning so operators can detect backpressure issues.
-        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = self.persist_tx.try_send(job)
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.persist_tx.send(job),
+        )
+        .await
         {
-            static DROP_COUNT: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(0);
-            let dropped = DROP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            // Log every drop but avoid spam: detailed log every 100th drop
-            if dropped <= 10 || dropped % 100 == 0 {
-                tracing::warn!(
+            Ok(Ok(())) => {} // sent successfully — block will be persisted
+            Ok(Err(_closed)) => {
+                // Channel closed — background persist task has shut down
+                tracing::error!(
                     target = "pms_persist",
                     block_id = %sb.id,
-                    total_dropped = dropped,
-                    "⚠️ Persist channel full — block dropped! Increase buffer or reduce TPS"
+                    "Persist channel closed — background task died, block NOT queued"
+                );
+            }
+            Err(_elapsed) => {
+                // Timeout — persist pipeline completely stalled for 5s
+                static TIMEOUT_COUNT: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let count =
+                    TIMEOUT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                tracing::error!(
+                    target = "pms_persist",
+                    block_id = %sb.id,
+                    total_timeouts = count,
+                    "Persist send timed out (5s) — RocksDB may be stalled, block NOT queued"
                 );
             }
         }

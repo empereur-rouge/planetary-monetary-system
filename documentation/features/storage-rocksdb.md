@@ -1,15 +1,15 @@
 ---
 tags: [feature, infrastructure]
 created: 2026-03-14
-updated: 2026-03-21
-version: v0.6.0
+updated: 2026-03-24
+version: v0.7.1
 ---
 
 # Storage / RocksDB
 
 ## Resume
 
-La couche de persistance RocksDB constitue le socle de stockage durable du moteur bancaire DAG-PMS. Elle garantit la durabilite des blocs, des UTXOs, des NFTs, des index d'activite, des contrats declaratifs, des gas pools et de la configuration runtime. Architecturee autour de **31 Column Families** par ledger, elle supporte le mode multi-ledger via prefixage dynamique des CFs, et integre un systeme de migrations incrementales (schema DB version + DAG protocol version). Les performances sont optimisees pour un throughput soutenu de 120+ TPS sur VPS 8 Go grace a un tuning RocksDB pousse (bloom filters sur toutes les CFs, block cache 512 Mo, prevention des write stalls L0, sub-compactions paralleles).
+La couche de persistance RocksDB constitue le socle de stockage durable du moteur bancaire DAG-PMS. Elle garantit la durabilite des blocs, des UTXOs, des NFTs, des index d'activite, des contrats declaratifs, des gas pools et de la configuration runtime. Architecturee autour de **33 Column Families** par ledger (+ 1 CF `default` RocksDB), elle supporte le mode multi-ledger via prefixage dynamique des CFs, et integre un systeme de migrations incrementales (schema DB version + DAG protocol version). Les performances sont optimisees pour un throughput soutenu via un tuning RocksDB pousse (bloom filters sur toutes les CFs, block cache 512 Mo, prevention des write stalls L0, sub-compactions paralleles, Direct I/O).
 
 ## Architecture
 
@@ -27,7 +27,7 @@ Le systeme utilise une architecture a deux couches complementaires :
 |   ConcurrentDag   |          |    RocksStore      |
 |   (RAM, hot)      |          |   (SSD, durable)   |
 +-------------------+          +-------------------+
-| DashMap<id,Block> |          | 31 CFs x N ledgers |
+| DashMap<id,Block> |          | 33 CFs x N ledgers |
 | DashSet(outpoints)|          | WriteBatch atomic   |
 | FinalityState     |          | Bloom + LRU cache   |
 | Bounded by        |          | Unbounded (disque)  |
@@ -50,6 +50,23 @@ Le systeme utilise une architecture a deux couches complementaires :
 - Cache in-memory DashSet pour les adresses gelees (`frozen_set`, O(1) sans I/O)
 - `db_path: PathBuf` stocke le chemin absolu de la DB. Utilise pour deriver le chemin de backup (sibling `backups/pms/`) — garantit que les checkpoints sont toujours sur le meme volume que les donnees (critique en Docker)
 
+### Background Persist Pipeline (v0.5.20+, back-pressure v0.7.1)
+
+```
+API handler → persist_block() → [RAM DAG insert] → mpsc::send(block) → background_persist_task()
+                                                         ↓                        ↓
+                                                    back-pressure          batch drain (64 max)
+                                                    (blocks if full)            ↓
+                                                                      store.append_blocks_batch()
+                                                                      (single WriteBatch)
+```
+
+- **Channel** : `mpsc::channel(2_000)` — file d'attente bornee entre les API handlers et la tache de persistance (v0.7.1: 10K → 2K)
+- **Back-pressure (v0.7.1)** : `send().await` avec timeout 5s remplace `try_send()` qui **perdait silencieusement** les blocs quand le buffer etait plein. Maintenant les API handlers ralentissent naturellement quand la persistance ne suit pas le debit.
+- **Batch drain** : La tache consommatrice draine jusqu'a `MAX_BATCH_SIZE=64` jobs par iteration via `try_recv()` non-bloquant apres le `recv().await` initial
+- **WriteBatch** : Tous les blocs du batch sont persistes en un seul `db.write()` via `append_blocks_batch()` (v0.5.20)
+- **Fichiers** : `crates/pms-core/src/background_persist.rs` (tache), `crates/pms-core/src/net_adapter/persist.rs` (envoi), `crates/pms-core/src/core_adapter.rs` (spawn)
+
 ### Regle critique : Dual-Layer Consistency
 
 > **Tout fix applique sur une couche DOIT etre verifie et applique sur l'autre couche si la meme logique existe.**
@@ -58,7 +75,7 @@ Exemple historique : `prune_oldest()` (RAM) a ete corrige pour proteger le derni
 
 ### Multi-Prefix Mode (Multi-Ledger)
 
-Chaque ledger dispose de son propre jeu de 31 CFs, prefixees par l'identifiant du ledger :
+Chaque ledger dispose de son propre jeu de 33 CFs, prefixees par l'identifiant du ledger :
 - Ledger principal : `mainnet:blocks`, `mainnet:utxo`, `mainnet:tips`, ...
 - Ledger custom : `custom_ledger_42:blocks`, `custom_ledger_42:utxo`, ...
 
@@ -74,7 +91,7 @@ Les CFs utilisent le format `{prefix}:{cf_short_name}`. Le mapping short name ->
 
 ## Column Families
 
-### Liste exhaustive (31 CFs par ledger)
+### Liste exhaustive (33 CFs par ledger)
 
 | # | Nom CF | Cle | Valeur | Role | Module |
 |---|--------|-----|--------|------|--------|
@@ -110,8 +127,9 @@ Les CFs utilisent le format `{prefix}:{cf_short_name}`. Le mapping short name ->
 | 30 | `contracts` | `contract_id` (bytes) | JSON(`Contract`) | Contrats declaratifs (smart contracts rule-based) | `contract_storage.rs` |
 | 31 | `gas_pools` | `ledger_id` (bytes) | JSON(`GasPool`) | Gas pools par ledger (anti-spam pour ledgers custom) | `gas_pool_storage.rs` |
 | 32 | `ledger_subscriptions` | `ledger_id` (bytes) | JSON(`LedgerSubscription`) | Abonnements annuels des ledgers custom | `store.rs` (CF declare) |
+| 33 | `ledger_defs` | `ledger_id` (bytes) | JSON(`LedgerDef`) | Definitions des ledgers custom persistes (owner, prefix, config) | `ledger_storage.rs` |
 
-> **Note** : Le tableau contient 32 CFs car `CF_NAMES` en declare 31 + la CF `default` obligatoire de RocksDB. La liste hardcodee dans `new()` et la constante `CF_NAMES` doivent rester synchronisees.
+> **Note** : Le tableau contient 33 CFs definies dans `CF_NAMES` + la CF `default` obligatoire de RocksDB = 34 CFs au total par ledger. Avec N ledgers : `1 (default) + N × 33` CFs. Pour 2 ledgers (main + eden) : 67 CFs. La liste hardcodee dans `new()` et la constante `CF_NAMES` doivent rester synchronisees.
 
 ### Double liste de CFs (piege historique)
 
@@ -132,11 +150,11 @@ Un CF present dans l'une mais absent de l'autre provoque un crash RocksDB au dem
 | `tip_limit` | `usize` | `200` | Nombre maximum de tips conserves dans la CF `tips` |
 | `max_dag_blocks` | `usize` | `50_000` | Blocs max en RAM (ConcurrentDag). 0 = illimite |
 | `max_spent_outpoints` | `usize` | `500_000` | Outpoints depenses max en RAM (double-spend detection) |
-| `max_utxos` | `usize` | `500_000` | UTXOs max dans le cache LRU RAM. Cache miss -> RocksDB |
+| `max_utxos` | `usize` | `2_000_000` | UTXOs max dans le cache LRU RAM. Cache miss -> RocksDB |
 | `checkpoint_interval_secs` | `Option<u64>` | `21600` (6h) | Intervalle entre les checkpoints de backup |
-| `write_buffer_size_mb` | `usize` | `32` | Taille du memtable par CF, en MB. **CRITIQUE multi-ledger** : `N_CFs × max_write_buffer × write_buffer = memtable RAM` (v0.5.22: 128→32) |
+| `write_buffer_size_mb` | `usize` | `16` | Taille du memtable par CF, en MB. **CRITIQUE multi-ledger** : `N_CFs × max_write_buffer × write_buffer = memtable RAM` (v0.7.1: 128→16) |
 | `max_write_buffer_number` | `i32` | `3` | Nombre max de memtables par CF avant flush |
-| `block_cache_size_mb` | `usize` | `1024` | Cache LRU partage entre toutes les CFs, en MB. **Seul cache de lecture avec Direct I/O (v0.5.21)** |
+| `block_cache_size_mb` | `usize` | `512` | Cache LRU partage entre toutes les CFs, en MB. **Seul cache de lecture avec Direct I/O (v0.5.21)** |
 | `db_write_buffer_size_mb` | `usize` | `512` | Declencheur de flush global (toutes CFs). 0 = desactive. **N'est PAS un cap memoire dur** — les memtables immutables en attente de flush depassent cette limite (v0.5.22) |
 | `max_open_files` | `i32` | `512` | Limite FD RocksDB. -1 = illimite (dangereux). **Critique pour VPS avec ulimit=1024 et 66+ CFs** (v0.5.8) |
 
@@ -154,15 +172,15 @@ pub struct RocksMemoryConfig {
 }
 ```
 
-**Recommandations par taille VPS (v0.5.22, multi-ledger safe) :**
+**Recommandations par taille VPS (v0.7.1, multi-ledger safe) :**
 
 Formule : `memtable_max = num_CFs × max_write_buffer_number × write_buffer_size_mb`
 
-| VPS | Ledgers | CFs | `write_buffer_size_mb` | `max_write_buffer_number` | Memtable max | `block_cache_size_mb` | Total |
-|-----|---------|-----|----------------------|--------------------------|-------------|---------------------|-------|
-| 8 GB | 1 | 33 | 16 | 3 | 1.6 GB | 512 | ~2.5 GB |
-| 16 GB | 2 | 66 | **32** | **3** | 6.3 GB | **1024** | ~8 GB |
-| 32 GB | 4+ | 132+ | 64 | 4 | 33 GB | 2048 | ~36 GB |
+| VPS | Ledgers | CFs | `write_buffer_size_mb` | `max_write_buffer_number` | Memtable max | `block_cache_size_mb` | `max_dag_blocks` | Observed peak |
+|-----|---------|-----|----------------------|--------------------------|-------------|---------------------|-----------------|--------------|
+| 8 GB | 1 | 34 | 8 | 2 | 0.5 GB | 128 | 5K | ~5 GB |
+| **16 GB** | **2** | **67** | **16** | **2** | **2.1 GB** | **256** | **10K** | **~12.4 GB** |
+| 32 GB | 4+ | 133+ | 32 | 3 | 12.8 GB | 1024 | 50K | ~20 GB |
 
 ### Parametres `apply_db_tuning()` (configurable + hardcodes)
 
@@ -193,7 +211,7 @@ Ces parametres sont appliques uniformement a `new()` et `open_db_multi_prefix()`
 
 ### Block Cache et Bloom Filters
 
-Appliques a **toutes** les 31 CFs (pas seulement aux CFs d'index) :
+Appliques a **toutes** les 33 CFs (pas seulement aux CFs d'index) :
 
 | Parametre | Valeur | Configurable | Justification |
 |-----------|--------|-------------|---------------|
@@ -249,7 +267,7 @@ Appliques a **toutes** les 31 CFs (pas seulement aux CFs d'index) :
 
 | Fonction | Fichier | Description |
 |----------|---------|-------------|
-| `RocksStore::new()` | `store.rs` | Ouverture single-prefix : cree les 31 CFs prefixees, applique le tuning, bloom filters sur toutes les CFs |
+| `RocksStore::new()` | `store.rs` | Ouverture single-prefix : cree les 33 CFs prefixees, applique le tuning, bloom filters sur toutes les CFs |
 | `RocksStore::open_db_multi_prefix()` | `store.rs` | Ouverture multi-prefix : cree les CFs pour N ledgers, retourne `Arc<PmsDb>` partageable |
 | `RocksStore::from_shared_db()` | `store.rs` | Cree un `RocksStore` a partir d'un `Arc<PmsDb>` deja ouvert (multi-ledger) |
 | `RocksStore::open_read_only()` | `secondary.rs` | Ouvre la DB en lecture seule (pas de lock exclusif) |
@@ -367,15 +385,15 @@ Verification au demarrage via `check_dag_compatibility()` :
 
 #### v0.2.6 : Bloom filters sur toutes les CFs
 
-**Cause racine** : Seules 7/31 CFs avaient des bloom filters. Les point lookups sur les 24 autres degradaient progressivement avec la croissance des niveaux LSM.
+**Cause racine** : Seules 7/33 CFs avaient des bloom filters. Les point lookups sur les 24 autres degradaient progressivement avec la croissance des niveaux LSM.
 
 **Correctifs** :
-- Bloom filters (10 bits/key) appliques aux 31 CFs dans `new()` et `open_db_multi_prefix()`
+- Bloom filters (10 bits/key) appliques aux 33 CFs dans `new()` et `open_db_multi_prefix()`
 - `optimize_filters_for_hits(true)` sur toutes les CFs
 
 #### v0.2.7 : Pinning L0 + 512 MB cache
 
-**Cause racine** : 31 CFs rivalisaient pour l'espace cache (256 MB). Les blocs index/filter de L0 se faisaient evincer, chaque point lookup necessitait 2+ lectures disque. TPS tombait a 0.
+**Cause racine** : 33 CFs rivalisaient pour l'espace cache (256 MB). Les blocs index/filter de L0 se faisaient evincer, chaque point lookup necessitait 2+ lectures disque. TPS tombait a 0.
 
 **Correctifs** :
 - Cache LRU passe de 256 MB a **512 MB** (partage entre toutes les CFs)
@@ -403,9 +421,9 @@ Verification au demarrage via `check_dag_compatibility()` :
 - Application + runtime : ~500 MB
 - **Total : ~5.1 GB moyen, ~8.4 GB max** — aucune pression de page cache, 0 GB invisible
 
-#### v0.5.22 : Fix OOM memtable multi-ledger
+#### v0.5.22 : Fix OOM memtable multi-ledger (premier round)
 
-**Cause racine** : Avec 2 ledgers (main + Eden), RocksDB cree 66 CFs (33 par ledger). `write_buffer_size_mb=128 × max_write_buffer_number=6 × 66 CFs = 50 GB theorique max`. En pratique, ~1.5 memtables actives par CF = **12.7 GB de heap** confirme par `/proc/1/smaps_rollup`. Le `db_write_buffer_size_mb=1024` n'est qu'un declencheur de flush, PAS un cap dur.
+**Cause racine** : Avec 2 ledgers (main + Eden), RocksDB cree 67 CFs (33 par ledger + default). `write_buffer_size_mb=128 × max_write_buffer_number=6 × 67 CFs = 51 GB theorique max`. En pratique, ~1.5 memtables actives par CF = **12.7 GB de heap** confirme par `/proc/1/smaps_rollup`. Le `db_write_buffer_size_mb=1024` n'est qu'un declencheur de flush, PAS un cap dur.
 
 **Symptomes** : 4 restarts OOM en 1 nuit. `docker stats` montre 11.58 GiB / 14 GiB. Direct I/O confirme fonctionnel (Pss_File = 21 MB seulement).
 
@@ -415,10 +433,25 @@ Verification au demarrage via `check_dag_compatibility()` :
 - `db_write_buffer_size_mb` : 1024 → **512** (config testnet)
 - Documentation corrigee : `db_write_buffer_size_mb` est un flush trigger, pas un memory cap
 
-**Budget memoire corrige** (2 ledgers, 66 CFs, VPS 16 GB) :
-- Memtables max : 66 × 3 × 32 MB = **6.3 GB** (au lieu de 50 GB theorique)
-- Memtables moyen : 66 × 1.5 × 32 MB = **~3.2 GB**
-- + Block cache (1 GB) + UTXO (0.4 GB) + App (0.5 GB) = **~5.1 GB moyen** — safe dans 14 GB
+#### v0.7.1 : Fix OOM crash loop (deuxieme + troisieme round)
+
+**Cause racine** : Avec 20M blocs en DB, 2 ledgers (67 CFs), les compactions RocksDB generent des pics memoire de ~12 GiB. Les parametres initiaux (write_buffer=32, buffers=3, cache=1024) laissaient un budget memtable max de 6.4 GiB — combine avec le block cache, UTXO LRU, et compaction buffers, l'engine depassait 14 GiB. 12 restarts OOM en 24h avec cycle raccourcissant (1h45 → 7 min).
+
+**Symptomes** : Engine atteint 10-14 GiB en 2-3 min meme a 20 tx/s. Pattern dent de scie lie aux cycles de compaction RocksDB (toutes les 2-3 min, 857% CPU pendant compaction).
+
+**Correctifs (3 rounds successifs)** :
+1. `write_buffer_size_mb` : 32 → **16** | `block_cache_size_mb` : 1024 → 512 *(insuffisant)*
+2. `max_write_buffer_number` : 3 → **2** | `block_cache_size_mb` : 512 → **256** | `db_write_buffer_size_mb` : 512 → **256** *(stabilise le saw-tooth)*
+3. `max_dag_blocks` : 50K → **10K** | `max_utxos` : 2M → **500K** *(baseline de 8 GiB → 0.6 GiB)*
+
+**Back-pressure (persist pipeline)** : `try_send()` remplace par `send().await` + timeout 5s. Buffer 10K → 2K. Previent les silent block drops.
+
+**Budget memoire final** (2 ledgers, 67 CFs, VPS 16 GB) :
+- Memtables max : 67 × 2 × 16 MB = **2.1 GiB**
+- Block cache : 0.25 GiB
+- RAM DAG : 10K blocs × 2 ledgers = ~60 MiB
+- UTXO LRU : 21K entries effectifs = ~4 MiB
+- **Trough : ~6-7 GiB, Peak : ~12.4 GiB** (compaction) — stable a ~20 tx/s + game
 
 #### v0.5.20 : Fix du TPS cliff sous charge soutenue (600+ blk/s)
 

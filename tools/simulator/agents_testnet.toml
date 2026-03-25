@@ -1,16 +1,23 @@
 # =============================================================================
-# Agent definitions for Testnet VPS — ~97 agents, charge moderee
+# Agent definitions for Testnet VPS — ~30 agents, ~20 tx/s sustained
 # =============================================================================
+# MEMORY BUDGET: 16 GB VPS with 14 GiB Docker limit, 67 RocksDB CFs.
+# Engine at rest: ~8 GiB (DAG bootstrap + RocksDB metadata + jemalloc retention).
+# Headroom: ~6 GiB for write pressure. Back-pressure (v0.7.1) slows API callers
+# when persist pipeline is full, but RocksDB internal buffers still grow under load.
+#
+# Proven stable: 0 tx/s = ~8 GiB, ~20 tx/s = ~10 GiB (target), ~60 tx/s = OOM.
+# Keep total PMS tx/s ≤ 20, game blocks add ~10 blk/s → total ~30 blk/s.
 
 # ---------------------------------------------------------------------------
-# CASUAL USERS — Transactions PMS moderees + game loop
-# 40 agents, 1 tick/s, petits montants, 30% de chance d'envoyer
-# PMS: sends_per_tick = 5 → 40 × 0.3 × 5 = 60 PMS tx/s
-# EDN: edn_sends_per_tick = 5, cooldown = 15 (15s > 10s distrib)
+# CASUAL USERS — PMS + game loop
+# 8 agents, 3s/tick, 30% chance, 1 send/tick
+# PMS: 8 × 0.3 × 1 / 3 = 0.8 PMS tx/s
+# EDN: edn_sends_per_tick = 1, cooldown = 10 (30s > 10s distrib)
 # ---------------------------------------------------------------------------
 [[agents]]
-count = 40
-interval_ms = 1000
+count = 8
+interval_ms = 3000
 name_prefix = "user"
 
 [agents.behavior]
@@ -18,43 +25,43 @@ type = "random"
 min_amount = 0.1
 max_amount = 5.0
 send_probability = 0.3
-sends_per_tick = 5
+sends_per_tick = 1
 
 [agents.game]
 enabled = true
-cubes_per_agent = 5
+cubes_per_agent = 3
 cubes_remint_min = 80
 cubes_remint_max = 120
 edn_send_min_pct = 10.0
 edn_send_max_pct = 50.0
-burn_cooldown_ticks = 15
-edn_sends_per_tick = 5
+burn_cooldown_ticks = 10
+edn_sends_per_tick = 1
 
 # ---------------------------------------------------------------------------
-# FAST TRADERS — Micro-transactions rapides, pas de game
-# 20 agents, 500ms entre chaque tick, tres petits montants, 80% send
-# sends_per_tick = 15 → 20 × 0.8/0.5s × 15 = 480 PMS tx/s
+# FAST TRADERS — Micro-transactions, no game
+# 5 agents, 2s/tick, 50% send, 2 sends/tick
+# PMS: 5 × 0.5 × 2 / 2 = 2.5 PMS tx/s
 # ---------------------------------------------------------------------------
 [[agents]]
-count = 20
-interval_ms = 500
+count = 5
+interval_ms = 2000
 name_prefix = "fast"
 
 [agents.behavior]
 type = "random"
 min_amount = 0.01
 max_amount = 0.5
-send_probability = 0.8
-sends_per_tick = 15
+send_probability = 0.5
+sends_per_tick = 2
 
 # ---------------------------------------------------------------------------
-# MINERS — Game-only, pas d'envoi PMS, focus burn/mint cubes
-# 15 agents, 1 tick/s, beaucoup de cubes
-# EDN: edn_sends_per_tick = 10, cooldown = 15 (15s > 10s distrib)
+# MINERS — Game-only, no PMS sends, focus cubes
+# 5 agents, 2s/tick
+# EDN: edn_sends_per_tick = 2, cooldown = 10 (20s > 10s distrib)
 # ---------------------------------------------------------------------------
 [[agents]]
-count = 15
-interval_ms = 1000
+count = 5
+interval_ms = 2000
 name_prefix = "miner"
 
 [agents.behavior]
@@ -65,50 +72,50 @@ send_probability = 0.0
 
 [agents.game]
 enabled = true
-cubes_per_agent = 10
+cubes_per_agent = 5
 cubes_remint_min = 80
 cubes_remint_max = 120
 edn_send_min_pct = 5.0
 edn_send_max_pct = 20.0
-burn_cooldown_ticks = 15
-edn_sends_per_tick = 10
+burn_cooldown_ticks = 10
+edn_sends_per_tick = 2
 
 # ---------------------------------------------------------------------------
-# WHALES — Gros montants, peu frequents
-# 5 agents, 1 tick toutes les 5s, gros envois
-# PMS: sends_per_tick = 3 → 5 × 0.8/5s × 3 = 2.4 PMS tx/s
-# EDN: edn_sends_per_tick = 3, cooldown = 5 (5×5s=25s > 10s distrib)
+# WHALES — Large amounts, infrequent + game
+# 3 agents, 10s/tick
+# PMS: 3 × 0.5 × 2 / 10 = 0.3 PMS tx/s
+# EDN: edn_sends_per_tick = 1, cooldown = 3 (30s > 10s distrib)
 # ---------------------------------------------------------------------------
 [[agents]]
-count = 5
-interval_ms = 5000
+count = 3
+interval_ms = 10000
 name_prefix = "whale"
 
 [agents.behavior]
 type = "random"
 min_amount = 50.0
 max_amount = 200.0
-send_probability = 0.8
-sends_per_tick = 3
+send_probability = 0.5
+sends_per_tick = 2
 
 [agents.game]
 enabled = true
-cubes_per_agent = 20
+cubes_per_agent = 10
 cubes_remint_min = 80
 cubes_remint_max = 120
 edn_send_min_pct = 30.0
 edn_send_max_pct = 80.0
-burn_cooldown_ticks = 5
-edn_sends_per_tick = 3
+burn_cooldown_ticks = 3
+edn_sends_per_tick = 1
 
 # ---------------------------------------------------------------------------
-# SNIPERS — Tres rapides, tres petits montants, envoi quasi systematique
-# 10 agents, 200ms, micro-tx
-# sends_per_tick = 25 → 10 × 1.0/0.2s × 25 = 1250 PMS tx/s
+# SNIPERS — Fast micro-tx, systematic
+# 3 agents, 2s/tick, 100% send, 3 sends/tick
+# PMS: 3 × 1.0 × 3 / 2 = 4.5 PMS tx/s
 # ---------------------------------------------------------------------------
 [[agents]]
-count = 10
-interval_ms = 200
+count = 3
+interval_ms = 2000
 name_prefix = "sniper"
 
 [agents.behavior]
@@ -116,25 +123,25 @@ type = "random"
 min_amount = 0.001
 max_amount = 0.05
 send_probability = 1.0
-sends_per_tick = 25
+sends_per_tick = 3
 
 # ---------------------------------------------------------------------------
-# SLOW SAVERS — Peu actifs, gros envois occasionnels + game
-# 5 agents, 1 tick toutes les 10s
-# PMS: sends_per_tick = 5 → 5 × 0.4/10s × 5 = 1 PMS tx/s
-# EDN: edn_sends_per_tick = 5, cooldown = 3 (3×10s=30s > 10s distrib)
+# SLOW SAVERS — Occasional large sends + game
+# 3 agents, 20s/tick
+# PMS: 3 × 0.3 × 2 / 20 = 0.09 PMS tx/s
+# EDN: edn_sends_per_tick = 2, cooldown = 2 (40s > 10s distrib)
 # ---------------------------------------------------------------------------
 [[agents]]
-count = 5
-interval_ms = 10000
+count = 3
+interval_ms = 20000
 name_prefix = "saver"
 
 [agents.behavior]
 type = "random"
 min_amount = 10.0
 max_amount = 50.0
-send_probability = 0.4
-sends_per_tick = 5
+send_probability = 0.3
+sends_per_tick = 2
 
 [agents.game]
 enabled = true
@@ -143,24 +150,24 @@ cubes_remint_min = 80
 cubes_remint_max = 120
 edn_send_min_pct = 40.0
 edn_send_max_pct = 90.0
-burn_cooldown_ticks = 3
-edn_sends_per_tick = 5
+burn_cooldown_ticks = 2
+edn_sends_per_tick = 2
 
 # ---------------------------------------------------------------------------
-# OBSERVERS — Monitoring passif
-# 2 agents, 1 tick toutes les 3s
+# OBSERVERS — Passive monitoring
+# 2 agents, 5s/tick
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 2
-interval_ms = 3000
+interval_ms = 5000
 name_prefix = "obs"
 
 [agents.behavior]
 type = "observer"
 
 # ---------------------------------------------------------------------------
-# COORDINATOR — Wallet du noeud, envoie 0.1-1 PMS chaque minute
-# 1 agent, 60s entre chaque tick, pas de faucet (financé par les fees)
+# COORDINATOR — Node wallet, sends 0.1-1 PMS every minute
+# 1 agent, 60s/tick, no faucet (funded by fees)
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 1
