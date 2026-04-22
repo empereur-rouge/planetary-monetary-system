@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.7.2] - Unreleased — Security audit: persist pipeline no silent drops
+## [0.7.2] - 2026-04-22 — Security audit sprint (C2, C3, M1, H5, M2, M3+M4, M5+H7, H4+M6)
 
 ### Fixed
 - **fix(persist/critical)**: `do_persist_block` previously wrapped `persist_tx.send()` in a 5-second `tokio::time::timeout` and returned `PutResult::Inserted` to the caller even when the send timed out or the channel was closed — a silent data-loss bug. In a saturated persist pipeline (RocksDB stall, compaction pressure), the block was in RAM but never queued for disk, and the HTTP client saw a false "Inserted" acknowledgement. Replaced with an unbounded `send().await` that blocks until the queue has room (natural end-to-end back-pressure), emits periodic `tracing::error!` warnings every second while blocked, and returns `Err(anyhow!)` on a closed channel instead of fake success. See [crates/pms-core/src/net_adapter/persist.rs](crates/pms-core/src/net_adapter/persist.rs).
@@ -921,6 +921,7 @@ Cumulative release covering all work from initial deployment (2026-01-08) throug
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 0.7.2 | 2026-04-22 | Security audit sprint: persist back-pressure, spent-tracking storage fallback, AAD binding, Wallet Debug redaction, bridge multiplier validation, rand unification (no RC), parking_lot migration, treasury misconfig surfacing, freeze/unfreeze race fix |
 | 0.3.0 | Unreleased | Economics system (fee burn, gas pools, dynamic fees) |
 | 0.2.7 | 2026-03-14 | Pin L0 index/filter + 512MB cache |
 | 0.2.6 | 2026-03-14 | Bloom filters on all 31 CFs |
