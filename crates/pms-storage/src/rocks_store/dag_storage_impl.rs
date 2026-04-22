@@ -716,6 +716,12 @@ impl DagStorage for RocksStore {
         Ok(count)
     }
 
+    async fn is_outpoint_spent(&self, txid: &str, index: u32) -> Result<bool> {
+        let cf_utxo_spent = self.cf("utxo_spent");
+        let key = make_utxo_key(txid, index);
+        Ok(self.db.get_cf(&cf_utxo_spent, &key)?.is_some())
+    }
+
     async fn recent_ids_by_address(
         &self,
         addr: &str,
