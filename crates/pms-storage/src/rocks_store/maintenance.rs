@@ -4,7 +4,7 @@
 //! and checkpoint rotation.
 
 use crate::checkpoint_rocks::rotate_checkpoints;
-use crate::helpers::{be_to_i64, parse_time_index_key};
+use crate::helpers::{be_to_i64, le_to_u64, parse_time_index_key};
 use crate::rocks_store::store::RocksStore;
 use std::cmp::Reverse;
 use std::sync::Arc;
@@ -91,52 +91,100 @@ impl RocksStore {
         }
 
         let cf_tips = self.cf("tips");
+        let cf_count = self.cf("children_count");
 
-        // 1. Collecte toutes les tips : (id, ts)
-        let mut tips: Vec<(String, i64)> = Vec::new();
+        // 1. Collecte toutes les tips : (id, ts, children_count).
+        //    A tip whose `children_count > 0` is a zombie: a real child has
+        //    arrived but `remove_tip` was never called (or was lost to a
+        //    crash). `RocksStore::tips` is meant to be an index of blocks
+        //    with no children — the ground-truth `children_count` CF wins.
+        let mut tips: Vec<(String, i64, u64)> = Vec::new();
         for kv in self.db.iterator_cf(&cf_tips, rocksdb::IteratorMode::Start) {
             let (k, v) = kv?;
             let id = String::from_utf8(k.to_vec())?;
             let ts = be_to_i64(&v)?;
-            tips.push((id, ts));
+            let cc = self
+                .db
+                .get_cf(&cf_count, id.as_bytes())?
+                .filter(|bytes| bytes.len() == 8)
+                .map(|bytes| le_to_u64(&bytes))
+                .unwrap_or(0);
+            tips.push((id, ts, cc));
         }
 
         // Correct the estimate to the actual count
         self.tip_count_estimate
             .store(tips.len(), std::sync::atomic::Ordering::Relaxed);
 
-        // 2. Trie par ts DESC (plus récent d'abord).
-        tips.sort_by_key(|(_, ts)| Reverse(*ts));
-
-        // 3. Si on est déjà <= tip_limit, rien à faire.
-        if tips.len() <= self.tip_limit {
-            return Ok(());
-        }
-
-        // 4. SAFETY: Always keep at least 1 tip (most recent).
-        //    Mirrors the same protection applied in ConcurrentDag::prune_oldest()
-        //    (commit 9e2922f). Without this, an over-pruned tips CF causes
-        //    top_tips() to return empty, silently blocking fee distribution.
-        let keep = self.tip_limit.max(1);
-
-        // 5. Supprime les tips excédentaires (les plus anciennes).
-        let to_remove: Vec<_> = tips.into_iter().skip(keep).collect();
-        if !to_remove.is_empty() {
-            tracing::debug!(
-                kept = keep,
-                removed = to_remove.len(),
-                "trim_tips: pruning excess tips from RocksDB"
-            );
-            let mut batch = rocksdb::WriteBatch::default();
-            for (id, _) in &to_remove {
-                batch.delete_cf(&cf_tips, id.as_bytes());
+        // 2. Split into real tips (children_count == 0) and zombies.
+        //    Zombies are always safe to drop — they've stopped being tips;
+        //    real tips we only trim down to `tip_limit` entries, oldest first.
+        //    This is the H3 fix: before, `trim_tips` only sorted by timestamp
+        //    and could evict an active tip while leaving zombies in place,
+        //    drifting the CF out of sync with what `ConcurrentDag::tips`
+        //    considers to be a tip.
+        let mut real_tips: Vec<(String, i64)> = Vec::with_capacity(tips.len());
+        let mut zombie_tips: Vec<String> = Vec::new();
+        for (id, ts, cc) in tips {
+            if cc == 0 {
+                real_tips.push((id, ts));
+            } else {
+                zombie_tips.push(id);
             }
-            self.db.write(batch)?;
-            // Update estimate after trimming
-            self.tip_count_estimate
-                .store(keep, std::sync::atomic::Ordering::Relaxed);
         }
 
+        let mut batch = rocksdb::WriteBatch::default();
+        let zombie_count = zombie_tips.len();
+        for id in &zombie_tips {
+            batch.delete_cf(&cf_tips, id.as_bytes());
+        }
+
+        // 3. If we still have too many *real* tips, keep the most recent.
+        //    SAFETY: Always keep at least 1 tip. Mirrors
+        //    `ConcurrentDag::prune_oldest()` (commit 9e2922f). Without this,
+        //    an over-pruned tips CF causes `top_tips()` to return empty,
+        //    silently blocking fee distribution.
+        real_tips.sort_by_key(|(_, ts)| Reverse(*ts));
+        let keep = self.tip_limit.max(1);
+        let mut evicted_real = 0usize;
+        if real_tips.len() > keep {
+            for (id, _) in real_tips.iter().skip(keep) {
+                batch.delete_cf(&cf_tips, id.as_bytes());
+                evicted_real += 1;
+            }
+        }
+
+        let remaining = real_tips.len().min(keep);
+        if zombie_count + evicted_real > 0 {
+            tracing::debug!(
+                remaining,
+                zombies = zombie_count,
+                evicted_old = evicted_real,
+                "trim_tips: reconciled RocksDB tips CF against children_count"
+            );
+            self.db.write(batch)?;
+            self.tip_count_estimate
+                .store(remaining, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_tip_for_test(
+        &self,
+        id: &str,
+        ts_ms: i64,
+        children_count: u64,
+    ) -> anyhow::Result<()> {
+        let cf_tips = self.cf("tips");
+        self.db
+            .put_cf(&cf_tips, id.as_bytes(), ts_ms.to_be_bytes())?;
+        if children_count > 0 {
+            let cf_count = self.cf("children_count");
+            self.db
+                .put_cf(&cf_count, id.as_bytes(), children_count.to_le_bytes())?;
+        }
         Ok(())
     }
 
@@ -239,5 +287,149 @@ impl RocksStore {
 
             tracing::info!("[rocks] background maintenance stopped");
         })
+    }
+}
+
+#[cfg(test)]
+mod trim_tips_tests {
+    //! Non-regression tests for audit finding H3 — RocksDB `tips` CF drift.
+    //!
+    //! Pre-0.7.3, `trim_tips` sorted by timestamp only. A tip that had
+    //! already gained a child (its `remove_tip` call was lost to a crash
+    //! or bug) would survive because of a recent timestamp, and
+    //! `trim_tips` would evict a genuinely-active older tip instead —
+    //! drifting the `tips` CF out of sync with `ConcurrentDag::tips`
+    //! (the real source of truth).
+    //!
+    //! Post-fix, `trim_tips` cross-checks every tip candidate against
+    //! the `children_count` CF: zombies (children_count > 0) are
+    //! reclaimed first, then tip_limit enforcement runs against the
+    //! real tips only.
+
+    use super::RocksStore;
+    use crate::rocks_store::store::RocksMemoryConfig;
+    use tempfile::TempDir;
+
+    async fn fresh_store(tip_limit: usize) -> (RocksStore, TempDir) {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().to_string_lossy().into_owned();
+        let store = RocksStore::new(
+            &path,
+            tip_limit,
+            "main",
+            None,
+            &RocksMemoryConfig::default(),
+        )
+        .await
+        .expect("rocks store");
+        (store, dir)
+    }
+
+    fn count_tips(store: &RocksStore) -> usize {
+        let cf = store.cf("tips");
+        store
+            .db
+            .iterator_cf(&cf, rocksdb::IteratorMode::Start)
+            .count()
+    }
+
+    fn tip_ids(store: &RocksStore) -> Vec<String> {
+        let cf = store.cf("tips");
+        store
+            .db
+            .iterator_cf(&cf, rocksdb::IteratorMode::Start)
+            .filter_map(|kv| kv.ok())
+            .map(|(k, _)| String::from_utf8_lossy(&k).into_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn zombies_are_evicted_before_real_tips() {
+        let (store, _dir) = fresh_store(2).await;
+
+        // Three real tips (children_count == 0). Only 2 should survive
+        // because tip_limit = 2, and the two *newest* win.
+        store.inject_tip_for_test("real-new", 300, 0).unwrap();
+        store.inject_tip_for_test("real-mid", 200, 0).unwrap();
+        store.inject_tip_for_test("real-old", 100, 0).unwrap();
+
+        // Two zombies: in the `tips` CF but with recorded children.
+        // Under the pre-fix logic these would have survived because of
+        // their recent timestamps and displaced the real tips.
+        store.inject_tip_for_test("zombie-recent", 500, 3).unwrap();
+        store.inject_tip_for_test("zombie-older", 50, 7).unwrap();
+
+        store.tip_count_estimate.store(
+            count_tips(&store),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        println!("before trim_tips:");
+        println!("  count = {}", count_tips(&store));
+        println!("  ids   = {:?}", tip_ids(&store));
+
+        store.trim_tips().expect("trim_tips");
+
+        let remaining = tip_ids(&store);
+        println!("after trim_tips:");
+        println!("  count = {}", remaining.len());
+        println!("  ids   = {:?}", remaining);
+
+        assert!(!remaining.contains(&"zombie-recent".to_string()));
+        assert!(!remaining.contains(&"zombie-older".to_string()));
+
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&"real-new".to_string()));
+        assert!(remaining.contains(&"real-mid".to_string()));
+        assert!(!remaining.contains(&"real-old".to_string()));
+    }
+
+    #[tokio::test]
+    async fn zombie_cleared_once_trim_runs() {
+        // `trim_tips` has a cheap fast-path: if the cached estimate is at or
+        // below tip_limit, it skips the full scan entirely. That's fine in
+        // practice — zombies appear on failure paths and get reclaimed the
+        // next time the count actually drifts over the limit. This test
+        // forces the scan via the estimate to prove that once trim runs,
+        // zombies disappear even when real_tips + zombies > tip_limit but
+        // real_tips alone is ≤ tip_limit.
+        let (store, _dir) = fresh_store(2).await;
+
+        store.inject_tip_for_test("real-a", 10, 0).unwrap();
+        store.inject_tip_for_test("real-b", 20, 0).unwrap();
+        store.inject_tip_for_test("zombie", 30, 1).unwrap();
+
+        // Force the fast-path threshold by pushing the estimate above
+        // tip_limit. This is the state a few inserts after a zombie
+        // entered the CF.
+        store
+            .tip_count_estimate
+            .store(3, std::sync::atomic::Ordering::Relaxed);
+
+        store.trim_tips().expect("trim_tips");
+
+        let remaining = tip_ids(&store);
+        println!("remaining after trim = {:?}", remaining);
+
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&"real-a".to_string()));
+        assert!(remaining.contains(&"real-b".to_string()));
+        assert!(!remaining.contains(&"zombie".to_string()));
+    }
+
+    #[tokio::test]
+    async fn tip_limit_zero_disables_trimming_entirely() {
+        // tip_limit = 0 is the documented "no trimming" config.
+        // Must not wipe the CF even if a zombie is present.
+        let (store, _dir) = fresh_store(0).await;
+        store.inject_tip_for_test("only-real", 1, 0).unwrap();
+        store.inject_tip_for_test("zombie", 2, 1).unwrap();
+
+        store.trim_tips().expect("trim_tips");
+
+        let remaining = tip_ids(&store);
+        println!("tip_limit=0 → untouched tips CF: {:?}", remaining);
+        assert!(remaining.contains(&"only-real".to_string()));
+        assert!(remaining.contains(&"zombie".to_string()));
     }
 }
