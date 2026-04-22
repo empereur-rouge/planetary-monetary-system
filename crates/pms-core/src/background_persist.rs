@@ -35,6 +35,11 @@ pub struct PersistJob {
 /// Higher = more WAL amortization, but higher per-block latency.
 const MAX_BATCH_SIZE: usize = 64;
 
+/// Default exponential backoff delays between `append_blocks_batch` retries
+/// after a transient storage failure. Six attempts spread over ~52 seconds.
+/// Tests can pass shorter delays via [`spawn_background_persist_with_retry`].
+pub const DEFAULT_RETRY_DELAYS_MS: [u64; 6] = [100, 500, 2_000, 5_000, 15_000, 30_000];
+
 /// Spawns the background persistence task with batch draining.
 ///
 /// The consumer drains up to [`MAX_BATCH_SIZE`] jobs per iteration using
@@ -57,6 +62,19 @@ const MAX_BATCH_SIZE: usize = 64;
 pub fn spawn_background_persist<S>(
     store: Arc<S>,
     buffer_size: usize,
+) -> (mpsc::Sender<PersistJob>, tokio::task::JoinHandle<()>)
+where
+    S: DagStorage + Send + Sync + 'static,
+{
+    spawn_background_persist_with_retry(store, buffer_size, DEFAULT_RETRY_DELAYS_MS.to_vec())
+}
+
+/// Test-oriented variant of [`spawn_background_persist`] that accepts custom
+/// retry delays. Production code should call [`spawn_background_persist`].
+pub fn spawn_background_persist_with_retry<S>(
+    store: Arc<S>,
+    buffer_size: usize,
+    retry_delays_ms: Vec<u64>,
 ) -> (mpsc::Sender<PersistJob>, tokio::task::JoinHandle<()>)
 where
     S: DagStorage + Send + Sync + 'static,
@@ -93,19 +111,58 @@ where
             // RocksStore overrides this with a mega WriteBatch (1 WAL append
             // instead of N), while the default trait impl falls back to
             // per-block writes for non-RocksDB backends.
-            match store.append_blocks_batch(&block_refs).await {
-                Ok(new_count) => {
-                    persisted_count += new_count as u64;
+            //
+            // Retry with exponential backoff on transient errors. We cannot
+            // silently drop a batch — the producer already received
+            // `PutResult::Inserted` for these blocks. After exhausting
+            // retries we break out of the main loop, which drops `rx`; the
+            // channel then reports closed to every subsequent `send().await`
+            // so `do_persist_block` returns an error to the HTTP caller
+            // instead of another false success.
+            let mut persisted_this_batch = false;
+            for (attempt, delay_ms) in std::iter::once(0u64)
+                .chain(retry_delays_ms.iter().copied())
+                .enumerate()
+            {
+                if delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
-                Err(e) => {
-                    error_count += batch_size as u64;
-                    tracing::error!(
-                        target = "pms_persist",
-                        error = %e,
-                        batch_size,
-                        "Failed to persist block batch"
-                    );
+                match store.append_blocks_batch(&block_refs).await {
+                    Ok(new_count) => {
+                        persisted_count += new_count as u64;
+                        if attempt > 0 {
+                            tracing::warn!(
+                                target = "pms_persist",
+                                attempt,
+                                batch_size,
+                                "Recovered from transient persist failure"
+                            );
+                        }
+                        persisted_this_batch = true;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            target = "pms_persist",
+                            error = %e,
+                            attempt,
+                            batch_size,
+                            "Failed to persist block batch (will retry)"
+                        );
+                    }
                 }
+            }
+
+            if !persisted_this_batch {
+                error_count += batch_size as u64;
+                tracing::error!(
+                    target = "pms_persist",
+                    batch_size,
+                    total_errors = error_count,
+                    "Persist batch FAILED after all retries — shutting down background task. \
+                     New send() calls will return an error so callers stop acknowledging blocks."
+                );
+                break;
             }
 
             // Batched finality persist: collect all newly_finalized from the batch

@@ -102,6 +102,13 @@ pub struct AppState {
     /// in the main store's `contracts` CF. Per-ledger stores do NOT contain contracts.
     /// Used by `evaluate_transfer()` in `prepare_tx()` and `wallet_send_simple()`.
     pub contract_store: Arc<dyn ContractStorage>,
+    /// Serialises compliance operations (freeze / unfreeze) across concurrent
+    /// admin requests. Without this, two simultaneous freeze requests for the
+    /// same address could both pass the `is_frozen` check before either
+    /// persisted its block, producing two audit trails for the same state
+    /// change (audit finding M6). Contention is negligible — these are
+    /// rare admin operations — so a single global lock is fine.
+    pub compliance_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Sync the PMS_BLOCKS_TOTAL gauge with the actual in-memory DAG size for the default ledger.

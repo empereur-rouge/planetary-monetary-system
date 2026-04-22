@@ -20,6 +20,7 @@ dashmap = "7.0.0-rc2"
 anyhow = "1.0.99"
 serde_json = "1.0.143"
 lru = "0.16.3"  # Fixed RUSTSEC-2026-0002 (IterMut unsoundness)
+parking_lot = "0.12"
 rand = "0.9.2"
 prometheus = "0.14.0"
 # Note: rustls-pemfile removed - using rustls native PEM support (pki_types::pem::PemObject)

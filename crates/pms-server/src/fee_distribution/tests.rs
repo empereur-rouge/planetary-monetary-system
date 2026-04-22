@@ -151,3 +151,54 @@ fn compute_block_reward_outputs_custom_percentages() {
     // Burn: 20% of 1.0 = 0.2
     assert_eq!(burn, "0.2".parse::<Decimal>().unwrap());
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Tests for `validate_treasury_config` (audit finding H4)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn validate_treasury_ok_when_percent_is_zero_and_no_addresses() {
+    let r = super::validate_treasury_config(0, &[], 0);
+    println!("percent=0, no addresses → {:?}", r);
+    assert!(r.is_ok(), "treasury tax disabled is always valid config");
+}
+
+#[test]
+fn validate_treasury_ok_when_percent_positive_and_address_present() {
+    let addrs = vec!["8e1treasury".to_string()];
+    let r = super::validate_treasury_config(35, &addrs, 0);
+    println!("percent=35, 1 address in settings → {:?}", r);
+    assert!(r.is_ok());
+}
+
+#[test]
+fn validate_treasury_ok_when_percent_positive_and_signed_wallet_present() {
+    let r = super::validate_treasury_config(10, &[], 1);
+    println!("percent=10, 1 signed wallet → {:?}", r);
+    assert!(
+        r.is_ok(),
+        "signed-wallet-file alone must satisfy the invariant"
+    );
+}
+
+#[test]
+fn validate_treasury_rejects_percent_without_any_address() {
+    let r = super::validate_treasury_config(35, &[], 0);
+    println!("percent=35, no addresses anywhere → {:?}", r);
+    let err = r.expect_err("must reject this misconfig");
+    // Operator must be told exactly what to fix and at which percent value.
+    assert!(err.contains("35%"));
+    assert!(err.contains("treasury_fee_percent"));
+    assert!(err.contains("treasury_addresses"));
+}
+
+#[test]
+fn validate_treasury_rejects_percent_with_empty_address_vec() {
+    let empty: Vec<String> = vec![];
+    let r = super::validate_treasury_config(1, &empty, 0);
+    println!("percent=1, empty vec → {:?}", r);
+    assert!(
+        r.is_err(),
+        "even 1% with no addresses must be flagged — silent redirection to node pool hides audit trails"
+    );
+}

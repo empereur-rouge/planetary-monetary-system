@@ -34,9 +34,9 @@ impl RocksStore {
             checkpoint_interval: Duration::from_secs(24 * 3600),
             db_path,
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
-            top_tips_cache: std::sync::Mutex::new(None),
+            top_tips_cache: parking_lot::Mutex::new(None),
             cf_names,
-            runtime_config_cache: std::sync::Mutex::new(None),
+            runtime_config_cache: parking_lot::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
             persist_counter: std::sync::atomic::AtomicU64::new(0),
         })
@@ -112,9 +112,9 @@ impl RocksStore {
             checkpoint_interval: Duration::from_secs(24 * 3600),
             db_path: primary,
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
-            top_tips_cache: std::sync::Mutex::new(None),
+            top_tips_cache: parking_lot::Mutex::new(None),
             cf_names,
-            runtime_config_cache: std::sync::Mutex::new(None),
+            runtime_config_cache: parking_lot::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
             persist_counter: std::sync::atomic::AtomicU64::new(0),
         })

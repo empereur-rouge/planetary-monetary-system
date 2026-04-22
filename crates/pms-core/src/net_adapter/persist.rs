@@ -862,13 +862,7 @@ where
         let mut reward_utxos: Vec<(pms_types::OutputId, pms_types::TxOutput, String, u64)> =
             Vec::new();
         {
-            let mut finality = match self.dag.finality.write() {
-                Ok(f) => f,
-                Err(poisoned) => {
-                    tracing::error!("finality RwLock poisoned -- recovering with into_inner()");
-                    poisoned.into_inner()
-                }
-            };
+            let mut finality = self.dag.finality.write();
 
             // a) Milestone handling
             if let Some(PayloadEnvelope::Plain(PlainPayload::Milestone {
@@ -991,44 +985,78 @@ where
         // ============================================================
         // 7) BACK-PRESSURE: Send to background persist channel
         // ============================================================
-        // CRITICAL: A financial system must NEVER silently drop blocks.
-        // We use a blocking send with timeout: when the persist pipeline
-        // can't keep up, API callers slow down (natural back-pressure)
-        // rather than losing data. The 5s timeout prevents indefinite
-        // blocking if RocksDB is completely stalled.
+        // A financial system must NEVER silently drop blocks. We block on
+        // `send().await` without a timeout so a saturated persist pipeline
+        // propagates back-pressure all the way to the HTTP caller instead of
+        // producing a fake `Inserted` acknowledgement for a block that was
+        // never queued to RocksDB.
+        //
+        // While blocked we log every second so a stall is visible in logs.
+        // A closed channel means the background task has died — that is a
+        // fatal, unrecoverable condition for this request, so we return an
+        // error instead of pretending the block was persisted.
         use crate::background_persist::PersistJob;
         let job = PersistJob {
             block: sb.clone(),
             delta,
             newly_finalized,
         };
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.persist_tx.send(job),
-        )
-        .await
         {
-            Ok(Ok(())) => {} // sent successfully — block will be persisted
-            Ok(Err(_closed)) => {
-                // Channel closed — background persist task has shut down
-                tracing::error!(
-                    target = "pms_persist",
-                    block_id = %sb.id,
-                    "Persist channel closed — background task died, block NOT queued"
-                );
-            }
-            Err(_elapsed) => {
-                // Timeout — persist pipeline completely stalled for 5s
-                static TIMEOUT_COUNT: std::sync::atomic::AtomicU64 =
-                    std::sync::atomic::AtomicU64::new(0);
-                let count =
-                    TIMEOUT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                tracing::error!(
-                    target = "pms_persist",
-                    block_id = %sb.id,
-                    total_timeouts = count,
-                    "Persist send timed out (5s) — RocksDB may be stalled, block NOT queued"
-                );
+            let send_start = std::time::Instant::now();
+            let send_fut = self.persist_tx.send(job);
+            tokio::pin!(send_fut);
+
+            let mut warn_interval =
+                tokio::time::interval(std::time::Duration::from_secs(1));
+            // `interval`'s first tick fires immediately; consume it so warnings
+            // only start after ~1s of real blocking.
+            warn_interval.tick().await;
+
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut send_fut => {
+                        match result {
+                            Ok(()) => {
+                                let elapsed = send_start.elapsed();
+                                if elapsed >= std::time::Duration::from_millis(500) {
+                                    tracing::warn!(
+                                        target = "pms_persist",
+                                        block_id = %sb.id,
+                                        elapsed_ms = elapsed.as_millis() as u64,
+                                        "persist_tx.send was back-pressured",
+                                    );
+                                }
+                                break;
+                            }
+                            Err(_closed) => {
+                                tracing::error!(
+                                    target = "pms_persist",
+                                    block_id = %sb.id,
+                                    "Persist channel closed — background task died. \
+                                     Block NOT persisted. Returning error so caller can retry.",
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "persist pipeline down: background task is not running"
+                                ));
+                            }
+                        }
+                    }
+                    _ = warn_interval.tick() => {
+                        static STALL_COUNT: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let count = STALL_COUNT
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        tracing::error!(
+                            target = "pms_persist",
+                            block_id = %sb.id,
+                            elapsed_ms = send_start.elapsed().as_millis() as u64,
+                            total_stalls = count,
+                            "persist_tx.send still pending — RocksDB pipeline saturated. \
+                             Caller is being back-pressured until the queue drains.",
+                        );
+                    }
+                }
             }
         }
 

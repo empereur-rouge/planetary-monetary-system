@@ -163,6 +163,18 @@ pub async fn serve_api(
     let fee_pool_registry = Arc::new(crate::fee_pool::FeePoolRegistry::new());
     let main_fee_pool = fee_pool_registry.get_or_create("main");
 
+    // Boot-time check: flag misconfigured treasury fees so operators see it
+    // immediately instead of noticing months later in an audit log review.
+    // Non-fatal — the runtime still safely redirects the cut to the node
+    // pool if this case ever slips through.
+    if let Err(msg) = crate::fee_distribution::validate_treasury_config(
+        settings.fees.treasury_fee_percent,
+        &settings.fees.treasury_addresses,
+        treasury_wallets.list.len(),
+    ) {
+        tracing::error!(target = "pms_boot", "TREASURY CONFIG ERROR: {msg}");
+    }
+
     // Keep a reference to the main store for the contract listener.
     // Contracts are registered on the main RocksDB, so the listener
     // needs it regardless of per-ledger store swaps.
@@ -202,6 +214,7 @@ pub async fn serve_api(
         tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
         contract_event_bus: main_event_bus.clone(),
         contract_store: main_store_for_contracts.clone(),
+        compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // ═══════════════════════════════════════════════════════════════════════

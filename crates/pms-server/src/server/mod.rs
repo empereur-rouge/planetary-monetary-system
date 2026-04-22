@@ -38,7 +38,7 @@ pub struct Server {
     pub(super) peers: DashMap<SocketAddr, PeerState>,
     pub(super) pong_waiters: DashMap<SocketAddr, oneshot::Sender<()>>,
     node_id: String,                             // ident local
-    seen_invs: std::sync::Mutex<LruCache<String, Instant>>, // LRU pour les Inv (gossip)
+    seen_invs: parking_lot::Mutex<LruCache<String, Instant>>, // LRU pour les Inv (gossip)
     pub(super) inflight_fetch: DashMap<String, Instant>,
     pub(super) orphans: DashMap<String, WireBlock>,
     parent_dependency: DashMap<String, Vec<String>>, // ParentID -> Vec<ChildID>
@@ -102,7 +102,7 @@ impl Server {
             peers: DashMap::new(),
             pong_waiters: DashMap::new(),
             node_id: node_id.clone(),
-            seen_invs: std::sync::Mutex::new(LruCache::new(SEEN_CAPACITY.try_into().unwrap())),
+            seen_invs: parking_lot::Mutex::new(LruCache::new(SEEN_CAPACITY.try_into().unwrap())),
             inflight_fetch: DashMap::new(),
             orphans: DashMap::new(),
             parent_dependency: DashMap::new(),
@@ -153,7 +153,7 @@ impl Server {
             peers: DashMap::new(),
             pong_waiters: DashMap::new(),
             node_id,
-            seen_invs: std::sync::Mutex::new(LruCache::new(SEEN_CAPACITY.try_into().unwrap())),
+            seen_invs: parking_lot::Mutex::new(LruCache::new(SEEN_CAPACITY.try_into().unwrap())),
             inflight_fetch: DashMap::new(),
             orphans: DashMap::new(),
             parent_dependency: DashMap::new(),

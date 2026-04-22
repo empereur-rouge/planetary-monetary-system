@@ -112,15 +112,11 @@ impl DagStorage for RocksStore {
         // - < 500ms  → fresh, serve directly
         // - 500ms-5s → stale but usable, serve immediately (eliminates stampede)
         // - > 5s     → force refresh
-        {
-            if let Ok(cache) = self.top_tips_cache.lock() {
-                if let Some((ts, ref tips)) = *cache {
-                    if tips.len() >= limit {
-                        let age = ts.elapsed();
-                        if age < std::time::Duration::from_secs(5) {
-                            return Ok(tips[..limit].to_vec());
-                        }
-                    }
+        if let Some((ts, ref tips)) = *self.top_tips_cache.lock() {
+            if tips.len() >= limit {
+                let age = ts.elapsed();
+                if age < std::time::Duration::from_secs(5) {
+                    return Ok(tips[..limit].to_vec());
                 }
             }
         }
@@ -145,9 +141,7 @@ impl DagStorage for RocksStore {
             .collect();
 
         // Update cache
-        if let Ok(mut cache) = self.top_tips_cache.lock() {
-            *cache = Some((std::time::Instant::now(), all.clone()));
-        }
+        *self.top_tips_cache.lock() = Some((std::time::Instant::now(), all.clone()));
 
         Ok(all.into_iter().take(limit).collect())
     }
@@ -714,6 +708,12 @@ impl DagStorage for RocksStore {
         }
 
         Ok(count)
+    }
+
+    async fn is_outpoint_spent(&self, txid: &str, index: u32) -> Result<bool> {
+        let cf_utxo_spent = self.cf("utxo_spent");
+        let key = make_utxo_key(txid, index);
+        Ok(self.db.get_cf(&cf_utxo_spent, &key)?.is_some())
     }
 
     async fn recent_ids_by_address(

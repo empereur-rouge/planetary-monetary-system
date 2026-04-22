@@ -11,16 +11,42 @@ use pms_storage::rocks_store::store::RocksStore;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::fmt;
 use std::fs;
 use std::path::Path;
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Wallet {
     pub private_key_b64: String, // clé ECDSA (signatures)
     pub public_key_hex: String,  // pub ECDSA
     pub x25519_pub_hex: String,  // pub pour chiffrement (NOUVEAU)
     pub mnemonic_words: Option<Vec<String>>,
+}
+
+// `Debug` is implemented manually so that a stray `dbg!(wallet)` or
+// `println!("{wallet:?}")` cannot leak the ECDSA private key or the BIP-39
+// mnemonic into logs / stderr / error reports. Only public material is
+// rendered; secrets are redacted with a length hint for debugging.
+impl fmt::Debug for Wallet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Wallet")
+            .field("public_key_hex", &self.public_key_hex)
+            .field("x25519_pub_hex", &self.x25519_pub_hex)
+            .field(
+                "private_key_b64",
+                &format_args!("<redacted {} chars>", self.private_key_b64.len()),
+            )
+            .field(
+                "mnemonic_words",
+                &self
+                    .mnemonic_words
+                    .as_ref()
+                    .map(|w| format!("<redacted {} words>", w.len()))
+                    .unwrap_or_else(|| "None".to_string()),
+            )
+            .finish()
+    }
 }
 
 impl Wallet {

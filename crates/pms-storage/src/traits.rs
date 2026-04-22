@@ -117,6 +117,21 @@ pub trait DagStorage: Send + Sync {
         Ok(count)
     }
 
+    /// Authoritative check: has this outpoint been spent at any point in the
+    /// DAG's history?
+    ///
+    /// Reads from the on-disk `utxo_spent` column family in `RocksStore`, which
+    /// is the single source of truth for double-spend detection across
+    /// restarts and independently of any in-RAM LRU/FIFO eviction. The default
+    /// implementation returns `Ok(false)` so mocks remain simple — backends
+    /// that cannot spent-track must never be trusted for financial flows.
+    ///
+    /// See [`ConcurrentDag::is_outpoint_spent_authoritative`] for the RAM
+    /// fast-path + storage fallback wrapper used in production validation.
+    async fn is_outpoint_spent(&self, _txid: &str, _index: u32) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Paginated reverse-chronological scan of block IDs involving a specific
     /// address.  Returns `(block_ids, next_cursor)`.
     /// Default no-op returns empty results (used by non-RocksDB backends).

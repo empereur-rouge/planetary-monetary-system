@@ -1,11 +1,12 @@
 use dashmap::{DashMap, DashSet};
 use lru::LruCache;
+use parking_lot::Mutex;
 use pms_types::{OutputId, TxOutput};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Nombre de shards (256 = 1 octet du hash)
@@ -56,10 +57,7 @@ impl Interner {
     }
 
     fn intern(&self, s: &str) -> Arc<str> {
-        let mut set = match self.set.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut set = self.set.lock();
         if let Some(existing) = set.get(s) {
             existing.clone()
         } else {
@@ -164,10 +162,7 @@ impl ShardedUtxoSet {
     // ─── Supply cache helpers (private) ──────────────────────────────
 
     fn supply_add_compact(&self, output: &CompactOutput) {
-        let mut cache = match self.supply_cache.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut cache = self.supply_cache.lock();
         let key = output.asset_id.as_ref().map(|a| a.to_string());
         let entry = cache.entry(key).or_insert((Decimal::ZERO, 0));
         entry.0 += output.amount;
@@ -192,10 +187,7 @@ impl ShardedUtxoSet {
     }
 
     fn supply_sub_compact(&self, output: &CompactOutput) {
-        let mut cache = match self.supply_cache.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut cache = self.supply_cache.lock();
         let key = output.asset_id.as_ref().map(|a| a.to_string());
         if let Some(entry) = cache.get_mut(&key) {
             entry.0 -= output.amount;
@@ -454,19 +446,13 @@ impl ShardedUtxoSet {
 
     /// Retourne le supply PMS natif en circulation depuis le cache.
     pub async fn circulating_supply(&self) -> (Decimal, usize) {
-        let cache = match self.supply_cache.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let cache = self.supply_cache.lock();
         cache.get(&None).cloned().unwrap_or((Decimal::ZERO, 0))
     }
 
     /// Retourne le supply d'un token spécifique depuis le cache.
     pub async fn circulating_supply_by_asset(&self, asset_id: Option<&str>) -> (Decimal, usize) {
-        let cache = match self.supply_cache.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let cache = self.supply_cache.lock();
         let key = asset_id.map(|s| s.to_string());
         cache.get(&key).cloned().unwrap_or((Decimal::ZERO, 0))
     }
@@ -683,10 +669,7 @@ impl ShardedUtxoSet {
             }
         }
 
-        let mut cache = match self.supply_cache.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut cache = self.supply_cache.lock();
         *cache = new_supply;
     }
 
@@ -734,10 +717,7 @@ impl ShardedUtxoSet {
             }
         }
 
-        let mut cache = match self.supply_cache.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut cache = self.supply_cache.lock();
         *cache = new_supply;
     }
 }

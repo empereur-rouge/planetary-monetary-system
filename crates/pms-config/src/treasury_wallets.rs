@@ -181,7 +181,7 @@ mod tests {
     fn test_sign_and_verify_treasury() {
         // Generate test keypair
         use k256::ecdsa::SigningKey;
-        use rand::rngs::OsRng;
+        use rand_core::OsRng;
 
         let sk = SigningKey::random(&mut OsRng);
         let pk = sk.verifying_key();
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn test_verify_fails_with_wrong_wallets() {
         use k256::ecdsa::SigningKey;
-        use rand::rngs::OsRng;
+        use rand_core::OsRng;
 
         let sk = SigningKey::random(&mut OsRng);
         let pk = sk.verifying_key();

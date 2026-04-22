@@ -183,11 +183,19 @@ pub async fn perform_fee_distribution(
                     &target[..20.min(target.len())]
                 );
             } else {
-                // [FALLBACK SECURITE] Pas de treasury wallet -> On laisse les fonds dans le pool pour les Noeuds/Createur
-                // On ne deduit PAS `treasury_cut` de `node_pool_amount`.
-                tracing::warn!(
-                    "⚠️ Treasury tax enabled but no treasury addresses configured! Keeping {} PMS in node pool distribution (fallback to nodes).",
-                    treasury_cut
+                // Safety: the cut stays in `node_pool_amount` (we skip the
+                // subtraction above). Funds are NOT lost, but the operator
+                // has misconfigured the node — log at `error!` so this shows
+                // up in standard alerting instead of getting buried in warnings.
+                // See `validate_treasury_config` (called at boot) for the same
+                // check surfaced earlier.
+                tracing::error!(
+                    target = "pms_fees",
+                    treasury_fee_percent = settings.fees.treasury_fee_percent,
+                    cut = %treasury_cut,
+                    "treasury_fee_percent > 0 but no treasury addresses configured — \
+                     cut redirected to the node pool. Fix [fees].treasury_addresses \
+                     or set treasury_fee_percent = 0."
                 );
             }
         }

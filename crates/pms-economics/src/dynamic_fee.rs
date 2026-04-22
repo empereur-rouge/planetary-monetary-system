@@ -1,6 +1,6 @@
+use parking_lot::Mutex;
 use pms_types_economics::DynamicFeeInfo;
 use std::collections::VecDeque;
-use std::sync::Mutex;
 use std::time::Instant;
 
 /// Tracks block persistence timestamps to compute rolling TPS and fee multiplier.
@@ -24,7 +24,7 @@ impl TpsTracker {
     /// Record a new block persistence timestamp (call after each successful block persist).
     pub fn record_block(&self) {
         let now = Instant::now();
-        let mut ts = self.timestamps.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ts = self.timestamps.lock();
         ts.push_back(now);
         // Eagerly prune old entries to bound memory
         let cutoff = now - std::time::Duration::from_secs(self.window_secs);
@@ -36,7 +36,7 @@ impl TpsTracker {
     /// Compute current TPS (blocks in the rolling window / window duration).
     pub fn current_tps(&self) -> f64 {
         let now = Instant::now();
-        let mut ts = self.timestamps.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ts = self.timestamps.lock();
         let cutoff = now - std::time::Duration::from_secs(self.window_secs);
         while ts.front().is_some_and(|&t| t < cutoff) {
             ts.pop_front();
