@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.2] - Unreleased — Security audit: persist pipeline no silent drops
+
+### Fixed
+- **fix(persist/critical)**: `do_persist_block` previously wrapped `persist_tx.send()` in a 5-second `tokio::time::timeout` and returned `PutResult::Inserted` to the caller even when the send timed out or the channel was closed — a silent data-loss bug. In a saturated persist pipeline (RocksDB stall, compaction pressure), the block was in RAM but never queued for disk, and the HTTP client saw a false "Inserted" acknowledgement. Replaced with an unbounded `send().await` that blocks until the queue has room (natural end-to-end back-pressure), emits periodic `tracing::error!` warnings every second while blocked, and returns `Err(anyhow!)` on a closed channel instead of fake success. See [crates/pms-core/src/net_adapter/persist.rs](crates/pms-core/src/net_adapter/persist.rs).
+- **fix(persist/critical)**: `background_persist_task` used to drop an entire batch on a single `append_blocks_batch` failure with only a `tracing::error!`. The task now retries with exponential backoff (100ms → 500ms → 2s → 5s → 15s → 30s) and, if all retries fail, shuts down the background loop so the channel closes and subsequent `send().await` calls return an error to the HTTP caller — no more false acknowledgements for blocks that never reached RocksDB. See [crates/pms-core/src/background_persist.rs](crates/pms-core/src/background_persist.rs).
+
+### Changed
+- **bump(version)**: Workspace version 0.7.1 → 0.7.2.
+
+---
+
 ## [0.7.1] - 2026-03-24 — Fix: OOM crash loop + software_version endpoint
 
 ### Fixed
