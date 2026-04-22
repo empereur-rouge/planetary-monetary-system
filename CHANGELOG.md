@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **bump(version)**: Workspace version 0.7.1 → 0.7.2.
+- **deps(rand)**: Unified all workspace crates on `rand = "0.9.2"` (audit finding M2). Previously `pms-wallet` used 0.8.5, `pms-config` 0.8, and `pms-ledger` was pinned to the pre-release `0.10.0-rc.5` which dragged in `chacha20 = "0.10.0-rc.5"` (an unfinished AEAD crate) as a transitive dependency. Both RC packages are now out of the dependency graph. `pms-wallet/helpers.rs` migrated to the 0.9 API (`rand::distr::weighted::WeightedIndex`, `rand::rng()`). `pms-config` tests pin `rand_core = "0.6"` explicitly for the `CryptoRngCore` trait required by `k256 0.13` (transitive `rand_core 0.6.4` via `ecdsa 0.16.9` is independent of the `rand` version we use). The only remaining non-0.9 `rand` in `Cargo.lock` is `0.8.5` pulled by `nanoid 0.4.0`, used for non-cryptographic ID generation only.
 
 ---
 

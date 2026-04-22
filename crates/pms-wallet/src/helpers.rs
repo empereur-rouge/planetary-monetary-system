@@ -4,7 +4,7 @@ use futures::future::join_all;
 use pms_storage::rocks_store::store::RocksStore;
 use pms_token::{Amount, FeePolicy, PLANETARY_MONETARY_SYSTEM as PMS};
 use pms_types_transaction::{OutputId, Transaction, TxInput, TxOutput};
-use rand::distributions::WeightedIndex;
+use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
@@ -139,7 +139,7 @@ where
     // Cas dégénéré: si tout égal et epsilon tout petit,
     // WeightedIndex gère tant que somme > 0.
     let dist = WeightedIndex::new(&weights_f64).map_err(|_| anyhow::anyhow!("poids invalides"))?;
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
     let idx = dist.sample(&mut rng);
 
     Ok(admin_addrs[idx].clone())
@@ -218,7 +218,7 @@ pub async fn pick_admin_wallet_weighted(
     }
 
     // 2) utiliser la fonction pure
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
     let idx = pick_index_from_balances(&balances, epsilon, &mut rng)?;
     Ok(admins[idx].clone())
 }
