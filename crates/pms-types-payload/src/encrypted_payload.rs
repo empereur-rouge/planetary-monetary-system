@@ -11,7 +11,14 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 pub const SCHEME_AES256GCM: &str = "x25519+aes256gcm";
-pub const KEY_VERSION_CURRENT: u32 = 1;
+/// Key-version 1 bound only `len_hint` into the AAD. Version 2 additionally
+/// binds `scheme`, `key_version`, the shared ephemeral pubkey, and the sorted
+/// set of recipient `kid`s so that tampering with any of those fields in a
+/// stored or transported `EncryptedPayload` invalidates the AES-GCM tag.
+/// Version 1 is still accepted on decryption for backward compatibility with
+/// blocks produced before v0.7.2.
+pub const KEY_VERSION_CURRENT: u32 = 2;
+const BINDING_DOMAIN: &[u8] = b"pms-aead-binding-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncryptedPayload {
@@ -27,6 +34,42 @@ pub struct EncryptedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AAD {
     pub len_hint: u32, // taille (ou padding) pour heuristiques
+    /// Envelope binding for key-version ≥ 2: `hex(sha256(...))` over
+    /// `scheme`, `key_version`, `ephem_pub`, and the recipients' sorted
+    /// `kid`s. `None` when absent (key-version 1, old blocks).
+    ///
+    /// The `#[serde(skip_serializing_if)]` is what keeps v1 wire format
+    /// byte-identical: `AAD { len_hint: 42, binding: None }` serialises to
+    /// `{"len_hint":42}`, exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+}
+
+/// Compute the envelope binding hex for key-version 2.
+///
+/// The binding covers every public field an attacker could rewrite without
+/// the DEK: the ciphersuite, the key-version, the shared ephemeral pubkey,
+/// and the sorted set of recipient kids. Because this hash is embedded in
+/// the AES-GCM AAD of the body ciphertext, any post-hoc substitution of
+/// those fields causes decryption to fail with an authentication error.
+fn compute_binding(scheme: &str, key_version: u32, ephem_pub_hex: &str, kids: &[&str]) -> String {
+    let mut sorted: Vec<&str> = kids.to_vec();
+    sorted.sort_unstable();
+
+    let mut h = Sha256::new();
+    h.update(BINDING_DOMAIN);
+    h.update([0u8]);
+    h.update(scheme.as_bytes());
+    h.update([0u8]);
+    h.update(key_version.to_le_bytes());
+    h.update([0u8]);
+    h.update(ephem_pub_hex.as_bytes());
+    h.update([0u8]);
+    for kid in &sorted {
+        h.update(kid.as_bytes());
+        h.update([0u8]);
+    }
+    hex::encode(h.finalize())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,29 +121,17 @@ impl EncryptedPayload {
         let mut nonce = [0u8; 12];
         rng.fill_bytes(&mut nonce);
 
-        // 2) Chiffre le payload
-        let aad_struct = AAD { len_hint };
-        let aad_bytes = serde_json::to_vec(&aad_struct).map_err(|e| e.to_string())?;
-        let cipher = Aes256Gcm::new_from_slice(&dek).map_err(|e| e.to_string())?;
-        let ct = cipher
-            .encrypt(
-                Nonce::from_slice(&nonce),
-                Payload {
-                    msg: plaintext,
-                    aad: &aad_bytes,
-                },
-            )
-            .map_err(|e| format!("aes-gcm enc: {e}"))?;
-        let commitment = sha256_hex(plaintext);
-
-        // 3) Clé éphémère unique pour tous les wraps (per‑message)
+        // 2) Clé éphémère unique pour tous les wraps (per‑message)
         let mut eph_sk_bytes = [0u8; 32];
         rng.fill_bytes(&mut eph_sk_bytes);
         let eph_sk = StaticSecret::from(eph_sk_bytes);
         let eph_pk = PublicKey::from(&eph_sk);
         let eph_pk_hex = hex::encode(eph_pk.to_bytes());
 
-        // 4) Enveloppe DEK pour chaque destinataire via X25519 + HKDF -> KEK, puis AES-GCM
+        // 3) Enveloppe DEK pour chaque destinataire via X25519 + HKDF -> KEK,
+        //    puis AES-GCM. This has to run BEFORE the body encryption because
+        //    the recipients' kids feed the envelope binding that the AES-GCM
+        //    AAD on the body ciphertext commits to.
         let mut recipients = Vec::with_capacity(recipients_pks_hex.len());
         for pk_hex in recipients_pks_hex {
             let recip_pk_bytes = hex_to_32(pk_hex)?;
@@ -147,7 +178,37 @@ impl EncryptedPayload {
             kek.zeroize();
         }
 
-        // 5) Assemble l’enveloppe
+        // 4) Envelope binding — hash every public field an attacker could
+        //    substitute without the DEK (scheme, key_version, ephem_pub, the
+        //    sorted set of kids). Embedded in the AAD of the body ciphertext
+        //    so AES-GCM's tag turns any post-hoc edit into a decrypt failure.
+        let kid_refs: Vec<&str> = recipients.iter().map(|r| r.kid.as_str()).collect();
+        let binding = compute_binding(
+            SCHEME_AES256GCM,
+            KEY_VERSION_CURRENT,
+            &eph_pk_hex,
+            &kid_refs,
+        );
+
+        // 5) Chiffre le payload avec l'AAD étendue
+        let aad_struct = AAD {
+            len_hint,
+            binding: Some(binding),
+        };
+        let aad_bytes = serde_json::to_vec(&aad_struct).map_err(|e| e.to_string())?;
+        let cipher = Aes256Gcm::new_from_slice(&dek).map_err(|e| e.to_string())?;
+        let ct = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad_bytes,
+                },
+            )
+            .map_err(|e| format!("aes-gcm enc: {e}"))?;
+        let commitment = sha256_hex(plaintext);
+
+        // 6) Assemble l’enveloppe
         let env = EncryptedPayload {
             scheme: SCHEME_AES256GCM.to_string(),
             key_version: KEY_VERSION_CURRENT,
@@ -170,6 +231,33 @@ impl EncryptedPayload {
         if self.scheme.as_str() != SCHEME_AES256GCM {
             return Err("unsupported scheme".into());
         }
+
+        // Envelope-binding check for key-version ≥ 2. Recomputing the hash
+        // from the envelope we received catches most tampering cases with a
+        // crisp error; the AES-GCM tag on the body ciphertext is still the
+        // ultimate authority — we rely on it for any field the binding
+        // doesn't cover. v1 blocks (`binding = None`) skip this step for
+        // backward compatibility.
+        if let Some(ref wire_binding) = self.aad.binding {
+            let Some(first) = self.recipients.first() else {
+                return Err("no recipients in v2 envelope".into());
+            };
+            // v2 requires every recipient to share the same ephem_pub, which
+            // is enforced at encrypt time. Reject mismatched envelopes
+            // before we burn a decrypt on a mangled payload.
+            for r in &self.recipients {
+                if r.ephem_pub != first.ephem_pub {
+                    return Err("recipients have mismatched ephem_pub".into());
+                }
+            }
+            let kid_refs: Vec<&str> = self.recipients.iter().map(|r| r.kid.as_str()).collect();
+            let expected =
+                compute_binding(&self.scheme, self.key_version, &first.ephem_pub, &kid_refs);
+            if &expected != wire_binding {
+                return Err("envelope binding mismatch — recipients or ephem_pub tampered with".into());
+            }
+        }
+
         // AAD
         let aad_bytes = serde_json::to_vec(&self.aad).map_err(|e| e.to_string())?;
         let nonce = b64dec(&self.nonce_b64)?;

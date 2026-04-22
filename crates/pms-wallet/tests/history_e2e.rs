@@ -3,7 +3,7 @@
 use anyhow::Result;
 use tokio::time::{Duration, sleep};
 
-use rand::{RngCore, rngs::OsRng};
+use rand::RngCore;
 
 use pms_config::load_config;
 use pms_storage::{DagStorage, models::StoredBlock};
@@ -19,7 +19,7 @@ use pms_wire::WireMeta;
 
 fn ns() -> String {
     let mut r = [0u8; 4];
-    OsRng.fill_bytes(&mut r);
+    rand::rng().fill_bytes(&mut r);
     format!(
         "it:history:e2e:{:02x}{:02x}{:02x}{:02x}",
         r[0], r[1], r[2], r[3]
