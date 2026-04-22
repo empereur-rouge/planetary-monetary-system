@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.3] - Unreleased — Persist hot-path clone reduction
+
+### Performance
+- **perf(persist)**: Extracted `block_id` once in `do_persist_block` and moved both the `Block` (into `ConcurrentDag::insert_block`) and the `StoredBlock` (into `PersistJob`) by value instead of cloning them (audit finding H6). The `StoredBlock` clone was the most expensive — it carries `payload_json`, which can be 10-100 KB on encrypted blocks (`LedgerOwnershipTransfer`, wrapped DEK payloads). The reused `block_id` also folds 3 separate `block.id.clone()` calls in the finality path into a single pre-extracted `String`. Net effect at 10 K TPS: ~20 K avoided clones/s of the full `StoredBlock` and `Block` structs, several MB/s less memory pressure on the persist pipeline, no behavioural change. All 150+ branch tests still green. See [crates/pms-core/src/net_adapter/persist.rs](crates/pms-core/src/net_adapter/persist.rs).
+
+### Changed
+- **bump(version)**: Workspace version 0.7.2 → 0.7.3.
+
+---
+
 ## [0.7.2] - 2026-04-22 — Security audit sprint (C2, C3, M1, H5, M2, M3+M4, M5+H7, H4+M6)
 
 ### Fixed

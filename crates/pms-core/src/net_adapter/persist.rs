@@ -841,8 +841,14 @@ where
             return Ok(PutResult::AlreadyExists);
         }
 
-        // Lock-free insertion into concurrent DAG
-        self.dag.insert_block(block.clone());
+        // Extract the block id once — reused by finality bookkeeping, the
+        // EventBus emit path, and per-block log lines. Lets us `move` the
+        // full `block` and `sb` structs into their consumers below without
+        // paying for another full clone on every call.
+        let block_id: String = sb.id.clone();
+
+        // Lock-free insertion into concurrent DAG (block is moved in, not cloned).
+        self.dag.insert_block(block);
 
         // Mark spent outpoints in concurrent DAG (for double-spend detection)
         if let Some(d) = &delta {
@@ -870,9 +876,9 @@ where
                 ..
             })) = &payload
             {
-                finality.last_milestone = Some(block.id.clone());
-                if finality.finalized.insert(block.id.clone()) {
-                    newly_finalized.push(block.id.clone());
+                finality.last_milestone = Some(block_id.clone());
+                if finality.finalized.insert(block_id.clone()) {
+                    newly_finalized.push(block_id.clone());
                 }
 
                 // Distribution des fees aux noeuds si demande
@@ -898,13 +904,12 @@ where
                                                 .get_node_reward_address(node_pk)
                                                 .unwrap_or_else(|_| node_pk.clone());
 
-                                            let txid = sb.id.clone();
                                             let amount = rust_decimal::Decimal::from(share)
                                                 / rust_decimal::Decimal::from(100_000_000);
                                             let amount_str = format!("{:.8}", amount);
 
                                             let out_id = pms_types::OutputId {
-                                                txid,
+                                                txid: block_id.clone(),
                                                 index: idx as u32,
                                             };
                                             let out = pms_types::TxOutput {
@@ -948,7 +953,7 @@ where
             // itself or its subtree). This reduces the cost from O(N * k) to O(k^2).
             let depth_k = finality.depth_k;
             if depth_k > 0 {
-                let ancestors = self.dag.ancestors_within_depth(&block.id, depth_k);
+                let ancestors = self.dag.ancestors_within_depth(&block_id, depth_k);
 
                 for ancestor_id in ancestors {
                     if finality.finalized.contains(&ancestor_id) {
@@ -996,8 +1001,13 @@ where
         // fatal, unrecoverable condition for this request, so we return an
         // error instead of pretending the block was persisted.
         use crate::background_persist::PersistJob;
+        // `sb` is moved into the job — previously we paid for a full
+        // `StoredBlock` clone here (including the payload_json, which can be
+        // 10-100 KB for encrypted blocks). The pre-extracted `block_id` above
+        // covers everything that still needs a stable string reference below.
+        let payload_json_for_event = sb.payload_json.clone().unwrap_or_default();
         let job = PersistJob {
-            block: sb.clone(),
+            block: sb,
             delta,
             newly_finalized,
         };
@@ -1022,7 +1032,7 @@ where
                                 if elapsed >= std::time::Duration::from_millis(500) {
                                     tracing::warn!(
                                         target = "pms_persist",
-                                        block_id = %sb.id,
+                                        block_id = %block_id,
                                         elapsed_ms = elapsed.as_millis() as u64,
                                         "persist_tx.send was back-pressured",
                                     );
@@ -1032,7 +1042,7 @@ where
                             Err(_closed) => {
                                 tracing::error!(
                                     target = "pms_persist",
-                                    block_id = %sb.id,
+                                    block_id = %block_id,
                                     "Persist channel closed — background task died. \
                                      Block NOT persisted. Returning error so caller can retry.",
                                 );
@@ -1049,7 +1059,7 @@ where
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         tracing::error!(
                             target = "pms_persist",
-                            block_id = %sb.id,
+                            block_id = %block_id,
                             elapsed_ms = send_start.elapsed().as_millis() as u64,
                             total_stalls = count,
                             "persist_tx.send still pending — RocksDB pipeline saturated. \
@@ -1068,7 +1078,7 @@ where
         if count.is_multiple_of(500) {
             tracing::info!(
                 target = "pms_perf",
-                block_id = %sb.id,
+                block_id = %block_id,
                 parents_us = t_parents.as_micros() as u64,
                 utxo_val_us = t_utxo_val.as_micros() as u64,
                 dag_val_us = t_dag_val.as_micros() as u64,
@@ -1108,11 +1118,11 @@ where
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             self.event_bus.emit(PmsEvent::BlockPersisted {
-                block_id: wb.id.clone(),
+                block_id,
                 ts_ms,
                 payload_type: payload_type.to_string(),
                 involved_addresses: involved,
-                payload_json: wb.payload_json.clone().unwrap_or_default(),
+                payload_json: payload_json_for_event,
             });
         }
 
