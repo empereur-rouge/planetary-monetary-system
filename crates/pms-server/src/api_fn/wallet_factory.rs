@@ -666,17 +666,33 @@ pub async fn wallet_send_simple(
     // ════════════════════════════════════════════════════════════════════
     // 11) Persist + UTXO delta + broadcast + reward
     // ════════════════════════════════════════════════════════════════════
-    match tx_helpers::persist_and_broadcast(&state, &wb).await {
-        Ok(PutResult::Inserted) => {
-            // Resolve sender BEFORE spending UTXOs — once spent, get_utxo returns None.
-            let sender_addr = if let pms_types_payload::PlainPayload::TxUtxo(ref tx) = plain {
-                if let Some(first_input) = tx.inputs.first() {
-                    state.srv.adapter_arc().get_utxo(&first_input.out).await.map(|u| u.address)
-                } else { None }
-            } else { None };
+    // Resolve sender BEFORE the persist call — once the delta is applied
+    // atomically inside `persist_block_with_delta`, `get_utxo` on the
+    // inputs returns `None` because they've been consumed (H1).
+    let sender_addr = if let pms_types_payload::PlainPayload::TxUtxo(ref tx) = plain {
+        if let Some(first_input) = tx.inputs.first() {
+            state
+                .srv
+                .adapter_arc()
+                .get_utxo(&first_input.out)
+                .await
+                .map(|u| u.address)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-            tx_helpers::apply_utxo_delta(&adapter, &wb.id, &signed_tx.inputs, &signed_tx.outputs)
-                .await;
+    match tx_helpers::persist_and_broadcast_with_delta(
+        &state,
+        &wb,
+        &signed_tx.inputs,
+        &signed_tx.outputs,
+    )
+    .await
+    {
+        Ok(PutResult::Inserted) => {
 
             // Index activity for encrypted payload (both untyped + typed + precomputed items).
             {

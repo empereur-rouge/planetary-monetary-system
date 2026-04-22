@@ -122,6 +122,40 @@ pub async fn persist_and_broadcast(state: &AppState, wb: &WireBlock) -> Result<P
         .await
         .map_err(|e| format!("persist error: {e:#}"))?;
 
+    after_persist_bookkeeping(state, wb, &res).await;
+
+    Ok(res)
+}
+
+/// Persist a block atomically with an externally-provided `UtxoDelta`, then
+/// run the same metrics / broadcast bookkeeping as [`persist_and_broadcast`].
+///
+/// For encrypted payloads, the pipeline can't derive the UTXO delta from
+/// the ciphertext, so the caller — which knows the plaintext — hands the
+/// delta in here. The adapter applies it inside the same critical section
+/// as the block insert, so a block is never visible to the DAG / persist
+/// pipeline while its inputs still look spendable in the UTXO set
+/// (audit finding H1).
+pub async fn persist_and_broadcast_with_delta(
+    state: &AppState,
+    wb: &WireBlock,
+    inputs: &[TxInput],
+    outputs: &[TxOutput],
+) -> Result<PutResult, String> {
+    let adapter = state.srv.adapter_arc();
+    let delta = adapter.build_encrypted_utxo_delta(&wb.id, inputs, outputs);
+    let res = adapter
+        .persist_block_with_delta(wb, delta)
+        .await
+        .map_err(|e| format!("persist error: {e:#}"))?;
+
+    after_persist_bookkeeping(state, wb, &res).await;
+
+    Ok(res)
+}
+
+/// Shared tail of both persist entry points: metrics + gossip + TPS counter.
+async fn after_persist_bookkeeping(state: &AppState, wb: &WireBlock, res: &PutResult) {
     if matches!(res, PutResult::Inserted) {
         crate::metrics::BLOCKS_PERSISTED
             .with_label_values(&[&state.ledger_id])
@@ -133,8 +167,6 @@ pub async fn persist_and_broadcast(state: &AppState, wb: &WireBlock) -> Result<P
         // Record block for TPS tracker (dynamic fee calculation)
         state.tps_tracker.record_block();
     }
-
-    Ok(res)
 }
 
 /// Apply UTXO delta: remove spent inputs and add new outputs.

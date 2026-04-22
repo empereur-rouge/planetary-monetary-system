@@ -30,6 +30,7 @@ pub use block_ops::{
     get_block_parents,
     forge_and_sign_block,
     persist_and_broadcast,
+    persist_and_broadcast_with_delta,
     apply_utxo_delta,
 };
 

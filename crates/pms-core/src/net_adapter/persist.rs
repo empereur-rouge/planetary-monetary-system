@@ -41,8 +41,19 @@ where
     ///  2. Persistance atomique en store (`StoredBlock`) -- source de verite.
     ///  3. Reconstruction du `Block` en RAM + mise a jour du DAG + finalite.
     ///  4. Persistance de la finalite (finals + dernier milestone) dans le store.
+    /// Core persistence pipeline. `external_delta` is used for payloads the
+    /// pipeline can't introspect (i.e. encrypted): the caller supplies the
+    /// plaintext `UtxoDelta` so the spends are marked and the UTXO set is
+    /// updated **inside the same critical section** as the block insert.
+    /// Without this, the old `persist_block → apply_utxo_delta` sequence
+    /// opened a race window where concurrent handlers could still see the
+    /// inputs as spendable (audit finding H1).
     #[allow(clippy::too_many_lines)]
-    pub(super) async fn do_persist_block(&self, wb: &WireBlock) -> Result<PutResult> {
+    pub(super) async fn do_persist_block_internal(
+        &self,
+        wb: &WireBlock,
+        external_delta: Option<pms_storage::UtxoDelta>,
+    ) -> Result<PutResult> {
         // ============================================================
         // 0) Use cached wire metadata (network_id + protocol_version).
         //    Avoids re-reading the config file on every block insertion.
@@ -579,8 +590,17 @@ where
             metadata: wb.metadata.clone(),
         };
 
-        // Construction du delta UTXO (si applicable)
-        let delta = match &payload {
+        // UTXO delta: callers of `persist_block_with_delta` supply the
+        // plaintext view of an encrypted transaction here. If present, it
+        // takes precedence over any delta the pipeline could have derived
+        // from the payload — and it MUST, because for encrypted payloads
+        // the pipeline can't see the plaintext at all (`_ => None` branch
+        // below). Applying the caller's delta inside the same critical
+        // section as the block insert closes the H1 race.
+        let delta = if let Some(d) = external_delta {
+            Some(d)
+        } else {
+            match &payload {
             Some(PayloadEnvelope::Plain(PlainPayload::Mint { outputs })) => {
                 // Mint = create only (no inputs)
                 let create = outputs
@@ -787,8 +807,9 @@ where
                     .collect();
                 Some(UtxoDelta { spend, create })
             }
-            // Freeze/Unfreeze: no UTXO changes (registry-only)
-            _ => None,
+                // Freeze/Unfreeze: no UTXO changes (registry-only)
+                _ => None,
+            }
         };
 
         // Note: append_block_atomic_with_utxo prend Option<&UtxoDelta>

@@ -528,6 +528,7 @@ async fn boot_sandbox() -> Result<Sandbox> {
         tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
         contract_event_bus: main_event_bus.clone(),
         contract_store: main_store_for_contracts.clone(),
+        compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // ── 11. Spawn fee distributor task (2s interval) ─────────────────

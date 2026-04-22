@@ -276,19 +276,37 @@ pub async fn wallet_send_tx(
     // ============================================================
     // 6) Persist + UTXO delta + broadcast + reward
     // ============================================================
-    match tx_helpers::persist_and_broadcast(&state, &wb).await {
-        Ok(PutResult::Inserted) => {
-            // Resolve sender BEFORE spending UTXOs — once spent, get_utxo returns None.
-            let sender_addr = if let PlainPayload::TxUtxo(ref tx) = plain {
-                if let Some(first_input) = tx.inputs.first() {
-                    state.srv.adapter_arc().get_utxo(&first_input.out).await.map(|u| u.address)
-                } else { None }
-            } else { None };
+    // Resolve sender BEFORE the persist call — once the delta is applied
+    // atomically inside `persist_block_with_delta`, `get_utxo` on the
+    // inputs returns `None` because they've been consumed.
+    let sender_addr = if let PlainPayload::TxUtxo(ref tx) = plain {
+        if let Some(first_input) = tx.inputs.first() {
+            state
+                .srv
+                .adapter_arc()
+                .get_utxo(&first_input.out)
+                .await
+                .map(|u| u.address)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-            // Apply UTXO delta for encrypted payload (spends inputs, creates outputs)
-            if let PlainPayload::TxUtxo(ref tx) = plain {
-                tx_helpers::apply_utxo_delta(&adapter, &wb.id, &tx.inputs, &tx.outputs).await;
-            }
+    // For encrypted TxUtxo payloads we hand the plaintext delta to the
+    // adapter so it's applied in the same critical section as the block
+    // insert (audit finding H1). For non-TxUtxo encrypted payloads
+    // (e.g. `LedgerOwnershipTransfer`) there's no UTXO delta to apply,
+    // so we fall back to the delta-less path.
+    let persist_result = if let PlainPayload::TxUtxo(ref tx) = plain {
+        tx_helpers::persist_and_broadcast_with_delta(&state, &wb, &tx.inputs, &tx.outputs).await
+    } else {
+        tx_helpers::persist_and_broadcast(&state, &wb).await
+    };
+
+    match persist_result {
+        Ok(PutResult::Inserted) => {
 
             // Index activity for encrypted payload (both untyped + typed).
             // Plain payloads are indexed automatically in append_block_atomic_with_utxo,

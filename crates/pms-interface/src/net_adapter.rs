@@ -1,6 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use pms_storage::UtxoDelta;
 use pms_storage::store::PutResult;
+use pms_types::{TxInput, TxOutput};
 use pms_wire::WireBlock;
 
 /// Trait que le serveur réseau utilisera pour interagir avec le core.
@@ -10,6 +12,80 @@ pub trait NetDagAdapter: Send + Sync {
     async fn have_block(&self, id: &str) -> bool;
     /// Persiste un bloc (idempotent).
     async fn persist_block(&self, b: &WireBlock) -> Result<PutResult>;
+
+    /// Persist a block together with an externally-provided `UtxoDelta`.
+    ///
+    /// Exists to plug audit finding H1: the previous caller-side pattern
+    /// `persist_block(wb).await; apply_utxo_delta(inputs, outputs).await;`
+    /// leaves a gap where the block is already visible in the RAM DAG and
+    /// the persist pipeline while the UTXO set still lists the inputs as
+    /// spendable, so a concurrent handler could re-select them.
+    ///
+    /// Encrypted payloads are the target use case: `do_persist_block` can't
+    /// derive a `UtxoDelta` from the ciphertext, so the caller — which knows
+    /// the plaintext — builds one and hands it over here.
+    ///
+    /// The default implementation preserves the old two-step behaviour
+    /// (non-atomic) so mocks that don't need atomicity keep compiling.
+    /// Production implementations MUST override this to apply the delta
+    /// in the same critical section as the block insert (see
+    /// `CoreAdapter::persist_block_with_delta`).
+    async fn persist_block_with_delta(
+        &self,
+        wb: &WireBlock,
+        delta: UtxoDelta,
+    ) -> Result<PutResult> {
+        let res = self.persist_block(wb).await?;
+        if matches!(res, PutResult::Inserted) {
+            for (txid, idx) in &delta.spend {
+                self.remove_utxo(&pms_types::OutputId {
+                    txid: txid.clone(),
+                    index: *idx,
+                })
+                .await;
+            }
+            for (txid, idx, addr, amt, asset) in &delta.create {
+                self.add_utxo(
+                    txid.clone(),
+                    *idx,
+                    addr.clone(),
+                    amt.clone(),
+                    asset.clone(),
+                )
+                .await;
+            }
+        }
+        Ok(res)
+    }
+
+    /// Helper: build a `UtxoDelta` from plaintext `inputs` / `outputs` of an
+    /// encrypted transaction. Convenience wrapper callers can use instead
+    /// of constructing the delta tuples by hand.
+    fn build_encrypted_utxo_delta(
+        &self,
+        block_id: &str,
+        inputs: &[TxInput],
+        outputs: &[TxOutput],
+    ) -> UtxoDelta {
+        let spend = inputs
+            .iter()
+            .map(|inp| (inp.out.txid.clone(), inp.out.index))
+            .collect();
+        let create = outputs
+            .iter()
+            .enumerate()
+            .map(|(i, out)| {
+                (
+                    block_id.to_string(),
+                    i as u32,
+                    out.address.clone(),
+                    out.amount.clone(),
+                    out.asset_id.clone(),
+                )
+            })
+            .collect();
+        UtxoDelta { spend, create }
+    }
     /// Diffuse un bloc aux pairs.
     async fn broadcast_block(&self, b: &WireBlock) -> Result<()>;
     async fn top_tips(&self, limit: usize) -> Result<Vec<String>>;

@@ -45,7 +45,15 @@ where
 
     #[allow(clippy::too_many_lines)]
     async fn persist_block(&self, wb: &WireBlock) -> Result<PutResult> {
-        self.do_persist_block(wb).await
+        self.do_persist_block_internal(wb, None).await
+    }
+
+    async fn persist_block_with_delta(
+        &self,
+        wb: &WireBlock,
+        delta: pms_storage::UtxoDelta,
+    ) -> Result<PutResult> {
+        self.do_persist_block_internal(wb, Some(delta)).await
     }
 
     async fn broadcast_block(&self, wb: &WireBlock) -> Result<()> {
