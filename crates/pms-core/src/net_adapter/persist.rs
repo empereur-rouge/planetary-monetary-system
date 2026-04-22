@@ -862,13 +862,7 @@ where
         let mut reward_utxos: Vec<(pms_types::OutputId, pms_types::TxOutput, String, u64)> =
             Vec::new();
         {
-            let mut finality = match self.dag.finality.write() {
-                Ok(f) => f,
-                Err(poisoned) => {
-                    tracing::error!("finality RwLock poisoned -- recovering with into_inner()");
-                    poisoned.into_inner()
-                }
-            };
+            let mut finality = self.dag.finality.write();
 
             // a) Milestone handling
             if let Some(PayloadEnvelope::Plain(PlainPayload::Milestone {

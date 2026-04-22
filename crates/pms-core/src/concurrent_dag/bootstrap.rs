@@ -116,13 +116,7 @@ impl ConcurrentDag {
         // temporal behaviour). Only include IDs that were actually loaded
         // (some get_block calls may have returned None).
         {
-            let mut order = match dag.insertion_order.lock() {
-                Ok(o) => o,
-                Err(poisoned) => {
-                    tracing::error!("insertion_order mutex poisoned during bootstrap — recovering");
-                    poisoned.into_inner()
-                }
-            };
+            let mut order = dag.insertion_order.lock();
             for id in &ids {
                 if dag.blocks.contains_key(id) {
                     order.push_back(id.clone());

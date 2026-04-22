@@ -8,17 +8,12 @@ impl ConcurrentDag {
     /// Mark an outpoint as spent (bounded FIFO eviction when limit > 0)
     pub fn mark_spent(&self, txid: &str, index: u32) {
         let key = (txid.to_string(), index);
-        if self.spent_outpoints.insert(key.clone()) {
-            if self.max_spent_outpoints > 0 {
-                let mut order = match self.spent_order.lock() {
-                    Ok(o) => o,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                order.push_back(key);
-                while order.len() > self.max_spent_outpoints {
-                    if let Some(oldest) = order.pop_front() {
-                        self.spent_outpoints.remove(&oldest);
-                    }
+        if self.spent_outpoints.insert(key.clone()) && self.max_spent_outpoints > 0 {
+            let mut order = self.spent_order.lock();
+            order.push_back(key);
+            while order.len() > self.max_spent_outpoints {
+                if let Some(oldest) = order.pop_front() {
+                    self.spent_outpoints.remove(&oldest);
                 }
             }
         }

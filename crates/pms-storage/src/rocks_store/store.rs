@@ -63,13 +63,13 @@ pub struct RocksStore {
     /// Cached result of `top_tips()` with a short TTL (500ms). Avoids repeated
     /// full scans of the tips CF when called frequently (fee distribution, parent
     /// selection). The Mutex critical section is very short (no I/O inside).
-    pub(crate) top_tips_cache: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
+    pub(crate) top_tips_cache: parking_lot::Mutex<Option<(std::time::Instant, Vec<String>)>>,
     /// Pre-computed "prefix:cf_short_name" strings. Eliminates `format!()`
     /// allocation on every `cf()` call (~11 calls per block in hot path).
     pub(crate) cf_names: HashMap<String, String>,
     /// Cached RuntimeConfig with 500ms TTL. Avoids RocksDB read + JSON deser
     /// on every `persist_block()` call. Write-through on `set_runtime_config()`.
-    pub(crate) runtime_config_cache: std::sync::Mutex<Option<(std::time::Instant, pms_config::RuntimeConfig)>>,
+    pub(crate) runtime_config_cache: parking_lot::Mutex<Option<(std::time::Instant, pms_config::RuntimeConfig)>>,
     /// In-memory set of frozen addresses. Populated at bootstrap from the
     /// `compliance_frozen` CF. Updated on freeze/unfreeze. Turns O(N) RocksDB
     /// reads per TxUtxo into O(N) DashSet lookups (lock-free, no I/O).
@@ -383,9 +383,9 @@ impl RocksStore {
             checkpoint_interval,
             db_path,
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
-            top_tips_cache: std::sync::Mutex::new(None),
+            top_tips_cache: parking_lot::Mutex::new(None),
             cf_names,
-            runtime_config_cache: std::sync::Mutex::new(None),
+            runtime_config_cache: parking_lot::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
             persist_counter: std::sync::atomic::AtomicU64::new(0),
         })
@@ -528,9 +528,9 @@ impl RocksStore {
             checkpoint_interval,
             db_path,
             tip_count_estimate: std::sync::atomic::AtomicUsize::new(0),
-            top_tips_cache: std::sync::Mutex::new(None),
+            top_tips_cache: parking_lot::Mutex::new(None),
             cf_names,
-            runtime_config_cache: std::sync::Mutex::new(None),
+            runtime_config_cache: parking_lot::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
             persist_counter: std::sync::atomic::AtomicU64::new(0),
         }

@@ -110,7 +110,7 @@ impl Server {
     /// Déclenche une synchronisation globale (demande les tips à tous les pairs).
     /// Utile pour rattraper d'éventuels blocs orphelins ou lors de la convergence.
     fn mark_inv_seen(&self, id: &str) {
-        let mut cache = self.seen_invs.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cache = self.seen_invs.lock();
         cache.put(id.to_string(), Instant::now());
         while cache.len() > SEEN_CAPACITY {
             cache.pop_lru();

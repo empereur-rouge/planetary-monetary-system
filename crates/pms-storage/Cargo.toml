@@ -34,6 +34,7 @@ rust_decimal = "1"
 tracing = "0.1"
 dashmap = "6.1.0"
 itoa = "1"
+parking_lot = "0.12"
 
 
 [dev-dependencies]

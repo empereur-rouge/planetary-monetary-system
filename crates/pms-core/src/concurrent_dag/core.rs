@@ -3,10 +3,10 @@
 use super::{ConcurrentDag, PRUNE_CHECK_INTERVAL};
 use crate::finality::FinalityState;
 use dashmap::{DashMap, DashSet};
+use parking_lot::{Mutex, RwLock};
 use pms_types::{Block, BlockId};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
 
 impl ConcurrentDag {
     /// Create a new empty ConcurrentDag (unlimited, for tests/CLI).
@@ -45,10 +45,7 @@ impl ConcurrentDag {
             .insert(genesis.id.clone(), AtomicU64::new(0));
         dag.tips.insert(genesis.id.clone());
         dag.blocks.insert(genesis.id.clone(), genesis.clone());
-        match dag.insertion_order.lock() {
-            Ok(mut order) => order.push_back(genesis.id),
-            Err(poisoned) => poisoned.into_inner().push_back(genesis.id),
-        }
+        dag.insertion_order.lock().push_back(genesis.id);
         dag
     }
 
@@ -140,10 +137,7 @@ impl ConcurrentDag {
         self.blocks.insert(block_id.clone(), block);
 
         // Track insertion order for pruning
-        match self.insertion_order.lock() {
-            Ok(mut order) => order.push_back(block_id),
-            Err(poisoned) => poisoned.into_inner().push_back(block_id),
-        }
+        self.insertion_order.lock().push_back(block_id);
 
         // Amortized pruning: check every PRUNE_CHECK_INTERVAL inserts
         let count = self.insert_counter.fetch_add(1, Ordering::Relaxed);

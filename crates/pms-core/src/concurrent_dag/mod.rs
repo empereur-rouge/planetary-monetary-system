@@ -41,10 +41,10 @@ mod tests;
 
 use crate::finality::FinalityState;
 use dashmap::{DashMap, DashSet};
+use parking_lot::{Mutex, RwLock};
 use pms_types::{Block, BlockId};
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Mutex, RwLock};
 
 /// Maximum number of tips to return from find_tips
 pub const MAX_TIPS_CAP: usize = 64;

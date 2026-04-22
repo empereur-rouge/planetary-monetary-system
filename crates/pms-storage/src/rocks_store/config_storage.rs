@@ -13,11 +13,9 @@ impl ConfigStorage for RocksStore {
     /// Récupère la configuration runtime courante (cached, 500ms TTL).
     fn get_runtime_config(&self) -> Result<RuntimeConfig> {
         // Fast path: check cache (500ms TTL)
-        if let Ok(cache) = self.runtime_config_cache.lock() {
-            if let Some((ts, ref config)) = *cache {
-                if ts.elapsed() < std::time::Duration::from_millis(500) {
-                    return Ok(config.clone());
-                }
+        if let Some((ts, ref config)) = *self.runtime_config_cache.lock() {
+            if ts.elapsed() < std::time::Duration::from_millis(500) {
+                return Ok(config.clone());
             }
         }
 
@@ -30,9 +28,7 @@ impl ConfigStorage for RocksStore {
         };
 
         // Update cache
-        if let Ok(mut cache) = self.runtime_config_cache.lock() {
-            *cache = Some((std::time::Instant::now(), config.clone()));
-        }
+        *self.runtime_config_cache.lock() = Some((std::time::Instant::now(), config.clone()));
 
         Ok(config)
     }
@@ -44,9 +40,7 @@ impl ConfigStorage for RocksStore {
         self.db.put_cf(&cf, b"current", &bytes)?;
 
         // Write-through: immediately update cache with new value
-        if let Ok(mut cache) = self.runtime_config_cache.lock() {
-            *cache = Some((std::time::Instant::now(), config.clone()));
-        }
+        *self.runtime_config_cache.lock() = Some((std::time::Instant::now(), config.clone()));
 
         Ok(())
     }

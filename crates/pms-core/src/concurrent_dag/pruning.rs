@@ -75,16 +75,7 @@ impl ConcurrentDag {
         // contention with concurrent insert_block() calls.
         let mut ids_to_remove: Vec<BlockId> = Vec::with_capacity(to_remove);
         {
-            let mut order = match self.insertion_order.lock() {
-                Ok(o) => o,
-                Err(poisoned) => {
-                    tracing::error!(
-                        "insertion_order mutex POISONED — pruning disabled! \
-                         Recovering with into_inner()"
-                    );
-                    poisoned.into_inner()
-                }
-            };
+            let mut order = self.insertion_order.lock();
 
             // Safety cap: never iterate more than the deque length to avoid infinite loops
             // when all remaining blocks are tips.
@@ -133,18 +124,9 @@ impl ConcurrentDag {
         // the finalized set to approximately max_blocks entries instead of
         // growing to millions over the node's lifetime (~340MB saved).
         if !ids_to_remove.is_empty() {
-            match self.finality.write() {
-                Ok(mut f) => {
-                    for old_id in &ids_to_remove {
-                        f.finalized.remove(old_id);
-                    }
-                }
-                Err(poisoned) => {
-                    let mut f = poisoned.into_inner();
-                    for old_id in &ids_to_remove {
-                        f.finalized.remove(old_id);
-                    }
-                }
+            let mut f = self.finality.write();
+            for old_id in &ids_to_remove {
+                f.finalized.remove(old_id);
             }
         }
 

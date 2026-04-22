@@ -2442,6 +2442,7 @@ dependencies = [
  "k256",
  "lru",
  "num-traits",
+ "parking_lot",
  "pms-config",
  "pms-errors",
  "pms-event",
@@ -2474,6 +2475,7 @@ dependencies = [
 name = "pms-economics"
 version = "0.1.0"
 dependencies = [
+ "parking_lot",
  "pms-types-economics",
  "rust_decimal",
  "rust_decimal_macros",
@@ -2605,6 +2607,7 @@ dependencies = [
  "k256",
  "lru",
  "once_cell",
+ "parking_lot",
  "pms-bridge",
  "pms-config",
  "pms-contracts",
@@ -2660,6 +2663,7 @@ dependencies = [
  "itoa",
  "nanoid",
  "num_cpus",
+ "parking_lot",
  "pms-config",
  "pms-core",
  "pms-economics",
