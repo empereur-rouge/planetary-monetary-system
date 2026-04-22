@@ -88,6 +88,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         _ready: ready,
         stats,
         contract_store: store.clone(),
+        compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
         store,
         admin_token,
         node_wallet,
@@ -214,6 +215,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
         contract_event_bus: None,
         contract_store: store.clone(),
+        compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // 10) Router
@@ -330,6 +332,7 @@ pub async fn make_test_ctx_with_admin(
         tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
         contract_event_bus: None,
         contract_store: store.clone(),
+        compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // 10) Router
