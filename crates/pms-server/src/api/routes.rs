@@ -305,6 +305,13 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         ));
 
     // Endpoint: /admin/* (Protected)
+    //
+    // The admin sub-router intentionally DOES NOT apply a CorsLayer. A browser
+    // refusing to send cross-origin requests without CORS headers is itself a
+    // defense-in-depth barrier against CSRF attacks targeting an operator who
+    // happens to have an admin session cookie / localStorage token (audit
+    // finding H-auth-E). Operator tooling (curl, CLI scripts, Postman) is not
+    // a browser and therefore not affected.
     let admin = Router::new()
         .route("/admin/ping", get(admin_ping))
         .route("/admin/compact", post(admin_compact))
@@ -438,12 +445,30 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         ))
         // 2. Concurrency Limit (256)
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
-        // 1.5 CORS (allow any origin for frontend flexibility)
+        // 1.5 CORS — origin stays open so the game frontend / SDK can talk
+        // to the engine from any domain, but methods + headers are pinned to
+        // what the API actually uses. The admin sub-router adds no CORS
+        // layer of its own, so a browser can't preflight `/admin/*`: any
+        // cross-origin admin request is rejected by the browser before it
+        // reaches the auth middleware. See audit finding H-auth-E and the
+        // `documentation/trust-model.md` section on operator tooling.
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PUT,
+                    axum::http::Method::DELETE,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::ACCEPT,
+                    axum::http::HeaderName::from_static("x-api-key"),
+                    axum::http::HeaderName::from_static("x-admin-token"),
+                ]),
         )
         // 1.5 API latency histogram (records after response, before tracing)
         .layer(middleware::from_fn(track_latency))

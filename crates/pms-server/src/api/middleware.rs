@@ -11,10 +11,18 @@ use serde_json::json;
 use std::net::SocketAddr;
 
 /// Middleware to check if request is allowed for admin routes.
-/// Logic:
-/// 1. Allow localhost always
-/// 2. If allowed_ips is configured (non-empty), check IP is in whitelist
-/// 3. Require valid admin token
+///
+/// Logic, in order:
+///   1. Allow localhost (loopback) without token — dev convenience.
+///      SECURITY NOTE: the server MUST NOT bind directly on `0.0.0.0`;
+///      production should always sit behind a trusted reverse proxy
+///      (Caddy / nginx) on localhost. This is documented in the trust
+///      model (see `documentation/trust-model.md`).
+///   2. If `allowed_networks` is non-empty, the remote IP must be in it.
+///   3. Admin token must be supplied via either `Authorization: Bearer <t>`
+///      or `X-Admin-Token: <t>`. Comparison is constant-time (delegated
+///      to `helper::is_admin_authorized` which uses `subtle::ConstantTimeEq`),
+///      closing audit finding H-auth-A (timing leak).
 pub(super) async fn require_local_or_admin(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -37,42 +45,56 @@ pub(super) async fn require_local_or_admin(
             .any(|net| net.contains(client_ip));
         if !ip_allowed {
             tracing::warn!("Admin access denied: IP {} not in allowlist", client_ip);
+            crate::metrics::ADMIN_AUTH_FAILURES
+                .with_label_values(&["ip_not_allowed"])
+                .inc();
             return (StatusCode::FORBIDDEN, "IP not allowed").into_response();
         }
     }
 
-    // 3. Require valid Admin Token
-    if let Some(token) = &state.admin_token {
-        if let Some(auth_header) = headers.get("Authorization") {
-            if let Ok(auth_str) = auth_header.to_str() {
-                if auth_str == format!("Bearer {}", token) {
-                    return next.run(request).await;
-                }
-            }
-        }
+    // 3. Require valid Admin Token — constant-time compare via helper.
+    if crate::helper::is_admin_authorized(&state, &headers) {
+        return next.run(request).await;
     }
 
-    // Block otherwise
+    // Differentiate "no token supplied" from "wrong token" so alerts can
+    // distinguish brute force from a misconfigured client.
+    let reason = if headers.get(axum::http::header::AUTHORIZATION).is_none()
+        && headers.get("X-Admin-Token").is_none()
+    {
+        "missing_token"
+    } else {
+        "wrong_token"
+    };
+    crate::metrics::ADMIN_AUTH_FAILURES
+        .with_label_values(&[reason])
+        .inc();
     (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
 }
 
-/// Admin-token-only middleware for per-ledger admin routes (used inside oneshot router
-/// where ConnectInfo may not be available).
+/// Admin-token-only middleware for per-ledger admin routes where `ConnectInfo`
+/// is not available (nested oneshot router). Delegates to
+/// `helper::is_admin_authorized` — same constant-time path as
+/// `require_local_or_admin`.
 pub(super) async fn require_admin_token(
     State(state): State<AppState>,
     headers: HeaderMap,
     request: axum::extract::Request,
     next: Next,
 ) -> impl IntoResponse {
-    if let Some(token) = &state.admin_token {
-        if let Some(auth_header) = headers.get("Authorization") {
-            if let Ok(auth_str) = auth_header.to_str() {
-                if auth_str == format!("Bearer {}", token) {
-                    return next.run(request).await;
-                }
-            }
-        }
+    if crate::helper::is_admin_authorized(&state, &headers) {
+        return next.run(request).await;
     }
+    let reason = if headers.get(axum::http::header::AUTHORIZATION).is_none()
+        && headers.get("X-Admin-Token").is_none()
+    {
+        "missing_token"
+    } else {
+        "wrong_token"
+    };
+    crate::metrics::ADMIN_AUTH_FAILURES
+        .with_label_values(&[reason])
+        .inc();
     (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
 }
 

@@ -29,6 +29,21 @@ pub static PMS_BLOCKS_TOTAL: Lazy<IntGaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Admin-auth failures counter (unauthorized hits on admin routes).
+///
+/// Incremented by the admin middlewares on every 401/403 so that an operator
+/// can alert on sudden bursts (brute force / token leak attempts). Labelled
+/// by `reason` so that IP-allowlist rejections, missing token, and wrong
+/// token can be differentiated without exploding cardinality on route.
+pub static ADMIN_AUTH_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
+    prometheus::register_int_counter_vec!(
+        "pms_admin_auth_failures_total",
+        "Admin endpoint authentication failures",
+        &["reason"] // "ip_not_allowed" | "missing_token" | "wrong_token"
+    )
+    .unwrap()
+});
+
 /// API request latency histogram (seconds) — labels: method, route.
 ///
 /// Uses `MatchedPath` from axum to get route templates (e.g. `/v1/wallet/{addr}/balance`)

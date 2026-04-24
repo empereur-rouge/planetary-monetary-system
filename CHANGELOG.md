@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.4] - Unreleased — Production hardening sprint
+
+### Security
+- **sec(admin-auth)**: Audit finding H-auth closed on five fronts. (A) The two admin middlewares (`require_local_or_admin`, `require_admin_token`) used to compare the admin token with `auth_str == format!("Bearer {token}")` — a direct string compare that can leak via timing. Both now delegate to `helper::is_admin_authorized`, which already runs `subtle::ConstantTimeEq` on the payload. (D) `api_fn::compliance::is_admin_authorized` was a divergent copy (wrong default "allow all on missing token", only checked `Authorization` not `X-Admin-Token`); removed and `use crate::helper::is_admin_authorized` wired in. (E) The global `CorsLayer` shifted from `allow_methods(Any)` / `allow_headers(Any)` to an explicit small set (`GET/POST/PUT/DELETE/OPTIONS`, `Authorization`/`Content-Type`/`Accept`/`X-Api-Key`/`X-Admin-Token`), and the `/admin/*` sub-router intentionally carries no CORS layer of its own — a browser refusing the preflight is an extra defense-in-depth barrier against CSRF targeting an operator with a stored admin token. (F) New `pms_admin_auth_failures_total{reason}` counter lets operators alert on brute-force / token-leak bursts (reasons: `ip_not_allowed`, `missing_token`, `wrong_token`). (C) New integration test `admin_auth_enforcement.rs` fires every known `/admin/*` route (36 at time of writing) from a non-loopback IP with no Authorization header, asserts 401/403 across the board — a regression trap if a future router refactor ever accidentally unplugs the middleware.
+- **bump(version)**: Workspace version 0.7.3 → 0.7.4.
+
+---
+
 ## [0.7.3] - Unreleased — Persist hot-path clone reduction + atomic encrypted UTXO delta + tips reconcile
 
 ### Fixed
