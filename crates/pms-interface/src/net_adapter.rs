@@ -194,4 +194,17 @@ pub trait NetDagAdapter: Send + Sync {
     fn persist_queue_depth(&self) -> Option<(usize, usize)> {
         None
     }
+
+    /// Current size of the in-memory UTXO set (number of unspent outputs).
+    ///
+    /// Default `None` so mocks that don't keep a UTXO set can opt out — the
+    /// metrics sampler ignores `None`. Production `CoreAdapter` reports
+    /// `ShardedUtxoSet::total_len()`. Used by the metrics sampler to
+    /// publish `pms_utxo_set_size`, an early-warning gauge for the cap
+    /// configured by `[rocks].max_utxos`. When this gauge approaches the
+    /// cap, the LRU starts evicting and balance lookups fall through to
+    /// the storage layer.
+    async fn utxo_set_size(&self) -> Option<usize> {
+        None
+    }
 }

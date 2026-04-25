@@ -66,6 +66,10 @@ where
         Some((max.saturating_sub(avail), max))
     }
 
+    async fn utxo_set_size(&self) -> Option<usize> {
+        Some(self.utxos.total_len().await)
+    }
+
     async fn top_tips(&self, limit: usize) -> Result<Vec<String>> {
         self.do_top_tips(limit).await
     }

@@ -1,6 +1,7 @@
 // pms-server/src/api/tasks — Background tasks (fee distribution, inflation mint, activity backfill).
 
 use super::state::AppState;
+use pms_storage::DagStorage;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -146,6 +147,116 @@ pub fn spawn_inflation_mint_task(state: AppState) {
                 }
             }
         });
+    }
+}
+
+/// Spawns the metrics sampler (item 4, v0.7.4).
+///
+/// Most operator-facing signals are gauges that can't be incremented from
+/// the hot path — the persist queue depth, the in-memory UTXO set size,
+/// the fee pool balance — so we read them on a fixed cadence (5s) and
+/// publish into Prometheus. The same loop drives the global RocksDB
+/// stall counter by polling `is-write-stopped` and adding the sampling
+/// interval whenever it's `1`.
+///
+/// 5s is a deliberate compromise: tight enough that a stall surfaces in
+/// the next Prometheus scrape, loose enough that the sampler itself is
+/// not visible on a flame graph. Each tick walks `ledger_mgr.list_ids()`
+/// — that's bounded (1 main + N custom ledgers) and each call is O(1)
+/// against in-memory state.
+pub fn spawn_metrics_sampler_task(state: AppState) {
+    const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+
+    tokio::spawn(async move {
+        tracing::info!(
+            target = "pms_metrics",
+            "Metrics sampler started (interval: {:?})",
+            SAMPLE_INTERVAL
+        );
+        let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
+        // Consume the first immediate tick so samples start one full
+        // interval after boot — gives the rest of the system time to
+        // settle and avoids reporting transient zero values.
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+
+            // ---- main ledger (always present) ----------------------
+            sample_ledger(
+                &state.ledger_id,
+                &*state.srv.adapter_arc(),
+                &state.fee_pool,
+                state.store.is_write_stopped(),
+            )
+            .await;
+
+            // ---- custom ledgers from the registry ------------------
+            if let Some(ref mgr) = state.ledger_mgr {
+                for lid in mgr.list_ids() {
+                    if lid == "main" {
+                        continue;
+                    }
+                    let Some(instance) = mgr.get(&lid) else {
+                        continue;
+                    };
+                    let pool = state.fee_pool_registry.get_or_create(&lid);
+                    sample_ledger(
+                        &lid,
+                        &*instance.adapter,
+                        &pool,
+                        instance.store.is_write_stopped(),
+                    )
+                    .await;
+                }
+            }
+        }
+    });
+}
+
+/// Sample one ledger's gauges and feed them into the Prometheus registry.
+/// Defined out-of-line so the loop above stays readable.
+async fn sample_ledger(
+    ledger_id: &str,
+    adapter: &(dyn pms_interface::NetDagAdapter + 'static),
+    fee_pool: &crate::fee_pool::SharedFeePool,
+    is_write_stopped: Option<bool>,
+) {
+    use crate::metrics::{
+        FEE_POOL_TOTAL, PERSIST_QUEUE_CAPACITY, PERSIST_QUEUE_DEPTH,
+        ROCKSDB_WRITE_STALLED_SECONDS, UTXO_SET_SIZE,
+    };
+
+    // Persist queue gauges. `None` from the adapter means the backend
+    // doesn't expose this introspection (e.g. mock adapters in tests);
+    // skip rather than publish a misleading zero.
+    if let Some((depth, capacity)) = adapter.persist_queue_depth() {
+        PERSIST_QUEUE_DEPTH
+            .with_label_values(&[ledger_id])
+            .set(depth as i64);
+        PERSIST_QUEUE_CAPACITY
+            .with_label_values(&[ledger_id])
+            .set(capacity as i64);
+    }
+
+    if let Some(size) = adapter.utxo_set_size().await {
+        UTXO_SET_SIZE
+            .with_label_values(&[ledger_id])
+            .set(size as i64);
+    }
+
+    // Fee pool: read the snapshot under a brief read lock. We don't hold
+    // it across `await` boundaries — the lock is dropped at end of expr.
+    let total = fee_pool.read().await.total_fees;
+    FEE_POOL_TOTAL
+        .with_label_values(&[ledger_id])
+        .set(total.to_string().parse::<f64>().unwrap_or(0.0));
+
+    // RocksDB stall counter: increment by the sampling interval *only*
+    // when the property explicitly reads `true`. `None` means we don't
+    // know — better to under-report than to over-report a stall.
+    if matches!(is_write_stopped, Some(true)) {
+        ROCKSDB_WRITE_STALLED_SECONDS.inc_by(5);
     }
 }
 

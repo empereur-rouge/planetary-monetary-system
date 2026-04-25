@@ -2,7 +2,7 @@
 
 use super::routes::build_api_router;
 use super::state::{AppState, FeePoolRefundSink};
-use super::tasks::{spawn_activity_backfill_task, spawn_fee_distributor_task, spawn_inflation_mint_task};
+use super::tasks::{spawn_activity_backfill_task, spawn_fee_distributor_task, spawn_inflation_mint_task, spawn_metrics_sampler_task};
 use crate::Server;
 use crate::api_keys;
 use crate::helper::resolve_admin_token;
@@ -231,6 +231,12 @@ pub async fn serve_api(
     // ACTIVITY ITEMS BACKFILL (one-time, 30s delayed)
     // ═══════════════════════════════════════════════════════════════════════
     spawn_activity_backfill_task(state.clone());
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // METRICS SAMPLER (item 4, v0.7.4) — 5s gauge polling for the persist
+    // queue, fee pool, UTXO set size, and RocksDB write-stop signal.
+    // ═══════════════════════════════════════════════════════════════════════
+    spawn_metrics_sampler_task(state.clone());
 
     // ═══════════════════════════════════════════════════════════════════════
     // TPS LOGGER (periodic JSONL file — every 10 min)

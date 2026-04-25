@@ -126,6 +126,18 @@ pub trait DagStorage: Send + Sync {
         Ok(None)
     }
 
+    /// True when RocksDB has stopped accepting writes because L0 file
+    /// count exceeded `level0_stop_writes_trigger`. Default `None` lets
+    /// non-RocksDB backends opt out (the metrics sampler ignores `None`).
+    /// `RocksStore` reads the `rocksdb.is-write-stopped` property — this
+    /// is the canonical "writes are blocked" signal exposed by RocksDB
+    /// itself (see DBOptions). Used by the metrics sampler to drive
+    /// `pms_rocksdb_write_stalled_seconds_total`, which is the alerting
+    /// signal an operator wires to PagerDuty / Better Uptime.
+    fn is_write_stopped(&self) -> Option<bool> {
+        None
+    }
+
     /// Authoritative check: has this outpoint been spent at any point in the
     /// DAG's history?
     ///

@@ -1078,6 +1078,10 @@ where
                             std::sync::atomic::AtomicU64::new(0);
                         let count = STALL_COUNT
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        // The interval ticks once per second after consuming
+                        // the immediate first tick above, so each fire here
+                        // means "we've been blocked for ~1 more second".
+                        crate::metrics::PERSIST_STALL_SECONDS.inc();
                         tracing::error!(
                             target = "pms_persist",
                             block_id = %block_id,

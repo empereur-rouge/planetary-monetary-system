@@ -728,6 +728,21 @@ impl DagStorage for RocksStore {
         }
     }
 
+    fn is_write_stopped(&self) -> Option<bool> {
+        // RocksDB exposes the boolean as the literal string "0" or "1".
+        // Anything else (property unsupported, parse failure) returns None
+        // so the metrics sampler treats this sample as unavailable rather
+        // than reporting a misleading "not stalled" reading.
+        match self.db.property_value("rocksdb.is-write-stopped") {
+            Ok(Some(v)) => match v.trim() {
+                "0" => Some(false),
+                "1" => Some(true),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     async fn recent_ids_by_address(
         &self,
         addr: &str,

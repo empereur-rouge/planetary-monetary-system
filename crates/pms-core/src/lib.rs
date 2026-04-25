@@ -15,6 +15,7 @@
 pub mod background_persist;
 mod block_builder;
 pub mod concurrent_dag;
+pub mod metrics;
 mod core_adapter;
 mod crypto;
 pub mod dag;
