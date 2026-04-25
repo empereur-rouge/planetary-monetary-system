@@ -452,6 +452,95 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Commande pour chiffrer une clé coordinator existante (AES-256-GCM + argon2id)
+    // — voir pms-wallet::key_encryption et audit finding H-key (v0.7.4).
+    if args.len() > 1 && args[1] == "encrypt-coordinator-key" {
+        if args.len() != 4 {
+            eprintln!(
+                "Usage: tools-cli encrypt-coordinator-key <in_plain_key_path> <out_enc_path>"
+            );
+            eprintln!();
+            eprintln!("  in_plain_key_path : 64-hex coordinator key (same format as gen-coordinator output)");
+            eprintln!("  out_enc_path      : destination JSON envelope (e.g. /opt/pms/etc/pms/node.key.enc)");
+            eprintln!();
+            eprintln!("  Passphrase source, in order:");
+            eprintln!("    1. env var PMS_COORDINATOR_KEY_PASSPHRASE");
+            eprintln!("    2. interactive prompt (stdin, no echo when stdin is a TTY)");
+            std::process::exit(1);
+        }
+        let in_path = &args[2];
+        let out_path = &args[3];
+
+        // Read the plain key file — same parsing as Wallet::load_from_node_key_file
+        let raw = std::fs::read(in_path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", in_path))?;
+        let trimmed = String::from_utf8(raw.clone())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let priv_bytes: [u8; 32] = if trimmed.len() == 64 {
+            let v = hex::decode(&trimmed)
+                .map_err(|e| anyhow::anyhow!("parse hex key: {e}"))?;
+            v.as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("decoded key must be 32 bytes"))?
+        } else if raw.len() == 32 {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&raw);
+            a
+        } else {
+            anyhow::bail!(
+                "unsupported plain key format (expected 64-hex or 32-raw-bytes, got {} bytes)",
+                raw.len()
+            );
+        };
+
+        // Passphrase: env var first, then interactive prompt (double entry for confirm).
+        let mut passphrase = match std::env::var("PMS_COORDINATOR_KEY_PASSPHRASE") {
+            Ok(p) if !p.is_empty() => {
+                eprintln!("[encrypt] using passphrase from PMS_COORDINATOR_KEY_PASSPHRASE");
+                p
+            }
+            _ => {
+                let p1 = rpassword::prompt_password("Passphrase (min 12 chars): ")
+                    .map_err(|e| anyhow::anyhow!("read passphrase: {e}"))?;
+                if p1.len() < 12 {
+                    anyhow::bail!("passphrase must be at least 12 chars");
+                }
+                let p2 = rpassword::prompt_password("Confirm passphrase: ")
+                    .map_err(|e| anyhow::anyhow!("read passphrase: {e}"))?;
+                if p1 != p2 {
+                    anyhow::bail!("passphrases do not match");
+                }
+                p1
+            }
+        };
+
+        let env = pms_wallet::key_encryption::encrypt_key(&priv_bytes, &mut passphrase)
+            .map_err(|e| anyhow::anyhow!("encrypt: {e}"))?;
+
+        let json = serde_json::to_string_pretty(&env)?;
+        std::fs::write(out_path, json)
+            .map_err(|e| anyhow::anyhow!("write {}: {e}", out_path))?;
+
+        // 0600 on unix — same hardening as gen-coordinator
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(out_path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        println!("✅ Wrote encrypted coordinator key to {}", out_path);
+        println!();
+        println!("Deployment checklist:");
+        println!("  1. Move {} out of source control. Keep an offline backup.", in_path);
+        println!("  2. On the server, set PMS_COORDINATOR_KEY_PASSPHRASE via systemd EnvironmentFile,");
+        println!("     Docker secret, or a sourced shell script — never inline in config.toml.");
+        println!("  3. Update [secrets].node_identity_key_encrypted_path = \"{}\" in config.", out_path);
+        println!("  4. When the engine boots, it will prefer the encrypted file over the plain one.");
+        return Ok(());
+    }
+
     // Interactive REPL fallback
     repl::run().await
 }

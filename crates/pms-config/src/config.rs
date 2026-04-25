@@ -319,6 +319,20 @@ pub struct Auth {
 pub struct SecretSettings {
     pub node_identity_key_path: String,
     pub admin_wallet_file: Option<String>,
+    /// Optional AES-256-GCM encrypted coordinator key envelope produced by
+    /// `tools-cli encrypt-coordinator-key`. When set AND the file exists,
+    /// the server loads the node identity from it and reads the passphrase
+    /// from the `PMS_COORDINATOR_KEY_PASSPHRASE` environment variable.
+    /// Falls back to `node_identity_key_path` (plain hex) if absent —
+    /// keeps existing dev/testnet deployments working without changes.
+    /// See audit finding H-key and `pms-wallet::key_encryption`.
+    #[serde(default)]
+    pub node_identity_key_encrypted_path: Option<String>,
+    /// If true, boot aborts when the key file has group/world permissions
+    /// (`mode & 0o077 != 0`). Default: `false` (warning-only) so existing
+    /// dev setups don't break. Flip to `true` in production.
+    #[serde(default)]
+    pub strict_key_permissions: bool,
 }
 
 /// Runtime configuration passed to the P2P server and API server.

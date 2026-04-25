@@ -69,7 +69,41 @@ async fn main() -> Result<()> {
 
     // 1) Settings
     let settings = load_config()?;
-    let node_wallet = Wallet::load_from_node_key_file(&settings.secrets.node_identity_key_path)?;
+
+    // 1.a) Node identity key — prefer the encrypted envelope when one is
+    //      configured, fall back to the plain hex file otherwise. In the
+    //      encrypted case the passphrase must be supplied via the env var
+    //      `PMS_COORDINATOR_KEY_PASSPHRASE` (systemd EnvironmentFile,
+    //      Docker secret, vault-sourced `source` — never embedded in the
+    //      config file itself). Audit finding H-key, v0.7.4.
+    let node_wallet = match settings.secrets.node_identity_key_encrypted_path.as_deref() {
+        Some(enc_path) if std::path::Path::new(enc_path).exists() => {
+            Wallet::check_key_file_permissions(enc_path, settings.secrets.strict_key_permissions)?;
+            let passphrase = env::var("PMS_COORDINATOR_KEY_PASSPHRASE").map_err(|_| {
+                anyhow::anyhow!(
+                    "encrypted coordinator key at {enc_path} requires env var \
+                     PMS_COORDINATOR_KEY_PASSPHRASE to be set (empty strings \
+                     not accepted)"
+                )
+            })?;
+            if passphrase.is_empty() {
+                anyhow::bail!("PMS_COORDINATOR_KEY_PASSPHRASE is set but empty");
+            }
+            eprintln!("[node-key] loading encrypted key from {enc_path}");
+            Wallet::load_from_encrypted_file(enc_path, passphrase)?
+        }
+        _ => {
+            Wallet::check_key_file_permissions(
+                &settings.secrets.node_identity_key_path,
+                settings.secrets.strict_key_permissions,
+            )?;
+            eprintln!(
+                "[node-key] loading plain-text key from {}",
+                settings.secrets.node_identity_key_path
+            );
+            Wallet::load_from_node_key_file(&settings.secrets.node_identity_key_path)?
+        }
+    };
     let node_wallet = Arc::new(node_wallet);
 
     let cwd = env::current_dir()?;
