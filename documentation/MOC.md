@@ -1,6 +1,6 @@
 ---
 tags: [index]
-updated: 2026-03-23
+updated: 2026-04-25
 ---
 
 # PMS Engine — Map of Content
@@ -8,6 +8,12 @@ updated: 2026-03-23
 > Manuel d'instruction du projet DAG-PMS (Planetary Monetary System).
 > Ce vault Obsidian sert de documentation fonctionnelle haut-niveau.
 > Pour la documentation technique du code Rust, utiliser `cargo doc --no-deps --open`.
+
+## Gouvernance & Sécurité
+
+| Fiche | Description |
+|-------|-------------|
+| [[trust-model]] | Modèle de confiance : ce que le Coordinator peut/ne peut pas, SPOF, RTO/RPO, comparaison Bitcoin/Ethereum, résumé pour CGV |
 
 ---
 

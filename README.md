@@ -152,6 +152,16 @@ cargo test -p pms-server --test distributed_tx_e2e -- --ignored --nocapture
 
 ---
 
+## 🛡️ Modèle de Confiance
+
+PMS est centralisé sur un opérateur unique (le **Coordinator**) dont les actes sont
+publiquement vérifiables dans un DAG signé. Avant toute intégration, lis
+[`documentation/trust-model.md`](documentation/trust-model.md) pour comprendre
+**ce que le Coordinator peut et ne peut pas faire**, le SPOF actuel, et les
+RTO/RPO opérationnels. Un résumé prêt pour CGV y figure.
+
+---
+
 ## 📖 Documentation API
 
 Toute interaction se fait via le **Gateway (Port 8443)**.
