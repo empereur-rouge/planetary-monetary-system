@@ -239,21 +239,15 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     // Alias legacy
     let live = Router::new().route("/live", get(|| async { "ok" }));
 
-    // Endpoint: /healthz (Check DB + Ready)
-    let healthz = {
-        let r = state._ready.clone();
-        Router::new().route(
-            "/healthz",
-            get(move || async move {
-                if !r.load(Ordering::Relaxed) {
-                    return (StatusCode::SERVICE_UNAVAILABLE, "starting");
-                }
-                // Check DB open (trivial car via Arc<RocksStore>, s'il est là c'est ouvert)
-                // On pourrait check des métriques internes rocksdb si besoin
-                (StatusCode::OK, "ready")
-            }),
-        )
-    };
+    // Endpoint: /healthz (enriched checks — see api_fn::healthz, v0.7.4).
+    // `/livez` stays trivial (just `200 ok` if the process is alive) so
+    // a Kubernetes liveness probe doesn't restart the pod when the
+    // persist queue spikes. `/healthz` is the smart one and may return
+    // 503 with a JSON breakdown when one of the checks trips.
+    let healthz = Router::new().route(
+        "/healthz",
+        get(crate::api_fn::healthz::enriched_healthz),
+    );
     // Alias legacy
     let ready = {
         let r = state._ready.clone();

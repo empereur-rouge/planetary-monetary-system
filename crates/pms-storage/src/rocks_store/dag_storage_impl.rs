@@ -716,6 +716,18 @@ impl DagStorage for RocksStore {
         Ok(self.db.get_cf(&cf_utxo_spent, &key)?.is_some())
     }
 
+    async fn block_ts_ms(&self, id: &str) -> Result<Option<i64>> {
+        let cf_i2t = self.cf("id2ts");
+        match self.db.get_cf(&cf_i2t, id.as_bytes())? {
+            Some(v) if v.len() == 8 => {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&v);
+                Ok(Some(u64::from_be_bytes(b) as i64))
+            }
+            _ => Ok(None),
+        }
+    }
+
     async fn recent_ids_by_address(
         &self,
         addr: &str,

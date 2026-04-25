@@ -60,6 +60,12 @@ where
         self.do_broadcast_block(wb).await
     }
 
+    fn persist_queue_depth(&self) -> Option<(usize, usize)> {
+        let max = self.persist_tx.max_capacity();
+        let avail = self.persist_tx.capacity();
+        Some((max.saturating_sub(avail), max))
+    }
+
     async fn top_tips(&self, limit: usize) -> Result<Vec<String>> {
         self.do_top_tips(limit).await
     }

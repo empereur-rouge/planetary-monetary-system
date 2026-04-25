@@ -117,6 +117,15 @@ pub trait DagStorage: Send + Sync {
         Ok(count)
     }
 
+    /// Returns the persistence timestamp (milliseconds since UNIX epoch)
+    /// of a block, or `Ok(None)` if the block isn't indexed for time.
+    /// Default `Ok(None)` so mocks don't have to fake a timestamp index.
+    /// `RocksStore` reads from the `id2ts` column family directly.
+    /// Used by `/healthz` to compute `last_block_age`.
+    async fn block_ts_ms(&self, _id: &str) -> Result<Option<i64>> {
+        Ok(None)
+    }
+
     /// Authoritative check: has this outpoint been spent at any point in the
     /// DAG's history?
     ///

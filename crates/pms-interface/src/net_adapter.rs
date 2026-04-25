@@ -180,4 +180,18 @@ pub trait NetDagAdapter: Send + Sync {
     fn event_bus(&self) -> Option<pms_event::EventBus> {
         None
     }
+
+    /// Healthz introspection — current depth of the background persist
+    /// queue and its maximum capacity. Returns `(used, capacity)` where
+    /// `used` is the number of jobs currently pending in the channel and
+    /// `capacity` is the buffer size set at spawn time.
+    ///
+    /// Default `None` so mocks that don't run a real persist task don't
+    /// need to fake numbers. Production `CoreAdapter` returns a real
+    /// reading derived from `tokio::sync::mpsc::Sender::{capacity,
+    /// max_capacity}`. Used by `/healthz` to flag a saturated pipeline
+    /// (degraded), and by ops dashboards.
+    fn persist_queue_depth(&self) -> Option<(usize, usize)> {
+        None
+    }
 }
