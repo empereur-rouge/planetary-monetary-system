@@ -55,6 +55,7 @@ pub fn compute_block_id(
                 PlainPayload::ContractRegister(_) => "ContractRegister",
                 PlainPayload::ContractUpdate { .. } => "ContractUpdate",
                 PlainPayload::LedgerOwnershipTransfer { .. } => "LedgerOwnershipTransfer",
+                PlainPayload::CoordinatorKeyRotate { .. } => "CoordinatorKeyRotate",
             }
             .to_string();
 

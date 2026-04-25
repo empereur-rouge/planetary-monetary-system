@@ -181,6 +181,82 @@ impl Wallet {
         Ok(total)
     }
 
+    /// Load a coordinator wallet from an AES-256-GCM encrypted file
+    /// produced by [`crate::key_encryption::encrypt_key`] (see
+    /// `tools-cli encrypt-coordinator-key`). Passphrase is consumed and
+    /// zeroized by the underlying crypto helpers.
+    ///
+    /// The decrypted 32-byte private key is immediately promoted into a
+    /// `Wallet` via the same path as [`Self::load_from_node_key_file`]'s
+    /// 64-hex branch, so downstream signing code is unchanged.
+    pub fn load_from_encrypted_file(path: &str, mut passphrase: String) -> Result<Self> {
+        let p = Path::new(path);
+        let raw = fs::read(p)
+            .map_err(|e| anyhow::anyhow!("read encrypted key file {}: {e}", p.display()))?;
+        let env: crate::key_encryption::EncryptedKeyFile = serde_json::from_slice(&raw)
+            .map_err(|e| anyhow::anyhow!("parse encrypted key envelope: {e}"))?;
+        let priv_bytes = crate::key_encryption::decrypt_key(&env, &mut passphrase)?;
+
+        // Reuse the same construction as the 64-hex branch below.
+        let priv_b64 = STANDARD.encode(priv_bytes);
+        let signing_key = k256::ecdsa::SigningKey::from_slice(&priv_bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid ECDSA private key from decrypted file: {e}"))?;
+        let verify_key = signing_key.verifying_key();
+        let pub_hex = hex::encode(verify_key.to_encoded_point(false).as_bytes());
+
+        let mut w = Wallet {
+            private_key_b64: priv_b64,
+            public_key_hex: pub_hex,
+            x25519_pub_hex: String::new(),
+            mnemonic_words: None,
+        };
+        let (_sk, pk) = w
+            .derive_x25519_pair_from_private_key_b64()
+            .ok_or_else(|| anyhow::anyhow!("x25519 derivation failed from encrypted node key"))?;
+        w.x25519_pub_hex = pk;
+
+        // The on-stack `priv_bytes` array is dropped at end of scope; its
+        // memory is not guaranteed-zeroed by Rust. Zero it explicitly here
+        // so a core dump captured before scope ends doesn't keep the key.
+        // (Not perfect protection — a copy may linger in `priv_b64` — but
+        // every byte we can clear reduces the window.)
+        let mut pb = priv_bytes;
+        use zeroize::Zeroize;
+        pb.zeroize();
+        Ok(w)
+    }
+
+    /// Best-effort permission check on a coordinator key file.
+    ///
+    /// Warns if the file is group- or world-readable on Unix. Returns
+    /// `Err` when `strict_permissions` is `true` so the caller can abort
+    /// boot in production. On non-Unix platforms this is a no-op.
+    pub fn check_key_file_permissions(path: &str, strict: bool) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(path)
+                .map_err(|e| anyhow::anyhow!("stat {path}: {e}"))?;
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                let msg = format!(
+                    "key file {path} has permissive mode {:o}; expected 0600 / 0400 \
+                     (group/world bits must be cleared — `chmod 600 {path}`)",
+                    mode
+                );
+                if strict {
+                    return Err(anyhow::anyhow!(msg));
+                }
+                tracing::error!(target = "pms_secrets", "{msg}");
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path, strict); // no-op on Windows
+        }
+        Ok(())
+    }
+
     /// Charge le wallet "node identity" depuis un fichier de clé.
     /// Le format exact dépend de ce que tu as choisi (JSON, binaire, etc.).
     pub fn load_from_node_key_file(path: &str) -> Result<Self> {

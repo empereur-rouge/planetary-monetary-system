@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use pms_config::{
-    Address, Admin, Auth, FeePickMode, FeesSettings, Limits, Network, NetworkMode, P2pConfig,
-    Rocks, SecretSettings, Settings, TreasuryWallets, ValidationSettings,
+    Address, Admin, Auth, FeePickMode, FeesSettings, HealthSettings, Limits, Network, NetworkMode,
+    P2pConfig, Rocks, SecretSettings, Settings, TreasuryWallets, ValidationSettings,
 };
 use pms_interface::NetDagAdapter;
 use pms_server::Server;
@@ -168,6 +168,7 @@ async fn test_automated_fee_distribution() {
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
             max_open_files: 512,
+            auto_reindex_activity_items: false,
         },
         network: Network {
             mode: NetworkMode::Dev,
@@ -197,6 +198,8 @@ async fn test_automated_fee_distribution() {
         },
         secrets: SecretSettings {
             node_identity_key_path: ".".into(),
+            node_identity_key_encrypted_path: None,
+            strict_key_permissions: false,
             admin_wallet_file: None,
         },
         validation: ValidationSettings {
@@ -269,6 +272,7 @@ async fn test_automated_fee_distribution() {
             max_peer_retries: 20,
         },
         ledgers: vec![],
+        health: HealthSettings::default(),
     };
 
     // 5. Create Server with MockAdapter
@@ -357,6 +361,7 @@ async fn test_automated_fee_distribution() {
         tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
         contract_event_bus: None,
         contract_store: rocks_store_arc.clone(),
+        compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // 8. Spawn Distributor

@@ -296,6 +296,11 @@ impl RocksStore {
             "gas_pools",     // Gas pools per ledger: ledger_id -> GasPool (JSON)
             "ledger_subscriptions", // Ledger annual subscriptions: ledger_id -> LedgerSubscription (JSON)
             "ledger_defs",   // Persisted ledger definitions: ledger_id -> LedgerDef (JSON)
+            // Coordinator key rotation history (audit item 8, v0.7.4):
+            // key = applied_at_ts_ms_be:8 + applied_at_block_id ;
+            // value = JSON KeyRotationRecord. Iterated chronologically
+            // at boot to compute the active signer set.
+            "coordinator_key_history",
         ]
         .into_iter()
         .map(|s| format!("{prefix}:{s}"))
@@ -430,6 +435,7 @@ impl RocksStore {
         "gas_pools",
         "ledger_subscriptions",
         "ledger_defs",
+        "coordinator_key_history",
     ];
 
     /// Ouvre un RocksDB avec les column families de **plusieurs prefixes** à la fois.

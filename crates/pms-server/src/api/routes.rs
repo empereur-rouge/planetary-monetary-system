@@ -4,7 +4,7 @@ use super::ledger_dispatch::dynamic_ledger_handler;
 use super::middleware::{require_admin_token, require_api_key, require_local_or_admin, track_latency};
 use super::state::{sync_all_dag_size_metrics, sync_dag_size_metric, sync_dag_size_metric_for, AppState};
 use crate::admin::{
-    admin_compact, admin_get_config, admin_ping, admin_reindex_activity,
+    admin_compact, admin_get_config, admin_ping, admin_rebuild_tips, admin_reindex_activity,
     admin_reindex_activity_items, admin_update_config,
 };
 use crate::api_fn::activity::{get_wallet_activity, stream_wallet_activity};
@@ -239,21 +239,15 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     // Alias legacy
     let live = Router::new().route("/live", get(|| async { "ok" }));
 
-    // Endpoint: /healthz (Check DB + Ready)
-    let healthz = {
-        let r = state._ready.clone();
-        Router::new().route(
-            "/healthz",
-            get(move || async move {
-                if !r.load(Ordering::Relaxed) {
-                    return (StatusCode::SERVICE_UNAVAILABLE, "starting");
-                }
-                // Check DB open (trivial car via Arc<RocksStore>, s'il est là c'est ouvert)
-                // On pourrait check des métriques internes rocksdb si besoin
-                (StatusCode::OK, "ready")
-            }),
-        )
-    };
+    // Endpoint: /healthz (enriched checks — see api_fn::healthz, v0.7.4).
+    // `/livez` stays trivial (just `200 ok` if the process is alive) so
+    // a Kubernetes liveness probe doesn't restart the pod when the
+    // persist queue spikes. `/healthz` is the smart one and may return
+    // 503 with a JSON breakdown when one of the checks trips.
+    let healthz = Router::new().route(
+        "/healthz",
+        get(crate::api_fn::healthz::enriched_healthz),
+    );
     // Alias legacy
     let ready = {
         let r = state._ready.clone();
@@ -305,6 +299,13 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         ));
 
     // Endpoint: /admin/* (Protected)
+    //
+    // The admin sub-router intentionally DOES NOT apply a CorsLayer. A browser
+    // refusing to send cross-origin requests without CORS headers is itself a
+    // defense-in-depth barrier against CSRF attacks targeting an operator who
+    // happens to have an admin session cookie / localStorage token (audit
+    // finding H-auth-E). Operator tooling (curl, CLI scripts, Postman) is not
+    // a browser and therefore not affected.
     let admin = Router::new()
         .route("/admin/ping", get(admin_ping))
         .route("/admin/compact", post(admin_compact))
@@ -341,6 +342,10 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/admin/reindex-activity", post(admin_reindex_activity))
         .route("/admin/reindex-activity-items", post(admin_reindex_activity_items))
         .route("/admin/consolidate-utxos", post(crate::api_fn::consolidation::admin_consolidate_utxos))
+        // H3 curatif (item 6, v0.7.4): re-derive missing tips from
+        // children_count when the `tips` CF has drifted (e.g. after a
+        // crash between append_block_atomic and add_tip).
+        .route("/admin/rebuild-tips", post(admin_rebuild_tips))
         // Admin API Key CRUD endpoints
         .route("/admin/api-keys", post(admin_create_api_key))
         .route("/admin/api-keys", get(admin_list_api_keys))
@@ -438,12 +443,30 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         ))
         // 2. Concurrency Limit (256)
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
-        // 1.5 CORS (allow any origin for frontend flexibility)
+        // 1.5 CORS — origin stays open so the game frontend / SDK can talk
+        // to the engine from any domain, but methods + headers are pinned to
+        // what the API actually uses. The admin sub-router adds no CORS
+        // layer of its own, so a browser can't preflight `/admin/*`: any
+        // cross-origin admin request is rejected by the browser before it
+        // reaches the auth middleware. See audit finding H-auth-E and the
+        // `documentation/trust-model.md` section on operator tooling.
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PUT,
+                    axum::http::Method::DELETE,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::ACCEPT,
+                    axum::http::HeaderName::from_static("x-api-key"),
+                    axum::http::HeaderName::from_static("x-admin-token"),
+                ]),
         )
         // 1.5 API latency histogram (records after response, before tracing)
         .layer(middleware::from_fn(track_latency))

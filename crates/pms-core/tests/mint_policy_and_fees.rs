@@ -6,8 +6,8 @@ use rust_decimal::Decimal;
 use tempfile::tempdir;
 
 use pms_config::{
-    Address, Admin, Auth, FeePickMode, FeesSettings, Limits, Network, NetworkMode, P2pConfig,
-    Rocks, SecretSettings, Settings, ValidationSettings, load_config,
+    Address, Admin, Auth, FeePickMode, FeesSettings, HealthSettings, Limits, Network, NetworkMode,
+    P2pConfig, Rocks, SecretSettings, Settings, ValidationSettings, load_config,
 };
 use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use pms_wallet::{SignerBackend, Wallet};
@@ -244,6 +244,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
             max_open_files: 512,
+            auto_reindex_activity_items: false,
         },
         network: Network {
             mode: NetworkMode::Mainnet,
@@ -273,6 +274,8 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
         },
         secrets: SecretSettings {
             node_identity_key_path: "".to_string(),
+            node_identity_key_encrypted_path: None,
+            strict_key_permissions: false,
             admin_wallet_file: None,
         },
         validation: ValidationSettings {
@@ -346,6 +349,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             max_peer_retries: 20,
         },
         ledgers: vec![],
+        health: HealthSettings::default(),
     };
 
     // WireBlock signé par un "non-admin"
@@ -391,6 +395,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_testnet() {
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
             max_open_files: 512,
+            auto_reindex_activity_items: false,
         },
         network: Network {
             mode: NetworkMode::Testnet,
@@ -420,6 +425,8 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_testnet() {
         },
         secrets: SecretSettings {
             node_identity_key_path: "".to_string(),
+            node_identity_key_encrypted_path: None,
+            strict_key_permissions: false,
             admin_wallet_file: None,
         },
         validation: ValidationSettings {
@@ -492,6 +499,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_testnet() {
             max_peer_retries: 20,
         },
         ledgers: vec![],
+        health: HealthSettings::default(),
     };
 
     let wb = WireBlock {
@@ -543,6 +551,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_mainnet() {
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
             max_open_files: 512,
+            auto_reindex_activity_items: false,
         },
         network: Network {
             mode: NetworkMode::Mainnet,
@@ -572,6 +581,8 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_mainnet() {
         },
         secrets: SecretSettings {
             node_identity_key_path: "".to_string(),
+            node_identity_key_encrypted_path: None,
+            strict_key_permissions: false,
             admin_wallet_file: None,
         },
         validation: ValidationSettings {
@@ -644,6 +655,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_mainnet() {
             max_peer_retries: 20,
         },
         ledgers: vec![],
+        health: HealthSettings::default(),
     };
 
     let wb = WireBlock {
@@ -695,6 +707,7 @@ fn mint_policy_allows_empty_signer_pubkeys_in_dev() {
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
             max_open_files: 512,
+            auto_reindex_activity_items: false,
         },
         network: Network {
             mode: NetworkMode::Dev,
@@ -724,6 +737,8 @@ fn mint_policy_allows_empty_signer_pubkeys_in_dev() {
         },
         secrets: SecretSettings {
             node_identity_key_path: "".to_string(),
+            node_identity_key_encrypted_path: None,
+            strict_key_permissions: false,
             admin_wallet_file: None,
         },
         validation: ValidationSettings {
@@ -796,6 +811,7 @@ fn mint_policy_allows_empty_signer_pubkeys_in_dev() {
             max_peer_retries: 20,
         },
         ledgers: vec![],
+        health: HealthSettings::default(),
     };
 
     let wb = WireBlock {

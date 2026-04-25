@@ -1,5 +1,11 @@
 use crate::api::AppState;
 use crate::api_fn::tx_helpers;
+// Consolidated auth: single source of truth in `crate::helper`.
+// The local copy that used to live here diverged on the "no token configured
+// = allow all" branch (less safe) and only checked the `Authorization`
+// header, not `X-Admin-Token`. Removing it closes audit finding H-auth-D
+// (drift risk between duplicated auth helpers).
+use crate::helper::is_admin_authorized;
 use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
@@ -9,22 +15,6 @@ use pms_types_payload::{PayloadEnvelope, PlainPayload};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::json;
-
-fn is_admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
-    if let Some(ref token) = state.admin_token {
-        if let Some(auth) = headers.get("authorization") {
-            if let Ok(val) = auth.to_str() {
-                return val.strip_prefix("Bearer ").is_some_and(|t| {
-                    use subtle::ConstantTimeEq;
-                    t.as_bytes().ct_eq(token.as_bytes()).into()
-                });
-            }
-        }
-        false
-    } else {
-        true // no token configured = allow all
-    }
-}
 
 // ── Request structs ──────────────────────────────────────────────────────
 

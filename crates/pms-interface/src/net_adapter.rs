@@ -180,4 +180,31 @@ pub trait NetDagAdapter: Send + Sync {
     fn event_bus(&self) -> Option<pms_event::EventBus> {
         None
     }
+
+    /// Healthz introspection — current depth of the background persist
+    /// queue and its maximum capacity. Returns `(used, capacity)` where
+    /// `used` is the number of jobs currently pending in the channel and
+    /// `capacity` is the buffer size set at spawn time.
+    ///
+    /// Default `None` so mocks that don't run a real persist task don't
+    /// need to fake numbers. Production `CoreAdapter` returns a real
+    /// reading derived from `tokio::sync::mpsc::Sender::{capacity,
+    /// max_capacity}`. Used by `/healthz` to flag a saturated pipeline
+    /// (degraded), and by ops dashboards.
+    fn persist_queue_depth(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// Current size of the in-memory UTXO set (number of unspent outputs).
+    ///
+    /// Default `None` so mocks that don't keep a UTXO set can opt out — the
+    /// metrics sampler ignores `None`. Production `CoreAdapter` reports
+    /// `ShardedUtxoSet::total_len()`. Used by the metrics sampler to
+    /// publish `pms_utxo_set_size`, an early-warning gauge for the cap
+    /// configured by `[rocks].max_utxos`. When this gauge approaches the
+    /// cap, the LRU starts evicting and balance lookups fall through to
+    /// the storage layer.
+    async fn utxo_set_size(&self) -> Option<usize> {
+        None
+    }
 }

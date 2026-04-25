@@ -24,6 +24,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pms_interface::NetDagAdapter;
 use pms_storage::store::PutResult;
+use pms_storage::coordinator_key_store::CoordinatorKeyStorage;
 use pms_storage::{ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage};
 use pms_wire::WireBlock;
 
@@ -35,6 +36,7 @@ where
         + ConfigStorage
         + NodeRewardsStorage
         + ComplianceStorage
+        + CoordinatorKeyStorage
         + Send
         + Sync
         + 'static,
@@ -58,6 +60,16 @@ where
 
     async fn broadcast_block(&self, wb: &WireBlock) -> Result<()> {
         self.do_broadcast_block(wb).await
+    }
+
+    fn persist_queue_depth(&self) -> Option<(usize, usize)> {
+        let max = self.persist_tx.max_capacity();
+        let avail = self.persist_tx.capacity();
+        Some((max.saturating_sub(avail), max))
+    }
+
+    async fn utxo_set_size(&self) -> Option<usize> {
+        Some(self.utxos.total_len().await)
     }
 
     async fn top_tips(&self, limit: usize) -> Result<Vec<String>> {

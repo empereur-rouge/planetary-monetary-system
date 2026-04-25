@@ -5,6 +5,7 @@
 //! can delegate to them.
 
 use crate::CoreAdapter;
+use pms_storage::coordinator_key_store::CoordinatorKeyStorage;
 use pms_storage::{ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage};
 
 impl<S> CoreAdapter<S>
@@ -14,6 +15,7 @@ where
         + ConfigStorage
         + NodeRewardsStorage
         + ComplianceStorage
+        + CoordinatorKeyStorage
         + Send
         + Sync
         + 'static,

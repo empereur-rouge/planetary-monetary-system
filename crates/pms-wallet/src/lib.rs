@@ -10,6 +10,7 @@ extern crate core;
 mod backends;
 mod helpers;
 pub mod history;
+pub mod key_encryption;
 mod transaction;
 mod types;
 pub mod utils;

@@ -68,6 +68,7 @@ impl RocksStore {
                 6 => self.mig_6_to_7().await?,
                 7 => self.mig_7_to_8().await?,
                 8 => self.mig_8_to_9().await?,
+                9 => self.mig_9_to_10().await?,
                 _ => return Err(MigError::Unexpected(v)),
             }
             v += 1;
@@ -601,6 +602,25 @@ impl RocksStore {
             .map_err(|e| MigError::Any(anyhow!(e)))?;
 
         tracing::info!("Migration 8→9: ledger_defs CF verified — ledger persistence ready");
+        Ok(())
+    }
+
+    /// Migration 9 → 10 (audit item 8, v0.7.4).
+    /// Ensure the new `coordinator_key_history` CF is reachable and pinned
+    /// for stores that already exist. The CF is created at open-time by
+    /// the CF list reconciliation; this migration just touches it so we
+    /// catch any creation issue here rather than later when a rotation
+    /// block tries to land.
+    async fn mig_9_to_10(&self) -> std::result::Result<(), MigError> {
+        let cf = self.cf("coordinator_key_history");
+        self.db
+            .put_cf(&cf, b"__init__", b"")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+        self.db
+            .delete_cf(&cf, b"__init__")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+
+        tracing::info!("Migration 9→10: coordinator_key_history CF ready");
         Ok(())
     }
 }

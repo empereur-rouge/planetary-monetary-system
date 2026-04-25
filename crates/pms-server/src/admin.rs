@@ -163,6 +163,90 @@ pub async fn admin_reindex_activity_items(
     }
 }
 
+/// POST /admin/rebuild-tips
+///
+/// Curative reconcile of the RocksDB `tips` CF (audit finding H3, item 6,
+/// v0.7.4). The 0.7.3 fix to `trim_tips` evicts zombies (entries with
+/// `children_count > 0` that lingered after a missed `remove_tip`), but
+/// it never **adds** anything — so a tip that's missing because of an
+/// older crash between `append_block_atomic` and `add_tip` stays missing
+/// forever. This endpoint walks the recent window of `by_time` and adds
+/// any block whose `children_count == 0` is absent from `tips`.
+///
+/// Body (optional): `{ "scan_limit": <usize> }`. Defaults to 8 × the
+/// configured `tip_limit` so a fresh production node only touches a few
+/// dozen entries. Pass `0` to scan every block (only safe on small dev
+/// DBs).
+pub async fn admin_rebuild_tips(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<serde_json::Value>>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+
+    let scan_limit = body
+        .as_ref()
+        .and_then(|Json(v)| v.get("scan_limit"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        // Default: 8× tip_limit, with a sane floor so brand-new nodes
+        // (tip_limit small / unset) still scan enough recent blocks to
+        // matter. The intent of the cap is "only the recent window";
+        // setting it to 0 explicitly opts into a full scan.
+        .unwrap_or_else(|| state.settings.rocks.tip_limit.saturating_mul(8).max(64));
+
+    tracing::info!(
+        target = "rocks_tips",
+        scan_limit,
+        "[ADMIN] rebuild_tips_from_children_count requested"
+    );
+
+    let store = state.store.clone();
+    let result =
+        tokio::task::spawn_blocking(move || store.rebuild_tips_from_children_count(scan_limit))
+            .await;
+
+    match result {
+        Ok(Ok((scanned, added))) => {
+            tracing::info!(
+                target = "rocks_tips",
+                scanned,
+                added,
+                "[ADMIN] rebuild_tips complete"
+            );
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "ok",
+                    "action": "rebuild-tips",
+                    "scan_limit": scan_limit,
+                    "scanned": scanned,
+                    "added": added,
+                })),
+            )
+        }
+        Ok(Err(e)) => {
+            tracing::error!(target = "rocks_tips", error = %e, "rebuild_tips failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("rebuild_tips failed: {e}") })),
+            )
+        }
+        Err(e) => {
+            tracing::error!(target = "rocks_tips", error = %e, "rebuild_tips task panicked");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("rebuild_tips task panicked: {e}") })),
+            )
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ADMIN CONFIG API - Hot-Swap de la RuntimeConfig
 // ═══════════════════════════════════════════════════════════════════════════

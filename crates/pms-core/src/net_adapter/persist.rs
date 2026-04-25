@@ -15,6 +15,7 @@ use anyhow::Result;
 use num_traits::ToPrimitive;
 use pms_event::PmsEvent;
 use pms_storage::store::PutResult;
+use pms_storage::coordinator_key_store::{CoordinatorKeyStorage, KeyRotationRecord};
 use pms_storage::{
     ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage, StoredBlock,
     UtxoDelta,
@@ -29,6 +30,7 @@ where
         + ConfigStorage
         + NodeRewardsStorage
         + ComplianceStorage
+        + CoordinatorKeyStorage
         + Send
         + Sync
         + 'static,
@@ -103,20 +105,34 @@ where
         // ============================================================
         // 1.e) SINGLE WRITER ENFORCEMENT (Private DAG Mode)
         // ============================================================
-        // En mode Single Writer, TOUS les blocs doivent etre signes par le Coordinator.
-        // C'est le verrouillage protocole pour le mode centralise.
+        // En mode Single Writer, TOUS les blocs doivent etre signes par le
+        // Coordinator. v0.7.4 generalises this from "the bootstrap pk" to
+        // "any pk currently in the active set" so a `CoordinatorKeyRotate`
+        // block can hand authority over without restarting the network.
+        // The active set is `current_pk` ∪ {old_pk's still in their grace
+        // window}. When no rotation has ever landed it equals
+        // `{bootstrap_pk}` so behaviour is identical to pre-0.7.4.
+        let now_ms_for_signers = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let accepted_signer_keys = self
+            .key_rotation_state
+            .read()
+            .accepted_signer_keys(now_ms_for_signers);
         if policy.enforce_single_writer {
-            if let Some(ref expected_pk) = policy.coordinator_public_key {
-                if wb.signer_pk_hex.trim() != expected_pk.trim() {
+            if !accepted_signer_keys.is_empty() {
+                let signer = wb.signer_pk_hex.trim().to_string();
+                if !accepted_signer_keys.contains(&signer) {
                     tracing::warn!(
-                        "🚫 Single Writer violation: block {} signed by {} but expected {}",
+                        "🚫 Single Writer violation: block {} signed by {} not in active set ({} keys)",
                         &wb.id[..16.min(wb.id.len())],
                         &wb.signer_pk_hex,
-                        expected_pk
+                        accepted_signer_keys.len()
                     );
                     return Ok(PutResult::Rejected(format!(
-                        "single_writer: only Coordinator can create blocks. Got signer: {}, expected: {}",
-                        &wb.signer_pk_hex, expected_pk
+                        "single_writer: signer {} is not in the active coordinator key set",
+                        &wb.signer_pk_hex
                     )));
                 }
             }
@@ -162,10 +178,21 @@ where
             }
 
             // Verification 2: SECURITE COORDINATEUR
-            // Seul le Coordinateur peut minter (Mainnet/Testnet)
+            // Seul le Coordinateur peut minter (Mainnet/Testnet).
+            //
+            // v0.7.4: mint authority follows the **current** rotation
+            // pointer, not the bootstrap key. So a `CoordinatorKeyRotate`
+            // block atomically transfers the right to mint to `new_pk` —
+            // old keys still in the SINGLE_WRITER grace window can sign
+            // chain blocks but cannot mint. This is the conservative
+            // choice for back-to-back rotations: mint is the most
+            // sensitive authority, so we narrow it the moment the new
+            // key is announced.
             let policy = ValidatePolicy::from_settings(&self.settings.validation);
-            // Override coordinator key from config if specified, else use hardcoded
             let mut policy = policy;
+            // Resolve the bootstrap pk — same logic as before — and let
+            // the rotation cache override it with the latest rotated-to
+            // key when one exists.
             if let Some(ref custom_key) = self.settings.validation.coordinator_public_key {
                 policy.coordinator_public_key = Some(custom_key.clone());
             } else {
@@ -182,6 +209,14 @@ where
                         policy.coordinator_public_key = None;
                     }
                 }
+            }
+            if let Some(current_pk) = self
+                .key_rotation_state
+                .read()
+                .current_pk()
+                .map(|s| s.to_string())
+            {
+                policy.coordinator_public_key = Some(current_pk);
             }
             if let Err(e) = validate_mint_security(wb, &policy) {
                 tracing::warn!(
@@ -361,6 +396,85 @@ where
                 "↩️ Transaction reversed: {} (block {})",
                 original_block_id,
                 wb.id
+            );
+        }
+
+        // 1.rotation) CoordinatorKeyRotate validation + record (audit
+        // item 8, v0.7.4). The block must be signed by the **current**
+        // coordinator key (not just any key in the grace window) and
+        // its `old_pk` field must match that current key — this
+        // prevents an attacker holding a still-in-grace old_pk from
+        // chaining a fresh rotation to keep authority indefinitely.
+        if let Some(PayloadEnvelope::Plain(PlainPayload::CoordinatorKeyRotate {
+            ref old_pk,
+            ref new_pk,
+            grace_window_seconds,
+        })) = payload
+        {
+            let current_pk = self
+                .key_rotation_state
+                .read()
+                .current_pk()
+                .map(|s| s.to_string());
+            let signer = wb.signer_pk_hex.trim().to_string();
+            let declared_old = old_pk.trim().to_string();
+
+            // Reject if no current pk is known (pure dev mode without
+            // a coordinator key configured) — rotation only makes sense
+            // when a key was bootstrapped.
+            let Some(current) = current_pk else {
+                return Ok(PutResult::Rejected(
+                    "CoordinatorKeyRotate: no bootstrap coordinator key configured; rotation requires an initial key".into(),
+                ));
+            };
+            if !signer.eq_ignore_ascii_case(&current) {
+                return Ok(PutResult::Rejected(format!(
+                    "CoordinatorKeyRotate: must be signed by the current coordinator key {} (got {})",
+                    current, signer
+                )));
+            }
+            if !declared_old.eq_ignore_ascii_case(&current) {
+                return Ok(PutResult::Rejected(format!(
+                    "CoordinatorKeyRotate: old_pk field {} does not match current coordinator key {}",
+                    declared_old, current
+                )));
+            }
+            if new_pk.trim().is_empty() || new_pk.trim().eq_ignore_ascii_case(&current) {
+                return Ok(PutResult::Rejected(
+                    "CoordinatorKeyRotate: new_pk must be non-empty and differ from current".into(),
+                ));
+            }
+
+            // Persist the rotation. We do this BEFORE inserting the
+            // block into the DAG so a failure here aborts the persist
+            // entirely — the block will be rejected, never half-applied.
+            let record = KeyRotationRecord {
+                old_pk: current.clone(),
+                new_pk: new_pk.trim().to_string(),
+                applied_at_block_id: wb.id.clone(),
+                applied_at_ts_ms: now_ms_for_signers,
+                grace_window_seconds,
+            };
+            if let Err(e) = self.store.record_key_rotation(&record) {
+                tracing::error!(
+                    target = "key_rotation",
+                    error = %e,
+                    "Failed to persist key rotation record — block REJECTED"
+                );
+                return Ok(PutResult::Rejected(format!(
+                    "CoordinatorKeyRotate: failed to persist history: {e}"
+                )));
+            }
+            // Refresh the in-RAM cache so subsequent blocks in this
+            // process see the new authority immediately.
+            self.refresh_key_rotation_state();
+            tracing::warn!(
+                target = "key_rotation",
+                block_id = %wb.id,
+                old_pk = %record.old_pk,
+                new_pk = %record.new_pk,
+                grace_window_seconds,
+                "🔑 Coordinator key rotated"
             );
         }
 
@@ -1078,6 +1192,10 @@ where
                             std::sync::atomic::AtomicU64::new(0);
                         let count = STALL_COUNT
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        // The interval ticks once per second after consuming
+                        // the immediate first tick above, so each fire here
+                        // means "we've been blocked for ~1 more second".
+                        crate::metrics::PERSIST_STALL_SECONDS.inc();
                         tracing::error!(
                             target = "pms_persist",
                             block_id = %block_id,

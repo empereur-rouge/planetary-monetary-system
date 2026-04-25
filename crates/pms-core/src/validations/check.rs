@@ -621,6 +621,24 @@ pub fn validate_block(
                     ));
                 }
             }
+            PlainPayload::CoordinatorKeyRotate { old_pk, new_pk, .. } => {
+                // Coordinator-only rotation. The signature check itself
+                // is enforced upstream in `do_persist_block_internal`
+                // (must be signed by the *current* coordinator key — a
+                // strict subset of the bootstrap rule). Here we only
+                // assert structural sanity.
+                require_coordinator_signature(b, policy, "CoordinatorKeyRotate")?;
+                if old_pk.trim().is_empty() || new_pk.trim().is_empty() {
+                    return Err(ValidationError::Other(
+                        "CoordinatorKeyRotate: old_pk and new_pk must be non-empty",
+                    ));
+                }
+                if old_pk.trim() == new_pk.trim() {
+                    return Err(ValidationError::Other(
+                        "CoordinatorKeyRotate: old_pk and new_pk must differ",
+                    ));
+                }
+            }
         },
         Some(PayloadEnvelope::Encrypted(_ep)) => {
             // MVP privé : on ne peut pas valider le contenu → on se limite à la structure.

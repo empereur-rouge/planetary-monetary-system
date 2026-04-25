@@ -452,6 +452,238 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Commande pour chiffrer une clé coordinator existante (AES-256-GCM + argon2id)
+    // — voir pms-wallet::key_encryption et audit finding H-key (v0.7.4).
+    if args.len() > 1 && args[1] == "encrypt-coordinator-key" {
+        if args.len() != 4 {
+            eprintln!(
+                "Usage: tools-cli encrypt-coordinator-key <in_plain_key_path> <out_enc_path>"
+            );
+            eprintln!();
+            eprintln!("  in_plain_key_path : 64-hex coordinator key (same format as gen-coordinator output)");
+            eprintln!("  out_enc_path      : destination JSON envelope (e.g. /opt/pms/etc/pms/node.key.enc)");
+            eprintln!();
+            eprintln!("  Passphrase source, in order:");
+            eprintln!("    1. env var PMS_COORDINATOR_KEY_PASSPHRASE");
+            eprintln!("    2. interactive prompt (stdin, no echo when stdin is a TTY)");
+            std::process::exit(1);
+        }
+        let in_path = &args[2];
+        let out_path = &args[3];
+
+        // Read the plain key file — same parsing as Wallet::load_from_node_key_file
+        let raw = std::fs::read(in_path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", in_path))?;
+        let trimmed = String::from_utf8(raw.clone())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let priv_bytes: [u8; 32] = if trimmed.len() == 64 {
+            let v = hex::decode(&trimmed)
+                .map_err(|e| anyhow::anyhow!("parse hex key: {e}"))?;
+            v.as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("decoded key must be 32 bytes"))?
+        } else if raw.len() == 32 {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&raw);
+            a
+        } else {
+            anyhow::bail!(
+                "unsupported plain key format (expected 64-hex or 32-raw-bytes, got {} bytes)",
+                raw.len()
+            );
+        };
+
+        // Passphrase: env var first, then interactive prompt (double entry for confirm).
+        let mut passphrase = match std::env::var("PMS_COORDINATOR_KEY_PASSPHRASE") {
+            Ok(p) if !p.is_empty() => {
+                eprintln!("[encrypt] using passphrase from PMS_COORDINATOR_KEY_PASSPHRASE");
+                p
+            }
+            _ => {
+                let p1 = rpassword::prompt_password("Passphrase (min 12 chars): ")
+                    .map_err(|e| anyhow::anyhow!("read passphrase: {e}"))?;
+                if p1.len() < 12 {
+                    anyhow::bail!("passphrase must be at least 12 chars");
+                }
+                let p2 = rpassword::prompt_password("Confirm passphrase: ")
+                    .map_err(|e| anyhow::anyhow!("read passphrase: {e}"))?;
+                if p1 != p2 {
+                    anyhow::bail!("passphrases do not match");
+                }
+                p1
+            }
+        };
+
+        let env = pms_wallet::key_encryption::encrypt_key(&priv_bytes, &mut passphrase)
+            .map_err(|e| anyhow::anyhow!("encrypt: {e}"))?;
+
+        let json = serde_json::to_string_pretty(&env)?;
+        std::fs::write(out_path, json)
+            .map_err(|e| anyhow::anyhow!("write {}: {e}", out_path))?;
+
+        // 0600 on unix — same hardening as gen-coordinator
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(out_path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        println!("✅ Wrote encrypted coordinator key to {}", out_path);
+        println!();
+        println!("Deployment checklist:");
+        println!("  1. Move {} out of source control. Keep an offline backup.", in_path);
+        println!("  2. On the server, set PMS_COORDINATOR_KEY_PASSPHRASE via systemd EnvironmentFile,");
+        println!("     Docker secret, or a sourced shell script — never inline in config.toml.");
+        println!("  3. Update [secrets].node_identity_key_encrypted_path = \"{}\" in config.", out_path);
+        println!("  4. When the engine boots, it will prefer the encrypted file over the plain one.");
+        return Ok(());
+    }
+
+    // Forge a CoordinatorKeyRotate block offline and print the signed
+    // WireBlock JSON to stdout (or write it to --out). The operator
+    // submits it to the running engine via the existing
+    // `POST /v1/submit/block` endpoint. Audit item 8 (v0.7.4).
+    if args.len() > 1 && args[1] == "rotate-coordinator-key" {
+        return run_rotate_coordinator_key(&args[2..]);
+    }
+
     // Interactive REPL fallback
     repl::run().await
+}
+
+/// Forge a `CoordinatorKeyRotate` payload, sign it with the current
+/// coordinator key, and print the resulting `WireBlock` JSON.
+///
+/// Args (positional + named, parsed by hand to avoid pulling clap into a
+/// sub-binary that's mostly a REPL):
+///   tools-cli rotate-coordinator-key
+///       --old-key <path>          plain 64-hex coordinator key (current)
+///       --new-key <path>          plain 64-hex new coordinator key
+///       --parent <block_id>       parent tip to attach the rotation block to
+///       [--grace <seconds>]       grace window for old_pk; default 60
+///       [--network-id <id>]       wire network id (default "pms-mainnet-v1")
+///       [--protocol-version <n>]  wire protocol version (default 1)
+///       [--out <file>]            write JSON here (default: stdout)
+fn run_rotate_coordinator_key(args: &[String]) -> Result<()> {
+    use pms_types::{PayloadEnvelope, PlainPayload};
+    use pms_utils::compute_block_id;
+    use pms_wire::WireBlock;
+    use std::collections::HashMap;
+
+    // Tiny named-arg parser — keeps the dependency surface flat.
+    let mut named: HashMap<String, String> = HashMap::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        let key = &args[i];
+        if !key.starts_with("--") {
+            anyhow::bail!("expected --flag, got {}", key);
+        }
+        let value = args
+            .get(i + 1)
+            .ok_or_else(|| anyhow::anyhow!("flag {} missing value", key))?;
+        named.insert(key.trim_start_matches("--").to_string(), value.clone());
+        i += 2;
+    }
+
+    let old_key_path = named
+        .get("old-key")
+        .ok_or_else(|| anyhow::anyhow!("missing --old-key"))?
+        .clone();
+    let new_key_path = named
+        .get("new-key")
+        .ok_or_else(|| anyhow::anyhow!("missing --new-key"))?
+        .clone();
+    let parent = named
+        .get("parent")
+        .ok_or_else(|| anyhow::anyhow!("missing --parent"))?
+        .clone();
+    let grace_window_seconds: u64 = named
+        .get("grace")
+        .map(|s| s.parse::<u64>())
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("--grace must be u64: {e}"))?
+        .unwrap_or(60);
+    let network_id = named
+        .get("network-id")
+        .cloned()
+        .unwrap_or_else(|| "pms-mainnet-v1".into());
+    let protocol_version: u16 = named
+        .get("protocol-version")
+        .map(|s| s.parse::<u16>())
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("--protocol-version must be u16: {e}"))?
+        .unwrap_or(1);
+    let out_path = named.get("out").cloned();
+
+    // Helper: read 64-hex plain key file, return a Wallet.
+    let load_wallet = |path: &str| -> Result<pms_wallet::Wallet> {
+        pms_wallet::Wallet::load_from_node_key_file(path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", path))
+    };
+
+    let old_wallet = load_wallet(&old_key_path)?;
+    let new_wallet = load_wallet(&new_key_path)?;
+    let old_pk = old_wallet.encoded_public_key();
+    let new_pk = new_wallet.encoded_public_key();
+    if old_pk.eq_ignore_ascii_case(&new_pk) {
+        anyhow::bail!(
+            "old and new keys derive the same public key — refusing to forge a no-op rotation"
+        );
+    }
+
+    let payload = PlainPayload::CoordinatorKeyRotate {
+        old_pk: old_pk.clone(),
+        new_pk: new_pk.clone(),
+        grace_window_seconds,
+    };
+    let envelope = PayloadEnvelope::Plain(payload);
+
+    // Mirror the block construction the API does for any signed plain
+    // block: parents[parent], nonce 0, payload-then-id, sign with the
+    // OLD key (current coordinator).
+    let parents = vec![parent.clone()];
+    let nonce: u64 = 0;
+    let id = compute_block_id(&parents, &Some(envelope.clone()), nonce);
+
+    let payload_json = serde_json::to_string(&envelope)
+        .map_err(|e| anyhow::anyhow!("serialize payload: {e}"))?;
+
+    let mut wire = WireBlock {
+        id: id.clone(),
+        parents: parents.clone(),
+        payload_json: Some(payload_json),
+        nonce,
+        network_id,
+        protocol_version,
+        signer_pk_hex: old_pk.clone(),
+        signature_hex: String::new(),
+        metadata: None,
+    };
+    let canonical = pms_wallet::signing_wire::canonical_wireblock_message(&wire);
+    use pms_wallet::SignerBackend;
+    wire.signature_hex = old_wallet
+        .sign(&canonical)
+        .map_err(|e| anyhow::anyhow!("sign: {e}"))?;
+
+    let json = serde_json::to_string_pretty(&wire)
+        .map_err(|e| anyhow::anyhow!("serialize wire block: {e}"))?;
+    if let Some(p) = out_path {
+        std::fs::write(&p, &json).map_err(|e| anyhow::anyhow!("write {}: {e}", p))?;
+        eprintln!("✅ Wrote signed CoordinatorKeyRotate block to {p}");
+    } else {
+        println!("{json}");
+    }
+    eprintln!();
+    eprintln!("Submit it to the running engine with:");
+    eprintln!(
+        "  curl -sS -X POST -H 'Content-Type: application/json' \\\n       --data-binary @- <SUBMIT_URL>/v1/submit/block <<<'{json}'"
+    );
+    eprintln!();
+    eprintln!("Block ID: {id}");
+    eprintln!("Old PK  : {old_pk}");
+    eprintln!("New PK  : {new_pk}");
+    eprintln!("Grace   : {grace_window_seconds}s");
+    Ok(())
 }

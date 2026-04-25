@@ -315,10 +315,69 @@ pub struct Auth {
     pub api_keys_file: Option<String>,
 }
 
+/// `/healthz` thresholds. Defaults are deliberately permissive so a
+/// dev box doesn't flap. Tighten in production: a healthy coordinator
+/// emits a block at least every few seconds, and you want disk-free
+/// alerts long before the FS fills up.
+#[derive(Deserialize, Clone, Debug)]
+pub struct HealthSettings {
+    /// `/healthz` returns `degraded` when the most recent block is older
+    /// than this. `0` disables the check. Default: `300` (5 min) — large
+    /// enough not to flap on dev / quiet testnet, but still surfaces a
+    /// coordinator that has stopped persisting on a busy network.
+    #[serde(default = "default_max_last_block_age_seconds")]
+    pub max_last_block_age_seconds: u64,
+    /// `/healthz` returns `degraded` if the persist channel queue is at
+    /// or above this fraction (0.0 – 1.0) of its capacity. Saturation
+    /// means the persist pipeline is back-pressuring callers (cf. C2
+    /// fix in v0.7.2). Default: `0.8`.
+    #[serde(default = "default_persist_queue_high_water")]
+    pub persist_queue_high_water: f64,
+    /// `/healthz` returns `degraded` when the filesystem holding the
+    /// RocksDB directory has less free space than this percentage.
+    /// Default: `10.0` (i.e. flag at 10% free).
+    #[serde(default = "default_min_disk_free_percent")]
+    pub min_disk_free_percent: f64,
+}
+
+impl Default for HealthSettings {
+    fn default() -> Self {
+        Self {
+            max_last_block_age_seconds: default_max_last_block_age_seconds(),
+            persist_queue_high_water: default_persist_queue_high_water(),
+            min_disk_free_percent: default_min_disk_free_percent(),
+        }
+    }
+}
+
+fn default_max_last_block_age_seconds() -> u64 {
+    300
+}
+fn default_persist_queue_high_water() -> f64 {
+    0.8
+}
+fn default_min_disk_free_percent() -> f64 {
+    10.0
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct SecretSettings {
     pub node_identity_key_path: String,
     pub admin_wallet_file: Option<String>,
+    /// Optional AES-256-GCM encrypted coordinator key envelope produced by
+    /// `tools-cli encrypt-coordinator-key`. When set AND the file exists,
+    /// the server loads the node identity from it and reads the passphrase
+    /// from the `PMS_COORDINATOR_KEY_PASSPHRASE` environment variable.
+    /// Falls back to `node_identity_key_path` (plain hex) if absent —
+    /// keeps existing dev/testnet deployments working without changes.
+    /// See audit finding H-key and `pms-wallet::key_encryption`.
+    #[serde(default)]
+    pub node_identity_key_encrypted_path: Option<String>,
+    /// If true, boot aborts when the key file has group/world permissions
+    /// (`mode & 0o077 != 0`). Default: `false` (warning-only) so existing
+    /// dev setups don't break. Flip to `true` in production.
+    #[serde(default)]
+    pub strict_key_permissions: bool,
 }
 
 /// Runtime configuration passed to the P2P server and API server.

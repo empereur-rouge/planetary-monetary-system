@@ -117,6 +117,27 @@ pub trait DagStorage: Send + Sync {
         Ok(count)
     }
 
+    /// Returns the persistence timestamp (milliseconds since UNIX epoch)
+    /// of a block, or `Ok(None)` if the block isn't indexed for time.
+    /// Default `Ok(None)` so mocks don't have to fake a timestamp index.
+    /// `RocksStore` reads from the `id2ts` column family directly.
+    /// Used by `/healthz` to compute `last_block_age`.
+    async fn block_ts_ms(&self, _id: &str) -> Result<Option<i64>> {
+        Ok(None)
+    }
+
+    /// True when RocksDB has stopped accepting writes because L0 file
+    /// count exceeded `level0_stop_writes_trigger`. Default `None` lets
+    /// non-RocksDB backends opt out (the metrics sampler ignores `None`).
+    /// `RocksStore` reads the `rocksdb.is-write-stopped` property — this
+    /// is the canonical "writes are blocked" signal exposed by RocksDB
+    /// itself (see DBOptions). Used by the metrics sampler to drive
+    /// `pms_rocksdb_write_stalled_seconds_total`, which is the alerting
+    /// signal an operator wires to PagerDuty / Better Uptime.
+    fn is_write_stopped(&self) -> Option<bool> {
+        None
+    }
+
     /// Authoritative check: has this outpoint been spent at any point in the
     /// DAG's history?
     ///

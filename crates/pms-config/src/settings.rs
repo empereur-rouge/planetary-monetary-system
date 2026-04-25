@@ -1,6 +1,6 @@
 use crate::{
-    Address, Admin, Auth, Client, FeesSettings, LedgerDef, Limits, LoadError, Network, NetworkMode,
-    P2pConfig, Rocks, SecretSettings, TlsConfig, ValidationSettings,
+    Address, Admin, Auth, Client, FeesSettings, HealthSettings, LedgerDef, Limits, LoadError,
+    Network, NetworkMode, P2pConfig, Rocks, SecretSettings, TlsConfig, ValidationSettings,
 };
 use anyhow::{Result, bail};
 
@@ -25,6 +25,11 @@ pub struct Settings {
     pub validation: ValidationSettings,
     pub fees: FeesSettings,
     pub p2p: P2pConfig,
+    /// Health-check thresholds for `/healthz` (audit finding H-healthz,
+    /// v0.7.4). All fields have sane defaults; the `[health]` block in
+    /// `config.toml` is optional.
+    #[serde(default)]
+    pub health: HealthSettings,
     /// Multi-ledger definitions. Si absent, un seul ledger "main" est créé
     /// automatiquement à partir de [rocks] et [network].
     #[serde(default)]

@@ -13,6 +13,13 @@ use pms_wire::WireBlock;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+/// Decimal → f64 for Prometheus counters. The fee-distribution counters
+/// are observed for trends (rate, magnitude), not equality, so the
+/// well-known precision loss past ~15 significant digits is acceptable.
+fn decimal_to_metric_f64(d: Decimal) -> f64 {
+    d.to_string().parse::<f64>().unwrap_or(0.0)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributeFeesResult {
     pub success: bool,
@@ -145,6 +152,9 @@ pub async fn perform_fee_distribution(
         if asset_id.is_none() {
             total_distributed += *amount;
         }
+        crate::metrics::FEES_DISTRIBUTED
+            .with_label_values(&[state.ledger_id.as_str(), "burn_refund"])
+            .inc_by(decimal_to_metric_f64(*amount));
         let asset_label = asset_id.as_deref().unwrap_or("PMS");
         tracing::info!(
             "💰 Burn refund output: {} -> {} {}",
@@ -176,6 +186,9 @@ pub async fn perform_fee_distribution(
                 });
                 total_distributed += treasury_cut;
                 node_pool_amount -= treasury_cut;
+                crate::metrics::FEES_DISTRIBUTED
+                    .with_label_values(&[state.ledger_id.as_str(), "treasury"])
+                    .inc_by(decimal_to_metric_f64(treasury_cut));
                 tracing::info!(
                     "🏛️ Treasury Tax ({}%): {} PMS -> {}",
                     settings.fees.treasury_fee_percent,
@@ -260,6 +273,9 @@ pub async fn perform_fee_distribution(
                     asset_id: None,
                 });
                 total_distributed += share_amount;
+                crate::metrics::FEES_DISTRIBUTED
+                    .with_label_values(&[state.ledger_id.as_str(), "node"])
+                    .inc_by(decimal_to_metric_f64(share_amount));
                 tracing::info!(
                     "👷 Node Reward: {} PMS -> {} (Node: {})",
                     share_amount,

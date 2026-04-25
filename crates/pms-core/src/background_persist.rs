@@ -142,6 +142,10 @@ where
                         break;
                     }
                     Err(e) => {
+                        // Count every retry attempt — a non-zero rate of
+                        // `pms_persist_retries_total` is the early-warning
+                        // signal that RocksDB is stalling.
+                        crate::metrics::PERSIST_RETRIES.inc();
                         tracing::error!(
                             target = "pms_persist",
                             error = %e,
@@ -155,6 +159,11 @@ where
 
             if !persisted_this_batch {
                 error_count += batch_size as u64;
+                // Each terminal failure increments the alerting counter.
+                // The batch may contain N blocks; we count it as 1 batch
+                // because the consumer is about to shut down — granularity
+                // is moot at that point.
+                crate::metrics::PERSIST_FAILURES.inc();
                 tracing::error!(
                     target = "pms_persist",
                     batch_size,

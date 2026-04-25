@@ -43,3 +43,7 @@ hex = "0.4.3"
 k256 = { version = "0.13", features = ["ecdsa"] }
 base64 = "0.22"
 regex = "1"
+# No-echo passphrase prompt for `encrypt-coordinator-key`. Pure-Rust,
+# tiny crate, falls back to visible echo when stdin is not a TTY (i.e.
+# scripted input).
+rpassword = "7"

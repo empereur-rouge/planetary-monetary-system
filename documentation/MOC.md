@@ -1,6 +1,6 @@
 ---
 tags: [index]
-updated: 2026-03-23
+updated: 2026-04-25
 ---
 
 # PMS Engine — Map of Content
@@ -8,6 +8,12 @@ updated: 2026-03-23
 > Manuel d'instruction du projet DAG-PMS (Planetary Monetary System).
 > Ce vault Obsidian sert de documentation fonctionnelle haut-niveau.
 > Pour la documentation technique du code Rust, utiliser `cargo doc --no-deps --open`.
+
+## Gouvernance & Sécurité
+
+| Fiche | Description |
+|-------|-------------|
+| [[trust-model]] | Modèle de confiance : ce que le Coordinator peut/ne peut pas, SPOF, RTO/RPO, comparaison Bitcoin/Ethereum, résumé pour CGV |
 
 ---
 
@@ -86,8 +92,8 @@ Voir le dossier [[api/README|documentation/api/]] pour la référence complète 
 
 | Système | Fichier | Valeur actuelle |
 |---------|---------|-----------------|
-| Software | `bin/Cargo.toml` | `0.6.8` |
-| Schema DB | `crates/pms-storage/src/migrations.rs` → `CURRENT_VER` | `9` |
+| Software | `Cargo.toml` (workspace) | `0.7.4` |
+| Schema DB | `crates/pms-storage/src/migrations.rs` → `CURRENT_VER` | `10` |
 | DAG Protocol | `crates/pms-storage/src/migrations.rs` → `DAG_VERSION` | `1.2.0` |
 | P2P Protocol | `crates/pms-config/src/config.rs` → `protocol_version` | `1` |
 | API | `crates/pms-server/src/api_fn/version.rs` → `API_VERSION` | `9` |

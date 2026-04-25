@@ -716,6 +716,33 @@ impl DagStorage for RocksStore {
         Ok(self.db.get_cf(&cf_utxo_spent, &key)?.is_some())
     }
 
+    async fn block_ts_ms(&self, id: &str) -> Result<Option<i64>> {
+        let cf_i2t = self.cf("id2ts");
+        match self.db.get_cf(&cf_i2t, id.as_bytes())? {
+            Some(v) if v.len() == 8 => {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&v);
+                Ok(Some(u64::from_be_bytes(b) as i64))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn is_write_stopped(&self) -> Option<bool> {
+        // RocksDB exposes the boolean as the literal string "0" or "1".
+        // Anything else (property unsupported, parse failure) returns None
+        // so the metrics sampler treats this sample as unavailable rather
+        // than reporting a misleading "not stalled" reading.
+        match self.db.property_value("rocksdb.is-write-stopped") {
+            Ok(Some(v)) => match v.trim() {
+                "0" => Some(false),
+                "1" => Some(true),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     async fn recent_ids_by_address(
         &self,
         addr: &str,

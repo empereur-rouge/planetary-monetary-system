@@ -8,6 +8,7 @@ pub mod contracts;
 pub mod coordinator;
 pub mod gas_pool;
 pub mod dag;
+pub mod healthz;
 pub mod history;
 pub mod ledger;
 pub mod milestone;
