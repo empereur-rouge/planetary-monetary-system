@@ -281,6 +281,7 @@ async fn local_bench() -> Result<()> {
         tps_tracker: tps_tracker.clone(),
         contract_event_bus: None,
         contract_store: store.clone(),
+        compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // ── 8. Build router and bind to random port ──────────────────────────
