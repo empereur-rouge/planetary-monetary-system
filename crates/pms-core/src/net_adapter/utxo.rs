@@ -5,6 +5,7 @@
 //! `CoreAdapter` so the trait impl in `mod.rs` can delegate to them.
 
 use crate::CoreAdapter;
+use pms_storage::coordinator_key_store::CoordinatorKeyStorage;
 use pms_storage::{ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage};
 use pms_types::{OutputId, TxOutput};
 
@@ -15,6 +16,7 @@ where
         + ConfigStorage
         + NodeRewardsStorage
         + ComplianceStorage
+        + CoordinatorKeyStorage
         + Send
         + Sync
         + 'static,

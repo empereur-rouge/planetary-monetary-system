@@ -141,6 +141,29 @@ pub enum PlainPayload {
         /// Recipients: \[owner_x25519 (si connu), coordinator_x25519\]
         encrypted_transfer: EncryptedPayload,
     },
+    /// Rotation de la clé Coordinator (audit item 8, v0.7.4).
+    ///
+    /// Permet de remplacer la clé secp256k1 qui signe les blocs sans
+    /// arrêter le réseau. Le bloc DOIT être signé par `old_pk`, qui
+    /// DOIT être la clé Coordinator courante au moment du persist
+    /// (bootstrap config OU dernier `new_pk` d'une rotation antérieure
+    /// qui a déjà été appliquée). Une fois persisté :
+    ///   - `new_pk` devient la clé "courante".
+    ///   - `old_pk` reste un signataire valide pendant
+    ///     `grace_window_seconds` secondes après le timestamp du bloc
+    ///     (si `0`, la révocation est immédiate / atomic rotation).
+    ///
+    /// Le bloc est tracé dans le CF `coordinator_key_history` et
+    /// rejoué au boot pour reconstruire l'ensemble des clés acceptées.
+    CoordinatorKeyRotate {
+        /// Clé qui signe ce bloc — DOIT être la coordinator key courante.
+        old_pk: String,
+        /// Nouvelle clé Coordinator qui prendra le relais.
+        new_pk: String,
+        /// Fenêtre de tolérance pendant laquelle `old_pk` reste valide.
+        /// `0` révoque l'ancienne clé immédiatement après ce bloc.
+        grace_window_seconds: u64,
+    },
 }
 
 /// Données de transfert d'ownership d'un ledger, sérialisées en JSON

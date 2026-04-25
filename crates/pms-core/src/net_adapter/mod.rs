@@ -24,6 +24,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pms_interface::NetDagAdapter;
 use pms_storage::store::PutResult;
+use pms_storage::coordinator_key_store::CoordinatorKeyStorage;
 use pms_storage::{ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage};
 use pms_wire::WireBlock;
 
@@ -35,6 +36,7 @@ where
         + ConfigStorage
         + NodeRewardsStorage
         + ComplianceStorage
+        + CoordinatorKeyStorage
         + Send
         + Sync
         + 'static,

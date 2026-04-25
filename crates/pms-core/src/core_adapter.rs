@@ -2,19 +2,151 @@ use crate::background_persist::{PersistJob, spawn_background_persist};
 use crate::concurrent_dag::ConcurrentDag;
 use crate::utxo::{ShardedUtxoSet, UtxoFetcher};
 use crate::{DagRef, ValidatePolicy};
+use parking_lot::RwLock;
 use pms_config::{load_config, Settings};
 use pms_event::EventBus;
+use pms_storage::coordinator_key_store::{CoordinatorKeyStorage, KeyRotationRecord};
 use pms_storage::{ComplianceStorage, DagStorage, NftStorage};
 use pms_wire::WireMeta;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+/// In-memory snapshot of the coordinator key rotation state.
+///
+/// Built once at adapter construction (bootstrap key + replay of
+/// `CoordinatorKeyStorage::list_key_rotations`) and refreshed whenever
+/// a `CoordinatorKeyRotate` block is successfully persisted. The
+/// validator consults this struct on every block to decide whether the
+/// signer is currently authorised.
+#[derive(Debug, Clone, Default)]
+pub struct KeyRotationState {
+    /// The key shipped in `[validation].coordinator_public_key` at boot.
+    /// `None` in pure dev mode.
+    pub bootstrap_pk: Option<String>,
+    /// Recorded rotations, oldest first. Each one's `new_pk` becomes
+    /// the "current" coordinator key once applied.
+    pub rotations: Vec<KeyRotationRecord>,
+}
+
+impl KeyRotationState {
+    /// The coordinator key that holds mint authority RIGHT NOW: the
+    /// most recent rotation's `new_pk`, or the bootstrap key if no
+    /// rotation has ever landed. `None` only in dev (no bootstrap key
+    /// configured).
+    pub fn current_pk(&self) -> Option<&str> {
+        self.rotations
+            .last()
+            .map(|r| r.new_pk.as_str())
+            .or(self.bootstrap_pk.as_deref())
+    }
+
+    /// Set of keys currently allowed to sign blocks: `current_pk` plus
+    /// any rotation's `old_pk` whose grace window hasn't expired yet
+    /// at the supplied wall-clock. Used by the single-writer signer
+    /// check on every block.
+    pub fn accepted_signer_keys(&self, now_ms: i64) -> HashSet<String> {
+        let mut set: HashSet<String> = HashSet::new();
+        if let Some(c) = self.current_pk() {
+            set.insert(c.to_string());
+        }
+        for r in &self.rotations {
+            // The current pk is `rotations.last().new_pk`; every other
+            // rotation's `old_pk` is a candidate for the grace window.
+            // We include each one whose grace hasn't expired — the
+            // overlap of two consecutive rotations' grace windows is
+            // intentional, it widens the tolerance during back-to-back
+            // rotations.
+            if r.old_key_in_grace(now_ms) {
+                set.insert(r.old_pk.clone());
+            }
+        }
+        set
+    }
+}
+
+#[cfg(test)]
+mod key_rotation_state_tests {
+    use super::*;
+
+    fn rec(old: &str, new: &str, ts: i64, grace: u64) -> KeyRotationRecord {
+        KeyRotationRecord {
+            old_pk: old.into(),
+            new_pk: new.into(),
+            applied_at_block_id: format!("blk-{ts}"),
+            applied_at_ts_ms: ts,
+            grace_window_seconds: grace,
+        }
+    }
+
+    #[test]
+    fn empty_state_falls_back_to_bootstrap() {
+        let s = KeyRotationState {
+            bootstrap_pk: Some("boot".into()),
+            rotations: vec![],
+        };
+        assert_eq!(s.current_pk(), Some("boot"));
+        let set = s.accepted_signer_keys(1_000_000);
+        println!("empty: {set:?}");
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("boot"));
+    }
+
+    #[test]
+    fn current_follows_latest_rotation() {
+        let s = KeyRotationState {
+            bootstrap_pk: Some("boot".into()),
+            rotations: vec![
+                rec("boot", "v2", 1_000, 60), // grace 60s
+                rec("v2", "v3", 5_000, 30),   // grace 30s
+            ],
+        };
+        // current = "v3"
+        assert_eq!(s.current_pk(), Some("v3"));
+
+        // At t=6_000ms (1s after second rotation):
+        //   - "v3" current ✓
+        //   - "v2" still in grace (5_000 + 30_000 = 35_000) ✓
+        //   - "boot" still in grace (1_000 + 60_000 = 61_000) ✓
+        let set = s.accepted_signer_keys(6_000);
+        println!("at t=6_000: {set:?}");
+        assert!(set.contains("v3"));
+        assert!(set.contains("v2"));
+        assert!(set.contains("boot"));
+        assert_eq!(set.len(), 3);
+
+        // At t=70_000ms — both grace windows expired.
+        let later = s.accepted_signer_keys(70_000);
+        println!("at t=70_000: {later:?}");
+        assert_eq!(later.len(), 1);
+        assert!(later.contains("v3"));
+    }
+
+    #[test]
+    fn atomic_rotation_revokes_old_pk_immediately() {
+        let s = KeyRotationState {
+            bootstrap_pk: Some("boot".into()),
+            rotations: vec![rec("boot", "v2", 1_000, 0)], // grace 0
+        };
+        // grace=0 means old_pk is rejected starting from the moment
+        // of rotation. `accepted` at the rotation timestamp is just
+        // {current}.
+        let set = s.accepted_signer_keys(1_000);
+        println!("atomic at t=1_000: {set:?}");
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("v2"));
+        assert!(!set.contains("boot"));
+    }
+}
 
 /// CoreAdapter : colle la logique du DAG, du store, et du serveur réseau.
 ///
 /// - `dag` : DAG concurrent (lock-free) pour haute performance (IOTA-like).
 /// - `store` : persistance (RocksDB, …).
 /// - `server` : lien **faible** vers le serveur réseau pour éviter un cycle Arc.
-pub struct CoreAdapter<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> {
+pub struct CoreAdapter<
+    S: DagStorage + NftStorage + ComplianceStorage + CoordinatorKeyStorage + Send + Sync + 'static,
+> {
     /// DAG concurrent lock-free (IOTA-like architecture)
     pub dag: Arc<ConcurrentDag>,
     /// Stockage persistant.
@@ -32,9 +164,17 @@ pub struct CoreAdapter<S: DagStorage + NftStorage + ComplianceStorage + Send + S
     pub(crate) settings: Settings,
     /// Cached wire metadata (derived from settings).
     pub(crate) wire_meta: WireMeta,
+    /// In-memory snapshot of the coordinator key rotation state (audit
+    /// item 8, v0.7.4). Read on every persist to decide whether the
+    /// block signer is authorised; refreshed whenever a
+    /// `CoordinatorKeyRotate` block lands.
+    pub(crate) key_rotation_state: Arc<RwLock<KeyRotationState>>,
 }
 
-impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> CoreAdapter<S> {
+impl<
+    S: DagStorage + NftStorage + ComplianceStorage + CoordinatorKeyStorage + Send + Sync + 'static,
+> CoreAdapter<S>
+{
     /// Étape 1/2 : construit l'adapter **sans** serveur attaché.
     ///
     /// On met `server` à `Weak::new()` ; il sera renseigné par `set_server` (étape 2/2).
@@ -60,6 +200,12 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
         // Event bus avec capacité 4096 (haut débit)
         let event_bus = EventBus::new(4096);
 
+        // Coordinator key rotation cache: bootstrap pk from policy +
+        // replay every persisted rotation. Failures during the replay
+        // are logged but don't abort startup — a fresh DB has no
+        // history and the default empty Vec is correct.
+        let key_rotation_state = Self::initial_key_rotation_state(&p, &store);
+
         Arc::new(Self {
             dag,
             store,
@@ -69,7 +215,60 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
             event_bus,
             settings,
             wire_meta,
+            key_rotation_state,
         })
+    }
+
+    fn initial_key_rotation_state(
+        policy: &ValidatePolicy,
+        store: &Arc<S>,
+    ) -> Arc<RwLock<KeyRotationState>> {
+        let bootstrap_pk = policy.coordinator_public_key.clone();
+        let rotations = match store.list_key_rotations() {
+            Ok(rs) => rs,
+            Err(e) => {
+                tracing::warn!(
+                    target = "key_rotation",
+                    error = %e,
+                    "Failed to load coordinator key rotation history at boot — \
+                     starting with empty history. Manual /admin/refresh-key-rotation \
+                     can recover once the underlying error is fixed."
+                );
+                Vec::new()
+            }
+        };
+        if !rotations.is_empty() {
+            tracing::info!(
+                target = "key_rotation",
+                count = rotations.len(),
+                "Loaded coordinator key rotation history"
+            );
+        }
+        Arc::new(RwLock::new(KeyRotationState {
+            bootstrap_pk,
+            rotations,
+        }))
+    }
+
+    /// Reload the rotation cache from storage. Called after a
+    /// `CoordinatorKeyRotate` block successfully persists. Cheap — the
+    /// CF holds at most a few dozen rows in any realistic deployment.
+    pub(crate) fn refresh_key_rotation_state(&self) {
+        match self.store.list_key_rotations() {
+            Ok(rotations) => {
+                let mut state = self.key_rotation_state.write();
+                state.rotations = rotations;
+            }
+            Err(e) => {
+                tracing::error!(
+                    target = "key_rotation",
+                    error = %e,
+                    "Failed to refresh coordinator key rotation state — \
+                     in-RAM cache is now stale until next restart. \
+                     Investigate immediately."
+                );
+            }
+        }
     }
 
     pub fn new_with_policy(
@@ -97,6 +296,8 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
         // Event bus avec capacité 4096
         let event_bus = EventBus::new(4096);
 
+        let key_rotation_state = Self::initial_key_rotation_state(&policy, &store);
+
         Arc::new(Self {
             dag,
             store,
@@ -106,6 +307,7 @@ impl<S: DagStorage + NftStorage + ComplianceStorage + Send + Sync + 'static> Cor
             event_bus,
             settings,
             wire_meta,
+            key_rotation_state,
         })
     }
 

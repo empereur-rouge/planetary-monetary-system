@@ -6,6 +6,7 @@
 
 use crate::CoreAdapter;
 use anyhow::Result;
+use pms_storage::coordinator_key_store::CoordinatorKeyStorage;
 use pms_storage::{ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage};
 use pms_wire::WireBlock;
 
@@ -16,6 +17,7 @@ where
         + ConfigStorage
         + NodeRewardsStorage
         + ComplianceStorage
+        + CoordinatorKeyStorage
         + Send
         + Sync
         + 'static,
