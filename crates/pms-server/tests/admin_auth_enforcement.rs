@@ -66,6 +66,7 @@ fn admin_routes() -> Vec<(&'static str, &'static str)> {
         ("POST", "/admin/reindex-activity"),
         ("POST", "/admin/reindex-activity-items"),
         ("POST", "/admin/consolidate-utxos"),
+        ("POST", "/admin/rebuild-tips"),
         ("POST", "/admin/api-keys"),
         ("GET", "/admin/api-keys"),
         // DELETE /admin/api-keys/{id}

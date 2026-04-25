@@ -170,6 +170,106 @@ impl RocksStore {
         Ok(())
     }
 
+    /// Curative reconcile of the `tips` CF — re-derive tips from
+    /// `children_count` (the ground truth) and add anything that's missing.
+    ///
+    /// The pre-0.7.3 `add_tip` logic could leak a real tip if a process
+    /// crashed (or a code bug skipped the `add_tip` call) between
+    /// `append_block_atomic` and `add_tip`: the block was persisted with
+    /// `children_count = 0`, but no row landed in the `tips` CF. The
+    /// 0.7.3 fix to `trim_tips` only deletes zombies (tips that have
+    /// since gained a child), so a missing tip stays missing forever
+    /// — the `tips` CF is sub-populated and `top_tips()` may return the
+    /// wrong set, blocking fee distribution silently.
+    ///
+    /// This method walks the `n` newest blocks (via `by_time`, which is
+    /// the same index `top_tips` already uses) and, for each block whose
+    /// `children_count == 0`, ensures it sits in the `tips` CF with its
+    /// timestamp. Existing entries are skipped (idempotent: cheap to run).
+    ///
+    /// `scan_limit = 0` means "scan every block" — only reasonable on
+    /// small dev DBs. Production callers should pass a bounded value
+    /// (e.g. `tip_limit * 8`, or whatever recent window they trust).
+    ///
+    /// Returns `(scanned, added)` so the caller can log the work.
+    pub fn rebuild_tips_from_children_count(
+        &self,
+        scan_limit: usize,
+    ) -> anyhow::Result<(usize, usize)> {
+        // Use the by-time index so we walk newest first — old blocks are
+        // exponentially less likely to still be tips, so a scan_limit
+        // bounded against the recent window catches drift cheaply.
+        let cf_time = self.cf("by_time");
+        let cf_count = self.cf("children_count");
+        let cf_tips = self.cf("tips");
+        let cf_i2t = self.cf("id2ts");
+
+        let mut scanned = 0usize;
+        let mut added = 0usize;
+        let mut batch = rocksdb::WriteBatch::default();
+
+        for kv in self.db.iterator_cf(&cf_time, rocksdb::IteratorMode::End) {
+            if scan_limit > 0 && scanned >= scan_limit {
+                break;
+            }
+            let (k, _v) = kv?;
+            // by_time keys are `(ts_be, id)` packed; parse_time_index_key
+            // is the canonical decoder used everywhere else in this file.
+            let Some((ts, block_id)) = parse_time_index_key(&k) else {
+                continue;
+            };
+            scanned += 1;
+
+            // children_count == 0 → this block IS a tip. Anything else
+            // is just a regular block, skip.
+            let cc = self
+                .db
+                .get_cf(&cf_count, block_id.as_bytes())?
+                .filter(|bytes| bytes.len() == 8)
+                .map(|bytes| le_to_u64(&bytes))
+                .unwrap_or(0);
+            if cc != 0 {
+                continue;
+            }
+
+            // Already in the tips CF — done.
+            if self.db.get_cf(&cf_tips, block_id.as_bytes())?.is_some() {
+                continue;
+            }
+
+            // Missing tip: insert with the same timestamp encoding `add_tip`
+            // uses elsewhere (8-byte big-endian i64). Cross-check `id2ts`
+            // for consistency: if the index is internally inconsistent we
+            // prefer the timestamp from the iterator key (already authoritative).
+            let _ = self.db.get_cf(&cf_i2t, block_id.as_bytes())?;
+            batch.put_cf(&cf_tips, block_id.as_bytes(), ts.to_be_bytes());
+            added += 1;
+        }
+
+        if added > 0 {
+            self.db.write(batch)?;
+            // Bump the cached estimate so trim_tips sees the new state on
+            // its next fast-path check. We saturating-add and let trim
+            // reconcile if the actual count drifted further.
+            self.tip_count_estimate
+                .fetch_add(added, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(
+                target = "rocks_tips",
+                scanned,
+                added,
+                "rebuild_tips_from_children_count: added missing tips"
+            );
+        } else {
+            tracing::debug!(
+                target = "rocks_tips",
+                scanned,
+                "rebuild_tips_from_children_count: no missing tips"
+            );
+        }
+
+        Ok((scanned, added))
+    }
+
     #[cfg(test)]
     pub(crate) fn inject_tip_for_test(
         &self,
@@ -185,6 +285,32 @@ impl RocksStore {
             self.db
                 .put_cf(&cf_count, id.as_bytes(), children_count.to_le_bytes())?;
         }
+        Ok(())
+    }
+
+    /// Test-only: simulate the drift the curative rebuild fixes.
+    /// Plants a block in `by_time` + `id2ts` + `children_count` (set to
+    /// the requested value, even when zero, so a tip with `cc == 0` is
+    /// still indexed correctly) but **never** in the `tips` CF — that's
+    /// the exact state a crashed `add_tip` call leaves behind.
+    #[cfg(test)]
+    pub(crate) fn inject_block_without_tip_entry_for_test(
+        &self,
+        id: &str,
+        ts_ms: i64,
+        children_count: u64,
+    ) -> anyhow::Result<()> {
+        use crate::helpers::key_time_index;
+
+        let cf_time = self.cf("by_time");
+        let cf_i2t = self.cf("id2ts");
+        let cf_count = self.cf("children_count");
+
+        self.db.put_cf(&cf_time, &key_time_index(ts_ms, id), b"")?;
+        self.db
+            .put_cf(&cf_i2t, id.as_bytes(), ts_ms.to_be_bytes())?;
+        self.db
+            .put_cf(&cf_count, id.as_bytes(), children_count.to_le_bytes())?;
         Ok(())
     }
 
@@ -431,5 +557,130 @@ mod trim_tips_tests {
         println!("tip_limit=0 → untouched tips CF: {:?}", remaining);
         assert!(remaining.contains(&"only-real".to_string()));
         assert!(remaining.contains(&"zombie".to_string()));
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // rebuild_tips_from_children_count — curative reconcile (item 6, v0.7.4)
+    //
+    // `trim_tips` only DELETES from the tips CF. If a tip is ever lost (a
+    // crash between `append_block_atomic` and `add_tip`, or a code bug
+    // that skipped the `add_tip` call), the missing entry is missing
+    // forever — `top_tips` returns the wrong set and fee distribution
+    // can stall. The curative rebuild scans the recent window via
+    // `by_time` and adds any block whose `children_count == 0` is
+    // missing from the `tips` CF.
+    // ════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn rebuild_recovers_a_missing_real_tip() {
+        let (store, _dir) = fresh_store(8).await;
+
+        // Three real tips already in the tips CF (the happy ones).
+        store.inject_tip_for_test("real-a", 100, 0).unwrap();
+        store.inject_tip_for_test("real-b", 200, 0).unwrap();
+        store.inject_tip_for_test("real-c", 300, 0).unwrap();
+        // …and add them to the by_time index too so the iterator sees them
+        // (without that, the rebuild scan would only walk the missing ones).
+        for (id, ts) in [("real-a", 100i64), ("real-b", 200), ("real-c", 300)] {
+            store
+                .inject_block_without_tip_entry_for_test(id, ts, 0)
+                .unwrap();
+            // …but the inject_tip_for_test call above already put them
+            // into `tips` — we want `inject_block_without_tip_entry` to
+            // populate `by_time` only for these. Re-add the tip after:
+            store.inject_tip_for_test(id, ts, 0).unwrap();
+        }
+
+        // The drift case: a fourth block exists in by_time + children_count
+        // but never made it into the tips CF.
+        store
+            .inject_block_without_tip_entry_for_test("missing-tip", 400, 0)
+            .unwrap();
+
+        let before = tip_ids(&store);
+        println!("before rebuild: tips = {:?}", before);
+        assert!(!before.contains(&"missing-tip".to_string()));
+
+        let (scanned, added) = store
+            .rebuild_tips_from_children_count(0)
+            .expect("rebuild");
+        println!("rebuild stats: scanned={scanned} added={added}");
+
+        let after = tip_ids(&store);
+        println!("after rebuild: tips = {:?}", after);
+        assert!(added >= 1, "rebuild must add the missing tip");
+        assert!(after.contains(&"missing-tip".to_string()));
+    }
+
+    #[tokio::test]
+    async fn rebuild_skips_blocks_that_already_have_children() {
+        let (store, _dir) = fresh_store(8).await;
+
+        // A "block" sits in by_time + has children (children_count > 0).
+        // It must NOT be added to tips — it isn't a tip.
+        store
+            .inject_block_without_tip_entry_for_test("non-tip", 500, 3)
+            .unwrap();
+
+        let (scanned, added) = store
+            .rebuild_tips_from_children_count(0)
+            .expect("rebuild");
+        println!("scanned={scanned} added={added}");
+
+        let after = tip_ids(&store);
+        println!("after rebuild: tips = {:?}", after);
+        assert!(!after.contains(&"non-tip".to_string()));
+        assert_eq!(added, 0);
+    }
+
+    #[tokio::test]
+    async fn rebuild_is_idempotent_on_correct_state() {
+        let (store, _dir) = fresh_store(8).await;
+
+        // Real tip both in tips CF and in by_time. Running rebuild
+        // should NOT duplicate or modify it.
+        store
+            .inject_block_without_tip_entry_for_test("ok", 600, 0)
+            .unwrap();
+        store.inject_tip_for_test("ok", 600, 0).unwrap();
+
+        let first = store
+            .rebuild_tips_from_children_count(0)
+            .expect("rebuild #1");
+        let second = store
+            .rebuild_tips_from_children_count(0)
+            .expect("rebuild #2");
+        println!("first={:?} second={:?}", first, second);
+
+        assert_eq!(first.1, 0);
+        assert_eq!(second.1, 0);
+        assert_eq!(tip_ids(&store), vec!["ok".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn rebuild_respects_scan_limit() {
+        let (store, _dir) = fresh_store(8).await;
+
+        // 5 missing tips, oldest first. With scan_limit=2 the rebuild
+        // walks newest-to-oldest and stops after 2 entries.
+        for (i, ts) in [("blk-1", 100), ("blk-2", 200), ("blk-3", 300), ("blk-4", 400), ("blk-5", 500)]
+        {
+            store
+                .inject_block_without_tip_entry_for_test(i, ts, 0)
+                .unwrap();
+        }
+
+        let (scanned, added) = store
+            .rebuild_tips_from_children_count(2)
+            .expect("rebuild");
+        println!("scanned={scanned} added={added} tips={:?}", tip_ids(&store));
+
+        assert_eq!(scanned, 2);
+        assert_eq!(added, 2);
+        let recovered = tip_ids(&store);
+        // Newest first → blk-5 + blk-4 should be the ones recovered.
+        assert!(recovered.contains(&"blk-5".to_string()));
+        assert!(recovered.contains(&"blk-4".to_string()));
+        assert!(!recovered.contains(&"blk-1".to_string()));
     }
 }
