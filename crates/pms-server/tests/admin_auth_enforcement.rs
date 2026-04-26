@@ -69,6 +69,7 @@ fn admin_routes() -> Vec<(&'static str, &'static str)> {
         ("POST", "/admin/rebuild-tips"),
         ("POST", "/admin/purge-activity"),
         ("POST", "/admin/purge-compliance-log"),
+        ("GET", "/admin/rocksdb-stats"),
         ("POST", "/admin/api-keys"),
         ("GET", "/admin/api-keys"),
         // DELETE /admin/api-keys/{id}

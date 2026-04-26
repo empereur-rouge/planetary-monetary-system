@@ -370,6 +370,86 @@ pub async fn admin_purge_compliance_log(
     }
 }
 
+/// GET /admin/rocksdb-stats
+///
+/// Read-only diagnostic snapshot of the RocksDB properties most useful
+/// when investigating write-path slowdowns. Used by the TPS-degradation
+/// profile test to correlate TPS drops with compaction / write-stall
+/// signals. Cheap (each `property_value` is O(1)) — safe to poll every
+/// few seconds in production for an ops dashboard.
+///
+/// Surfaced fields (all best-effort; missing properties return `null`):
+///
+///   * `num_files_at_level0` — primary write-stall signal. When this
+///     approaches the configured `level0_slowdown_writes_trigger` (default
+///     20) the engine throttles writes; at `level0_stop_writes_trigger`
+///     (default 36) it stops writing entirely.
+///   * `compaction_pending` — `1` when at least one compaction is
+///     queued. Sustained `1` means the compactor isn't keeping up.
+///   * `is_write_stopped` — `1` when writes are completely halted (the
+///     downstream effect of the L0-stop trigger).
+///   * `actual_delayed_write_rate` — current write throttle in
+///     bytes/sec when the engine is in slowdown mode.
+///   * `estimate_num_keys` — O(1) estimate of the `idx_blocks` size.
+///   * `mem_table_flush_pending` — `1` if a memtable flush is queued.
+///   * `num_running_compactions` / `num_running_flushes` — current
+///     parallelism in the background.
+pub async fn admin_rocksdb_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+
+    let store = state.store.clone();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        // String-typed properties (parse to u64 where applicable).
+        let read_str = |name: &str| -> Option<String> {
+            store.db.property_value(name).ok().flatten()
+        };
+        let read_u64 = |name: &str| -> Option<u64> {
+            read_str(name).and_then(|v| v.trim().parse::<u64>().ok())
+        };
+        let read_bool_as_u64 = |name: &str| -> Option<u64> { read_u64(name) };
+
+        // Per-CF L0 file count for `idx_blocks` (the hot CF).
+        let cf_idx = store.cf("idx_blocks");
+        let l0_idx_blocks = store
+            .db
+            .property_value_cf(&cf_idx, "rocksdb.num-files-at-level0")
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse::<u64>().ok());
+
+        json!({
+            "num_files_at_level0": read_u64("rocksdb.num-files-at-level0"),
+            "num_files_at_level0_idx_blocks": l0_idx_blocks,
+            "compaction_pending": read_bool_as_u64("rocksdb.compaction-pending"),
+            "is_write_stopped": read_bool_as_u64("rocksdb.is-write-stopped"),
+            "actual_delayed_write_rate": read_u64("rocksdb.actual-delayed-write-rate"),
+            "mem_table_flush_pending": read_bool_as_u64("rocksdb.mem-table-flush-pending"),
+            "num_running_compactions": read_u64("rocksdb.num-running-compactions"),
+            "num_running_flushes": read_u64("rocksdb.num-running-flushes"),
+            "estimate_num_keys": read_u64("rocksdb.estimate-num-keys"),
+            "estimate_live_data_size": read_u64("rocksdb.estimate-live-data-size"),
+            "size_all_mem_tables": read_u64("rocksdb.size-all-mem-tables"),
+        })
+    })
+    .await;
+
+    match snapshot {
+        Ok(stats) => (StatusCode::OK, Json(stats)),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("rocksdb-stats task panicked: {e}") })),
+        ),
+    }
+}
+
 /// Wall-clock - days, in milliseconds.
 fn compute_cutoff_ms(before_days: u64) -> i64 {
     let now = std::time::SystemTime::now()

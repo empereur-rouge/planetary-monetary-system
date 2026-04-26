@@ -3224,3 +3224,381 @@ async fn test_multi_engine_cluster_propagation() -> Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// TPS DEGRADATION PROFILE (audit follow-up, 2026-04-26)
+// ============================================================================
+//
+// `test_sustained_tps_stress` showed the engine drops from ~10K TPS at
+// minute 1 to ~5K at minute 5 — a real degradation but the existing
+// test doesn't tell us *why*. This test:
+//
+//   1. Boots the same in-process sandbox.
+//   2. Runs a shorter (90s by default) continuous load.
+//   3. Polls `/admin/rocksdb-stats` every 5s for L0 file count, write-
+//      stop signal, compaction-pending, delayed-write-rate, etc.
+//   4. Reads `/metrics` for the persist-queue depth + capacity.
+//   5. Prints a wide table per interval so the operator can visually
+//      correlate "TPS dropped at t=X" with "L0 jumped from 3 to 12".
+//
+// Output is on stdout — paste into a spreadsheet to see the curve, or
+// just read the timestamps and trigger fields.
+
+const PROFILE_DURATION_SECS: u64 = 90;
+const PROFILE_WORKERS: usize = 40;
+const PROFILE_INTERVAL_SECS: u64 = 5;
+const PROFILE_INITIAL_MINT: &str = "100000";
+const PROFILE_TX_AMOUNT: &str = "0.01";
+
+#[derive(Debug, Default)]
+struct ProfileSample {
+    elapsed_s: f64,
+    interval_tps: f64,
+    interval_failures: u64,
+    cum_tx: u64,
+    rocks_l0_default: Option<u64>,
+    rocks_l0_idx: Option<u64>,
+    rocks_compaction_pending: Option<u64>,
+    rocks_is_write_stopped: Option<u64>,
+    rocks_actual_delayed_write_rate: Option<u64>,
+    rocks_running_compactions: Option<u64>,
+    rocks_running_flushes: Option<u64>,
+    rocks_size_all_mem_tables: Option<u64>,
+    rocks_estimate_num_keys: Option<u64>,
+    persist_queue_depth: Option<u64>,
+    persist_queue_capacity: Option<u64>,
+    persist_retries: Option<u64>,
+    persist_failures: Option<u64>,
+    persist_stall_seconds: Option<u64>,
+    rocksdb_write_stalled_seconds: Option<u64>,
+    utxo_count: Option<u64>,
+}
+
+/// Pull a single labelled gauge / counter value out of the Prometheus
+/// `text/plain` exposition format. Returns the first match or `None`.
+/// Permissive enough for our needs — we don't need a full parser, we
+/// just look for `name{...} <number>` lines.
+fn extract_metric(body: &str, name: &str) -> Option<u64> {
+    for line in body.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with(name) {
+            // Skip past the (optional) label block.
+            let after_labels = match line.find('}') {
+                Some(i) => &line[i + 1..],
+                None => &line[name.len()..],
+            };
+            return after_labels.trim().parse::<u64>().ok();
+        }
+    }
+    None
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore]
+async fn test_tps_degradation_profile() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+    println!("\n╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  TPS DEGRADATION PROFILE                                      ║");
+    println!(
+        "║  Duration: {}s | Workers: {} | Interval: {}s                  ║",
+        PROFILE_DURATION_SECS, PROFILE_WORKERS, PROFILE_INTERVAL_SECS
+    );
+    println!("╚═══════════════════════════════════════════════════════════════╝\n");
+
+    // Mint funds for each worker.
+    let mut worker_keys: Vec<String> = Vec::with_capacity(PROFILE_WORKERS);
+    for i in 0..PROFILE_WORKERS {
+        let w = Wallet::generate();
+        let addr = w.get_address("8e");
+        sandbox
+            .faucet_mint(None, &addr, PROFILE_INITIAL_MINT)
+            .await?;
+        worker_keys.push(w.private_key_b64.clone());
+        if (i + 1) % 10 == 0 {
+            println!("   funded {}/{}", i + 1, PROFILE_WORKERS);
+        }
+    }
+    sleep(Duration::from_secs(2)).await;
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let fail_count = Arc::new(AtomicUsize::new(0));
+    let admin_addr = sandbox.admin_addr.clone();
+    let base_url = sandbox.base_url.clone();
+    let client = sandbox.client.clone();
+    let admin_token = sandbox.admin_token.clone();
+
+    // Spawn workers.
+    let mut handles = Vec::with_capacity(PROFILE_WORKERS);
+    for sk_b64 in worker_keys.iter() {
+        let sk = sk_b64.clone();
+        let target = admin_addr.clone();
+        let url = base_url.clone();
+        let cl = client.clone();
+        let stop = stop_flag.clone();
+        let ok = success_count.clone();
+        let fail = fail_count.clone();
+        handles.push(tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                let body = json!({
+                    "private_key_b64": sk,
+                    "to": target,
+                    "amount": PROFILE_TX_AMOUNT,
+                });
+                match cl
+                    .post(format!("{}/v1/wallet/send-simple", url))
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(r) if r.status().is_success() => {
+                        ok.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {
+                        fail.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        }));
+    }
+
+    // Stop timer.
+    {
+        let stop = stop_flag.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_secs(PROFILE_DURATION_SECS)).await;
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+
+    // Collector loop.
+    let bench_start = Instant::now();
+    let mut samples: Vec<ProfileSample> = Vec::new();
+    let mut last_ok = 0usize;
+    let mut last_fail = 0usize;
+
+    println!(
+        "{:>5} | {:>6} | {:>5} | {:>3} | {:>3} | {:>3} | {:>4} | {:>4} | {:>4} | {:>5} | {:>5} | {:>4} | {:>4} | {:>4} | {:>7}",
+        "t(s)",
+        "tps",
+        "fail",
+        "L0",
+        "L0i",
+        "stp",
+        "cmp",
+        "rcmp",
+        "rfsh",
+        "qd",
+        "qcap",
+        "ret",
+        "ferr",
+        "stl",
+        "utxos"
+    );
+    println!("{:->137}", "");
+
+    while !stop_flag.load(Ordering::Relaxed) {
+        sleep(Duration::from_secs(PROFILE_INTERVAL_SECS)).await;
+        let elapsed = bench_start.elapsed();
+        let cur_ok = success_count.load(Ordering::Relaxed);
+        let cur_fail = fail_count.load(Ordering::Relaxed);
+        let interval_tx = cur_ok.saturating_sub(last_ok) as u64;
+        let interval_failures = cur_fail.saturating_sub(last_fail) as u64;
+        let interval_tps = interval_tx as f64 / PROFILE_INTERVAL_SECS as f64;
+
+        // Pull /admin/rocksdb-stats.
+        let mut s = ProfileSample {
+            elapsed_s: elapsed.as_secs_f64(),
+            interval_tps,
+            interval_failures,
+            cum_tx: cur_ok as u64,
+            ..ProfileSample::default()
+        };
+        if let Ok(resp) = client
+            .get(format!("{}/admin/rocksdb-stats", base_url))
+            .bearer_auth(&admin_token)
+            .send()
+            .await
+        {
+            if let Ok(j) = resp.json::<Value>().await {
+                let getu = |k: &str| -> Option<u64> {
+                    j.get(k).and_then(|v| v.as_u64())
+                };
+                s.rocks_l0_default = getu("num_files_at_level0");
+                s.rocks_l0_idx = getu("num_files_at_level0_idx_blocks");
+                s.rocks_compaction_pending = getu("compaction_pending");
+                s.rocks_is_write_stopped = getu("is_write_stopped");
+                s.rocks_actual_delayed_write_rate = getu("actual_delayed_write_rate");
+                s.rocks_running_compactions = getu("num_running_compactions");
+                s.rocks_running_flushes = getu("num_running_flushes");
+                s.rocks_size_all_mem_tables = getu("size_all_mem_tables");
+                s.rocks_estimate_num_keys = getu("estimate_num_keys");
+            }
+        }
+
+        // Pull /metrics for persist queue + counters.
+        if let Ok(resp) = client.get(format!("{}/metrics", base_url)).send().await {
+            if let Ok(text) = resp.text().await {
+                s.persist_queue_depth =
+                    extract_metric(&text, "pms_persist_queue_depth");
+                s.persist_queue_capacity =
+                    extract_metric(&text, "pms_persist_queue_capacity");
+                s.persist_retries = extract_metric(&text, "pms_persist_retries_total");
+                s.persist_failures = extract_metric(&text, "pms_persist_failures_total");
+                s.persist_stall_seconds =
+                    extract_metric(&text, "pms_persist_stall_seconds_total");
+                s.rocksdb_write_stalled_seconds =
+                    extract_metric(&text, "pms_rocksdb_write_stalled_seconds_total");
+            }
+        }
+
+        // Pull /v1/supply for UTXO count — leading hypothesis is that
+        // per-worker UTXO accumulation (each send_simple creates a
+        // change UTXO) makes coin_selection scan linearly grow.
+        if let Ok(resp) = client.get(format!("{}/v1/supply", base_url)).send().await {
+            if let Ok(j) = resp.json::<Value>().await {
+                s.utxo_count = j
+                    .get("utxo_count")
+                    .and_then(|v| v.as_u64())
+                    .or_else(|| j.get("count").and_then(|v| v.as_u64()));
+            }
+        }
+
+        // Compact one-line dump.
+        println!(
+            "{:>5.0} | {:>6.0} | {:>5} | {:>3} | {:>3} | {:>3} | {:>4} | {:>4} | {:>4} | {:>5} | {:>5} | {:>4} | {:>4} | {:>4} | {:>7}",
+            s.elapsed_s,
+            s.interval_tps,
+            s.interval_failures,
+            s.rocks_l0_default.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            s.rocks_l0_idx.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            s.rocks_is_write_stopped.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            s.rocks_compaction_pending.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            s.rocks_running_compactions.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            s.rocks_running_flushes.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            s.persist_queue_depth.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            s.persist_queue_capacity.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            s.persist_retries.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            s.persist_failures.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            s.persist_stall_seconds.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            s.utxo_count.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+        );
+
+        samples.push(s);
+        last_ok = cur_ok;
+        last_fail = cur_fail;
+    }
+
+    // Drain workers.
+    for h in handles {
+        let _ = h.await;
+    }
+
+    // ── Verdict ────────────────────────────────────────────────────────
+    let n = samples.len();
+    if n < 2 {
+        println!("\n   not enough samples for verdict ({n})");
+        return Ok(());
+    }
+    let first = samples.first().map(|s| s.interval_tps).unwrap_or(0.0);
+    let last = samples.last().map(|s| s.interval_tps).unwrap_or(0.0);
+    let max = samples
+        .iter()
+        .map(|s| s.interval_tps)
+        .fold(f64::MIN, f64::max);
+    let degradation_pct = if max > 0.0 {
+        100.0 * (max - last) / max
+    } else {
+        0.0
+    };
+
+    println!("\n   ═══════════════════════════════════════════════════════════════");
+    println!("   PROFILE VERDICT");
+    println!("   ═══════════════════════════════════════════════════════════════");
+    println!("   First interval TPS : {:.1}", first);
+    println!("   Peak interval TPS  : {:.1}", max);
+    println!("   Last interval TPS  : {:.1}", last);
+    println!("   Degradation peak→last: {:.1}%", degradation_pct);
+
+    // First interval where TPS dropped > 30% vs peak.
+    let drop_threshold = max * 0.7;
+    if let Some(s) = samples.iter().find(|s| s.interval_tps < drop_threshold) {
+        println!(
+            "   First drop > 30% at t={:.0}s — TPS={:.0} L0_default={:?} L0_idx={:?} stop={:?} qd={:?}/{:?} retries={:?}",
+            s.elapsed_s,
+            s.interval_tps,
+            s.rocks_l0_default,
+            s.rocks_l0_idx,
+            s.rocks_is_write_stopped,
+            s.persist_queue_depth,
+            s.persist_queue_capacity,
+            s.persist_retries
+        );
+    } else {
+        println!("   No interval below 70% of peak — degradation < 30%, OK.");
+    }
+
+    // Did any sample show is-write-stopped?
+    let stalled = samples
+        .iter()
+        .any(|s| s.rocks_is_write_stopped == Some(1));
+    println!("   RocksDB write-stop fired during run: {}", stalled);
+
+    // Did the queue ever saturate?
+    let max_qd = samples
+        .iter()
+        .filter_map(|s| s.persist_queue_depth)
+        .max()
+        .unwrap_or(0);
+    let qcap = samples
+        .iter()
+        .filter_map(|s| s.persist_queue_capacity)
+        .next()
+        .unwrap_or(0);
+    println!(
+        "   Persist queue: max depth = {} / capacity {} ({:.0}%)",
+        max_qd,
+        qcap,
+        if qcap > 0 {
+            100.0 * max_qd as f64 / qcap as f64
+        } else {
+            0.0
+        }
+    );
+
+    // Did we ever back-pressure (stall counter increased)?
+    let stalls_first = samples.first().and_then(|s| s.persist_stall_seconds).unwrap_or(0);
+    let stalls_last = samples.last().and_then(|s| s.persist_stall_seconds).unwrap_or(0);
+    println!(
+        "   Persist stall seconds: {} (start) → {} (end), Δ = {}",
+        stalls_first,
+        stalls_last,
+        stalls_last.saturating_sub(stalls_first)
+    );
+
+    // UTXO growth — leading hypothesis if RocksDB / persist queue / WAL
+    // are all clean. Linear growth here while TPS halves is a strong
+    // signal that coin_selection is the bottleneck.
+    let utxos_first = samples.first().and_then(|s| s.utxo_count).unwrap_or(0);
+    let utxos_last = samples.last().and_then(|s| s.utxo_count).unwrap_or(0);
+    println!(
+        "   UTXO count       : {} (start) → {} (end), Δ = {}",
+        utxos_first,
+        utxos_last,
+        utxos_last.saturating_sub(utxos_first)
+    );
+    if utxos_last > utxos_first {
+        let utxo_growth_pct = 100.0 * (utxos_last - utxos_first) as f64 / utxos_first.max(1) as f64;
+        let tps_drop_pct = 100.0 * (max - last) / max.max(0.001);
+        println!(
+            "   UTXO growth: +{:.0}% over the run; TPS drop: {:.0}% — \
+             correlation suggests coin_selection scaling with UTXO set",
+            utxo_growth_pct, tps_drop_pct
+        );
+    }
+    println!("   ═══════════════════════════════════════════════════════════════\n");
+
+    Ok(())
+}

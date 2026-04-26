@@ -6,7 +6,7 @@ use super::state::{sync_all_dag_size_metrics, sync_dag_size_metric, sync_dag_siz
 use crate::admin::{
     admin_compact, admin_get_config, admin_ping, admin_purge_activity,
     admin_purge_compliance_log, admin_rebuild_tips, admin_reindex_activity,
-    admin_reindex_activity_items, admin_update_config,
+    admin_reindex_activity_items, admin_rocksdb_stats, admin_update_config,
 };
 use crate::api_fn::activity::{get_wallet_activity, stream_wallet_activity};
 use crate::api_fn::blocks::{get_block_by_id, submit_block};
@@ -353,6 +353,10 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         // regulatory compliance log.
         .route("/admin/purge-activity", post(admin_purge_activity))
         .route("/admin/purge-compliance-log", post(admin_purge_compliance_log))
+        // Diagnostic: RocksDB property snapshot for write-stall analysis.
+        // Used by the TPS-degradation profile test; safe to poll from
+        // an ops dashboard.
+        .route("/admin/rocksdb-stats", get(admin_rocksdb_stats))
         // Admin API Key CRUD endpoints
         .route("/admin/api-keys", post(admin_create_api_key))
         .route("/admin/api-keys", get(admin_list_api_keys))
