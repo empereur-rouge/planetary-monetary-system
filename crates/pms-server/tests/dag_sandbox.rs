@@ -62,6 +62,17 @@ struct Sandbox {
     _tmp: tempfile::TempDir,
     /// Server task handle — aborted on drop.
     _server_handle: tokio::task::JoinHandle<()>,
+    /// P2P server handle (multi-engine cluster mode only). `None` when the
+    /// sandbox was booted via `boot_sandbox()` (single engine, no P2P).
+    _p2p_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Reference to the underlying `Server` so multi-engine tests can
+    /// invoke `connect_to_peer` and `get_p2p_peers`. `None` for the
+    /// single-engine path.
+    server_arc: Option<Arc<Server>>,
+    /// P2P bind address (`127.0.0.1:<port>`). `None` for single-engine.
+    p2p_addr: Option<String>,
+    /// Cluster index (0 = coordinator, ≥1 = follower). `None` for single-engine.
+    cluster_idx: Option<usize>,
 }
 
 impl Sandbox {
@@ -618,6 +629,10 @@ async fn boot_sandbox() -> Result<Sandbox> {
         network_id,
         _tmp: tmp,
         _server_handle: server_handle,
+        _p2p_handle: None,
+        server_arc: None,
+        p2p_addr: None,
+        cluster_idx: None,
     })
 }
 
@@ -2648,6 +2663,590 @@ async fn test_sustained_tps_stress() -> Result<()> {
     println!(
         "   ═══════════════════════════════════════════════════════════════\n"
     );
+
+    Ok(())
+}
+
+// ============================================================================
+// MULTI-ENGINE CLUSTER (post-sprint, 2026-04-26)
+// ============================================================================
+//
+// Simulates 1 coordinator + N-1 followers in-process so the user can test
+// the multi-VPS topology BEFORE owning a 2nd VPS. Each engine boots with
+// its own RocksDB tempdir and HTTP/P2P ports; they all share the SAME
+// admin wallet's pubkey as the bootstrap coordinator key (so blocks
+// signed by the coordinator are accepted by every follower's validator),
+// but each engine has its OWN node_wallet — only the coordinator can
+// actually sign blocks; followers are read-replicas.
+//
+// Topology:
+//   sandboxes[0]  — coordinator: writes blocks via HTTP API, broadcasts via P2P
+//   sandboxes[1..n] — followers : passive, accept blocks via P2P broadcast
+//
+// All engines are wired in a star around the coordinator: each follower
+// dials the coordinator on boot, and the coordinator's broadcast worker
+// fans out every newly-persisted block to every inbound peer.
+
+use std::sync::OnceLock;
+
+/// Pick an unused TCP port by binding to `127.0.0.1:0`, reading the
+/// assigned port, and closing the listener. There's a tiny race window
+/// before the engine binds the same port — ports are normally not
+/// reused immediately by the OS so this is fine for tests.
+async fn pick_free_port() -> Result<u16> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
+
+/// Workspace bench config is written ONCE per process. `boot_sandbox`
+/// already does this; we mirror the path so cluster mode can re-use it
+/// without rewriting the same TOML N times.
+static BENCH_CONFIG_INIT: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// Boot a multi-engine cluster of `n` sandboxes (1 ≤ n ≤ 4).
+///
+/// `sandboxes[0]` is the coordinator and is the only engine that can
+/// sign blocks (its `node_wallet` matches the configured
+/// `coordinator_public_key`). `sandboxes[1..n]` are followers with
+/// random per-engine wallets — their own block submissions would be
+/// rejected by the single-writer check, but they accept and persist
+/// blocks broadcast by the coordinator over P2P.
+///
+/// All engines share the same global config (PMS_CONFIG file), so
+/// network_id, coordinator_public_key, and protocol_version are
+/// identical across the cluster — that's what we want for a star
+/// topology where the coordinator's signature is trusted by everyone.
+async fn boot_sandbox_cluster(n: usize) -> Result<Vec<Sandbox>> {
+    anyhow::ensure!(
+        (1..=4).contains(&n),
+        "boot_sandbox_cluster: n must be between 1 and 4 (got {n})"
+    );
+
+    let root = get_workspace_root();
+    std::env::set_current_dir(&root)?;
+
+    // ── 1. Admin wallet (shared coordinator key for the whole cluster) ──
+    let admin_wallet_path = root.join("etc/pms/admin-wallet.json");
+    anyhow::ensure!(
+        admin_wallet_path.exists(),
+        "Admin wallet not found: {:?}",
+        admin_wallet_path
+    );
+    let admin_wallet = Wallet::load_from_file(admin_wallet_path.to_string_lossy().as_ref())
+        .map_err(|e| anyhow::anyhow!("Failed to load admin wallet: {}", e))?;
+    let admin_addr = admin_wallet.get_address("8e");
+    let admin_pk = admin_wallet.encoded_public_key();
+
+    // ── 2. Generate the bench config ONCE for the cluster ──────────────
+    //     (same logic as boot_sandbox; cached after the first call).
+    let bench_config_path = match BENCH_CONFIG_INIT.get() {
+        Some(p) => p.clone(),
+        None => {
+            let config_src = std::fs::read_to_string(root.join("etc/config/config.local.toml"))
+                .context("Failed to read config.local.toml")?;
+            let mut buf: String = config_src
+                .lines()
+                .map(|l| {
+                    let trimmed = l.trim_start();
+                    if trimmed.starts_with("coordinator_public_key")
+                        && !trimmed.starts_with("coordinator_public_key_")
+                    {
+                        return format!("coordinator_public_key = \"{}\"", admin_pk);
+                    }
+                    if trimmed.starts_with("coordinator_x25519_public_key") {
+                        return format!(
+                            "coordinator_x25519_public_key = \"{}\"",
+                            admin_wallet.x25519_pub_hex()
+                        );
+                    }
+                    if trimmed.starts_with("mode") && trimmed.contains("testnet") {
+                        return l.replace("testnet", "dev");
+                    }
+                    if trimmed.starts_with("prefix") && trimmed.contains("pms:test") {
+                        return l.replace("pms:test", "pms:dev");
+                    }
+                    if trimmed.starts_with("enforce_single_writer") {
+                        return l.replace("true", "false");
+                    }
+                    l.to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !buf.contains("enforce_single_writer") {
+                buf = buf.replace(
+                    "[validation]",
+                    "[validation]\nenforce_single_writer = false",
+                );
+            }
+            if !buf.contains("coordinator_public_key") {
+                buf = buf.replace(
+                    "[validation]",
+                    &format!("[validation]\ncoordinator_public_key = \"{}\"", admin_pk),
+                );
+            }
+            buf = if buf.contains("distribution_interval_sec") {
+                let mut out = String::new();
+                for line in buf.lines() {
+                    if line.trim_start().starts_with("distribution_interval_sec") {
+                        out.push_str("distribution_interval_sec = 2\n");
+                    } else {
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                }
+                out
+            } else {
+                buf.replace("[fees]", "[fees]\ndistribution_interval_sec = 2")
+            };
+            let p = root.join("etc/config/config.bench.toml");
+            std::fs::write(&p, &buf).context("Failed to write bench config")?;
+            BENCH_CONFIG_INIT.set(p.clone()).ok();
+            p
+        }
+    };
+    unsafe {
+        std::env::set_var("PMS_CONFIG", bench_config_path.to_string_lossy().as_ref());
+    }
+    if std::env::var("PMS_ADMIN_TOKEN").is_err() {
+        unsafe { std::env::set_var("PMS_ADMIN_TOKEN", "sandbox_test") };
+    }
+
+    // ── 3. Allocate ports up front so we can wire known_peers ──────────
+    let mut p2p_ports = Vec::with_capacity(n);
+    let mut api_ports = Vec::with_capacity(n);
+    for _ in 0..n {
+        p2p_ports.push(pick_free_port().await?);
+        api_ports.push(pick_free_port().await?);
+    }
+
+    // ── 4. Boot every engine ───────────────────────────────────────────
+    let mut sandboxes = Vec::with_capacity(n);
+    for idx in 0..n {
+        let sandbox = boot_one_engine(
+            idx,
+            n,
+            &admin_wallet,
+            &admin_addr,
+            &admin_pk,
+            p2p_ports[idx],
+            api_ports[idx],
+        )
+        .await
+        .with_context(|| format!("boot_one_engine idx={idx}"))?;
+        sandboxes.push(sandbox);
+    }
+
+    // ── 5. Wait for every P2P listener to be ready, then wire the star ──
+    //
+    // Bidirectional dial. PMS's `broadcast()` worker only fans out to
+    // INBOUND peers — outbound connections are explicitly excluded
+    // (broadcast.rs:81-87 "sending there would go nowhere"). So if we
+    // only have follower → coord, the coord can broadcast `Inv` to
+    // followers, but each follower's `GetBlock` reply goes through its
+    // own `broadcast()` (peer.rs:347-358) and never reaches the coord
+    // (which is OUTBOUND from the follower's view). The block never
+    // makes it to the follower's DAG.
+    //
+    // Workaround: dial in BOTH directions so every pair sits in each
+    // other's inbound table. That's two TCP connections per follower
+    // for the cluster (one initiated each way) — fine for an
+    // in-process test.
+    sleep(Duration::from_millis(500)).await;
+    if n > 1 {
+        let coord_p2p = format!("127.0.0.1:{}", p2p_ports[0]);
+        let coord_srv = sandboxes[0]
+            .server_arc
+            .clone()
+            .expect("coord must have server_arc");
+
+        for idx in 1..n {
+            let follower_p2p = format!("127.0.0.1:{}", p2p_ports[idx]);
+            // Follower dials coord (so follower is inbound from coord's view).
+            let f_srv = sandboxes[idx]
+                .server_arc
+                .clone()
+                .expect("follower must have server_arc");
+            f_srv
+                .connect_to_peer(coord_p2p.clone(), None)
+                .await
+                .with_context(|| format!("follower {idx} → coord {coord_p2p}"))?;
+
+            // Coord dials follower (so coord is inbound from follower's view).
+            // This is what makes the follower's `GetBlock` reach the coord.
+            coord_srv
+                .clone()
+                .connect_to_peer(follower_p2p.clone(), None)
+                .await
+                .with_context(|| format!("coord → follower {idx} ({follower_p2p})"))?;
+
+            println!(
+                "   [cluster] follower {} ↔ coordinator wired (both directions)",
+                idx
+            );
+        }
+        // Give the handshakes + initial sync time to settle.
+        sleep(Duration::from_secs(2)).await;
+    }
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║  PMS Multi-Engine Cluster Sandbox (n={})                   ║", n);
+    println!("╚═══════════════════════════════════════════════════════════╝");
+    for (idx, s) in sandboxes.iter().enumerate() {
+        let role = if idx == 0 { "coordinator" } else { "follower" };
+        println!(
+            "   [{}] {:11} api={} p2p={}",
+            idx,
+            role,
+            s.base_url,
+            s.p2p_addr.as_deref().unwrap_or("n/a")
+        );
+    }
+    println!();
+
+    Ok(sandboxes)
+}
+
+/// Boot a single engine inside a cluster. Internal — call
+/// `boot_sandbox_cluster` from tests.
+async fn boot_one_engine(
+    idx: usize,
+    n_total: usize,
+    admin_wallet: &Wallet,
+    admin_addr: &str,
+    admin_pk: &str,
+    p2p_port: u16,
+    api_port: u16,
+) -> Result<Sandbox> {
+    let mut settings = load_config()?;
+    let network_id = settings.network.network_id.clone();
+
+    settings.admin.signer_pubkeys = vec![admin_pk.to_string()];
+    settings.admin.wallet_addresses = vec![admin_addr.to_string()];
+    settings.validation.coordinator_public_key = Some(admin_pk.to_string());
+
+    // Per-engine RocksDB tempdir.
+    let tmp = tempfile::tempdir()?;
+    let db_path = tmp.path().join(format!("sandbox-rocks-{idx}"));
+    settings.rocks.path = db_path.to_string_lossy().into();
+
+    // ── LedgerManager + adapter (own DB per engine) ──────────────────
+    let mgr = pms_ledger::LedgerManager::bootstrap(&settings)
+        .await
+        .context("LedgerManager::bootstrap failed")?;
+    let main_instance = mgr
+        .default_ledger()
+        .context("No default (main) ledger after bootstrap")?;
+    let store = main_instance.store.clone();
+    let adapter = main_instance.adapter.clone();
+
+    // ── Per-engine node_wallet ───────────────────────────────────────
+    //
+    // idx=0 (coordinator) signs blocks → wallet must be the admin
+    // wallet (its pubkey matches `coordinator_public_key`).
+    // idx>0 (follower) gets a random wallet — its own block submissions
+    // would be rejected by single-writer enforcement, but it accepts
+    // blocks broadcast by the coordinator (signed by admin_pk) because
+    // every engine shares the same coordinator_public_key in config.
+    let node_wallet: Arc<Wallet> = if idx == 0 {
+        Arc::new(admin_wallet.clone())
+    } else {
+        // Distinct seed per follower so node_id differs (required for
+        // P2P self-loop detection and distinct peer IDs).
+        let seed = [idx as u8 + 100; 32];
+        Arc::new(
+            Wallet::from_seed(&seed, None)
+                .map_err(|e| anyhow::anyhow!("follower wallet from_seed: {e}"))?,
+        )
+    };
+
+    // Override P2P bind address on the per-engine settings before
+    // building the Server. `Server::new()` reads it from the
+    // p2p_config arg we pass in — we set bind_addr on a clone so
+    // we don't poison the global settings.
+    let mut p2p_cfg = settings.p2p.clone();
+    p2p_cfg.bind_addr = Some(format!("127.0.0.1:{p2p_port}"));
+
+    let mgr_arc = Arc::new(mgr);
+    let srv = Server::new(
+        adapter,
+        &settings.network.network_id,
+        settings.network.protocol_version,
+        node_wallet.clone(),
+        &p2p_cfg,
+        Some(mgr_arc.clone()),
+    );
+
+    // ── Spawn the P2P listener ────────────────────────────────────────
+    //
+    // `Server::listen` loops forever; spawning detaches it so the
+    // sandbox can boot the API listener next. The handle is stored on
+    // Sandbox so the test can drop it (and abort the listener) when
+    // the cluster goes away.
+    let p2p_addr = format!("127.0.0.1:{p2p_port}");
+    let srv_listen = srv.clone();
+    let p2p_addr_clone = p2p_addr.clone();
+    let p2p_handle = tokio::spawn(async move {
+        if let Err(e) = srv_listen.listen(&p2p_addr_clone).await {
+            eprintln!("   [cluster idx={idx}] P2P listener exited: {e}");
+        }
+    });
+    // Yield so the listener has a chance to call bind() before the
+    // first follower tries to dial it.
+    sleep(Duration::from_millis(50)).await;
+
+    let admin_token = settings
+        .auth
+        .admin_api_token
+        .as_deref()
+        .and_then(resolve_admin_token)
+        .unwrap_or_else(|| "sandbox_test".to_string());
+
+    let fee_pool_registry = Arc::new(pms_server::fee_pool::FeePoolRegistry::new());
+    let main_fee_pool = fee_pool_registry.get_or_create("main");
+    let main_store_for_contracts: Arc<dyn pms_storage::ContractStorage> = store.clone();
+    let main_event_bus = srv.adapter_arc().event_bus();
+
+    let cfg = Arc::new(ServerConfig {
+        bind_addr: p2p_addr.clone(),
+        api_addr: format!("127.0.0.1:{api_port}"),
+        tls: settings.tls.clone(),
+        api_tls_enabled: false,
+        network: settings.network.clone(),
+        auth: settings.auth.clone(),
+    });
+
+    let state = AppState {
+        srv: srv.clone(),
+        _cfg: cfg,
+        _ready: Arc::new(AtomicBool::new(true)),
+        stats: Arc::new(Stats::new()),
+        store: store.clone(),
+        admin_token: Some(admin_token.clone()),
+        node_wallet: node_wallet.clone(),
+        settings: Arc::new(settings.clone()),
+        allowed_networks: vec![],
+        treasury_wallets: TreasuryWallets::empty(),
+        node_registry: pms_server::node_registry::create_registry(),
+        fee_pool: main_fee_pool,
+        fee_pool_registry: fee_pool_registry.clone(),
+        api_key_store: pms_server::api_keys::create_api_key_store(None)
+            .expect("empty api key store must work"),
+        ledger_mgr: Some(mgr_arc),
+        ledger_id: "main".into(),
+        effective_fees: Arc::new(pms_server::api_fn::tx_helpers::resolve_effective_fees(
+            &settings.fees,
+            None,
+        )),
+        activity_cache: Arc::new(pms_server::api_fn::activity::ActivityCache::new(1_000, 30)),
+        tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
+        contract_event_bus: main_event_bus.clone(),
+        contract_store: main_store_for_contracts.clone(),
+        compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+
+    // Only the coordinator runs the fee distributor — followers don't
+    // own the writing key, distributing from a follower would either
+    // produce a block rejected by single-writer, or worse, race with
+    // the coordinator.
+    if idx == 0 {
+        spawn_fee_distributor_task(state.clone());
+        if let Some(bus) = main_event_bus {
+            let sink = Arc::new(FeePoolRefundSink {
+                registry: fee_pool_registry.clone(),
+            });
+            pms_contracts::spawn_contract_listener(bus, main_store_for_contracts, sink);
+        }
+    }
+
+    let app = build_api_router(state, &settings);
+    let api_listener = tokio::net::TcpListener::bind(&format!("127.0.0.1:{api_port}")).await?;
+    let bound = api_listener.local_addr()?;
+    let base_url = format!("http://{}", bound);
+
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = axum::serve(
+            api_listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
+            eprintln!("   [cluster idx={idx}] API listener exited: {e}");
+        }
+    });
+    sleep(Duration::from_millis(200)).await;
+
+    // Wait for /livez to respond.
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(20)
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build()?;
+    let mut ready = false;
+    for _ in 0..60 {
+        if let Ok(r) = client.get(format!("{}/livez", base_url)).send().await {
+            if r.status().is_success() {
+                ready = true;
+                break;
+            }
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+    anyhow::ensure!(
+        ready,
+        "[cluster idx={idx}] API not ready after 12s (api={base_url})"
+    );
+
+    println!(
+        "   [cluster] engine {} / {} booted: api={} p2p={}",
+        idx + 1,
+        n_total,
+        base_url,
+        p2p_addr
+    );
+
+    Ok(Sandbox {
+        base_url,
+        client,
+        admin_wallet: admin_wallet.clone(),
+        admin_addr: admin_addr.to_string(),
+        admin_token,
+        network_id,
+        _tmp: tmp,
+        _server_handle: server_handle,
+        _p2p_handle: Some(p2p_handle),
+        server_arc: Some(srv),
+        p2p_addr: Some(p2p_addr),
+        cluster_idx: Some(idx),
+    })
+}
+
+// ============================================================================
+// TEST: Multi-engine cluster — block propagation across the star
+// ============================================================================
+
+/// Boot 1 + 3 followers, faucet-mint on the coordinator, then assert
+/// every follower's `block_count_estimate` reflects the coordinator's
+/// new block. This is the in-process replacement for "deploy on a 2nd
+/// VPS and test failover" — it proves end-to-end that the persist
+/// pipeline emits broadcast events, the broadcast worker fans them out
+/// over the P2P TCP listener, and the followers' adapters accept them.
+///
+/// The test parameterises `n` from 1 to 4 so we exercise the singleton
+/// case (n=1, no peers) and the full cluster (n=4) in one run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore]
+async fn test_multi_engine_cluster_propagation() -> Result<()> {
+    for n in [1usize, 2, 3, 4] {
+        println!("\n═══════════════════════════════════════════════════════════════");
+        println!("   CLUSTER SIZE n={}", n);
+        println!("═══════════════════════════════════════════════════════════════");
+
+        let cluster = boot_sandbox_cluster(n).await?;
+        let coordinator = &cluster[0];
+
+        // Sanity: peer count matches the topology. With bidirectional
+        // dial, the coord ends up with TWO peer entries per follower
+        // (one for each TCP connection direction — different ephemeral
+        // ports on the dialing side, so two distinct DashMap keys).
+        // We assert `>= n - 1` rather than equality because the
+        // PMS protocol semantics around peer dedup may evolve.
+        if let Some(srv) = coordinator.server_arc.as_ref() {
+            let peers = srv.get_p2p_peers();
+            let expected_min = n.saturating_sub(1);
+            println!(
+                "   [coord] connected peers: {} (expected ≥ {})",
+                peers.len(),
+                expected_min
+            );
+            assert!(
+                peers.len() >= expected_min,
+                "coordinator should see at least n-1 followers (got {} for n={n})",
+                peers.len()
+            );
+        }
+
+        // Submit a faucet mint on the coordinator. This is the simplest
+        // signed plain block that touches the persist pipeline.
+        let test_addr = pms_wallet::Wallet::generate().get_address("8e");
+        let (status, body) = coordinator
+            .admin_post(
+                "/admin/faucet",
+                json!({ "to": test_addr, "amount": "10.0" }),
+            )
+            .await;
+        println!("   [coord] /admin/faucet → {} body={}", status, body);
+        assert!(
+            status.is_success(),
+            "coordinator faucet must succeed (status={status} body={body})"
+        );
+
+        // Give P2P broadcast + persist time to fan out.
+        sleep(Duration::from_secs(3)).await;
+
+        // Helper: pull /healthz on each engine and extract the
+        // `block_count_estimate` from the rocksdb_writable check —
+        // cheapest way to compare DAG sizes across engines without
+        // adding a dedicated debug endpoint.
+        let block_count = async |sandbox: &Sandbox| -> Result<u64> {
+            let resp: Value = sandbox
+                .client
+                .get(format!("{}/healthz", sandbox.base_url))
+                .send()
+                .await?
+                .json()
+                .await
+                .unwrap_or(json!({}));
+            let count = resp
+                .get("checks")
+                .and_then(|cs| cs.as_array())
+                .and_then(|cs| {
+                    cs.iter().find(|c| {
+                        c.get("name").and_then(|v| v.as_str())
+                            == Some("rocksdb_writable")
+                    })
+                })
+                .and_then(|c| c.get("detail"))
+                .and_then(|d| d.get("block_count_estimate"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            Ok(count)
+        };
+
+        let coord_count = block_count(coordinator).await?;
+        println!("   [coord] block_count_estimate = {coord_count}");
+        assert!(
+            coord_count >= 2,
+            "coordinator must have at least genesis + faucet block (got {coord_count})"
+        );
+
+        // For each follower, assert block_count grew past the initial
+        // genesis. Strict tip-equality is harder than it sounds: when
+        // each engine runs its own LedgerManager, they each create
+        // their own deterministic genesis — but if the follower has
+        // joined too late and never replays history, it stays at its
+        // own tip. The block_count check is the operative signal:
+        // strictly-greater-than-1 means the follower received and
+        // accepted at least one block from the coordinator.
+        for (idx, follower) in cluster.iter().enumerate().skip(1) {
+            let f_count = block_count(follower).await?;
+            println!("   [follower {idx}] block_count_estimate = {f_count}");
+            // If the genesis IDs match across engines, follower will
+            // have received the faucet (count >= 2). If the genesis
+            // IDs DON'T match, the follower will reject the faucet
+            // (parent unknown) and stay at count=1 — that's a real
+            // deployment bug we want to surface, not silence.
+            assert!(
+                f_count >= 2,
+                "follower {idx} block_count={f_count}: coordinator's broadcast didn't propagate \
+                 (likely cause: divergent genesis IDs across engines — check LedgerManager bootstrap)"
+            );
+        }
+
+        println!("   ✅ n={n}: all followers persisted the coordinator's block");
+        // Drop cluster — handles + tempdirs clean up here.
+    }
 
     Ok(())
 }
