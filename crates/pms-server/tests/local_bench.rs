@@ -282,6 +282,8 @@ async fn local_bench() -> Result<()> {
         contract_event_bus: None,
         contract_store: store.clone(),
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
+        coord_shard_wallets: std::sync::Arc::new(Vec::new()),
+        coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // ── 8. Build router and bind to random port ──────────────────────────

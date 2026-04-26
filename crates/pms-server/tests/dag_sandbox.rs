@@ -540,6 +540,8 @@ async fn boot_sandbox() -> Result<Sandbox> {
         contract_event_bus: main_event_bus.clone(),
         contract_store: main_store_for_contracts.clone(),
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
+        coord_shard_wallets: std::sync::Arc::new(Vec::new()),
+        coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // ── 11. Spawn fee distributor task (2s interval) ─────────────────
@@ -3021,6 +3023,8 @@ async fn boot_one_engine(
         contract_event_bus: main_event_bus.clone(),
         contract_store: main_store_for_contracts.clone(),
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
+        coord_shard_wallets: std::sync::Arc::new(Vec::new()),
+        coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // Only the coordinator runs the fee distributor — followers don't

@@ -89,6 +89,8 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         stats,
         contract_store: store.clone(),
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
+        coord_shard_wallets: std::sync::Arc::new(Vec::new()),
+        coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         store,
         admin_token,
         node_wallet,
@@ -216,6 +218,8 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         contract_event_bus: None,
         contract_store: store.clone(),
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
+        coord_shard_wallets: std::sync::Arc::new(Vec::new()),
+        coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // 10) Router
@@ -333,6 +337,8 @@ pub async fn make_test_ctx_with_admin(
         contract_event_bus: None,
         contract_store: store.clone(),
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
+        coord_shard_wallets: std::sync::Arc::new(Vec::new()),
+        coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // 10) Router

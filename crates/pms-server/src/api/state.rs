@@ -109,6 +109,61 @@ pub struct AppState {
     /// change (audit finding M6). Contention is negligible — these are
     /// rare admin operations — so a single global lock is fine.
     pub compliance_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Coordinator sub-address shards. Empty when sharding is disabled
+    /// (legacy single-address behaviour, default). When non-empty, the
+    /// transaction-fee output destination round-robins across the shards
+    /// via `next_coord_shard_address` to bound per-address UTXO accumulation.
+    /// Audit follow-up to v0.7.4 — see `pms_wallet::shard_derivation`.
+    pub coord_shard_wallets: Arc<Vec<Wallet>>,
+    /// Atomic round-robin counter for `next_coord_shard_address`. Wrapped
+    /// with `Arc` so `AppState::clone` shares it across handlers — that
+    /// keeps the round-robin truly fair under load instead of restarting
+    /// from 0 on every clone.
+    pub coord_shard_round_robin: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl AppState {
+    /// Pick the next coordinator-side address that should receive a
+    /// transaction-fee output. Returns the appropriate shard address
+    /// when sharding is configured, otherwise falls back to the legacy
+    /// `settings.admin.wallet_addresses` / `treasury_addresses` chain
+    /// the handlers used pre-sharding.
+    ///
+    /// `hrp` is the bech32 HRP for this network (e.g. "8e" for testnet
+    /// — the same value the handlers already pass to `get_address`).
+    pub fn next_coord_shard_address(&self, hrp: &str) -> Option<String> {
+        if self.coord_shard_wallets.is_empty() {
+            // Legacy: caller falls back to settings.admin / treasury list.
+            return None;
+        }
+        // Wrapping is intentional — `AtomicUsize::fetch_add` is atomic
+        // and `n` is bounded by config validation (≤ 256), so the modulo
+        // is cheap. Relaxed ordering is enough; we don't need a happens-
+        // before relation across shards, just monotonic counter progress.
+        let idx = self
+            .coord_shard_round_robin
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % self.coord_shard_wallets.len();
+        Some(self.coord_shard_wallets[idx].get_address(hrp))
+    }
+
+    /// Resolve the coordinator-side address for a transaction-fee output,
+    /// applying sharding first and falling back to the legacy
+    /// `admin.wallet_addresses` / `treasury_addresses` chain if sharding
+    /// is disabled. Returns `None` only when none of the three sources
+    /// is configured (caller should HTTP 500).
+    pub fn fee_recipient_address(&self) -> Option<String> {
+        let hrp = &self.settings.address.hrp;
+        if let Some(s) = self.next_coord_shard_address(hrp) {
+            return Some(s);
+        }
+        self.settings
+            .admin
+            .wallet_addresses
+            .first()
+            .cloned()
+            .or_else(|| self.settings.fees.treasury_addresses.first().cloned())
+    }
 }
 
 /// Sync the PMS_BLOCKS_TOTAL gauge with the actual in-memory DAG size for the default ledger.

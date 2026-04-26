@@ -30,6 +30,7 @@ fn test_fees_settings() -> pms_config::FeesSettings {
         distribution_interval_sec: 600,
         daily_inflation_enabled: false,
         daily_inflation_interval_sec: 86400,
+            coord_shard_count: 0,
         burn_rate_bps: 0,
         gas_per_tx: None,
         gas_pool_min_balance: None,

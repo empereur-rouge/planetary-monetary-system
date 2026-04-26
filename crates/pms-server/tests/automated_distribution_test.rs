@@ -248,6 +248,7 @@ async fn test_automated_fee_distribution() {
             distribution_interval_sec: 1, // 1 second interval for test
             daily_inflation_enabled: false,
             daily_inflation_interval_sec: 86400,
+            coord_shard_count: 0,
             burn_rate_bps: 0,
             gas_per_tx: None,
             gas_pool_min_balance: None,
@@ -362,6 +363,8 @@ async fn test_automated_fee_distribution() {
         contract_event_bus: None,
         contract_store: rocks_store_arc.clone(),
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
+        coord_shard_wallets: std::sync::Arc::new(Vec::new()),
+        coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // 8. Spawn Distributor

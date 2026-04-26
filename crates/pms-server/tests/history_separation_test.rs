@@ -75,6 +75,8 @@ async fn history_separation_test() -> anyhow::Result<()> {
         contract_event_bus: None,
         contract_store: store.clone(),
         compliance_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        coord_shard_wallets: std::sync::Arc::new(Vec::new()),
+        coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // 4) Insert Blocks manually into Store (to bypass validation/mining for speed)

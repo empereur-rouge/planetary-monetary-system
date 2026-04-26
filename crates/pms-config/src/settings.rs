@@ -134,6 +134,19 @@ impl Settings {
             bail!("validation.min_pow_leading_zero_bits > 32 est absurde");
         }
 
+        // 6) Coordinator shard count must be 0 (disabled) or 2..=256.
+        // 1 is rejected because pointless (one shard = no sharding); 256
+        // is the upper bound because each shard derivation runs HKDF
+        // at boot, so a runaway value (e.g. 1M from a config typo) would
+        // freeze the engine for minutes — and there is no realistic
+        // throughput that needs more than a few hundred shards.
+        let n = self.fees.coord_shard_count;
+        if n == 1 || n > 256 {
+            bail!(
+                "fees.coord_shard_count must be 0 (disabled) or in [2, 256], got {n}"
+            );
+        }
+
         Ok(())
     }
 }

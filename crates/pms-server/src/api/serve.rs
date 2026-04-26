@@ -185,6 +185,44 @@ pub async fn serve_api(
     // events from any ledger reach the single ContractListener.
     let main_event_bus = srv.adapter_arc().event_bus();
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Coordinator shard wallets (audit follow-up to v0.7.4 — UTXO
+    // accumulation bottleneck on the single coordinator address).
+    //
+    // When `[fees].coord_shard_count > 0`, derive that many sub-wallets
+    // from `node_wallet` via HKDF-SHA256 so transaction-fee outputs can
+    // round-robin across them instead of all landing on one address.
+    //
+    // Validation in `Settings::validate()` already rejected n=1 and n>256;
+    // here we just unwrap the (in-bounds) derive_set call. A failure here
+    // is a single-call ~2^-128 HKDF-out-of-curve event — fail-fast at boot
+    // is correct, the operator can pick a different shard_count.
+    // ═══════════════════════════════════════════════════════════════════════
+    let coord_shard_wallets: Vec<pms_wallet::Wallet> = if settings.fees.coord_shard_count > 0 {
+        match pms_wallet::shard_derivation::derive_coord_shard_set(
+            &node_wallet,
+            settings.fees.coord_shard_count,
+        ) {
+            Ok(v) => {
+                tracing::info!(
+                    target = "coord_sharding",
+                    count = v.len(),
+                    "Derived {} coordinator shard wallets",
+                    v.len()
+                );
+                v
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "Failed to derive coord_shard_count={} sub-wallets: {e}",
+                    settings.fees.coord_shard_count
+                );
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     let state = AppState {
         srv,
         _cfg: cfg.clone(),
@@ -215,6 +253,8 @@ pub async fn serve_api(
         contract_event_bus: main_event_bus.clone(),
         contract_store: main_store_for_contracts.clone(),
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
+        coord_shard_wallets: Arc::new(coord_shard_wallets),
+        coord_shard_round_robin: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     // ═══════════════════════════════════════════════════════════════════════

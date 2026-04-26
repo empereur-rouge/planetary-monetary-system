@@ -648,6 +648,24 @@ pub struct FeesSettings {
     /// Interval in seconds for scheduled inflation mint. Default: 86400 (24h).
     #[serde(default = "default_daily_inflation_interval_sec")]
     pub daily_inflation_interval_sec: u64,
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Coordinator address sharding (audit follow-up to v0.7.4 — UTXO
+    // accumulation bottleneck). When > 0, transaction fee outputs are
+    // round-robin'd across N derived sub-addresses instead of landing on
+    // a single coordinator address. Each shard's per-address index stays
+    // bounded which keeps `apply_diff` write throughput flat under
+    // sustained load (the test_tps_degradation_profile measurement
+    // showed admin_addr accumulating ~17K UTXOs/s; with N=32 each shard
+    // sees ~530/s, well within healthy DashMap rehash tolerance).
+    //
+    // 0 (default) preserves the legacy single-address behaviour for
+    // existing deployments; valid values are {0} ∪ [2, 256]. The shard
+    // wallets are HKDF-derived from `node_wallet`'s private key at boot
+    // (see `pms_wallet::shard_derivation`).
+    // ═══════════════════════════════════════════════════════════════════════
+    #[serde(default)]
+    pub coord_shard_count: u32,
 }
 
 fn default_fee_ratio() -> String {
