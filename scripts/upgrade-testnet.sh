@@ -214,9 +214,13 @@ if [ "$UPDATE_CONFIG" = "true" ]; then
 
     echo -e "   ${GREEN}Saved: coordinator_key, x25519_key, wallet_addresses, treasury_addresses, signer_pubkeys${NC}"
 
-    # Upload fresh config + compose + simulator config
+    # Upload fresh config + compose + simulator config + prometheus
+    # scrape config (the v0.7.5 update flips /metrics → /metrics/all and
+    # adds bearer-token auth, otherwise the new per-stage persist counters
+    # never make it into Prometheus).
     scp -q $SSH_OPTS "$COMPOSE_FILE" "$VPS_USER@$VPS_IP:$REMOTE_DIR/$COMPOSE_FILE"
     scp -q $SSH_OPTS "$CONFIG_FILE" "$VPS_USER@$VPS_IP:$REMOTE_DIR/$CONFIG_FILE"
+    scp -q $SSH_OPTS etc/prometheus/prometheus.yml "$VPS_USER@$VPS_IP:$REMOTE_DIR/etc/prometheus/prometheus.yml"
     scp -q $SSH_OPTS tools/simulator/simulator.testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/simulator.testnet.toml"
     scp -q $SSH_OPTS tools/simulator/agents_testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/agents_testnet.toml"
 
@@ -367,6 +371,15 @@ export PMS_ADMIN_TOKEN="$ADMIN_TOKEN"
 export PMS_API_KEY="$API_KEY"
 export PMS_COORDINATOR_KEY="$COORD_KEY"
 export PMS_COORDINATOR_ADDR="$COORD_ADDR"
+
+# Refresh the Prometheus admin-token file every upgrade. /metrics/all
+# sits behind require_local_or_admin and Prometheus runs in its own
+# container (non-loopback), so the scrape config reads the token from
+# /etc/prometheus/admin_token (mounted from secrets/prometheus_admin_token).
+# This keeps the file in sync if the operator rotates the token.
+mkdir -p secrets
+printf '%s' "$ADMIN_TOKEN" > secrets/prometheus_admin_token
+chmod 600 secrets/prometheus_admin_token
 
 # Clean stale Docker Compose state (ghost container fix).
 # Docker Compose v2 can desync with containerd, leaving phantom container

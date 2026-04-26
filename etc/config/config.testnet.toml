@@ -93,6 +93,14 @@ annual_inflation_percent = 3.0
 treasury_reward_percent = 20
 creator_reward_percent = 70
 burn_percent = 10
+# Coordinator sub-address sharding (audit follow-up to v0.7.4).
+# When > 0, fee outputs are round-robin'd across N HKDF-SHA256-derived
+# sub-addresses instead of all landing on the master coordinator
+# address — bounds the per-address UTXO accumulation and exposes
+# `/v1/coordinator/info::shards` for auditors to sum balances.
+# Value 0 = sharding disabled (legacy single-address fee routing).
+# Valid range when > 0: [2, 256].
+coord_shard_count = 32
 
 [auth]
 require_signed_submit = true
@@ -103,6 +111,24 @@ api_keys_file = "/home/pms/config/pms/api-keys.json"
 [secrets]
 node_identity_key_path = "/home/pms/config/pms/node.key"
 admin_wallet_file = "/home/pms/config/pms/coordinator.json"
+
+# /healthz thresholds (v0.7.4). All fields have defaults; values below
+# are tuned for testnet's mostly-idle baseline + 16 GB VPS profile.
+[health]
+# Flag /healthz as `degraded` if no block has been persisted in this
+# many seconds. 300 = 5 min — long enough to absorb idle quiet periods
+# on testnet, short enough to surface a stuck coordinator.
+max_last_block_age_seconds = 300
+# Flag as `degraded` when the persist channel sits at >=80% capacity.
+# Saturation means producers are about to start blocking on send.await.
+persist_queue_high_water = 0.8
+# Flag when free disk drops below 10% on the RocksDB volume.
+min_disk_free_percent = 10.0
+# Background activity-index retention (audit follow-up to v0.7.4).
+# 30 days is enough for the dashboard's history view; older entries
+# are purged daily by `spawn_activity_retention_task`. Compliance log
+# is NOT auto-purged — operator-only via `/admin/purge-compliance-log`.
+activity_retention_days = 30
 
 [validation]
 min_pow_leading_zero_bits = 0

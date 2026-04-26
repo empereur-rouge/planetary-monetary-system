@@ -424,13 +424,21 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
+  # PMS Engine — full registry. /metrics returns 3 dashboard counters
+  # per ledger; /metrics/all is the actual `prometheus::gather()` output
+  # with all the v0.7.4 sampler + v0.7.5 per-stage diagnostic counters.
+  # Auth: behind require_local_or_admin → admin token required from a
+  # non-loopback container.
   - job_name: 'pms-engine'
     scheme: https
     tls_config:
       insecure_skip_verify: true
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/admin_token
     static_configs:
       - targets: ['pms-engine:8080']
-    metrics_path: /metrics
+    metrics_path: /metrics/all
 
   - job_name: 'pms-gateway'
     scheme: https
@@ -442,6 +450,12 @@ scrape_configs:
 PROM_EOF
     echo -e "   \${GREEN}Prometheus config created\${NC}"
 fi
+
+# Mount the admin token as a one-line file so Prometheus can authenticate
+# /metrics/all. The actual file is written further down once $ADMIN_TOKEN
+# is known (after env / wallet bootstrap). docker-compose.testnet.yml
+# mounts it at /etc/prometheus/admin_token (ro).
+mkdir -p secrets
 
 # --- Caddyfile ---
 cat > Caddyfile.testnet << CADDY_EOF
@@ -617,6 +631,17 @@ if [ "\$DO_BUILD" = "true" ]; then
     export PMS_ADMIN_TOKEN="\$ADMIN_TOKEN"
     export PMS_COORDINATOR_KEY="\$COORD_PRIV_KEY"
     export PMS_COORDINATOR_ADDR="\$COORD_ADDR"
+
+    # Write the admin token where Prometheus can read it. The container
+    # mounts secrets/prometheus_admin_token:/etc/prometheus/admin_token:ro
+    # and the scrape config (etc/prometheus/prometheus.yml) references
+    # the file via \`credentials_file\`. Without this Prometheus would
+    # 401 against /metrics/all (require_local_or_admin denies non-
+    # loopback callers without a token).
+    mkdir -p secrets
+    printf '%s' "\$ADMIN_TOKEN" > secrets/prometheus_admin_token
+    chmod 600 secrets/prometheus_admin_token
+    echo -e "   \${GREEN}Prometheus admin token written to secrets/prometheus_admin_token\${NC}"
     # Clean stale Docker Compose state (ghost container fix).
     # Docker Compose v2 can desync with containerd, leaving phantom container
     # references that cause "No such container" errors on recreate.

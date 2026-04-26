@@ -3,14 +3,36 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
+  # PMS Engine — full Prometheus registry (per-stage persist counters,
+  # consumer timings, persist queue depth, fee-pool size, UTXO-set size,
+  # RocksDB write-stall counters). The plain `/metrics` endpoint returns
+  # only 3 dashboard-friendly counters per ledger (no labels) and masks
+  # everything the v0.7.4 metrics sampler + v0.7.5 per-stage diagnostic
+  # exposes; `/metrics/all` returns the full `prometheus::gather()`
+  # output.
+  #
+  # AUTH: `/metrics`, `/metrics/all`, and `/l/{id}/metrics` all sit
+  # behind `require_local_or_admin`. Prometheus runs in its own
+  # container on the docker network — it is NOT loopback, so the admin
+  # token is required. The token is mounted into this container at
+  # `/etc/prometheus/admin_token` by `scripts/deploy-testnet.sh`
+  # (one-line file containing the value of `$PMS_ADMIN_TOKEN`). Keeps
+  # the token out of this YAML, out of the image layer, and out of
+  # Prometheus's scrape-config dashboard view.
   - job_name: 'pms-engine'
     scheme: https
     tls_config:
       insecure_skip_verify: true
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/admin_token
     static_configs:
       - targets: ['pms-engine:8080']
-    metrics_path: /metrics
+    metrics_path: /metrics/all
 
+  # Gateway exposes its own `/metrics` (request rates, upstream latency,
+  # rate-limit decisions). No admin auth required on the gateway side
+  # — that's a separate service with its own surface.
   - job_name: 'pms-gateway'
     scheme: https
     tls_config:

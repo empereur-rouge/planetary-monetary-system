@@ -28,11 +28,17 @@ RUN cargo build --release -p tools-cli
 # ---------- runtime node ----------
 FROM alpine:3.20 AS node
 # libstdc++ + libgcc: required because binary is dynamically linked (-crt-static off)
-RUN apk add --no-cache ca-certificates libstdc++ libgcc
+# curl: required by the docker-compose `/healthz` probe (busybox wget
+# in alpine 3.20 doesn't reliably handle the self-signed HTTPS the
+# engine binds on port 8080).
+RUN apk add --no-cache ca-certificates libstdc++ libgcc curl
 COPY --from=build-node /app/target/release/bin /usr/local/bin/pms-node
 USER 65532:65532
 EXPOSE 8050 8080
-HEALTHCHECK --interval=5s --timeout=2s --retries=30 CMD wget -qO- http://127.0.0.1:8080/live || exit 1
+# Baseline liveness probe — overridden by docker-compose with a real
+# `/healthz` check that surfaces RocksDB degradation. Kept here so a
+# bare `docker run` still has *some* healthcheck wired up.
+HEALTHCHECK --interval=5s --timeout=2s --retries=30 CMD curl -sk -f https://127.0.0.1:8080/livez || exit 1
 ENTRYPOINT ["/usr/local/bin/pms-node"]
 
 # ---------- runtime cli ----------

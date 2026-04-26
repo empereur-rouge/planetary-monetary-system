@@ -41,6 +41,13 @@ services:
       RUST_LOG: info,pms_server=info,pms_core=info
       PMS_CONFIG: /home/pms/config/config.testnet.toml
       PMS_ADMIN_TOKEN: "${PMS_ADMIN_TOKEN}"
+      # Optional: passphrase for the encrypted-at-rest coordinator key.
+      # Required when `[secrets].node_identity_key_encrypted_path` is set
+      # in config.testnet.toml — the engine reads this to AES-GCM-decrypt
+      # node.key.enc at boot. Source it from a secret manager / .env /
+      # vault — never commit. Empty / unset is fine when the deployment
+      # uses the legacy plain `node.key`.
+      PMS_COORDINATOR_KEY_PASSPHRASE: "${PMS_COORDINATOR_KEY_PASSPHRASE:-}"
     command: ["--config", "/home/pms/config/config.testnet.toml"]
     volumes:
       - ./etc/config:/home/pms/config:rw
@@ -49,8 +56,15 @@ services:
       - rocksdb_testnet_data:/home/pms/data
     expose:
       - "8080"
+    # Real-content healthcheck against `/healthz` (v0.7.4): returns 200
+    # when RocksDB is writable, the persist queue is healthy, the last
+    # block is recent, and the disk has free space; 503 (degraded|fail)
+    # otherwise. The previous TCP-port probe accepted the engine as
+    # healthy as long as the listener was alive, masking real
+    # degradation. `start_period: 300s` covers cold-boot RAM bootstrap
+    # of the DAG (large DBs take a while to replay).
     healthcheck:
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
+      test: ["CMD-SHELL", "curl -sk -f https://127.0.0.1:8080/healthz || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -142,6 +156,13 @@ services:
         max-file: "3"
     volumes:
       - ./etc/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Admin token mounted as a one-line file. Prometheus reads it via
+      # `credentials_file: /etc/prometheus/admin_token` in the scrape
+      # config to authenticate `/metrics/all` (the engine's full
+      # registry sits behind `require_local_or_admin` middleware, and
+      # Prometheus's container IP isn't loopback). The file is created
+      # by `scripts/deploy-testnet.sh` from `$PMS_ADMIN_TOKEN`.
+      - ./secrets/prometheus_admin_token:/etc/prometheus/admin_token:ro
       - prometheus_testnet_data:/prometheus
     ports:
       - "127.0.0.1:9091:9090"
