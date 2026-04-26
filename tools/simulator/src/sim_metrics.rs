@@ -91,13 +91,20 @@ pub fn render() -> String {
 }
 
 /// Extract the agent group from the agent's name. The simulator names
-/// agents like `casual_0`, `casual_1`, ..., `spammer_0`, ... so the
-/// group is everything before the last `_<digits>` suffix.
+/// agents like `casual-0`, `casual-1`, ..., `spammer-0`, ... so the
+/// group is everything before the last `<sep><digits>` suffix where
+/// `<sep>` is either `-` (current convention used by `funder.rs`) or
+/// `_` (legacy convention from earlier code paths). Without this
+/// trimming the Prometheus `agent_group` label has cardinality N (one
+/// per agent) instead of the intended ~5 (one per group), which blows
+/// up dashboard queries and storage.
 pub fn group_of(agent_name: &str) -> &str {
-    if let Some(idx) = agent_name.rfind('_') {
-        let suffix = &agent_name[idx + 1..];
+    let idx = agent_name
+        .rfind(|c: char| c == '-' || c == '_')
+        .map(|i| (i, &agent_name[i + 1..]));
+    if let Some((i, suffix)) = idx {
         if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
-            return &agent_name[..idx];
+            return &agent_name[..i];
         }
     }
     agent_name
@@ -109,12 +116,18 @@ mod tests {
 
     #[test]
     fn group_of_strips_numeric_suffix() {
+        // Underscore separator (legacy).
         assert_eq!(group_of("casual_0"), "casual");
         assert_eq!(group_of("active_42"), "active");
         assert_eq!(group_of("spammer_4"), "spammer");
+        // Hyphen separator (current funder convention).
+        assert_eq!(group_of("casual-0"), "casual");
+        assert_eq!(group_of("active-42"), "active");
+        assert_eq!(group_of("adversarial-2"), "adversarial");
         // Non-numeric suffix → name returned as-is.
         assert_eq!(group_of("coordinator"), "coordinator");
         assert_eq!(group_of("agent_main"), "agent_main");
+        assert_eq!(group_of("name-with-text"), "name-with-text");
     }
 
     #[test]
