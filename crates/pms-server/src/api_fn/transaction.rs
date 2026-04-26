@@ -580,18 +580,14 @@ pub async fn prepare_tx(
         });
     }
 
-    // Output frais vers admin wallet (fallback: treasury/coordinator)
+    // Output frais vers admin wallet, ou shard quand sharding activé.
+    // Priority chain:
+    //   1. coord shard (round-robin) when [fees].coord_shard_count > 0
+    //   2. settings.admin.wallet_addresses[0]
+    //   3. settings.fees.treasury_addresses[0]
+    //   4. 500 — no valid recipient configured.
     if fee_dec > Decimal::ZERO {
-        // Priority: 1. admin.wallet_addresses, 2. fees.treasury_addresses, 3. error (no valid recipient)
-        let admin_addr = state
-            .settings
-            .admin
-            .wallet_addresses
-            .first()
-            .cloned()
-            .or_else(|| state.settings.fees.treasury_addresses.first().cloned());
-
-        let admin_addr = match admin_addr {
+        let admin_addr = match state.fee_recipient_address() {
             Some(addr) => addr,
             None => {
                 tracing::warn!("prepareTx: No admin or treasury address configured for fees!");

@@ -509,16 +509,10 @@ pub async fn wallet_send_simple(
         });
     }
 
-    // Fee to admin
+    // Fee to admin (round-robin'd across coord shards when sharding is
+    // enabled — see audit follow-up to v0.7.4 + AppState::fee_recipient_address).
     if fee_dec > Decimal::ZERO {
-        let admin_addr = settings
-            .admin
-            .wallet_addresses
-            .first()
-            .cloned()
-            .or_else(|| settings.fees.treasury_addresses.first().cloned());
-
-        let admin_addr = match admin_addr {
+        let admin_addr = match state.fee_recipient_address() {
             Some(addr) => addr,
             None => {
                 return (

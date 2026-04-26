@@ -371,16 +371,13 @@ pub async fn admin_mint_token(
         asset_id: Some(req.asset_id.clone()),
     }];
 
-    // Add fee output if configured (fee always in PMS native token)
+    // Add fee output if configured (fee always in PMS native token).
+    // Routes through coord shards when sharding is enabled — see
+    // AppState::fee_recipient_address.
     if mint_fee_dec > Decimal::ZERO {
-        let fee_addr = state.settings.admin.wallet_addresses.first().or(state
-            .settings
-            .fees
-            .treasury_addresses
-            .first());
-        if let Some(addr) = fee_addr {
+        if let Some(addr) = state.fee_recipient_address() {
             outputs.push(TxOutput {
-                address: addr.clone(),
+                address: addr,
                 amount: mint_fee_dec.to_string(),
                 asset_id: None, // Fee in PMS native
             });
