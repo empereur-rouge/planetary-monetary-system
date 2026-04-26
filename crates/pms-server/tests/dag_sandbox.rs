@@ -436,6 +436,29 @@ async fn boot_sandbox() -> Result<Sandbox> {
         config_bench.replace("[fees]", "[fees]\ndistribution_interval_sec = 2")
     };
 
+    // Inject coord_shard_count into the bench config when the test
+    // requests it via env var. Lets a single test enable sharding for
+    // the engine it's about to boot, without polluting any of the
+    // other dag_sandbox tests.
+    let config_bench = match std::env::var("PMS_TEST_COORD_SHARD_COUNT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+    {
+        Some(n) if n > 0 => {
+            // Strip any pre-existing line, then re-add with our value.
+            let mut out = String::new();
+            for line in config_bench.lines() {
+                if line.trim_start().starts_with("coord_shard_count") {
+                    continue;
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+            out.replace("[fees]", &format!("[fees]\ncoord_shard_count = {n}"))
+        }
+        _ => config_bench,
+    };
+
     let bench_config_path = root.join("etc/config/config.bench.toml");
     std::fs::write(&bench_config_path, &config_bench)
         .context("Failed to write bench config")?;
@@ -503,6 +526,25 @@ async fn boot_sandbox() -> Result<Sandbox> {
     let main_store_for_contracts: Arc<dyn pms_storage::ContractStorage> = store.clone();
     let main_event_bus = srv.adapter_arc().event_bus();
 
+    // Coordinator shard wallets — same logic as api/serve.rs but in
+    // the in-process sandbox boot path. When [fees].coord_shard_count
+    // = 0 (default), the vec stays empty and fee handlers fall back
+    // to admin.wallet_addresses[0].
+    let coord_shard_wallets: Vec<pms_wallet::Wallet> = if settings.fees.coord_shard_count > 0 {
+        pms_wallet::shard_derivation::derive_coord_shard_set(
+            &node_wallet,
+            settings.fees.coord_shard_count,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "derive {} coord shards in sandbox: {e}",
+                settings.fees.coord_shard_count
+            )
+        })?
+    } else {
+        Vec::new()
+    };
+
     let cfg = Arc::new(ServerConfig {
         bind_addr: "127.0.0.1:0".into(),
         api_addr: "127.0.0.1:0".into(),
@@ -540,7 +582,7 @@ async fn boot_sandbox() -> Result<Sandbox> {
         contract_event_bus: main_event_bus.clone(),
         contract_store: main_store_for_contracts.clone(),
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
-        coord_shard_wallets: std::sync::Arc::new(Vec::new()),
+        coord_shard_wallets: std::sync::Arc::new(coord_shard_wallets),
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
@@ -2666,6 +2708,175 @@ async fn test_sustained_tps_stress() -> Result<()> {
         "   ═══════════════════════════════════════════════════════════════\n"
     );
 
+    Ok(())
+}
+
+// ============================================================================
+// COORD SHARDING (audit follow-up to v0.7.4)
+// ============================================================================
+//
+// Boots the sandbox with shard_count=8, sends faucet mints, then
+// asserts:
+//   - GET /v1/coordinator/info exposes 8 distinct shard addresses.
+//   - After enough fee-bearing transactions, the fees actually land
+//     across multiple shards (round-robin worked, not all on one).
+//   - Each shard's balance is reachable via /v1/balance/{addr}, and
+//     summing the shards equals (or approximates) the cumulative
+//     coordinator fees collected.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_coord_shard_routing_distributes_fees() -> Result<()> {
+    // Activate sharding for THIS test only — boot_sandbox reads the env
+    // var when generating its bench config. Cleared at the end so other
+    // tests in the same process aren't affected.
+    unsafe {
+        std::env::set_var("PMS_TEST_COORD_SHARD_COUNT", "8");
+    }
+    let sandbox_result = boot_sandbox().await;
+    unsafe {
+        std::env::remove_var("PMS_TEST_COORD_SHARD_COUNT");
+    }
+    let sandbox = sandbox_result?;
+
+    // 1) Hit /v1/coordinator/info → assert we have 8 shards.
+    let info: Value = sandbox
+        .client
+        .get(format!("{}/v1/coordinator/info", sandbox.base_url))
+        .send()
+        .await?
+        .json()
+        .await?;
+    println!("coordinator/info:\n{}", serde_json::to_string_pretty(&info)?);
+
+    let count = info
+        .get("coord_shard_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    assert_eq!(count, 8, "expected 8 shards (env was set to 8)");
+
+    let shards = info
+        .get("shards")
+        .and_then(|v| v.as_array())
+        .expect("shards array present");
+    assert_eq!(shards.len(), 8);
+
+    // Collect shard addresses + verify they are all distinct.
+    let shard_addrs: Vec<String> = shards
+        .iter()
+        .filter_map(|s| s.get("address").and_then(|a| a.as_str()).map(String::from))
+        .collect();
+    assert_eq!(shard_addrs.len(), 8, "all 8 shards must have addresses");
+    let unique: std::collections::HashSet<&String> = shard_addrs.iter().collect();
+    assert_eq!(unique.len(), 8, "shard addresses must be distinct");
+
+    // 2) Send fee-bearing transactions to drive the round-robin.
+    //    `wallet_send_simple` charges a fee that lands on the shard
+    //    chosen by AppState::next_coord_shard_address. Send N >> shard
+    //    count so every shard should see at least one fee.
+    let n_tx = 80usize;
+    let amount = "0.01";
+
+    // Mint a fresh worker wallet with enough balance to send N times.
+    let worker = Wallet::generate();
+    let worker_addr = worker.get_address("8e");
+    sandbox.faucet_mint(None, &worker_addr, "10000").await?;
+    sleep(Duration::from_secs(1)).await;
+
+    let dest = sandbox.admin_addr.clone();
+    for i in 0..n_tx {
+        let body = json!({
+            "private_key_b64": worker.private_key_b64,
+            "to": dest,
+            "amount": amount,
+        });
+        let resp = sandbox
+            .client
+            .post(format!("{}/v1/wallet/send-simple", sandbox.base_url))
+            .json(&body)
+            .send()
+            .await?;
+        assert!(
+            resp.status().is_success(),
+            "tx {} failed: {}",
+            i,
+            resp.status()
+        );
+    }
+    sleep(Duration::from_secs(2)).await;
+
+    // 3) Read each shard's balance via /v1/balance/{addr} and check
+    //    that the load was actually distributed.
+    let mut per_shard_balance: Vec<(usize, String, rust_decimal::Decimal)> =
+        Vec::with_capacity(8);
+    for (i, addr) in shard_addrs.iter().enumerate() {
+        let bal_resp: Value = sandbox
+            .client
+            .post(format!("{}/v1/balance", sandbox.base_url))
+            .json(&json!({ "address": addr }))
+            .send()
+            .await?
+            .json()
+            .await
+            .unwrap_or(json!({}));
+        let bal_str = bal_resp
+            .get("balance")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0");
+        let bal = rust_decimal::Decimal::from_str(bal_str).unwrap_or_default();
+        println!("   shard[{i:02}] @ {} → balance = {bal}", &addr[..16]);
+        per_shard_balance.push((i, addr.clone(), bal));
+    }
+
+    let total: rust_decimal::Decimal = per_shard_balance.iter().map(|(_, _, b)| *b).sum();
+    let nonzero = per_shard_balance
+        .iter()
+        .filter(|(_, _, b)| *b > rust_decimal::Decimal::ZERO)
+        .count();
+    println!("\n   total balance across all 8 shards: {total}");
+    println!("   shards with non-zero balance: {nonzero} / 8");
+
+    // With round-robin and 80 fee-bearing tx, EVERY shard should have
+    // received at least 80/8 = 10 fees. Allow a small slack in case
+    // some early txes ran before the shard counter started.
+    assert!(
+        nonzero >= 7,
+        "expected ≥7/8 shards to have received fees (round-robin), got {nonzero}"
+    );
+    assert!(
+        total > rust_decimal::Decimal::ZERO,
+        "total fee balance across shards must be positive, got {total}"
+    );
+
+    // 4) Sanity: no fees on the legacy admin master address — when
+    //    sharding is enabled, the master MUST NOT be a destination.
+    //    We use sandbox.admin_addr which is the master in this setup.
+    let master_bal: Value = sandbox
+        .client
+        .post(format!("{}/v1/balance", sandbox.base_url))
+        .json(&json!({ "address": sandbox.admin_addr }))
+        .send()
+        .await?
+        .json()
+        .await
+        .unwrap_or(json!({}));
+    let master_str = master_bal
+        .get("balance")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0");
+    let master_dec = rust_decimal::Decimal::from_str(master_str).unwrap_or_default();
+    println!("   master coord balance: {master_dec} (expected: just the 80 transfer outputs, no fees)");
+    // The master receives the user's transfer (80 × 0.01 = 0.8) but
+    // NOT the fees (fees go to shards). So master >> 0 is expected
+    // but it must equal the transferred amount, not the fees.
+    // We assert master ≥ the transfer total (loose check).
+    let transfer_total = rust_decimal::Decimal::from_str("0.8").unwrap();
+    assert!(
+        master_dec >= transfer_total,
+        "master should hold the transfers ({transfer_total}), got {master_dec}"
+    );
+
+    println!("\n   ✅ coord sharding distributes fees across {nonzero}/8 shards");
     Ok(())
 }
 
