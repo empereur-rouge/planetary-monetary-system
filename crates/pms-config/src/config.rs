@@ -347,6 +347,32 @@ pub struct HealthSettings {
     /// `POST /admin/purge-compliance-log`. Audit follow-up to v0.7.4.
     #[serde(default)]
     pub activity_retention_days: Option<u64>,
+
+    /// Auto UTXO consolidation interval, in seconds. When set to a
+    /// positive value, a background task triggers
+    /// `/admin/consolidate-utxos` periodically on the coordinator's
+    /// master address — bounds the per-address UTXO accumulation that
+    /// fee receipts produce on a busy network. Coordinator sub-address
+    /// sharding (audit follow-up, `[fees].coord_shard_count`) already
+    /// caps per-shard accumulation to `1/N` of the total fee flow, so
+    /// many deployments don't need this. `None` (default) = disabled.
+    /// Recommended value when enabled: `600` (10 min).
+    #[serde(default)]
+    pub auto_consolidate_interval_secs: Option<u64>,
+
+    /// Minimum number of UTXOs at the coordinator master address
+    /// before the auto-consolidation task fires a self-transfer.
+    /// Below this threshold the periodic check is a no-op (saves a
+    /// block per cycle when the engine is idle). Default: `200` —
+    /// small enough that consolidation happens every ~3 hours under
+    /// the EDN-clicker prod profile, large enough that idle engines
+    /// don't churn no-op blocks.
+    #[serde(default = "default_auto_consolidate_min_utxos")]
+    pub auto_consolidate_min_utxos: usize,
+}
+
+fn default_auto_consolidate_min_utxos() -> usize {
+    200
 }
 
 impl Default for HealthSettings {
@@ -356,6 +382,8 @@ impl Default for HealthSettings {
             persist_queue_high_water: default_persist_queue_high_water(),
             min_disk_free_percent: default_min_disk_free_percent(),
             activity_retention_days: None,
+            auto_consolidate_interval_secs: None,
+            auto_consolidate_min_utxos: default_auto_consolidate_min_utxos(),
         }
     }
 }

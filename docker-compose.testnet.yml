@@ -98,8 +98,15 @@ services:
       TLS_KEY: /app/tls/key.pem
       ADMIN_TOKEN: "${PMS_ADMIN_TOKEN}"
       DASHBOARD_PATH: /app/dashboard
-      RATE_LIMIT_RPS: 50000
-      BURST_SIZE: 100000
+      # Per-IP rate limit at the gateway. Tightened from 50K → 500 RPS
+      # so the simulator's adversarial flood scenario actually trips the
+      # 429 path (5 spammers × 50 RPS share the same docker IP and now
+      # add up against a meaningful ceiling). 100-user legitimate load
+      # peaks at ~150-300 RPS during cube-mint bursts so 500/1000 keeps
+      # them inside the budget. For a more granular per-API-key limit,
+      # see recommendation #4 in CHANGELOG (requires gateway code change).
+      RATE_LIMIT_RPS: 500
+      BURST_SIZE: 1000
       SERVICES_MONITOR: "Engine|https://pms-engine:8080/internal/health|ok,Prometheus|http://prometheus:9090/-/healthy|,Simulator|http://pms-simulator:9090/|,Caddy|http://caddy:80|"
       SERVICES_CHECK_INTERVAL: "20"
     volumes:

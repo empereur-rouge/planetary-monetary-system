@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.6] - 2026-04-26 — Simulator hardening: 7 ROI-ranked recommendations
+
+### Added
+- **sim(progressive-mining)**: New `[agents.game].target_cubes` + `mint_per_tick` knobs (rec #1). When `target_cubes` is set the agent mines `mint_per_tick` cubes per tick until it hits the target, then burns the lot — replaces the legacy bulk mint of 350-380 cubes every ~hour with a continuous N-cubes-per-min stream that matches a real EDN-clicker player. Casual + active groups in `agents_testnet.toml` now ship with `target_cubes=360`, `mint_per_tick=1` at a 10s tick → exactly 6 cubes/min. Legacy bulk mode preserved when `target_cubes = None` (default) — back-compat for `agents_dev.toml` / `agents_docker.toml`.
+- **sim(burn-jitter)**: New `[agents.game].burn_cooldown_jitter_pct` knob (rec #6). Multiplies the post-burn cooldown by `1 + uniform(-j, +j)` so the 100-agent fleet doesn't synchronise on the same tick after a shared event (e.g. all bootstrapping at once). Default `0.0` (off); testnet config sets `0.5` for ±50% spread.
+- **sim(prometheus-metrics)**: New `pms_simulator_tx_sent_total{agent_group, kind}`, `pms_simulator_tx_failed_total{agent_group, kind, reason}`, `pms_simulator_cubes_minted_total`, `pms_simulator_cubes_burned_total`, `pms_simulator_burn_batches_total` (rec #7). Exposed at `GET http://pms-simulator:9090/metrics`. Pair with the engine's `/metrics/all` in Grafana to compute the attempted-vs-accepted gap (e.g. spammers attempt 50 RPS, engine accepts 30 RPS, dashboard shows 20 RPS as `pms_simulator_tx_failed_total`). Prometheus scrape config + new pms-simulator job auto-wired in `etc/prometheus/prometheus.yml`.
+- **server(auto-consolidate)**: New `[health].auto_consolidate_interval_secs` + `auto_consolidate_min_utxos` (rec #5). When enabled, a background task fires `/admin/consolidate-utxos` every N seconds at the coordinator master address — bounds the per-address UTXO accumulation that fee receipts produce on busy networks. Default `None` (off); testnet config sets `interval=600` (10 min) + `min_utxos=200`. Coordinator-only; coexists with `[fees].coord_shard_count` (sharding caps per-shard accumulation, this caps the master).
+- **sim(adversarial-spammer)**: New `AgentBehavior::Adversarial` agent type (rec #3). Each tick picks a random attack from the configured list — `bad_signature`, `over_balance`, `malformed_json`, `no_auth`, `replay`, `bad_utxo` — and records the engine's response in `pms_simulator_tx_failed_total{kind="adversarial:*", reason=http_4xx|http_422_validation|http_401_unauthorized|...}`. Validates the engine's REJECT paths (4xx codes), complementing the legitimate flood-spammer's BACK-PRESSURE validation. Three `adversarial` agents added to `agents_testnet.toml` (1s tick, 1 attack/tick).
+- **sim(multi-ledger-games)**: New `[[simulation.games]]` array (rec #2). Each entry boots an independent `GameEngine` on its own ledger with its own EDN-equivalent token + smart contract + gas pool. Agents pick which game to play via `[agents.game].game_index` (default 0 — picks the first game, falls back to legacy `[simulation.game]` if the array is empty). New `AgentContext::game_engines: Vec<Arc<RwLock<GameEngine>>>` + `game_engine_for(index)` resolver; the legacy `game_engine: Option<...>` alias is preserved for observers / coordinator that don't care about multi-ledger. Documented + commented out in `simulator.testnet.toml` so operators flip a single section to spread the playerbase across N ledgers.
+
+### Changed
+- **deploy(rate-limit-tightened)**: `RATE_LIMIT_RPS` 50000 → 500, `BURST_SIZE` 100000 → 1000 in `docker-compose.testnet.yml` (rec #4). The previous 50K limit was so far above realistic client rates that the gateway 429 path was effectively dead code in the testnet. New value lets the new `spammer` + `adversarial` agent groups actually trip the limit while staying above the 100-user legitimate burst (~150-300 RPS during cube-mint moments).
+- **sim(scenario-realism)**: `agents_testnet.toml` rebuilt around the prod-shaped EDN-clicker scenario (109 agents):
+  - 60 `casual` (10s tick, 30% PMS send) — 6 cubes/min progressive
+  - 40 `active` (10s tick, 50% PMS send, 2 sends/tick) — same 6 cubes/min, different PMS economic profile
+  - 5 `spammer` (200ms tick, valid-but-fast) — back-pressure validation
+  - 3 `adversarial` (1s tick, random attacks) — rejection-path validation
+  - 3 `obs` + 1 `coordinator` — utility
+- **sim(version)**: `tools/simulator/Cargo.toml` adds `prometheus = "0.14"` and `once_cell = "1"` deps for the metrics module.
+
+### Validation
+- `tools/simulator` cargo build + 10/10 unit tests green.
+- Engine `dag_sandbox` 8/8 tests green (no regression from the new `[health]` knobs / consolidation task).
+
+---
+
 ## [0.7.5] - 2026-04-26 — TPS-degradation diagnostic + persist-pipeline optimisations
 
 ### Infrastructure

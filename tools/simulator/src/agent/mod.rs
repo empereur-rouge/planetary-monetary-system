@@ -1,3 +1,4 @@
+pub mod adversarial;
 pub mod coordinator;
 pub mod funder;
 pub mod observer;
@@ -24,10 +25,33 @@ pub struct AgentContext {
     /// All agent names + addresses for peer discovery
     pub peer_registry: Arc<RwLock<Vec<PeerInfo>>>,
     pub cancel: CancellationToken,
-    /// Optional game engine for Edenite cube NFTs
+    /// All boot-time game engines (one per `[[simulation.games]]` entry).
+    /// Pre-v0.7.5 there was only ever one — `game_engine` below is a
+    /// convenience alias that resolves to the agent's `game_index`-th
+    /// entry. Empty if no game is configured.
+    pub game_engines: Vec<Arc<RwLock<GameEngine>>>,
+    /// Convenience alias resolving to `game_engines.first()`. Kept so
+    /// agents that don't care about multi-ledger (observers,
+    /// coordinator) still work without specifying an index.
     pub game_engine: Option<Arc<RwLock<GameEngine>>>,
     /// Coordinator wallet for PMS distribution (agents request refuel from coordinator)
     pub coordinator_wallet: Option<WalletInfo>,
+}
+
+impl AgentContext {
+    /// Resolve the game engine for an agent based on its `game_index`.
+    /// Falls back to `game_engine` (the legacy single-engine alias) if
+    /// the index is out of range — keeps single-ledger configs working
+    /// even when an agent group accidentally specifies a non-zero index.
+    pub fn game_engine_for(
+        &self,
+        index: usize,
+    ) -> Option<&Arc<RwLock<GameEngine>>> {
+        self.game_engines
+            .get(index)
+            .or_else(|| self.game_engines.first())
+            .or(self.game_engine.as_ref())
+    }
 }
 
 #[derive(Debug, Clone)]

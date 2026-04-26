@@ -18,6 +18,12 @@ pub async fn run_web_server(port: u16, state: WebState) {
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/ws", get(ws_handler))
+        // Prometheus scrape endpoint for the simulator's own counters
+        // (recommendation #7). Pair with the engine's `/metrics/all` in
+        // Grafana to compare attempted-vs-accepted on the same panel —
+        // e.g. spammers attempt 50 RPS, engine accepts 30 RPS,
+        // dashboard shows the 20 RPS gap as `pms_simulator_tx_failed_total`.
+        .route("/metrics", get(metrics_handler))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -31,6 +37,14 @@ pub async fn run_web_server(port: u16, state: WebState) {
 
 async fn index_handler() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn metrics_handler() -> impl axum::response::IntoResponse {
+    let body = crate::sim_metrics::render();
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        body,
+    )
 }
 
 async fn ws_handler(

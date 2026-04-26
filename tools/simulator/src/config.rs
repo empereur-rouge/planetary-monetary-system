@@ -72,9 +72,35 @@ pub struct SimulationParams {
     /// Amount to faucet per agent for initial PMS (default: "50.00")
     #[serde(default = "default_faucet_amount")]
     pub faucet_amount: String,
-    /// Optional game configuration (Edenite cube NFTs)
+    /// Optional single-game config (legacy, pre-v0.7.5). When `games`
+    /// below is empty AND this is `Some`, it's promoted to the first
+    /// (and only) entry in `games`.
     #[serde(default)]
     pub game: Option<GameConfig>,
+    /// Multi-ledger game configs (recommendation #2, v0.7.5). Each
+    /// entry boots an independent game engine on its own ledger with
+    /// its own EDN-equivalent token. Agents pick which game to play
+    /// via `[agents.game].game_index` (defaults to 0).
+    ///
+    /// Either `[simulation.game]` (single) or `[[simulation.games]]`
+    /// (array) is honoured — `games` takes precedence when both exist.
+    #[serde(default)]
+    pub games: Vec<GameConfig>,
+}
+
+impl SimulationParams {
+    /// Resolve the list of game configs to boot. Combines the legacy
+    /// single `game` field with the new `games` array — caller gets a
+    /// uniform `Vec` regardless of which TOML shape was used.
+    pub fn resolved_games(&self) -> Vec<GameConfig> {
+        if !self.games.is_empty() {
+            self.games.clone()
+        } else if let Some(g) = &self.game {
+            vec![g.clone()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -159,6 +185,42 @@ pub struct AgentGameConfig {
     /// Each send is sequential (UTXO chain from same wallet).
     #[serde(default = "default_edn_sends_per_tick")]
     pub edn_sends_per_tick: u32,
+
+    /// Random jitter on `burn_cooldown_ticks` to spread bursts across the
+    /// fleet. Each agent's actual cooldown is `base × (1 + uniform(-j, +j))`
+    /// where `j` is this fraction. Default: `0.0` (no jitter — every
+    /// agent fires at the same tick after a synchronised event, which
+    /// produces concentrated bursts). For a 100-agent prod scenario set
+    /// to `0.2` (±20%) so burns spread over a ~24-min window instead of
+    /// hammering the engine in one tick.
+    #[serde(default = "default_burn_cooldown_jitter_pct")]
+    pub burn_cooldown_jitter_pct: f64,
+
+    /// Target accumulated cubes before burning (progressive-mining mode,
+    /// recommendation #1). When `Some(N)` the agent mines `mint_per_tick`
+    /// cubes per tick until its inventory hits N, then burns the lot
+    /// and enters cooldown. When `None` the legacy bulk-batch behaviour
+    /// (bulk-mint `cubes_remint_min..max` then immediately burn) is used
+    /// — required for back-compat with `agents_dev.toml` /
+    /// `agents_docker.toml` and any other config that hasn't migrated.
+    #[serde(default)]
+    pub target_cubes: Option<usize>,
+
+    /// In progressive-mining mode (when `target_cubes` is set), how many
+    /// cubes to mint per tick during the accumulation phase. Default: 1
+    /// — at a 10s tick that yields 6 cubes/min, matching the EDN-clicker
+    /// production cadence.
+    #[serde(default = "default_mint_per_tick")]
+    pub mint_per_tick: usize,
+
+    /// Index into `[[simulation.games]]` for the game this agent group
+    /// plays. Default: 0 (first game). Used by the multi-ledger game
+    /// dispatch (recommendation #2, v0.7.5) to spread the population
+    /// across N independent EDN-equivalent ledgers — set different
+    /// indices on different agent groups to load all ledgers
+    /// simultaneously.
+    #[serde(default)]
+    pub game_index: usize,
 }
 
 impl Default for AgentGameConfig {
@@ -172,6 +234,10 @@ impl Default for AgentGameConfig {
             edn_send_max_pct: 50.0,
             burn_cooldown_ticks: 10,
             edn_sends_per_tick: 1,
+            burn_cooldown_jitter_pct: 0.0,
+            target_cubes: None,
+            mint_per_tick: 1,
+            game_index: 0,
         }
     }
 }
@@ -195,6 +261,12 @@ fn default_burn_cooldown_ticks() -> u32 {
     10
 }
 fn default_edn_sends_per_tick() -> u32 {
+    1
+}
+fn default_burn_cooldown_jitter_pct() -> f64 {
+    0.0
+}
+fn default_mint_per_tick() -> usize {
     1
 }
 
@@ -234,6 +306,29 @@ pub enum AgentBehavior {
         #[serde(default = "default_coord_send_probability")]
         send_probability: f64,
         /// Number of PMS transactions to send per tick (default: 1).
+        #[serde(default = "default_sends_per_tick")]
+        sends_per_tick: u32,
+    },
+    /// Adversarial spammer (recommendation #3, v0.7.5). Sends a random
+    /// mix of malformed / unauthenticated / double-spending / unsigned
+    /// transactions to validate the engine's rejection paths. Each tick
+    /// picks one attack from `attacks` (uniform), fires it, and records
+    /// the response code in the simulator's `pms_simulator_tx_failed_total`
+    /// counter. Used together with the legitimate flood-spammer to
+    /// stress both the rate-limit + the validation pipeline.
+    Adversarial {
+        /// List of attack kinds to randomise across each tick. Empty
+        /// = all built-in attacks. Possible values:
+        ///   - `bad_signature`     : valid tx, garbled signature
+        ///   - `bad_utxo`          : input refs a non-existent UTXO
+        ///   - `double_spend`      : reuses a stale UTXO ref
+        ///   - `over_balance`      : amount > available balance
+        ///   - `malformed_json`    : raw POST with broken JSON
+        ///   - `no_auth`           : drops the X-API-Key header
+        ///   - `replay`            : resubmits the previous successful block
+        #[serde(default)]
+        attacks: Vec<String>,
+        /// Sends per tick (each picks an independent attack). Default: 1.
         #[serde(default = "default_sends_per_tick")]
         sends_per_tick: u32,
     },

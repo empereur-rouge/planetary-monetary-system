@@ -6,6 +6,7 @@ mod error;
 mod game;
 mod gemini;
 mod metrics;
+pub mod sim_metrics;
 mod tui;
 mod types;
 mod web;
@@ -241,17 +242,34 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 8. Optional game engine setup (Edenite cube NFTs)
-    let game_engine = if let Some(ref game_config) = config.simulation.game {
-        tracing::info!("Setting up game engine (ledger: {})...", game_config.ledger_id);
-        // Pass coordinator private key hex for public key derivation (owner of Eden ledger)
-        let coord_privkey = config.coordinator.as_ref().map(|c| c.private_key_hex.as_str());
+    // 8. Game engine setup (Edenite cube NFTs).
+    //
+    // Supports multi-ledger via `[[simulation.games]]` (recommendation #2,
+    // v0.7.5). Single-ledger `[simulation.game]` is still honoured —
+    // `resolved_games()` flattens both shapes into a uniform Vec.
+    // Pass coordinator private key hex for public key derivation (owner
+    // of each game ledger).
+    let coord_privkey = config.coordinator.as_ref().map(|c| c.private_key_hex.as_str());
+    let games_to_boot = config.simulation.resolved_games();
+    let mut game_engines: Vec<Arc<RwLock<game::GameEngine>>> =
+        Vec::with_capacity(games_to_boot.len());
+    for (i, game_config) in games_to_boot.iter().enumerate() {
+        tracing::info!(
+            "Setting up game engine {}/{} (ledger: {})...",
+            i + 1,
+            games_to_boot.len(),
+            game_config.ledger_id
+        );
         let engine = game::GameEngine::setup(&client, game_config, coord_privkey).await?;
-        tracing::info!("Game engine ready (edenite on ledger '{}')", engine.ledger_id);
-        Some(Arc::new(RwLock::new(engine)))
-    } else {
-        None
-    };
+        tracing::info!(
+            "Game engine ready (edenite on ledger '{}')",
+            engine.ledger_id
+        );
+        game_engines.push(Arc::new(RwLock::new(engine)));
+    }
+    // Legacy alias for agents that don't care about multi-game.
+    let game_engine: Option<Arc<RwLock<game::GameEngine>>> =
+        game_engines.first().cloned();
 
     // 9. Fund all agents via coordinator distribution + optional cube NFT minting
     let coord_w = coordinator_wallet.as_ref().ok_or_else(|| {
@@ -302,6 +320,7 @@ async fn main() -> anyhow::Result<()> {
         metrics_tx,
         peer_registry,
         cancel: cancel.clone(),
+        game_engines,
         game_engine,
         coordinator_wallet: coordinator_wallet.clone(),
     });
@@ -352,6 +371,18 @@ async fn main() -> anyhow::Result<()> {
             AgentBehavior::Coordinator { .. } => {
                 // Coordinator agents are spawned separately below
                 continue;
+            }
+            AgentBehavior::Adversarial {
+                attacks,
+                sends_per_tick,
+            } => {
+                let _inbox = comms.register(&name).await;
+                Box::new(agent::adversarial::AdversarialAgent::new(
+                    name.clone(),
+                    wallet,
+                    attacks.clone(),
+                    *sends_per_tick,
+                ))
             }
         };
 

@@ -5,9 +5,36 @@ use crate::config::AgentGameConfig;
 use crate::error::SimResult;
 use crate::game::GameEngine;
 use crate::metrics::MetricEvent;
+use crate::sim_metrics::{
+    group_of, SIM_BURN_BATCHES, SIM_CUBES_BURNED, SIM_CUBES_MINTED,
+    SIM_TX_FAILED, SIM_TX_SENT,
+};
 use crate::types::{SendSimpleRequest, WalletInfo};
 use rand::Rng;
 use tokio::sync::mpsc;
+
+/// Classify a `SimError` into the coarse `reason` bucket exposed in
+/// `pms_simulator_tx_failed_total{reason=...}`.
+fn classify_error(e: &crate::error::SimError) -> &'static str {
+    let s = format!("{:#}", e);
+    let s_lower = s.to_lowercase();
+    if s_lower.contains("insufficient") || s_lower.contains("balance") {
+        "insufficient_funds"
+    } else if s_lower.contains("4") && (s_lower.contains("400") || s_lower.contains("422") || s_lower.contains("429") || s_lower.contains("401") || s_lower.contains("403"))
+    {
+        "http_4xx"
+    } else if s_lower.contains("5") && (s_lower.contains("500") || s_lower.contains("502") || s_lower.contains("503"))
+    {
+        "http_5xx"
+    } else if s_lower.contains("network") || s_lower.contains("connect") || s_lower.contains("timeout") || s_lower.contains("dns")
+    {
+        "network_error"
+    } else if s_lower.contains("decode") || s_lower.contains("json") || s_lower.contains("parse") {
+        "decode_error"
+    } else {
+        "other"
+    }
+}
 
 /// Seuil PMS en-dessous duquel l'agent demande un refuel au coordinator
 const LOW_BALANCE_THRESHOLD: f64 = 10.0;
@@ -143,24 +170,64 @@ impl RandomAgent {
     /// Burn cooldown: after burning, waits `burn_cooldown_ticks` ticks before
     /// reminting, giving `fee_distribution` time to deliver EDN UTXOs so
     /// Phase 2 (send EDN) can fire.
-    async fn game_tick(&mut self, ctx: &AgentContext) -> SimResult<()> {
-        let game_engine = match ctx.game_engine {
-            Some(ref ge) => ge,
-            None => return Ok(()),
-        };
+    /// Apply optional jitter on the burn cooldown so the fleet doesn't
+    /// burn in lockstep. Returns the cooldown to set: `base × (1 + U(-j, +j))`,
+    /// rounded to a tick. Falls back to base when jitter is zero or
+    /// non-finite. Pinned to at least 1 tick so EDN delivery has a
+    /// chance to land before the next mining wave.
+    fn jittered_cooldown(base: u32, jitter_pct: f64) -> u32 {
+        if !jitter_pct.is_finite() || jitter_pct <= 0.0 {
+            return base;
+        }
+        let mut rng = rand::rng();
+        let factor: f64 = 1.0 + rng.random_range(-jitter_pct..jitter_pct);
+        let scaled = (base as f64 * factor.max(0.0)).round() as i64;
+        scaled.max(1) as u32
+    }
 
+    async fn game_tick(&mut self, ctx: &AgentContext) -> SimResult<()> {
         if !self.game_enabled() {
             return Ok(());
         }
 
         let gc = self.game_config.as_ref().unwrap().clone();
 
+        // Resolve which game ledger this agent plays on. With
+        // recommendation #2 (multi-ledger games), `game_index` lets an
+        // agent group target a specific entry in `[[simulation.games]]`
+        // — different groups pointing at different indices spread the
+        // population across N independent game ledgers, exercising
+        // every one in parallel.
+        let game_engine = match ctx.game_engine_for(gc.game_index) {
+            Some(ge) => ge,
+            None => return Ok(()),
+        };
+
         // Decrement burn cooldown each tick
         if self.burn_cooldown > 0 {
             self.burn_cooldown -= 1;
         }
 
-        if !self.cube_ids.is_empty() {
+        // ── PROGRESSIVE MODE GUARD ──
+        //
+        // When `target_cubes` is set, the agent mines incrementally
+        // toward that target instead of bulk-batching. This gives a
+        // continuous N cubes/min stream (configurable via
+        // `mint_per_tick`) that matches a real EDN-clicker player —
+        // mine, mine, mine, … (≈ 1 hour) … burn, repeat.
+        //
+        // Burn fires only when inventory ≥ target. While accumulating
+        // (cubes < target), the legacy Phase 1 (always-burn) is
+        // suppressed; instead Phase 0 (below) mints `mint_per_tick`
+        // more cubes per tick. Phase 2 (EDN send) and the cooldown
+        // logic still apply when cubes==0 post-burn.
+        let progressive_target = gc.target_cubes;
+        let should_burn = match progressive_target {
+            Some(t) => self.cube_ids.len() >= t.max(1),
+            None => !self.cube_ids.is_empty(),
+        };
+
+        if should_burn {
             // ── Phase 1: BATCH BURN all cubes → EDN via smart contract ──
             // Lock-free: drain registry under brief write lock, HTTP without lock.
             let cubes_to_burn: Vec<String> = self.cube_ids.drain(..).collect();
@@ -188,8 +255,23 @@ impl RandomAgent {
                         "[{}] Batch burned {} cubes → expected ~{} EDN (via contract, async)",
                         self.name, count, edn_str,
                     );
-                    // Start burn cooldown — wait for fee_distribution to deliver EDN
-                    self.burn_cooldown = gc.burn_cooldown_ticks;
+                    SIM_BURN_BATCHES
+                        .with_label_values(&[group_of(&self.name)])
+                        .inc();
+                    SIM_CUBES_BURNED
+                        .with_label_values(&[group_of(&self.name)])
+                        .inc_by(count as u64);
+                    SIM_TX_SENT
+                        .with_label_values(&[group_of(&self.name), "cube_burn"])
+                        .inc();
+                    // Start burn cooldown — wait for fee_distribution to deliver EDN.
+                    // Jitter spreads the next-burn moment across the fleet so
+                    // 100 agents don't synchronise on the same tick after a
+                    // shared event (e.g. all bootstrapping at once).
+                    self.burn_cooldown = Self::jittered_cooldown(
+                        gc.burn_cooldown_ticks,
+                        gc.burn_cooldown_jitter_pct,
+                    );
                     let _ = ctx.metrics_tx.try_send(MetricEvent::TransactionSent {
                         agent_name: self.name.clone(),
                         block_id: format!("batch-burn:{}", count),
@@ -215,6 +297,9 @@ impl RandomAgent {
                         "[{}] Failed to batch burn {} cubes: {:#}",
                         self.name, count, e
                     );
+                    SIM_TX_FAILED
+                        .with_label_values(&[group_of(&self.name), "cube_burn", "other"])
+                        .inc();
                     // Restore cubes in registry + local list
                     {
                         let mut ge = game_engine.write().await;
@@ -328,6 +413,12 @@ impl RandomAgent {
                                     amount: format!("{} EDN", amount_str),
                                     latency: std::time::Duration::from_millis(0),
                                 });
+                            SIM_TX_SENT
+                                .with_label_values(&[
+                                    group_of(&self.name),
+                                    "edn_send",
+                                ])
+                                .inc();
                             ctx.comms
                                 .send_to(
                                     &target.name,
@@ -342,6 +433,14 @@ impl RandomAgent {
                             edn_ok += 1;
                         }
                         Err(e) => {
+                            let reason = classify_error(&e);
+                            SIM_TX_FAILED
+                                .with_label_values(&[
+                                    group_of(&self.name),
+                                    "edn_send",
+                                    reason,
+                                ])
+                                .inc();
                             tracing::warn!(
                                 "[{}] EDN send {}/{} failed: {:#}",
                                 self.name, round + 1, edn_sends, e
@@ -359,15 +458,30 @@ impl RandomAgent {
                 }
             } else if self.burn_cooldown == 0 {
                 // ── Phase 3: RE-MINT cubes (only if cooldown expired) ──
-                // Lock-free: generate specs without lock, HTTP without lock,
-                // register results under brief write lock.
-                let cubes_to_mint = {
+                // Two modes:
+                //   * Progressive (`target_cubes = Some(N)`): mint
+                //     `mint_per_tick` cubes — small steady drip toward N.
+                //   * Legacy (None): bulk-mint a random batch from
+                //     `cubes_remint_min..=cubes_remint_max`.
+                let cubes_to_mint = if let Some(target) = progressive_target {
+                    let current = self.cube_ids.len();
+                    if current >= target.max(1) {
+                        // Reached target while EDN was being sent — next
+                        // tick will trigger a burn. Skip mint this tick.
+                        return Ok(());
+                    }
+                    gc.mint_per_tick.max(1).min(target - current)
+                } else {
                     let mut rng = rand::rng();
                     rng.random_range(gc.cubes_remint_min..=gc.cubes_remint_max)
                 };
                 tracing::info!(
-                    "[{}] No cubes, EDN {:.10} < threshold → parallel minting {} cubes",
-                    self.name, edn_balance, cubes_to_mint
+                    "[{}] cubes={}/{}, EDN {:.10} < threshold → minting {} cubes",
+                    self.name,
+                    self.cube_ids.len(),
+                    progressive_target.map(|t| t as i64).unwrap_or(-1),
+                    edn_balance,
+                    cubes_to_mint
                 );
 
                 // Generate specs without any lock (pure RNG)
@@ -390,6 +504,22 @@ impl RandomAgent {
                 }
                 // Write lock released
 
+                SIM_CUBES_MINTED
+                    .with_label_values(&[group_of(&self.name)])
+                    .inc_by(ok_count as u64);
+                SIM_TX_SENT
+                    .with_label_values(&[group_of(&self.name), "cube_mint"])
+                    .inc_by(ok_count as u64);
+                let failed_mints = cubes_to_mint.saturating_sub(ok_count);
+                if failed_mints > 0 {
+                    SIM_TX_FAILED
+                        .with_label_values(&[
+                            group_of(&self.name),
+                            "cube_mint",
+                            "other",
+                        ])
+                        .inc_by(failed_mints as u64);
+                }
                 tracing::info!(
                     "[{}] Parallel mint done: {}/{} cubes",
                     self.name, ok_count, cubes_to_mint
@@ -539,8 +669,15 @@ impl Agent for RandomAgent {
                         amount: amount_str,
                         latency: resp.latency,
                     });
+                    SIM_TX_SENT
+                        .with_label_values(&[group_of(&self.name), "pms_send"])
+                        .inc();
                 }
                 Err(e) => {
+                    let reason = classify_error(&e);
+                    SIM_TX_FAILED
+                        .with_label_values(&[group_of(&self.name), "pms_send", reason])
+                        .inc();
                     let _ = ctx.metrics_tx.try_send(MetricEvent::AgentError {
                         agent_name: self.name.clone(),
                         error: format!("{:#}", e),

@@ -2,7 +2,7 @@
 
 use super::routes::build_api_router;
 use super::state::{AppState, FeePoolRefundSink};
-use super::tasks::{spawn_activity_backfill_task, spawn_activity_retention_task, spawn_fee_distributor_task, spawn_inflation_mint_task, spawn_metrics_sampler_task};
+use super::tasks::{spawn_activity_backfill_task, spawn_activity_retention_task, spawn_consolidation_task, spawn_fee_distributor_task, spawn_inflation_mint_task, spawn_metrics_sampler_task};
 use crate::Server;
 use crate::api_keys;
 use crate::helper::resolve_admin_token;
@@ -285,6 +285,15 @@ pub async fn serve_api(
     // No-op when the knob is None (default).
     // ═══════════════════════════════════════════════════════════════════════
     spawn_activity_retention_task(state.clone());
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // AUTO UTXO CONSOLIDATION (recommendation #5, v0.7.5) — periodic
+    // self-transfer at the coordinator master address when the UTXO
+    // count crosses [health].auto_consolidate_min_utxos. Bounds the
+    // accumulation that fee receipts produce on busy networks. No-op
+    // when [health].auto_consolidate_interval_secs is None (default).
+    // ═══════════════════════════════════════════════════════════════════════
+    spawn_consolidation_task(state.clone());
 
     // ═══════════════════════════════════════════════════════════════════════
     // TPS LOGGER (periodic JSONL file — every 10 min)

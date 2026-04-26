@@ -353,6 +353,100 @@ async fn sample_ledger(
     }
 }
 
+/// Spawns the auto UTXO-consolidation task (recommendation #5, v0.7.5).
+///
+/// Bounds the per-address UTXO accumulation that fee receipts produce
+/// at the coordinator's master address. Without this task an operator
+/// has to remember to `POST /admin/consolidate-utxos` periodically;
+/// with it the engine self-heals on a schedule.
+///
+/// Enabled by setting `[health].auto_consolidate_interval_secs` to a
+/// positive value (recommended: `600` = 10 min). The task fires every
+/// `interval_secs`, queries the UTXO count at the coordinator master
+/// address, and triggers `admin_consolidate_utxos` only when the count
+/// exceeds `auto_consolidate_min_utxos` (default `200`). Below the
+/// threshold the loop iteration is a no-op.
+///
+/// The task does NOT consolidate sub-address shards — `coord_shard_count`
+/// already bounds per-shard accumulation by routing fees round-robin
+/// across N addresses. If a deployment runs without sharding (count=0)
+/// AND with sustained heavy fee traffic, this task is the safety net.
+///
+/// Coordinator-only (skipped on non-coordinator nodes).
+pub fn spawn_consolidation_task(state: AppState) {
+    let Some(interval_sec) = state.settings.health.auto_consolidate_interval_secs else {
+        return;
+    };
+    if interval_sec == 0 {
+        return;
+    }
+    let min_utxos = state.settings.health.auto_consolidate_min_utxos;
+
+    tokio::spawn(async move {
+        // Initial delay so we don't fight the boot-time activity backfill
+        // for the storage write lock.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+        // Consume immediate first tick — we already slept.
+        interval.tick().await;
+
+        let hrp = state.settings.address.hrp.clone();
+        let addr = state.node_wallet.get_address(&hrp);
+        tracing::info!(
+            target = "consolidation",
+            address = %addr,
+            interval_secs = interval_sec,
+            min_utxos,
+            "auto-consolidation task started"
+        );
+
+        loop {
+            interval.tick().await;
+
+            // Cheap UTXO count check via the adapter. utxos_by_address
+            // clones the OutputId list out of the address index — at
+            // 200+ UTXOs that's still microseconds, not milliseconds.
+            let adapter = state.srv.adapter_arc();
+            let utxos = adapter.utxos_by_address(&addr).await;
+            let count = utxos.len();
+
+            if count < min_utxos {
+                tracing::debug!(
+                    target = "consolidation",
+                    address = %addr,
+                    count,
+                    min_utxos,
+                    "auto-consolidation: below threshold, skipping"
+                );
+                continue;
+            }
+
+            tracing::info!(
+                target = "consolidation",
+                address = %addr,
+                count,
+                "auto-consolidation: triggering self-transfer"
+            );
+
+            // Reuse the public admin handler — it already does the full
+            // forge + sign + persist + fee-pool accumulation cycle.
+            // Calling it directly (rather than over HTTP) avoids needing
+            // the admin token + a self-loopback reqwest client. The
+            // returned `(StatusCode, Json)` tuple is discarded; logs
+            // inside the handler tell the operator what happened.
+            let req = crate::api_fn::consolidation::ConsolidateRequest {
+                asset_id: None,
+                max_inputs: 64,
+            };
+            let _ = crate::api_fn::consolidation::admin_consolidate_utxos(
+                axum::extract::State(state.clone()),
+                axum::Json(req),
+            )
+            .await;
+        }
+    });
+}
+
 /// Spawns a background task to backfill missing `activity_items` entries.
 ///
 /// Runs once at startup (after a 30s stabilization delay) to ensure 100%

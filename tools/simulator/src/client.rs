@@ -119,6 +119,41 @@ impl DagClient {
     // Public API
     // ════════════════════════════════════════════════════════════════
 
+    /// Raw POST with a body string and the configured X-API-Key header.
+    /// The caller controls every byte of the body — used by the
+    /// adversarial agent for malformed-JSON attacks. Returns the raw
+    /// `reqwest::Response` so the caller can inspect the status code
+    /// without going through the typed deserialiser.
+    pub async fn raw_post_json(
+        &self,
+        path: &str,
+        body: &str,
+    ) -> Result<Response, reqwest::Error> {
+        let builder = self
+            .http
+            .post(self.url(path))
+            .header("Content-Type", "application/json")
+            .body(body.to_string());
+        let builder = self.with_api_key(builder);
+        builder.send().await
+    }
+
+    /// Raw POST with the X-API-Key header **dropped**. Used by the
+    /// adversarial agent's `no_auth` attack — the gateway should respond
+    /// with 401 before the request ever reaches the engine.
+    pub async fn raw_post_no_auth(
+        &self,
+        path: &str,
+        body: String,
+    ) -> Result<Response, reqwest::Error> {
+        self.http
+            .post(self.url(path))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+    }
+
     pub async fn health_check(&self) -> SimResult<bool> {
         let resp = self
             .http

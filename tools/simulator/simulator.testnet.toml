@@ -24,6 +24,26 @@ symbol = "EDN"
 divisor = 13700
 gas_pool_deposit = "50000"             # PMS deposited into Edenite gas pool (anti-spam, testnet charge)
 
+# Multi-ledger games (recommendation #2, v0.7.5). Uncomment + add
+# entries to spread the agent population across N independent EDN-
+# equivalent ledgers. Agents pick which game to play via
+# `[agents.game].game_index = N` (default 0). When this array is
+# non-empty it takes precedence over `[simulation.game]` above.
+#
+# [[simulation.games]]
+# ledger_id = "eden"
+# network_id = "eden-net"
+# symbol = "EDN"
+# divisor = 13700
+# gas_pool_deposit = "50000"
+#
+# [[simulation.games]]
+# ledger_id = "arena"
+# network_id = "arena-net"
+# symbol = "ARN"
+# divisor = 13700
+# gas_pool_deposit = "20000"
+
 [coordinator]
 private_key_hex = "env:PMS_COORDINATOR_KEY"
 address = "env:PMS_COORDINATOR_ADDR"

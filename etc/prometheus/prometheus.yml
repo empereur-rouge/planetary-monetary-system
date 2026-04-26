@@ -40,3 +40,15 @@ scrape_configs:
     static_configs:
       - targets: ['pms-gateway:8443']
     metrics_path: /metrics
+
+  # PMS Simulator — producer-side counters (recommendation #7 in v0.7.5).
+  # `pms_simulator_tx_sent_total{agent_group, kind}`,
+  # `pms_simulator_tx_failed_total{agent_group, kind, reason}`,
+  # `pms_simulator_cubes_minted_total`, etc. Pair with engine's
+  # `/metrics/all` to compute attempted-vs-accepted gaps in Grafana.
+  # Plain HTTP, no auth — same instance that serves the dashboard at :9090.
+  - job_name: 'pms-simulator'
+    scheme: http
+    static_configs:
+      - targets: ['pms-simulator:9090']
+    metrics_path: /metrics

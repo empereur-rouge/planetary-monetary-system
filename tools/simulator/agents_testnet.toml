@@ -18,14 +18,17 @@
 #   - 20-25 blk/s steady-state: ~10 GiB headroom (proven stable)
 #   - 60+ blk/s              : OOM risk
 #
-# CYCLE MECHANIC (6 cubes/min × 1h cycle, config-only):
+# CYCLE MECHANIC (progressive mining, v0.7.5+):
 #   - interval_ms = 10000      → 10 s tick
-#   - cubes_remint_min/max=350/380 → 350-380 cubes batched per cycle
-#   - burn_cooldown_ticks = 358 → ≈ 59 min 40 s post-burn pause
-#   Cycle: burn → cooldown 1h → mint 350-380 → burn → loop.
-#   Average rate = 360 cubes / 60 min = 6 cubes/min/agent ✓
-#   ⚠️  The mint is BURSTY (parallel batch every ~1h, not 1-cube-per-10s).
-#       For true continuous mining, code change required — see README.
+#   - target_cubes = 360        → burn when inventory hits 360
+#   - mint_per_tick = 1         → 1 cube minted per tick (= 6/min @ 10s tick) ✓
+#   - burn_cooldown_ticks = 6   → ~60s after burn for EDN delivery
+#   - burn_cooldown_jitter_pct = 0.5 → ±50% spread on cooldown to
+#     desynchronise the fleet (otherwise 100 agents burn on the same tick).
+#   Cycle: mint 1 cube every tick × 360 ticks (~60 min) → burn 360 →
+#          ~30-90 s cooldown (jittered) → EDN sends → resume mining.
+#   Pre-v0.7.5 the mint was bursty (one parallel 350-380 batch per
+#   ~hour); progressive mode produces a continuous stream.
 
 # ---------------------------------------------------------------------------
 # CASUAL USERS — bulk of the playerbase, 60% of active users
@@ -47,38 +50,46 @@ sends_per_tick = 1
 
 [agents.game]
 enabled = true
-cubes_per_agent = 5         # initial seed (burned within first tick)
-cubes_remint_min = 350      # ≈ 1h at 6 cubes/min, ±10%
+cubes_per_agent = 0          # no initial seed in progressive mode
+target_cubes = 360           # burn at 360 cubes (= 1h × 6/min)
+mint_per_tick = 1            # 1 cube/tick × 10s tick = 6/min ✓
+cubes_remint_min = 350       # legacy fields kept for back-compat / fallback
 cubes_remint_max = 380
-burn_cooldown_ticks = 358   # 358 × 10s = 59m 40s
+burn_cooldown_ticks = 6      # ~60s post-burn for EDN delivery
+burn_cooldown_jitter_pct = 0.5  # ±50% spread (3-9 ticks = 30-90s)
 edn_send_min_pct = 30
 edn_send_max_pct = 70
 edn_sends_per_tick = 1
 
 # ---------------------------------------------------------------------------
-# ACTIVE USERS — power players, 40% of active users, faster tick
-# 40 agents, 5s tick, 30% PMS send chance, 1 send/tick
-# PMS: 40 × 0.3 × 1 / 5 = 2.4 PMS tx/s
-# Cubes: same 6/min average — same cycle math but tick=5s, so 716 ticks/h
+# ACTIVE USERS — power players: same 6 cubes/min cube cadence (gameplay
+# is identical) but more PMS economic activity (larger sends, higher
+# probability, multiple sends per tick).
+# 40 agents, 10s tick (matches casual to keep cube rate constant),
+# 50% PMS send chance, 2 sends/tick
+# PMS: 40 × 0.5 × 2 / 10 = 4.0 PMS tx/s
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 40
-interval_ms = 5000
+interval_ms = 10000
 name_prefix = "active"
 
 [agents.behavior]
 type = "random"
-min_amount = 0.1
-max_amount = 10.0
-send_probability = 0.3
-sends_per_tick = 1
+min_amount = 0.5
+max_amount = 25.0
+send_probability = 0.5
+sends_per_tick = 2
 
 [agents.game]
 enabled = true
-cubes_per_agent = 5
+cubes_per_agent = 0
+target_cubes = 360           # same 1h × 6/min cycle as casual
+mint_per_tick = 1
 cubes_remint_min = 350
 cubes_remint_max = 380
-burn_cooldown_ticks = 716   # 716 × 5s = 59m 40s — match casual cycle
+burn_cooldown_ticks = 6
+burn_cooldown_jitter_pct = 0.5
 edn_send_min_pct = 30
 edn_send_max_pct = 70
 edn_sends_per_tick = 1
@@ -108,6 +119,25 @@ min_amount = 0.001
 max_amount = 0.01
 send_probability = 1.0
 sends_per_tick = 2
+
+# ---------------------------------------------------------------------------
+# ADVERSARIAL — validates the engine's REJECT paths (recommendation #3)
+# 3 agents, 1s tick, 1 attack per tick
+# Each tick picks a random attack from the list — invalid signatures,
+# over-balance, malformed JSON, no auth header, replay. Counts response
+# codes in pms_simulator_tx_failed_total{kind="adversarial:*", reason=...}.
+# Pair with the legitimate `spammer` group above to stress both rate-
+# limit (back-pressure) AND validation pipeline simultaneously.
+# ---------------------------------------------------------------------------
+[[agents]]
+count = 3
+interval_ms = 1000
+name_prefix = "adversarial"
+
+[agents.behavior]
+type = "adversarial"
+attacks = ["bad_signature", "over_balance", "malformed_json", "no_auth"]
+sends_per_tick = 1
 
 # ---------------------------------------------------------------------------
 # OBSERVERS — passive monitoring (queries only)

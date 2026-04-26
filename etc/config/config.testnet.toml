@@ -129,6 +129,13 @@ min_disk_free_percent = 10.0
 # are purged daily by `spawn_activity_retention_task`. Compliance log
 # is NOT auto-purged — operator-only via `/admin/purge-compliance-log`.
 activity_retention_days = 30
+# Auto UTXO consolidation (recommendation #5, v0.7.5).
+# Periodically rolls up the coordinator master address's UTXOs into a
+# single self-transfer once they exceed `auto_consolidate_min_utxos`.
+# 600s = every 10 minutes. Disabled (None) on smaller deployments where
+# coord_shard_count > 0 already caps per-address accumulation.
+auto_consolidate_interval_secs = 600
+auto_consolidate_min_utxos = 200
 
 [validation]
 min_pow_leading_zero_bits = 0
