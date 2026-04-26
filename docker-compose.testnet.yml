@@ -180,7 +180,13 @@ services:
       - '--storage.tsdb.retention.time=3d'
       - '--storage.tsdb.retention.size=1GB'
     networks:
+      # Internal: scrape engine + gateway via internal DNS.
       - pms-testnet-internal
+      # Public: scrape simulator (which lives on the public network so
+      # the dashboard at :9090 is exposed). Without this, Prometheus
+      # can't resolve `pms-simulator` and the pms-simulator scrape
+      # target stays in DOWN state with a DNS lookup error.
+      - pms-testnet-public
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------

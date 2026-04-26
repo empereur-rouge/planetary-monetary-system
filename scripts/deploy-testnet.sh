@@ -640,7 +640,15 @@ if [ "\$DO_BUILD" = "true" ]; then
     # loopback callers without a token).
     mkdir -p secrets
     printf '%s' "\$ADMIN_TOKEN" > secrets/prometheus_admin_token
-    chmod 600 secrets/prometheus_admin_token
+    # 644 (not 600): the prometheus container runs as `nobody` (uid
+    # 65534) but the file is owned by `pms` (uid 1000). With 600 only
+    # the owner can read, so prometheus's bearer-token credentials_file
+    # lookup fails with "unable to read authorization credentials file"
+    # and every /metrics/all scrape errors out. The token sits inside
+    # /opt/pms/secrets which is itself 0750 owned by pms, so widening
+    # to 644 only opens the file to other readers on the host that
+    # already had directory access.
+    chmod 644 secrets/prometheus_admin_token
     echo -e "   \${GREEN}Prometheus admin token written to secrets/prometheus_admin_token\${NC}"
     # Clean stale Docker Compose state (ghost container fix).
     # Docker Compose v2 can desync with containerd, leaving phantom container

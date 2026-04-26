@@ -379,7 +379,12 @@ export PMS_COORDINATOR_ADDR="$COORD_ADDR"
 # This keeps the file in sync if the operator rotates the token.
 mkdir -p secrets
 printf '%s' "$ADMIN_TOKEN" > secrets/prometheus_admin_token
-chmod 600 secrets/prometheus_admin_token
+# 644 (not 600): prometheus container runs as `nobody` (uid 65534)
+# while the file is owned by `pms` — 600 makes it unreadable to
+# the container and the scrape errors out with
+# "unable to read authorization credentials file". See deploy script
+# comment for the full rationale.
+chmod 644 secrets/prometheus_admin_token
 
 # Clean stale Docker Compose state (ghost container fix).
 # Docker Compose v2 can desync with containerd, leaving phantom container
