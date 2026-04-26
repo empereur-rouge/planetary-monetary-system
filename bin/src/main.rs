@@ -354,6 +354,18 @@ async fn main() -> Result<()> {
             tps_tracker: std::sync::Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
             contract_event_bus: None, // Internal API doesn't need contract events
             contract_store: store.clone(),
+            // Internal API runs alongside the main engine; both share the
+            // same node_wallet so we don't need a separate compliance
+            // lock or shard wallet derivation here. The fields exist on
+            // AppState because the main router uses them — supplying
+            // empty defaults keeps the internal-API state initializer
+            // valid without disturbing fee-shard routing or compliance
+            // gating (which only fire on the main router).
+            compliance_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            coord_shard_wallets: std::sync::Arc::new(Vec::new()),
+            coord_shard_round_robin: std::sync::Arc::new(
+                std::sync::atomic::AtomicUsize::new(0),
+            ),
         };
 
         eprintln!("🔧 Launching Internal API at {}", addr);
