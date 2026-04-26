@@ -222,11 +222,16 @@ Le DAG sert à rendre les actes du Coordinator **vérifiables a posteriori**, pa
 
 ## Roadmap pour réduire la dépendance
 
-Ces évolutions sont **possibles mais non implémentées** au moment de v0.7.4 :
+Ces évolutions sont **possibles mais non implémentées** au moment de v0.7.4
+(sauf indication contraire) :
 
-- **Rotation de la clé Coordinator** (item 8 de la sprint hardening) : permettrait
-  de changer la clé sans redémarrer le réseau, en signant un bloc
-  `CoordinatorKeyRotate` avec l'ancienne clé qui autorise la nouvelle.
+- ✅ **Rotation de la clé Coordinator** (item 8 du sprint hardening, livrée
+  v0.7.4) : changement de clé sans redémarrer le réseau via le bloc
+  `CoordinatorKeyRotate` signé par l'ancienne clé.
+- ✅ **Sub-address sharding du Coordinator** (audit follow-up post-v0.7.4) :
+  N sous-adresses dérivées HKDF pour borner l'accumulation d'UTXOs et
+  garder le throughput plat sous charge sustainée. Voir section dédiée
+  ci-dessus.
 - **HSM** (YubiHSM / AWS KMS) : la clé ne quitte jamais le matériel sécurisé,
   même le process serveur ne la voit pas en clair.
 - **Secondaire en lecture** : un VPS qui se synchronise sur le DAG en mode
@@ -239,6 +244,96 @@ Ces évolutions sont **possibles mais non implémentées** au moment de v0.7.4 :
 - **Byzantine Fault Tolerance** (HotStuff, Tendermint…) : on devient une vraie
   blockchain. C'est un projet à part entière (6+ mois) et change la nature du
   produit.
+
+---
+
+## Sub-address sharding du Coordinator (post-v0.7.4)
+
+Le Coordinator peut être configuré pour utiliser **N sous-adresses dérivées**
+au lieu d'une seule adresse pour recevoir les fees de transaction. Activé via
+`[fees].coord_shard_count` dans la config (défaut `0` = sharding désactivé,
+comportement legacy). Valeurs valides : `0` ou `2..=256`.
+
+### Pourquoi
+
+À grande échelle, la centralisation des fees sur une seule adresse fait
+exploser son set de UTXOs : sous test mesuré à 5K TPS, l'adresse coord
+accumulait ~17 000 UTXOs/s, et le throughput d'écriture du moteur chutait
+de 50% en 90 secondes (le HashSet par-adresse rehashait en boucle).
+Diviser les fees sur N shards garde chaque set borné — N=32 maintient ~530
+UTXOs/s par shard, soit dans la zone saine pour un DashMap interne.
+
+### Comment
+
+À chaque transaction qui paie un fee, le serveur choisit la destination via
+`AppState::next_coord_shard_address` qui round-robine sur `coord_shard_wallets`
+via un compteur atomique partagé. Quand `shard_count = 0`, fallback sur la
+liste legacy (`settings.admin.wallet_addresses` puis `treasury_addresses`).
+
+### Dérivation des sous-adresses
+
+Chaque shard est un wallet PMS standard dont la clé privée secp256k1 est
+HKDF-dérivée du `node_wallet` master :
+
+```
+shard_priv[i] = HKDF-SHA256(
+    master.priv_bytes,
+    salt = "pms/coord-shard-salt/v1",
+    info = "pms/coord-shard/v1/" + i_be:4
+)[..32]
+```
+
+Constantes invariantes du protocole v1. Changer le salt invaliderait toutes
+les sous-adresses précédemment dérivées — bumper en `v2`/`v3` lors de toute
+révision. Le domain separator dans `info` empêche toute collision avec
+les autres dérivations HKDF du wallet (notamment `pms/x25519-sk/v1`).
+
+L'opérateur n'a pas besoin de sauvegarder N clés privées : seul le
+`node.key` master est sauvegardé, les N shards sont reproductibles à
+chaque boot via la même dérivation.
+
+### Procédure d'audit (anyone)
+
+1. `GET /v1/coordinator/info` retourne :
+   - `coord_shard_count: u32`
+   - `shards: [{ index, secp256k1_pubkey, x25519_pubkey, address }]` (ou absent
+     si `count = 0`).
+2. Pour chaque entry du tableau, l'auditeur appelle `GET /v1/balance/{address}`.
+3. La somme = balance totale du coordinator.
+
+Les shard pubkeys sont publiques mais leurs **clés privées sont inaccessibles**
+— HKDF est one-way, il faut le master pour dériver. Donc l'audit ne donne
+aucun pouvoir supplémentaire à un attaquant.
+
+### Rotation de clé et sharding
+
+Quand `CoordinatorKeyRotate` (item 8 v0.7.4) change la clé master, les N
+shards changent **automatiquement** car ils sont HKDF-dérivés du nouveau
+master au prochain boot. Conséquences opérationnelles :
+
+- **Avant rotation** : les fees s'accumulent sur les anciens shards
+  (dérivés de l'ancien master).
+- **Après rotation + restart** : les nouveaux fees vont sur les nouveaux
+  shards (dérivés du nouveau master).
+- Les UTXOs sur les **anciens shards** ne sont pas perdus mais deviennent
+  *non utilisables par l'engine actuel* — pour les unlocker il faut leurs
+  clés privées, qui sont dérivées de l'ancien master. L'engine ne charge
+  que le master courant, donc il ne sait pas signer pour les anciens
+  shards.
+
+→ **Procédure recommandée pour une rotation propre** :
+1. Avant rotation : exécuter `/admin/consolidate-utxos` pour vider les
+   shards courants vers l'admin master.
+2. Émettre le bloc `CoordinatorKeyRotate`.
+3. Restart l'engine avec la nouvelle clé.
+4. Les fees post-rotation atterrissent sur les nouveaux shards.
+
+Si l'étape 1 est oubliée, les fees pré-rotation sont **récupérables**
+mais demandent un travail manuel : (a) garder une copie de l'ancien
+`node.key`, (b) écrire un script qui re-dérive les anciens shards,
+(c) signer manuellement les unlocks des anciens shards UTXOs vers le
+nouveau master, (d) soumettre ces blocs au DAG. Pas trivial — d'où la
+recommandation de consolider d'abord.
 
 ---
 
