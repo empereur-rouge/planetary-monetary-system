@@ -2840,30 +2840,19 @@ async fn boot_sandbox_cluster(n: usize) -> Result<Vec<Sandbox>> {
 
     // ── 5. Wait for every P2P listener to be ready, then wire the star ──
     //
-    // Bidirectional dial. PMS's `broadcast()` worker only fans out to
-    // INBOUND peers — outbound connections are explicitly excluded
-    // (broadcast.rs:81-87 "sending there would go nowhere"). So if we
-    // only have follower → coord, the coord can broadcast `Inv` to
-    // followers, but each follower's `GetBlock` reply goes through its
-    // own `broadcast()` (peer.rs:347-358) and never reaches the coord
-    // (which is OUTBOUND from the follower's view). The block never
-    // makes it to the follower's DAG.
-    //
-    // Workaround: dial in BOTH directions so every pair sits in each
-    // other's inbound table. That's two TCP connections per follower
-    // for the cluster (one initiated each way) — fine for an
-    // in-process test.
+    // One-way dial only: follower → coordinator. This is the realistic
+    // multi-VPS topology where read-replica VPSes dial the writer,
+    // not the other way around. Pre-v0.7.4 the `peer.rs` Inv handler
+    // and the `blocks.rs` orphan-recovery path used `broadcast()` to
+    // ask for blocks back from the peer that announced them, which
+    // only worked when that peer was inbound — so a follower's request
+    // to its outbound coordinator went into the void. Both call sites
+    // now use `unicast(&sa, ...)`, which works regardless of dial
+    // direction. A single dial per follower is enough.
     sleep(Duration::from_millis(500)).await;
     if n > 1 {
         let coord_p2p = format!("127.0.0.1:{}", p2p_ports[0]);
-        let coord_srv = sandboxes[0]
-            .server_arc
-            .clone()
-            .expect("coord must have server_arc");
-
         for idx in 1..n {
-            let follower_p2p = format!("127.0.0.1:{}", p2p_ports[idx]);
-            // Follower dials coord (so follower is inbound from coord's view).
             let f_srv = sandboxes[idx]
                 .server_arc
                 .clone()
@@ -2872,19 +2861,7 @@ async fn boot_sandbox_cluster(n: usize) -> Result<Vec<Sandbox>> {
                 .connect_to_peer(coord_p2p.clone(), None)
                 .await
                 .with_context(|| format!("follower {idx} → coord {coord_p2p}"))?;
-
-            // Coord dials follower (so coord is inbound from follower's view).
-            // This is what makes the follower's `GetBlock` reach the coord.
-            coord_srv
-                .clone()
-                .connect_to_peer(follower_p2p.clone(), None)
-                .await
-                .with_context(|| format!("coord → follower {idx} ({follower_p2p})"))?;
-
-            println!(
-                "   [cluster] follower {} ↔ coordinator wired (both directions)",
-                idx
-            );
+            println!("   [cluster] follower {} → coordinator connected", idx);
         }
         // Give the handshakes + initial sync time to settle.
         sleep(Duration::from_secs(2)).await;
@@ -3146,12 +3123,9 @@ async fn test_multi_engine_cluster_propagation() -> Result<()> {
         let cluster = boot_sandbox_cluster(n).await?;
         let coordinator = &cluster[0];
 
-        // Sanity: peer count matches the topology. With bidirectional
-        // dial, the coord ends up with TWO peer entries per follower
-        // (one for each TCP connection direction — different ephemeral
-        // ports on the dialing side, so two distinct DashMap keys).
-        // We assert `>= n - 1` rather than equality because the
-        // PMS protocol semantics around peer dedup may evolve.
+        // Sanity: with one-way dial (follower → coord), the coord has
+        // exactly `n-1` inbound peers. We assert `>=` to keep room for
+        // any future reconnect / topology change.
         if let Some(srv) = coordinator.server_arc.as_ref() {
             let peers = srv.get_p2p_peers();
             let expected_min = n.saturating_sub(1);

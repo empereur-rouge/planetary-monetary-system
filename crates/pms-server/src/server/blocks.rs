@@ -209,12 +209,20 @@ impl Server {
                             }
                         }
 
-                        // Request parent
+                        // Request parent — unicast back to the peer that
+                        // delivered the orphan block. This peer either has
+                        // the parent (we ask it) or doesn't (we'll retry
+                        // via global sync later). Pre-fix used `broadcast`
+                        // which only fans out to inbound peers, so when
+                        // `sa` was an OUTBOUND peer the request went
+                        // nowhere and the orphan was stuck forever. The
+                        // adjacent line 104 already does this correctly
+                        // for the metadata-driven parent fetch path.
                         if self.inflight_fetch.len() < self.max_inflight_requests
                             || self.inflight_fetch.contains_key(&pid_clean)
                         {
                             self.inflight_fetch.insert(pid_clean.clone(), Instant::now());
-                            let _ = self.broadcast(&NetMsg::GetBlock { id: pid_clean }).await;
+                            let _ = self.unicast(&sa, NetMsg::GetBlock { id: pid_clean }).await;
                         }
                     } else {
                         crate::metrics::BLOCKS_REJECTED

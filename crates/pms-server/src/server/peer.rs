@@ -345,16 +345,28 @@ impl Server {
                                 }
                             }
                             if !to_fetch.is_empty() {
-                                if to_fetch.len() == 1 {
-                                    let _ = this
-                                        .broadcast(&NetMsg::GetBlock {
-                                            id: to_fetch[0].clone(),
-                                        })
-                                        .await;
+                                // Send the GetBlock(s) request back to the peer
+                                // that announced the Inv (`sa`), not via broadcast.
+                                //
+                                // Pre-fix this used `broadcast()`, which only fans
+                                // out to INBOUND peers (see `broadcast.rs:81-87`).
+                                // When the local node was an OUTBOUND peer
+                                // relative to the announcer (e.g. a follower
+                                // dialing a coordinator), the request went
+                                // nowhere — so the announced blocks were never
+                                // fetched and propagation silently stalled.
+                                // Unicast back to `sa` is both more efficient
+                                // (single send instead of fan-out) and direction-
+                                // independent: the peer that has the data is
+                                // exactly the peer that announced it.
+                                let msg = if to_fetch.len() == 1 {
+                                    NetMsg::GetBlock {
+                                        id: to_fetch.into_iter().next().unwrap(),
+                                    }
                                 } else {
-                                    let _ =
-                                        this.broadcast(&NetMsg::GetBlocks { ids: to_fetch }).await;
-                                }
+                                    NetMsg::GetBlocks { ids: to_fetch }
+                                };
+                                let _ = this.unicast(&sa, msg).await;
                             }
                         }
                         NetMsg::GetBlock { id } => {
