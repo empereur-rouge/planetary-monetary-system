@@ -234,8 +234,8 @@ async fn s4_batch_atomicity_across_reopen() {
         let blocks: Vec<StoredBlock> = (0..batch_size)
             .map(|i| make_block(&format!("batch-{i:04}"), None))
             .collect();
-        let refs: Vec<(&StoredBlock, Option<&UtxoDelta>)> =
-            blocks.iter().map(|b| (b, None)).collect();
+        let refs: Vec<(&StoredBlock, Option<&UtxoDelta>, &[(String, u64)])> =
+            blocks.iter().map(|b| (b, None, &[][..])).collect();
 
         let inserted = store.append_blocks_batch(&refs).await.expect("batch write");
         assert_eq!(
@@ -301,7 +301,7 @@ async fn s5_pipeline_failure_surfaces_to_caller() {
     impl DagStorage for AlwaysFails {
         async fn append_blocks_batch(
             &self,
-            _blocks: &[(&StoredBlock, Option<&UtxoDelta>)],
+            _blocks: &[(&StoredBlock, Option<&UtxoDelta>, &[(String, u64)])],
         ) -> Result<usize> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Err(anyhow!("simulated permanent disk error"))
@@ -350,6 +350,7 @@ async fn s5_pipeline_failure_surfaces_to_caller() {
         block: make_block("doomed-1", None),
         delta: None,
         newly_finalized: vec![],
+        parent_count_updates: vec![],
     })
     .await
     .expect("first send while task is alive");
@@ -369,6 +370,7 @@ async fn s5_pipeline_failure_surfaces_to_caller() {
             block: make_block("post-mortem", None),
             delta: None,
             newly_finalized: vec![],
+            parent_count_updates: vec![],
         })
         .await;
     println!("[S5] post-shutdown send result = {:?}", post_send.is_err());

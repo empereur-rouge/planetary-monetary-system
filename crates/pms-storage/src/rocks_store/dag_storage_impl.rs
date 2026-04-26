@@ -621,22 +621,50 @@ impl DagStorage for RocksStore {
     /// at the end instead of per-block.
     async fn append_blocks_batch(
         &self,
-        blocks: &[(&StoredBlock, Option<&UtxoDelta>)],
+        blocks: &[(&StoredBlock, Option<&UtxoDelta>, &[(String, u64)])],
     ) -> Result<usize> {
+        use crate::helpers::{key_time_index, ts_to_be, u64_to_le};
         use rocksdb::WriteBatch;
+        use std::collections::HashMap;
 
         if blocks.is_empty() {
             return Ok(0);
         }
 
-        let cf_blocks = self.cf("blocks");
+        // Sub-stage timings for the consumer side, exported as
+        // `pms_persist_consumer_substage_us_total{stage="dedup|build|write|trim"}`.
+        // The profile test reads the deltas to identify which sub-stage
+        // owns the per-block cost growth — the headline `c_us/blk` only
+        // tells us the consumer is slow, not why.
+        let t_total_start = std::time::Instant::now();
+        let t_dedup_start = std::time::Instant::now();
 
-        // Batch dedup check: single multi_get_cf call instead of N get_cf calls.
-        // We clone the Arc per key because multi_get_cf requires AsColumnFamilyRef
-        // (Arc, not &Arc). The Arc clone is cheap (refcount bump).
+        // ── Pre-resolve all CF handles once for the whole batch.
+        //
+        // `RocksStore::cf()` does a HashMap lookup for the prefixed name
+        // followed by `db.cf_handle(full)`, which under the hood acquires
+        // a per-DB mutex. At the previous per-call rate (~10 lookups per
+        // block × 64 blocks per batch = ~640 cf_handle() calls per batch)
+        // this added measurable overhead to the persist consumer hot
+        // path. Resolving once amortizes the cost over the whole batch.
+        let cf_blocks = self.cf("blocks");
+        let cf_idx = self.cf("idx_blocks");
+        let cf_time = self.cf("by_time");
+        let cf_i2t = self.cf("id2ts");
+        let cf_tips = self.cf("tips");
+        let cf_count = self.cf("children_count");
+        let cf_childset = self.cf("children_set");
+        let cf_utxo = self.cf("utxo");
+        let cf_utxo_spent = self.cf("utxo_spent");
+
+        // ── Batch dedup check: single multi_get_cf call instead of N
+        // individual get_cf calls. Required: a duplicate could double-
+        // count children_count for parents below (insert_block dedupes
+        // RAM-side but a race window remains until the block reaches
+        // the consumer).
         let keys: Vec<_> = blocks
             .iter()
-            .map(|(b, _)| (cf_blocks.clone(), b.id.as_bytes().to_vec()))
+            .map(|(b, _, _)| (cf_blocks.clone(), b.id.as_bytes().to_vec()))
             .collect();
         let existing: Vec<bool> = self
             .db
@@ -644,21 +672,52 @@ impl DagStorage for RocksStore {
             .into_iter()
             .map(|r| matches!(r, Ok(Some(_))))
             .collect();
+        let t_dedup = t_dedup_start.elapsed();
+        let t_build_start = std::time::Instant::now();
 
-        // Build a single mega WriteBatch for all new blocks
+        // ── parent_counts: post-insert `children_count` values
+        // snapshotted from the in-memory DAG by the producer.
+        //
+        // This replaces the previous per-batch `multi_get_cf` walk that
+        // was the dominant TPS-degradation cost: as the DAG grew,
+        // parent blocks aged out of the memtable and the LSM-tree
+        // lookup walked into L0 SSTs. The producer's
+        // `ConcurrentDag::get_children_count` is a lock-free atomic
+        // load that scales as O(1) regardless of DAG size, and FIFO
+        // channel ordering guarantees the consumer's `put_cf` writes
+        // see the same values RocksDB would have read.
+        //
+        // We deduplicate across the batch and keep the maximum count
+        // seen for each parent — when two blocks in the same batch
+        // share a parent the producer captured two different counts,
+        // and the WriteBatch only retains the last `put_cf`, so the
+        // running max preserves correctness.
+        let mut parent_counts: HashMap<&[u8], u64> = HashMap::new();
+        for (i, (_, _, pc)) in blocks.iter().enumerate() {
+            if existing[i] {
+                continue;
+            }
+            for (parent_id, count) in pc.iter() {
+                let key = parent_id.as_bytes();
+                let entry = parent_counts.entry(key).or_insert(0);
+                if *count > *entry {
+                    *entry = *count;
+                }
+            }
+        }
+
+        // ── Build a single mega WriteBatch for all new blocks.
         let mut batch = WriteBatch::default();
         let mut count = 0usize;
+        let now_ts = crate::helpers::now_ms_i64();
 
-        for (i, (b, delta)) in blocks.iter().enumerate() {
+        for (i, (b, delta, _pc)) in blocks.iter().enumerate() {
             if existing[i] {
                 continue; // block already persisted
             }
 
-            // UTXO Delta
+            // UTXO Delta — handles cleared at the top of this fn.
             if let Some(d) = delta {
-                let cf_utxo = self.cf("utxo");
-                let cf_utxo_spent = self.cf("utxo_spent");
-
                 for (txid, idx) in &d.spend {
                     let key = make_utxo_key(txid, *idx);
                     batch.delete_cf(&cf_utxo, &key);
@@ -690,23 +749,109 @@ impl DagStorage for RocksStore {
                 }
             }
 
-            // DAG indices
-            self.apply_dag_indices(&mut batch, b)?;
+            // ── DAG indices (inlined from apply_dag_indices, using
+            // the pre-resolved CF handles + producer-supplied counts).
+            let time_key = key_time_index(now_ts, &b.id);
+            let json = serde_json::to_vec(b)?;
+            batch.put_cf(&cf_blocks, b.id.as_bytes(), &json);
+            batch.put_cf(&cf_idx, b.id.as_bytes(), b"");
+            batch.put_cf(&cf_time, &time_key, b"");
+            batch.put_cf(&cf_i2t, b.id.as_bytes(), ts_to_be(now_ts));
+            batch.put_cf(&cf_tips, b.id.as_bytes(), ts_to_be(now_ts));
+            self.tip_count_estimate
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            for p in &b.parents {
+                batch.delete_cf(&cf_tips, p.as_bytes());
+                self.tip_count_estimate
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
-            // Activity indices
-            let ts = crate::helpers::now_ms_i64();
-            self.apply_addr_activity_indices(&mut batch, b, ts, None)?;
+                // Use the producer-supplied count if available; otherwise
+                // fall back to "1" (the legacy default for new parents).
+                let p_bytes: &[u8] = p.as_bytes();
+                if let Some(new_count) = parent_counts.get(p_bytes) {
+                    batch.put_cf(&cf_count, p_bytes, u64_to_le(*new_count));
+                }
+
+                let mut edge_key =
+                    Vec::with_capacity(p.len() + 1 + b.id.len());
+                edge_key.extend_from_slice(p_bytes);
+                edge_key.push(0);
+                edge_key.extend_from_slice(b.id.as_bytes());
+                batch.put_cf(&cf_childset, edge_key, b"");
+            }
+
+            // Activity indices are deferred to a background task — they
+            // feed the dashboard's history API, which has no consensus
+            // role and tolerates a few seconds of lag. Removing them
+            // from the hot WriteBatch shrinks `db.write()` time and frees
+            // the persist consumer to drain the channel faster.
+            //
+            // The async writer hooks in via
+            // `pms_core::background_activity::ActivityJob`; the producer
+            // side is `do_persist_block_internal` (alongside
+            // `persist_tx.try_send`). If activity ever falls catastrophically
+            // behind we lose only the dashboard view of those blocks —
+            // balances, UTXOs and consensus stay correct.
 
             count += 1;
         }
 
+        let t_build = t_build_start.elapsed();
+        let t_write_start = std::time::Instant::now();
+
         if count > 0 {
             // Single atomic write for all blocks
             self.db.write(batch)?;
+        }
+        let t_write = t_write_start.elapsed();
+        let t_trim_start = std::time::Instant::now();
+
+        if count > 0 {
             // Trim tips once for the whole batch
             self.maybe_trim_tips()?;
         }
+        let t_trim = t_trim_start.elapsed();
 
+        // Export sub-stage timings via the atomic counters on RocksStore.
+        // pms-core's metrics sampler reads these out and exposes them as
+        // Prometheus counters (pms-storage doesn't pull in prometheus).
+        use std::sync::atomic::Ordering;
+        self.append_us_dedup
+            .fetch_add(t_dedup.as_micros() as u64, Ordering::Relaxed);
+        self.append_us_build
+            .fetch_add(t_build.as_micros() as u64, Ordering::Relaxed);
+        self.append_us_write
+            .fetch_add(t_write.as_micros() as u64, Ordering::Relaxed);
+        self.append_us_trim
+            .fetch_add(t_trim.as_micros() as u64, Ordering::Relaxed);
+        let _ = t_total_start;
+
+        Ok(count)
+    }
+
+    /// Persist the activity-index entries for a batch of blocks in a
+    /// single `WriteBatch`. Called by the dedicated activity-writer
+    /// background task — see `pms_core::background_activity`.
+    async fn append_activity_batch(
+        &self,
+        blocks: &[(&StoredBlock, i64)],
+    ) -> Result<usize> {
+        use rocksdb::WriteBatch;
+
+        if blocks.is_empty() {
+            return Ok(0);
+        }
+
+        let mut batch = WriteBatch::default();
+        let mut count = 0usize;
+        for (b, ts) in blocks {
+            self.apply_addr_activity_indices(&mut batch, b, *ts, None)?;
+            count += 1;
+        }
+
+        if count > 0 {
+            self.db.write(batch)?;
+        }
         Ok(count)
     }
 

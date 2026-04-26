@@ -39,6 +39,10 @@ impl RocksStore {
             runtime_config_cache: parking_lot::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
             persist_counter: std::sync::atomic::AtomicU64::new(0),
+            append_us_dedup: std::sync::atomic::AtomicU64::new(0),
+            append_us_build: std::sync::atomic::AtomicU64::new(0),
+            append_us_write: std::sync::atomic::AtomicU64::new(0),
+            append_us_trim: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -117,6 +121,10 @@ impl RocksStore {
             runtime_config_cache: parking_lot::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
             persist_counter: std::sync::atomic::AtomicU64::new(0),
+            append_us_dedup: std::sync::atomic::AtomicU64::new(0),
+            append_us_build: std::sync::atomic::AtomicU64::new(0),
+            append_us_write: std::sync::atomic::AtomicU64::new(0),
+            append_us_trim: std::sync::atomic::AtomicU64::new(0),
         })
     }
 }

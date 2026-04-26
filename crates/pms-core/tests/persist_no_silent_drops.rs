@@ -58,7 +58,7 @@ impl CountingFailStore {
 impl DagStorage for CountingFailStore {
     async fn append_blocks_batch(
         &self,
-        blocks: &[(&StoredBlock, Option<&UtxoDelta>)],
+        blocks: &[(&StoredBlock, Option<&UtxoDelta>, &[(String, u64)])],
     ) -> Result<usize> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         if n < self.fail_first {
@@ -159,6 +159,7 @@ fn make_job(id: &str) -> PersistJob {
         },
         delta: None,
         newly_finalized: vec![],
+        parent_count_updates: vec![],
     }
 }
 

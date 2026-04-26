@@ -15,7 +15,7 @@
 //! metrics sampler task — those keep the per-ledger view.
 
 use once_cell::sync::Lazy;
-use prometheus::IntCounter;
+use prometheus::{IntCounter, IntCounterVec};
 
 /// Number of `append_blocks_batch` retry attempts. Incremented every time a
 /// transient storage error fires the retry path in
@@ -53,6 +53,73 @@ pub static PERSIST_STALL_SECONDS: Lazy<IntCounter> = Lazy::new(|| {
     prometheus::register_int_counter!(
         "pms_persist_stall_seconds_total",
         "Cumulative seconds spent back-pressured on persist_tx.send().await"
+    )
+    .unwrap()
+});
+
+/// Cumulative microseconds spent in each stage of `do_persist_block_internal`.
+/// Used by the TPS-degradation profile to identify which stage scales with
+/// total UTXO / block count. Pair with `pms_persist_blocks_total` to compute
+/// the average µs/block per stage between two scrapes.
+///
+/// Stages:
+///   - `parents`    — parent validation (find/check parent existence + uniqueness)
+///   - `utxo_val`   — UTXO validation (double-spend check on inputs)
+///   - `dag_val`    — DAG-level structural validation
+///   - `utxo_ram`   — UTXO RAM apply (`apply_diff` on `ShardedUtxoSet`)
+///   - `dag_insert` — DAG insert (`ConcurrentDag::insert_block` + finality)
+///   - `send`       — `persist_tx.send().await` (channel back-pressure)
+pub static PERSIST_STAGE_US: Lazy<IntCounterVec> = Lazy::new(|| {
+    prometheus::register_int_counter_vec!(
+        "pms_persist_stage_us_total",
+        "Cumulative microseconds spent in each stage of persist_block",
+        &["stage"]
+    )
+    .unwrap()
+});
+
+/// Total number of blocks that completed `do_persist_block_internal`
+/// successfully. Used as the denominator when computing the per-stage
+/// average latency from `pms_persist_stage_us_total`.
+pub static PERSIST_BLOCKS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    prometheus::register_int_counter!(
+        "pms_persist_blocks_total",
+        "Blocks that completed do_persist_block successfully"
+    )
+    .unwrap()
+});
+
+/// Cumulative microseconds spent inside `store.append_blocks_batch()` in
+/// the background persist consumer. Pair with `pms_persist_consumer_batches_total`
+/// to compute the avg µs/batch and with `pms_persist_blocks_total` to
+/// compute the avg µs/block on the consumer side.
+pub static PERSIST_CONSUMER_US: Lazy<IntCounter> = Lazy::new(|| {
+    prometheus::register_int_counter!(
+        "pms_persist_consumer_us_total",
+        "Cumulative microseconds spent in store.append_blocks_batch() (consumer)"
+    )
+    .unwrap()
+});
+
+/// Number of batches the background persist consumer has drained from
+/// the channel and successfully written. Combined with PERSIST_CONSUMER_US,
+/// gives the rolling avg batch latency.
+pub static PERSIST_CONSUMER_BATCHES: Lazy<IntCounter> = Lazy::new(|| {
+    prometheus::register_int_counter!(
+        "pms_persist_consumer_batches_total",
+        "Batches the background persist consumer has written"
+    )
+    .unwrap()
+});
+
+/// Sum of the `len()` of every batch the consumer has written. Lets
+/// you compute average batch fill (`blocks_in_batches / batches`) — if
+/// it stays close to MAX_BATCH_SIZE the consumer is genuinely the
+/// bottleneck; if it's well below, producers can't keep up either.
+pub static PERSIST_CONSUMER_BLOCKS: Lazy<IntCounter> = Lazy::new(|| {
+    prometheus::register_int_counter!(
+        "pms_persist_consumer_blocks_total",
+        "Total blocks written by the background persist consumer"
     )
     .unwrap()
 });

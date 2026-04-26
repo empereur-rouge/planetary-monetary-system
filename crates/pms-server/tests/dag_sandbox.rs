@@ -3487,6 +3487,19 @@ struct ProfileSample {
     persist_stall_seconds: Option<u64>,
     rocksdb_write_stalled_seconds: Option<u64>,
     utxo_count: Option<u64>,
+    // Cumulative per-stage µs counters from `pms_persist_stage_us_total`.
+    // Diff between two intervals divided by `delta_persist_blocks` gives
+    // the per-stage avg µs/block in that interval.
+    persist_blocks_total: Option<u64>,
+    stage_us_parents: Option<u64>,
+    stage_us_utxo_val: Option<u64>,
+    stage_us_dag_val: Option<u64>,
+    stage_us_utxo_ram: Option<u64>,
+    stage_us_dag_insert: Option<u64>,
+    stage_us_send: Option<u64>,
+    consumer_us: Option<u64>,
+    consumer_batches: Option<u64>,
+    consumer_blocks: Option<u64>,
 }
 
 /// Pull a single labelled gauge / counter value out of the Prometheus
@@ -3510,15 +3523,42 @@ fn extract_metric(body: &str, name: &str) -> Option<u64> {
     None
 }
 
+/// Same as `extract_metric` but matches a specific label value.
+/// Looks for lines of the form `name{...key="value"...} <number>`.
+fn extract_metric_with_label(body: &str, name: &str, key: &str, value: &str) -> Option<u64> {
+    let needle = format!("{key}=\"{value}\"");
+    for line in body.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with(name) && line.contains(&needle) {
+            let after_labels = match line.find('}') {
+                Some(i) => &line[i + 1..],
+                None => continue,
+            };
+            return after_labels.trim().parse::<u64>().ok();
+        }
+    }
+    None
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore]
 async fn test_tps_degradation_profile() -> Result<()> {
+    // Allow override via env so the same test serves both the quick
+    // 90-second diagnostic run AND the longer (5-10 min) prod-readiness
+    // run that asks "does the steady-state sit above the prod target?".
+    let duration_s: u64 = std::env::var("PROFILE_DURATION_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(PROFILE_DURATION_SECS);
+
     let sandbox = boot_sandbox().await?;
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
     println!("║  TPS DEGRADATION PROFILE                                      ║");
     println!(
         "║  Duration: {}s | Workers: {} | Interval: {}s                  ║",
-        PROFILE_DURATION_SECS, PROFILE_WORKERS, PROFILE_INTERVAL_SECS
+        duration_s, PROFILE_WORKERS, PROFILE_INTERVAL_SECS
     );
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
@@ -3582,8 +3622,9 @@ async fn test_tps_degradation_profile() -> Result<()> {
     // Stop timer.
     {
         let stop = stop_flag.clone();
+        let dur = duration_s;
         tokio::spawn(async move {
-            sleep(Duration::from_secs(PROFILE_DURATION_SECS)).await;
+            sleep(Duration::from_secs(dur)).await;
             stop.store(true, Ordering::Relaxed);
         });
     }
@@ -3593,6 +3634,18 @@ async fn test_tps_degradation_profile() -> Result<()> {
     let mut samples: Vec<ProfileSample> = Vec::new();
     let mut last_ok = 0usize;
     let mut last_fail = 0usize;
+    // Snapshots of the previous interval's cumulative stage µs counters,
+    // so we can print the avg µs/block in this interval.
+    let mut last_blocks: u64 = 0;
+    let mut last_parents: u64 = 0;
+    let mut last_utxo_val: u64 = 0;
+    let mut last_dag_val: u64 = 0;
+    let mut last_utxo_ram: u64 = 0;
+    let mut last_dag_insert: u64 = 0;
+    let mut last_send: u64 = 0;
+    let mut last_consumer_us: u64 = 0;
+    let mut last_consumer_batches: u64 = 0;
+    let mut last_consumer_blocks: u64 = 0;
 
     println!(
         "{:>5} | {:>6} | {:>5} | {:>3} | {:>3} | {:>3} | {:>4} | {:>4} | {:>4} | {:>5} | {:>5} | {:>4} | {:>4} | {:>4} | {:>7}",
@@ -3613,6 +3666,23 @@ async fn test_tps_degradation_profile() -> Result<()> {
         "utxos"
     );
     println!("{:->137}", "");
+    // Second header for the per-stage µs/block table — printed alongside
+    // the RocksDB row so the reader can correlate stage-latency growth
+    // with the engine state.
+    println!(
+        "{:>5} | {:>6} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7}",
+        "t(s)", "blks", "par_us", "uxV_us", "dgV_us", "uxR_us", "dgI_us", "snd_us", "tot_us", "≈tps"
+    );
+    println!("{:->100}", "");
+    // Third header: background-persist consumer side. `c_us/blk` =
+    // append_blocks_batch latency per persisted block. `c_us/bat` =
+    // per-batch latency. `bat_n` = blocks per batch (avg), telling us
+    // whether the consumer is starved or saturated.
+    println!(
+        "{:>5} | {:>7} | {:>7} | {:>7} | {:>5} | {:>7}",
+        "t(s)", "c_blks", "c_us/bk", "c_us/bt", "bat_n", "c_tps"
+    );
+    println!("{:->60}", "");
 
     while !stop_flag.load(Ordering::Relaxed) {
         sleep(Duration::from_secs(PROFILE_INTERVAL_SECS)).await;
@@ -3653,8 +3723,16 @@ async fn test_tps_degradation_profile() -> Result<()> {
             }
         }
 
-        // Pull /metrics for persist queue + counters.
-        if let Ok(resp) = client.get(format!("{}/metrics", base_url)).send().await {
+        // Pull /metrics/all for persist queue + counters. The plain `/metrics`
+        // endpoint uses `render_for_ledger` which only exposes 3 ledger gauges;
+        // we need the full registry so `pms_persist_*` and `pms_persist_stage_*`
+        // are visible. Admin token required by `require_local_or_admin`.
+        if let Ok(resp) = client
+            .get(format!("{}/metrics/all", base_url))
+            .bearer_auth(&admin_token)
+            .send()
+            .await
+        {
             if let Ok(text) = resp.text().await {
                 s.persist_queue_depth =
                     extract_metric(&text, "pms_persist_queue_depth");
@@ -3666,6 +3744,31 @@ async fn test_tps_degradation_profile() -> Result<()> {
                     extract_metric(&text, "pms_persist_stall_seconds_total");
                 s.rocksdb_write_stalled_seconds =
                     extract_metric(&text, "pms_rocksdb_write_stalled_seconds_total");
+                s.persist_blocks_total =
+                    extract_metric(&text, "pms_persist_blocks_total");
+                s.stage_us_parents = extract_metric_with_label(
+                    &text, "pms_persist_stage_us_total", "stage", "parents",
+                );
+                s.stage_us_utxo_val = extract_metric_with_label(
+                    &text, "pms_persist_stage_us_total", "stage", "utxo_val",
+                );
+                s.stage_us_dag_val = extract_metric_with_label(
+                    &text, "pms_persist_stage_us_total", "stage", "dag_val",
+                );
+                s.stage_us_utxo_ram = extract_metric_with_label(
+                    &text, "pms_persist_stage_us_total", "stage", "utxo_ram",
+                );
+                s.stage_us_dag_insert = extract_metric_with_label(
+                    &text, "pms_persist_stage_us_total", "stage", "dag_insert",
+                );
+                s.stage_us_send = extract_metric_with_label(
+                    &text, "pms_persist_stage_us_total", "stage", "send",
+                );
+                s.consumer_us = extract_metric(&text, "pms_persist_consumer_us_total");
+                s.consumer_batches =
+                    extract_metric(&text, "pms_persist_consumer_batches_total");
+                s.consumer_blocks =
+                    extract_metric(&text, "pms_persist_consumer_blocks_total");
             }
         }
 
@@ -3701,9 +3804,76 @@ async fn test_tps_degradation_profile() -> Result<()> {
             s.utxo_count.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
         );
 
+        // Second row: per-stage avg µs/block over this interval.
+        // Avg = (cumulative_us_now - cumulative_us_prev) / (blocks_now - blocks_prev).
+        let cur_blocks = s.persist_blocks_total.unwrap_or(0);
+        let delta_blocks = cur_blocks.saturating_sub(last_blocks).max(1);
+        let cur_par = s.stage_us_parents.unwrap_or(0);
+        let cur_ux_v = s.stage_us_utxo_val.unwrap_or(0);
+        let cur_dg_v = s.stage_us_dag_val.unwrap_or(0);
+        let cur_ux_r = s.stage_us_utxo_ram.unwrap_or(0);
+        let cur_dg_i = s.stage_us_dag_insert.unwrap_or(0);
+        let cur_snd = s.stage_us_send.unwrap_or(0);
+        let avg_par = cur_par.saturating_sub(last_parents) / delta_blocks;
+        let avg_ux_v = cur_ux_v.saturating_sub(last_utxo_val) / delta_blocks;
+        let avg_dg_v = cur_dg_v.saturating_sub(last_dag_val) / delta_blocks;
+        let avg_ux_r = cur_ux_r.saturating_sub(last_utxo_ram) / delta_blocks;
+        let avg_dg_i = cur_dg_i.saturating_sub(last_dag_insert) / delta_blocks;
+        let avg_snd = cur_snd.saturating_sub(last_send) / delta_blocks;
+        let avg_tot = avg_par + avg_ux_v + avg_dg_v + avg_ux_r + avg_dg_i + avg_snd;
+        // Theoretical TPS ceiling at this stage cost, single-threaded:
+        //   1_000_000 µs/s ÷ tot_us/block = blocks/s.
+        // Useful sanity check: with 12 worker_threads, real TPS can be
+        // higher than this number — but if avg_tot grows over time,
+        // real TPS will fall in lockstep regardless of thread count.
+        let approx_tps = if avg_tot > 0 { 1_000_000 / avg_tot } else { 0 };
+        println!(
+            "{:>5.0} | {:>6} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7} | {:>7}",
+            s.elapsed_s,
+            cur_blocks - last_blocks,
+            avg_par,
+            avg_ux_v,
+            avg_dg_v,
+            avg_ux_r,
+            avg_dg_i,
+            avg_snd,
+            avg_tot,
+            approx_tps,
+        );
+
+        // Consumer-side row.
+        let cur_c_us = s.consumer_us.unwrap_or(0);
+        let cur_c_bat = s.consumer_batches.unwrap_or(0);
+        let cur_c_blk = s.consumer_blocks.unwrap_or(0);
+        let d_c_us = cur_c_us.saturating_sub(last_consumer_us);
+        let d_c_bat = cur_c_bat.saturating_sub(last_consumer_batches).max(1);
+        let d_c_blk = cur_c_blk.saturating_sub(last_consumer_blocks).max(1);
+        let c_us_per_block = d_c_us / d_c_blk;
+        let c_us_per_batch = d_c_us / d_c_bat;
+        let c_avg_batch = d_c_blk / d_c_bat;
+        let c_tps = if c_us_per_block > 0 {
+            1_000_000 / c_us_per_block
+        } else {
+            0
+        };
+        println!(
+            "{:>5.0} | {:>7} | {:>7} | {:>7} | {:>5} | {:>7}",
+            s.elapsed_s, d_c_blk, c_us_per_block, c_us_per_batch, c_avg_batch, c_tps,
+        );
+
         samples.push(s);
         last_ok = cur_ok;
         last_fail = cur_fail;
+        last_blocks = cur_blocks;
+        last_parents = cur_par;
+        last_utxo_val = cur_ux_v;
+        last_dag_val = cur_dg_v;
+        last_utxo_ram = cur_ux_r;
+        last_dag_insert = cur_dg_i;
+        last_send = cur_snd;
+        last_consumer_us = cur_c_us;
+        last_consumer_batches = cur_c_bat;
+        last_consumer_blocks = cur_c_blk;
     }
 
     // Drain workers.

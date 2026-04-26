@@ -985,6 +985,19 @@ where
         // Lock-free insertion into concurrent DAG (block is moved in, not cloned).
         self.dag.insert_block(block);
 
+        // Snapshot the post-insert children_count for each parent. The
+        // consumer-side `append_blocks_batch` used to re-read these from
+        // RocksDB on every batch — the multi_get_cf walk became the
+        // dominant TPS-degradation cost as the DAG grew (parent blocks
+        // age out of the memtable). Reading here is a lock-free
+        // `AtomicU64::load`; the consumer writes the value verbatim,
+        // and FIFO channel order guarantees the latest value persists.
+        let parent_count_updates: Vec<(String, u64)> = sb
+            .parents
+            .iter()
+            .map(|p| (p.clone(), self.dag.get_children_count(p)))
+            .collect();
+
         // Mark spent outpoints in concurrent DAG (for double-spend detection)
         if let Some(d) = &delta {
             for (txid, idx) in &d.spend {
@@ -1145,9 +1158,10 @@ where
             block: sb,
             delta,
             newly_finalized,
+            parent_count_updates,
         };
+        let send_start = std::time::Instant::now();
         {
-            let send_start = std::time::Instant::now();
             let send_fut = self.persist_tx.send(job);
             tokio::pin!(send_fut);
 
@@ -1209,9 +1223,37 @@ where
             }
         }
 
+        let t_send = send_start.elapsed();
         let t_total = t0.elapsed();
 
-        // Log timing every 100th block for perf analysis
+        // Per-stage cumulative timing counters. Pair with `pms_persist_blocks_total`
+        // to compute average µs/block per stage between two scrapes — that's
+        // what `test_tps_degradation_profile` does to identify which stage
+        // grows over time as the UTXO/DAG state expands.
+        let stage_us = &crate::metrics::PERSIST_STAGE_US;
+        stage_us
+            .with_label_values(&["parents"])
+            .inc_by(t_parents.as_micros() as u64);
+        stage_us
+            .with_label_values(&["utxo_val"])
+            .inc_by(t_utxo_val.as_micros() as u64);
+        stage_us
+            .with_label_values(&["dag_val"])
+            .inc_by(t_dag_val.as_micros() as u64);
+        stage_us
+            .with_label_values(&["utxo_ram"])
+            .inc_by(t_utxo.as_micros() as u64);
+        stage_us
+            .with_label_values(&["dag_insert"])
+            .inc_by(t_dag.as_micros() as u64);
+        stage_us
+            .with_label_values(&["send"])
+            .inc_by(t_send.as_micros() as u64);
+        crate::metrics::PERSIST_BLOCKS_TOTAL.inc();
+
+        // Sample the same timing into the trace log every 500 blocks for
+        // human-readable post-mortems. The Prometheus counters above are
+        // the canonical source for dashboards and the profile test.
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if count.is_multiple_of(500) {
@@ -1223,6 +1265,7 @@ where
                 dag_val_us = t_dag_val.as_micros() as u64,
                 utxo_ram_us = t_utxo.as_micros() as u64,
                 dag_insert_us = t_dag.as_micros() as u64,
+                send_us = t_send.as_micros() as u64,
                 total_us = t_total.as_micros() as u64,
                 "persist_block timing (µs)"
             );

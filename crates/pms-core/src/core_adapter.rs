@@ -1,4 +1,5 @@
-use crate::background_persist::{PersistJob, spawn_background_persist};
+use crate::background_activity::spawn_activity_writer;
+use crate::background_persist::{PersistJob, spawn_background_persist_with_activity};
 use crate::concurrent_dag::ConcurrentDag;
 use crate::utxo::{ShardedUtxoSet, UtxoFetcher};
 use crate::{DagRef, ValidatePolicy};
@@ -193,9 +194,24 @@ impl<
         // Force l'utilisation du ShardedUtxoSet (Phase 4)
         p.skip_utxo_checks = true;
 
+        // Spawn the activity writer (background task that drains a
+        // dedicated channel and writes addr_activity / addr_type_activity /
+        // activity_items CFs out-of-band). The buffer is intentionally
+        // generous — activity events are non-critical, so we'd rather
+        // absorb spikes than drop dashboard rows during prod load.
+        let (activity_tx, _activity_handle) =
+            spawn_activity_writer(store.clone(), 50_000);
+
         // Spawn background persist task (buffer 2K blocks — smaller buffer limits
-        // RAM usage under write pressure; back-pressure in persist.rs ensures no drops)
-        let (persist_tx, _handle) = spawn_background_persist(store.clone(), 2_000);
+        // RAM usage under write pressure; back-pressure in persist.rs ensures no drops).
+        // The persist consumer forwards each freshly-persisted block to the
+        // activity writer via `activity_tx` so the dashboard's history is
+        // populated without blocking the critical persist `db.write()` slot.
+        let (persist_tx, _handle) = spawn_background_persist_with_activity(
+            store.clone(),
+            2_000,
+            activity_tx,
+        );
 
         // Event bus avec capacité 4096 (haut débit)
         let event_bus = EventBus::new(4096);
@@ -289,9 +305,24 @@ impl<
             policy.min_parents_after_boot = 1;
         }
 
+        // Spawn the activity writer (background task that drains a
+        // dedicated channel and writes addr_activity / addr_type_activity /
+        // activity_items CFs out-of-band). The buffer is intentionally
+        // generous — activity events are non-critical, so we'd rather
+        // absorb spikes than drop dashboard rows during prod load.
+        let (activity_tx, _activity_handle) =
+            spawn_activity_writer(store.clone(), 50_000);
+
         // Spawn background persist task (buffer 2K blocks — smaller buffer limits
-        // RAM usage under write pressure; back-pressure in persist.rs ensures no drops)
-        let (persist_tx, _handle) = spawn_background_persist(store.clone(), 2_000);
+        // RAM usage under write pressure; back-pressure in persist.rs ensures no drops).
+        // The persist consumer forwards each freshly-persisted block to the
+        // activity writer via `activity_tx` so the dashboard's history is
+        // populated without blocking the critical persist `db.write()` slot.
+        let (persist_tx, _handle) = spawn_background_persist_with_activity(
+            store.clone(),
+            2_000,
+            activity_tx,
+        );
 
         // Event bus avec capacité 4096
         let event_bus = EventBus::new(4096);

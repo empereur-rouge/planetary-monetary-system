@@ -104,17 +104,48 @@ pub trait DagStorage: Send + Sync {
     /// Default implementation falls back to calling `append_block_atomic_with_utxo`
     /// for each block sequentially. RocksStore overrides with a single `WriteBatch`
     /// for all blocks — reducing WAL appends and mutex acquisitions by up to 64×.
+    ///
+    /// `parent_counts` carries the post-insert `children_count` value for
+    /// each parent of each block, snapshotted from the in-memory DAG by
+    /// the producer. The optimised RocksStore implementation uses these
+    /// directly instead of re-reading the values from RocksDB on every
+    /// batch — eliminating a per-batch LSM-tree walk that was scaling
+    /// poorly with DAG size. Pass `&[]` for any block whose counts are
+    /// unknown; the implementation falls back to the legacy LSM read in
+    /// that case.
     async fn append_blocks_batch(
         &self,
-        blocks: &[(&StoredBlock, Option<&UtxoDelta>)],
+        blocks: &[(&StoredBlock, Option<&UtxoDelta>, &[(String, u64)])],
     ) -> Result<usize> {
         let mut count = 0usize;
-        for (b, delta) in blocks {
+        for (b, delta, _parent_counts) in blocks {
             if self.append_block_atomic_with_utxo(b, *delta).await? {
                 count += 1;
             }
         }
         Ok(count)
+    }
+
+    /// Persist the activity-index entries (`addr_activity` +
+    /// `addr_type_activity` + `activity_items`) for a batch of blocks.
+    ///
+    /// These three CFs feed the dashboard's history API and are not on
+    /// the consensus / balance / UTXO path. The persist consumer used to
+    /// write them inline with `append_blocks_batch`, but as the DAG grew
+    /// the per-block consumer cost rose enough to throttle producers
+    /// through `persist_tx.send().await` back-pressure. Splitting the
+    /// activity writes into a separate batch lets the activity task run
+    /// on a different `db.write()` call, which RocksDB pipelines in
+    /// parallel with the critical persist write.
+    ///
+    /// Default impl is a no-op so non-RocksDB backends (mocks) don't
+    /// need to maintain a separate index. The RocksStore override is
+    /// what actually persists to disk.
+    async fn append_activity_batch(
+        &self,
+        _blocks: &[(&StoredBlock, i64)],
+    ) -> Result<usize> {
+        Ok(0)
     }
 
     /// Returns the persistence timestamp (milliseconds since UNIX epoch)

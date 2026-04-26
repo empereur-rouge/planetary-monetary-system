@@ -425,6 +425,15 @@ pub async fn admin_rocksdb_stats(
             .flatten()
             .and_then(|v| v.trim().parse::<u64>().ok());
 
+        // Cumulative sub-stage timings of `append_blocks_batch`. Profiling
+        // diff between two scrapes tells us which sub-stage owns the
+        // per-block consumer cost (write_cf vs build vs LSM I/O).
+        use std::sync::atomic::Ordering;
+        let append_dedup = store.append_us_dedup.load(Ordering::Relaxed);
+        let append_build = store.append_us_build.load(Ordering::Relaxed);
+        let append_write = store.append_us_write.load(Ordering::Relaxed);
+        let append_trim = store.append_us_trim.load(Ordering::Relaxed);
+
         json!({
             "num_files_at_level0": read_u64("rocksdb.num-files-at-level0"),
             "num_files_at_level0_idx_blocks": l0_idx_blocks,
@@ -437,6 +446,10 @@ pub async fn admin_rocksdb_stats(
             "estimate_num_keys": read_u64("rocksdb.estimate-num-keys"),
             "estimate_live_data_size": read_u64("rocksdb.estimate-live-data-size"),
             "size_all_mem_tables": read_u64("rocksdb.size-all-mem-tables"),
+            "append_us_dedup": append_dedup,
+            "append_us_build": append_build,
+            "append_us_write": append_write,
+            "append_us_trim": append_trim,
         })
     })
     .await;

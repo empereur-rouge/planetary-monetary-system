@@ -77,6 +77,16 @@ pub struct RocksStore {
     /// Counter of block persists. Used to amortize `trim_tips()` calls —
     /// only runs every 64 blocks instead of on every single persist.
     pub(crate) persist_counter: std::sync::atomic::AtomicU64,
+    /// Cumulative microseconds spent in each sub-stage of
+    /// `append_blocks_batch`. pms-storage can't depend on prometheus, so
+    /// pms-core's metrics sampler reads these atomics each scrape and
+    /// exports them as `pms_persist_consumer_substage_us_total{stage=...}`.
+    /// Used by the TPS-degradation profile to identify where consumer
+    /// time is going as the DAG grows (write vs build vs LSM I/O).
+    pub append_us_dedup: std::sync::atomic::AtomicU64,
+    pub append_us_build: std::sync::atomic::AtomicU64,
+    pub append_us_write: std::sync::atomic::AtomicU64,
+    pub append_us_trim: std::sync::atomic::AtomicU64,
 }
 
 /// RocksDB memory tuning parameters, extracted from `[rocks]` config.
@@ -393,6 +403,10 @@ impl RocksStore {
             runtime_config_cache: parking_lot::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
             persist_counter: std::sync::atomic::AtomicU64::new(0),
+            append_us_dedup: std::sync::atomic::AtomicU64::new(0),
+            append_us_build: std::sync::atomic::AtomicU64::new(0),
+            append_us_write: std::sync::atomic::AtomicU64::new(0),
+            append_us_trim: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -539,6 +553,10 @@ impl RocksStore {
             runtime_config_cache: parking_lot::Mutex::new(None),
             frozen_set: dashmap::DashSet::new(),
             persist_counter: std::sync::atomic::AtomicU64::new(0),
+            append_us_dedup: std::sync::atomic::AtomicU64::new(0),
+            append_us_build: std::sync::atomic::AtomicU64::new(0),
+            append_us_write: std::sync::atomic::AtomicU64::new(0),
+            append_us_trim: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
