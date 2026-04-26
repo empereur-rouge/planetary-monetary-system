@@ -1,24 +1,42 @@
 # =============================================================================
-# Agent definitions for Testnet VPS — ~30 agents, ~20 tx/s sustained
+# Agent definitions for Testnet VPS — 100 active users + spammers
 # =============================================================================
-# MEMORY BUDGET: 16 GB VPS with 14 GiB Docker limit, 67 RocksDB CFs.
-# Engine at rest: ~8 GiB (DAG bootstrap + RocksDB metadata + jemalloc retention).
-# Headroom: ~6 GiB for write pressure. Back-pressure (v0.7.1) slows API callers
-# when persist pipeline is full, but RocksDB internal buffers still grow under load.
+# REALISTIC SCENARIO (post-v0.7.5): a hundred clickers mining ~6 cubes/minute
+# each, burning their stash roughly once per hour, plus a small flood of
+# spammers that the engine should throttle through persist back-pressure
+# without crashing.
 #
-# Proven stable: 0 tx/s = ~8 GiB, ~20 tx/s = ~10 GiB (target), ~60 tx/s = OOM.
-# Keep total PMS tx/s ≤ 20, game blocks add ~10 blk/s → total ~30 blk/s.
+# TARGET LOAD: ~20-25 successful blocks/s sustained.
+#   - Cube mint blocks   : 100 × 6/min = 10 blk/s (bursty per agent)
+#   - PMS sends           : ~4 blk/s (regular users)
+#   - Cube burn batches   : ~1.7/min (each batch = ~360 cubes burned)
+#   - EDN sends post-burn : ~1.7/min
+#   - Spammer attempts    : ~50 RPS (channel BP throttles them down)
+#
+# MEMORY BUDGET: 16 GB VPS, 14 GiB Docker, 67 RocksDB CFs.
+#   - Engine at rest         : ~8 GiB
+#   - 20-25 blk/s steady-state: ~10 GiB headroom (proven stable)
+#   - 60+ blk/s              : OOM risk
+#
+# CYCLE MECHANIC (6 cubes/min × 1h cycle, config-only):
+#   - interval_ms = 10000      → 10 s tick
+#   - cubes_remint_min/max=350/380 → 350-380 cubes batched per cycle
+#   - burn_cooldown_ticks = 358 → ≈ 59 min 40 s post-burn pause
+#   Cycle: burn → cooldown 1h → mint 350-380 → burn → loop.
+#   Average rate = 360 cubes / 60 min = 6 cubes/min/agent ✓
+#   ⚠️  The mint is BURSTY (parallel batch every ~1h, not 1-cube-per-10s).
+#       For true continuous mining, code change required — see README.
 
 # ---------------------------------------------------------------------------
-# CASUAL USERS — PMS + game loop
-# 8 agents, 3s/tick, 30% chance, 1 send/tick
-# PMS: 8 × 0.3 × 1 / 3 = 0.8 PMS tx/s
-# EDN: edn_sends_per_tick = 1, cooldown = 10 (30s > 10s distrib)
+# CASUAL USERS — bulk of the playerbase, 60% of active users
+# 60 agents, 10s tick, 30% PMS send chance, 1 send/tick
+# PMS: 60 × 0.3 × 1 / 10 = 1.8 PMS tx/s
+# Cubes: 6/min average (bursty 350-380 batches every ~1h)
 # ---------------------------------------------------------------------------
 [[agents]]
-count = 8
-interval_ms = 3000
-name_prefix = "user"
+count = 60
+interval_ms = 10000
+name_prefix = "casual"
 
 [agents.behavior]
 type = "random"
@@ -29,145 +47,83 @@ sends_per_tick = 1
 
 [agents.game]
 enabled = true
-cubes_per_agent = 3
-cubes_remint_min = 80
-cubes_remint_max = 120
-edn_send_min_pct = 10.0
-edn_send_max_pct = 50.0
-burn_cooldown_ticks = 10
+cubes_per_agent = 5         # initial seed (burned within first tick)
+cubes_remint_min = 350      # ≈ 1h at 6 cubes/min, ±10%
+cubes_remint_max = 380
+burn_cooldown_ticks = 358   # 358 × 10s = 59m 40s
+edn_send_min_pct = 30
+edn_send_max_pct = 70
 edn_sends_per_tick = 1
 
 # ---------------------------------------------------------------------------
-# FAST TRADERS — Micro-transactions, no game
-# 5 agents, 2s/tick, 50% send, 2 sends/tick
-# PMS: 5 × 0.5 × 2 / 2 = 2.5 PMS tx/s
+# ACTIVE USERS — power players, 40% of active users, faster tick
+# 40 agents, 5s tick, 30% PMS send chance, 1 send/tick
+# PMS: 40 × 0.3 × 1 / 5 = 2.4 PMS tx/s
+# Cubes: same 6/min average — same cycle math but tick=5s, so 716 ticks/h
 # ---------------------------------------------------------------------------
 [[agents]]
-count = 5
-interval_ms = 2000
-name_prefix = "fast"
+count = 40
+interval_ms = 5000
+name_prefix = "active"
 
 [agents.behavior]
 type = "random"
-min_amount = 0.01
-max_amount = 0.5
-send_probability = 0.5
-sends_per_tick = 2
-
-# ---------------------------------------------------------------------------
-# MINERS — Game-only, no PMS sends, focus cubes
-# 5 agents, 2s/tick
-# EDN: edn_sends_per_tick = 2, cooldown = 10 (20s > 10s distrib)
-# ---------------------------------------------------------------------------
-[[agents]]
-count = 5
-interval_ms = 2000
-name_prefix = "miner"
-
-[agents.behavior]
-type = "random"
-min_amount = 0.01
-max_amount = 0.01
-send_probability = 0.0
+min_amount = 0.1
+max_amount = 10.0
+send_probability = 0.3
+sends_per_tick = 1
 
 [agents.game]
 enabled = true
 cubes_per_agent = 5
-cubes_remint_min = 80
-cubes_remint_max = 120
-edn_send_min_pct = 5.0
-edn_send_max_pct = 20.0
-burn_cooldown_ticks = 10
-edn_sends_per_tick = 2
-
-# ---------------------------------------------------------------------------
-# WHALES — Large amounts, infrequent + game
-# 3 agents, 10s/tick
-# PMS: 3 × 0.5 × 2 / 10 = 0.3 PMS tx/s
-# EDN: edn_sends_per_tick = 1, cooldown = 3 (30s > 10s distrib)
-# ---------------------------------------------------------------------------
-[[agents]]
-count = 3
-interval_ms = 10000
-name_prefix = "whale"
-
-[agents.behavior]
-type = "random"
-min_amount = 50.0
-max_amount = 200.0
-send_probability = 0.5
-sends_per_tick = 2
-
-[agents.game]
-enabled = true
-cubes_per_agent = 10
-cubes_remint_min = 80
-cubes_remint_max = 120
-edn_send_min_pct = 30.0
-edn_send_max_pct = 80.0
-burn_cooldown_ticks = 3
+cubes_remint_min = 350
+cubes_remint_max = 380
+burn_cooldown_ticks = 716   # 716 × 5s = 59m 40s — match casual cycle
+edn_send_min_pct = 30
+edn_send_max_pct = 70
 edn_sends_per_tick = 1
 
 # ---------------------------------------------------------------------------
-# SNIPERS — Fast micro-tx, systematic
-# 3 agents, 2s/tick, 100% send, 3 sends/tick
-# PMS: 3 × 1.0 × 3 / 2 = 4.5 PMS tx/s
+# SPAMMERS — adversarial flood, no game, fast micro-tx
+# 5 agents, 200ms tick, 100% probability, 2 sends/tick
+# Theoretical: 5 × 1.0 × 2 / 0.2 = 50 PMS tx/s attempted.
+# Reality: the engine's persist channel back-pressures around ~25-30 blk/s
+# total throughput, so spammers throttle themselves through send.await
+# blocking. They never crash the engine — just compete for slots.
+#
+# ⚠️  This validates the BP behaviour. It does NOT exercise the gateway
+#     rate-limiter (10K RPS, all spammers share the same docker IP) nor
+#     the validation rejection paths (signatures are valid, UTXOs are
+#     real). For true "blocked by DAG" testing (invalid sigs, double-
+#     spends, malformed payloads), see recommendation #3 in README.
 # ---------------------------------------------------------------------------
 [[agents]]
-count = 3
-interval_ms = 2000
-name_prefix = "sniper"
+count = 5
+interval_ms = 200
+name_prefix = "spammer"
 
 [agents.behavior]
 type = "random"
 min_amount = 0.001
-max_amount = 0.05
+max_amount = 0.01
 send_probability = 1.0
-sends_per_tick = 3
+sends_per_tick = 2
 
 # ---------------------------------------------------------------------------
-# SLOW SAVERS — Occasional large sends + game
-# 3 agents, 20s/tick
-# PMS: 3 × 0.3 × 2 / 20 = 0.09 PMS tx/s
-# EDN: edn_sends_per_tick = 2, cooldown = 2 (40s > 10s distrib)
+# OBSERVERS — passive monitoring (queries only)
+# 3 agents, 10s tick
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 3
-interval_ms = 20000
-name_prefix = "saver"
-
-[agents.behavior]
-type = "random"
-min_amount = 10.0
-max_amount = 50.0
-send_probability = 0.3
-sends_per_tick = 2
-
-[agents.game]
-enabled = true
-cubes_per_agent = 3
-cubes_remint_min = 80
-cubes_remint_max = 120
-edn_send_min_pct = 40.0
-edn_send_max_pct = 90.0
-burn_cooldown_ticks = 2
-edn_sends_per_tick = 2
-
-# ---------------------------------------------------------------------------
-# OBSERVERS — Passive monitoring
-# 2 agents, 5s/tick
-# ---------------------------------------------------------------------------
-[[agents]]
-count = 2
-interval_ms = 5000
+interval_ms = 10000
 name_prefix = "obs"
 
 [agents.behavior]
 type = "observer"
 
 # ---------------------------------------------------------------------------
-# COORDINATOR — Node wallet, sends 0.1-1 PMS every minute
-# 1 agent, 60s/tick, no faucet (funded by fees)
+# COORDINATOR — node wallet, occasional bookkeeping sends
+# 1 agent, 60s tick
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 1
