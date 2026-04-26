@@ -11,6 +11,7 @@ mod backends;
 mod helpers;
 pub mod history;
 pub mod key_encryption;
+pub mod shard_derivation;
 mod transaction;
 mod types;
 pub mod utils;
