@@ -85,8 +85,11 @@ async fn signed_block_goes_through_full_pipeline() -> Result<()> {
         "le DAG en RAM doit contenir le bloc inséré"
     );
 
-    // Finalité : vérifier accès sans panique
-    let f = dag.finality.read().unwrap();
+    // Finalité : vérifier accès sans panique. `dag.finality` migrated
+    // from std::sync::RwLock to parking_lot::RwLock in v0.7.2 (commit
+    // around 9b5ad2a) — parking_lot's read() returns the guard
+    // directly, no Result/unwrap needed.
+    let f = dag.finality.read();
     let _finalized: Vec<String> = f.finalized.iter().cloned().collect();
 
     Ok(())

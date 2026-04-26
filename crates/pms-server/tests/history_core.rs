@@ -153,7 +153,10 @@ fn history_core_filters_and_paginates() {
     let enc1 = EncryptedPayload {
         scheme: "x25519+aes256gcm".into(),
         key_version: 1,
-        aad: AAD { len_hint: 0 },
+        aad: AAD {
+            len_hint: 0,
+            binding: None,
+        },
         commitment: "c".into(),
         ciphertext_b64: "AA==".into(),
         recipients: vec![],
@@ -178,7 +181,10 @@ fn history_core_filters_and_paginates() {
     let enc2 = EncryptedPayload {
         scheme: "x25519+aes256gcm".into(),
         key_version: 1,
-        aad: AAD { len_hint: 0 },
+        aad: AAD {
+            len_hint: 0,
+            binding: None,
+        },
         commitment: "d".into(),
         ciphertext_b64: "AA==".into(),
         recipients: vec![],

@@ -74,6 +74,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
         tps_tracker: std::sync::Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
         contract_event_bus: None,
         contract_store: store.clone(),
+        compliance_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // 4) Insert Blocks manually into Store (to bypass validation/mining for speed)
@@ -82,7 +83,10 @@ async fn history_separation_test() -> anyhow::Result<()> {
     let enc_payload = EncryptedPayload {
         scheme: "x25519+aes256gcm".into(),
         key_version: 1,
-        aad: AAD { len_hint: 0 },
+        aad: AAD {
+            len_hint: 0,
+            binding: None,
+        },
         commitment: "c".into(),
         ciphertext_b64: "AA==".into(),
         recipients: vec![],
