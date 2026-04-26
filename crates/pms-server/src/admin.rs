@@ -247,6 +247,138 @@ pub async fn admin_rebuild_tips(
     }
 }
 
+/// POST /admin/purge-activity
+///
+/// Manual trigger for activity-index retention. Body:
+/// `{"before_days": <u64>}` (mandatory) — entries older than that are
+/// deleted from `addr_activity`, `addr_type_activity`, and
+/// `activity_items`. The corresponding background task already runs
+/// daily when `[health].activity_retention_days` is set; this endpoint
+/// lets an operator purge ad-hoc with a different cutoff (e.g. before
+/// a backup, before a disk-full incident). Audit follow-up to v0.7.4.
+pub async fn admin_purge_activity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+    let Some(before_days) = body.get("before_days").and_then(|v| v.as_u64()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing or invalid `before_days` (u64)" })),
+        );
+    };
+
+    let cutoff_ms = compute_cutoff_ms(before_days);
+    tracing::info!(
+        target = "activity_retention",
+        before_days,
+        cutoff_ms,
+        "[ADMIN] purge_activity_before requested"
+    );
+
+    let store = state.store.clone();
+    let result = tokio::task::spawn_blocking(move || store.purge_activity_before(cutoff_ms)).await;
+    match result {
+        Ok(Ok(stats)) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "action": "purge-activity",
+                "before_days": before_days,
+                "stats": stats,
+            })),
+        ),
+        Ok(Err(e)) => {
+            tracing::error!(target = "activity_retention", error = %e, "purge failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("purge failed: {e}") })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("purge task panicked: {e}") })),
+        ),
+    }
+}
+
+/// POST /admin/purge-compliance-log
+///
+/// Operator-only. Audit follow-up to v0.7.4. The compliance log holds
+/// freeze/seize/reverse actions and is regulatory data — there is NO
+/// background task that auto-purges it. This endpoint exists so the
+/// operator can prune the log AFTER an external archive step
+/// (regulatory retention windows are typically 5+ years; you do not
+/// want to discover during an audit that the log is gone). Body:
+/// `{"before_days": <u64>}`.
+pub async fn admin_purge_compliance_log(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+    let Some(before_days) = body.get("before_days").and_then(|v| v.as_u64()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing or invalid `before_days` (u64)" })),
+        );
+    };
+
+    let cutoff_ms = compute_cutoff_ms(before_days);
+    tracing::warn!(
+        target = "compliance_retention",
+        before_days,
+        cutoff_ms,
+        "[ADMIN] purge_compliance_log_before requested — REGULATORY DATA WILL BE REMOVED"
+    );
+
+    let store = state.store.clone();
+    let result =
+        tokio::task::spawn_blocking(move || store.purge_compliance_log_before(cutoff_ms)).await;
+    match result {
+        Ok(Ok(stats)) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "action": "purge-compliance-log",
+                "before_days": before_days,
+                "stats": stats,
+            })),
+        ),
+        Ok(Err(e)) => {
+            tracing::error!(target = "compliance_retention", error = %e, "purge failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("purge failed: {e}") })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("purge task panicked: {e}") })),
+        ),
+    }
+}
+
+/// Wall-clock - days, in milliseconds.
+fn compute_cutoff_ms(before_days: u64) -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    now.saturating_sub(before_days.saturating_mul(86_400_000) as i64)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ADMIN CONFIG API - Hot-Swap de la RuntimeConfig
 // ═══════════════════════════════════════════════════════════════════════════

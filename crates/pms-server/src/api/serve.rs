@@ -2,7 +2,7 @@
 
 use super::routes::build_api_router;
 use super::state::{AppState, FeePoolRefundSink};
-use super::tasks::{spawn_activity_backfill_task, spawn_fee_distributor_task, spawn_inflation_mint_task, spawn_metrics_sampler_task};
+use super::tasks::{spawn_activity_backfill_task, spawn_activity_retention_task, spawn_fee_distributor_task, spawn_inflation_mint_task, spawn_metrics_sampler_task};
 use crate::Server;
 use crate::api_keys;
 use crate::helper::resolve_admin_token;
@@ -237,6 +237,14 @@ pub async fn serve_api(
     // queue, fee pool, UTXO set size, and RocksDB write-stop signal.
     // ═══════════════════════════════════════════════════════════════════════
     spawn_metrics_sampler_task(state.clone());
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ACTIVITY RETENTION (audit follow-up, v0.7.4 post-launch) — daily
+    // sweep that bounds the size of addr_activity / addr_type_activity /
+    // activity_items CFs when [health].activity_retention_days is set.
+    // No-op when the knob is None (default).
+    // ═══════════════════════════════════════════════════════════════════════
+    spawn_activity_retention_task(state.clone());
 
     // ═══════════════════════════════════════════════════════════════════════
     // TPS LOGGER (periodic JSONL file — every 10 min)

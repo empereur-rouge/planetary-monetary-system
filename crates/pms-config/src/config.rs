@@ -338,6 +338,15 @@ pub struct HealthSettings {
     /// Default: `10.0` (i.e. flag at 10% free).
     #[serde(default = "default_min_disk_free_percent")]
     pub min_disk_free_percent: f64,
+    /// Retention window (in days) for the activity index CFs
+    /// (`addr_activity`, `addr_type_activity`, `activity_items`).
+    /// When set, a background task purges entries older than this
+    /// every 24 hours. `None` = unlimited (default; keeps the
+    /// pre-0.7.4 behaviour for existing deployments). Compliance log
+    /// is **not** auto-purged — operator-only via
+    /// `POST /admin/purge-compliance-log`. Audit follow-up to v0.7.4.
+    #[serde(default)]
+    pub activity_retention_days: Option<u64>,
 }
 
 impl Default for HealthSettings {
@@ -346,6 +355,7 @@ impl Default for HealthSettings {
             max_last_block_age_seconds: default_max_last_block_age_seconds(),
             persist_queue_high_water: default_persist_queue_high_water(),
             min_disk_free_percent: default_min_disk_free_percent(),
+            activity_retention_days: None,
         }
     }
 }

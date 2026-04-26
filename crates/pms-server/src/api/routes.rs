@@ -4,7 +4,8 @@ use super::ledger_dispatch::dynamic_ledger_handler;
 use super::middleware::{require_admin_token, require_api_key, require_local_or_admin, track_latency};
 use super::state::{sync_all_dag_size_metrics, sync_dag_size_metric, sync_dag_size_metric_for, AppState};
 use crate::admin::{
-    admin_compact, admin_get_config, admin_ping, admin_rebuild_tips, admin_reindex_activity,
+    admin_compact, admin_get_config, admin_ping, admin_purge_activity,
+    admin_purge_compliance_log, admin_rebuild_tips, admin_reindex_activity,
     admin_reindex_activity_items, admin_update_config,
 };
 use crate::api_fn::activity::{get_wallet_activity, stream_wallet_activity};
@@ -346,6 +347,12 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         // children_count when the `tips` CF has drifted (e.g. after a
         // crash between append_block_atomic and add_tip).
         .route("/admin/rebuild-tips", post(admin_rebuild_tips))
+        // Audit follow-up to v0.7.4: bounded retention for activity
+        // CFs (auto via [health].activity_retention_days OR manual via
+        // this endpoint) and operator-only manual purge of the
+        // regulatory compliance log.
+        .route("/admin/purge-activity", post(admin_purge_activity))
+        .route("/admin/purge-compliance-log", post(admin_purge_compliance_log))
         // Admin API Key CRUD endpoints
         .route("/admin/api-keys", post(admin_create_api_key))
         .route("/admin/api-keys", get(admin_list_api_keys))

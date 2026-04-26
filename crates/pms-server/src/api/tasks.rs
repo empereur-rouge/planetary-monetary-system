@@ -150,6 +150,99 @@ pub fn spawn_inflation_mint_task(state: AppState) {
     }
 }
 
+/// Spawns the activity-retention task (audit follow-up to v0.7.4).
+///
+/// When `[health].activity_retention_days` is set in the config, this
+/// task wakes every 24 hours, computes
+/// `cutoff = now - retention_days × 86400 × 1000`, and calls
+/// `RocksStore::purge_activity_before(cutoff)` so the
+/// `addr_activity` / `addr_type_activity` / `activity_items` CFs stay
+/// bounded over time.
+///
+/// `None` retention disables the task entirely (default — preserves
+/// pre-0.7.4 behaviour for existing deployments). The compliance log
+/// is intentionally NOT touched by this task: it's regulatory audit
+/// material and the operator must explicitly opt in via
+/// `POST /admin/purge-compliance-log`.
+pub fn spawn_activity_retention_task(state: AppState) {
+    let Some(retention_days) = state.settings.health.activity_retention_days else {
+        return;
+    };
+    if retention_days == 0 {
+        tracing::warn!(
+            target = "activity_retention",
+            "activity_retention_days = 0 ignored (would purge everything every day); \
+             set None to disable, or a positive integer for a real retention window"
+        );
+        return;
+    }
+
+    tokio::spawn(async move {
+        // First sweep happens 1h after boot — gives the engine time to
+        // settle before we add scan pressure on the activity CFs.
+        let initial_delay = Duration::from_secs(3600);
+        let interval_dur = Duration::from_secs(86_400); // 24h between sweeps
+
+        tracing::info!(
+            target = "activity_retention",
+            retention_days,
+            initial_delay_secs = initial_delay.as_secs(),
+            interval_secs = interval_dur.as_secs(),
+            "activity retention task started"
+        );
+
+        tokio::time::sleep(initial_delay).await;
+        let mut interval = tokio::time::interval(interval_dur);
+        // Consume the immediate first tick — we already slept above.
+        interval.tick().await;
+
+        loop {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let cutoff_ms = now_ms.saturating_sub(
+                (retention_days.saturating_mul(86_400_000)) as i64,
+            );
+
+            let store = state.store.clone();
+            let cutoff = cutoff_ms;
+            let result = tokio::task::spawn_blocking(move || {
+                store.purge_activity_before(cutoff)
+            })
+            .await;
+
+            match result {
+                Ok(Ok(stats)) => {
+                    tracing::info!(
+                        target = "activity_retention",
+                        scanned = stats.scanned,
+                        deleted = stats.deleted,
+                        cutoff_ms = stats.cutoff_ms,
+                        "activity retention sweep done"
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        target = "activity_retention",
+                        error = %e,
+                        "activity retention sweep FAILED — will retry on next interval"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target = "activity_retention",
+                        error = %e,
+                        "activity retention task panicked — will retry on next interval"
+                    );
+                }
+            }
+
+            interval.tick().await;
+        }
+    });
+}
+
 /// Spawns the metrics sampler (item 4, v0.7.4).
 ///
 /// Most operator-facing signals are gauges that can't be incremented from
