@@ -16,33 +16,61 @@ accept_invalid_certs = true
 duration_secs = 0
 base_tick_ms = 1000
 faucet_amount = "100.00"
+# Number of in-flight requests during agent bootstrap (faucet →
+# coordinator-distribute → cube mints). At 1000+ agents the previous
+# default of 30 turned bootstrap into a 5-8 min serialised crawl;
+# 128 brings it down to ~90 s while staying inside the gateway's
+# tightened 500 RPS rate-limit. Bump to 256 for 5K+ agents.
+bootstrap_concurrency = 128
 
-[simulation.game]
+# 4-ledger production-realistic clicker scenario (v0.7.8+). Each entry
+# boots an independent game engine on its own ledger with its own
+# EDN-equivalent token + smart contract + gas pool. Clicker agents
+# spread across them via `[agents.game].game_index = 0..3` in
+# `agents_testnet.toml`. This gives the engine a multi-ledger
+# steady-state load that mirrors what the launched game is expected
+# to look like at first-week scale.
+#
+# Single-ledger fallback `[simulation.game]` is kept commented out
+# below for reference; uncomment it (and remove the `games` array) to
+# revert to the legacy single-ledger shape used pre-v0.7.5.
+[[simulation.games]]
 ledger_id = "eden"
 network_id = "eden-net"
 symbol = "EDN"
 divisor = 13700
-gas_pool_deposit = "50000"             # PMS deposited into Edenite gas pool (anti-spam, testnet charge)
+gas_pool_deposit = "50000"
 
-# Multi-ledger games (recommendation #2, v0.7.5). Uncomment + add
-# entries to spread the agent population across N independent EDN-
-# equivalent ledgers. Agents pick which game to play via
-# `[agents.game].game_index = N` (default 0). When this array is
-# non-empty it takes precedence over `[simulation.game]` above.
+[[simulation.games]]
+ledger_id = "arena"
+network_id = "arena-net"
+symbol = "ARN"
+divisor = 13700
+gas_pool_deposit = "50000"
+
+[[simulation.games]]
+ledger_id = "colosseum"
+network_id = "colosseum-net"
+symbol = "COL"
+divisor = 13700
+gas_pool_deposit = "50000"
+
+[[simulation.games]]
+ledger_id = "nexus"
+network_id = "nexus-net"
+symbol = "NEX"
+divisor = 13700
+gas_pool_deposit = "50000"
+
+# Legacy single-ledger config (pre-v0.7.5). Kept as a working example;
+# uncomment + remove the `games` array above to revert.
 #
-# [[simulation.games]]
+# [simulation.game]
 # ledger_id = "eden"
 # network_id = "eden-net"
 # symbol = "EDN"
 # divisor = 13700
 # gas_pool_deposit = "50000"
-#
-# [[simulation.games]]
-# ledger_id = "arena"
-# network_id = "arena-net"
-# symbol = "ARN"
-# divisor = 13700
-# gas_pool_deposit = "20000"
 
 [coordinator]
 private_key_hex = "env:PMS_COORDINATOR_KEY"

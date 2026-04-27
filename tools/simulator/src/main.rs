@@ -280,11 +280,14 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     tracing::info!(
-        "Funding {} agents via coordinator ({} PMS each)...",
+        "Funding {} agents via coordinator ({} PMS each, concurrency: {})...",
         all_agents.len(),
-        config.simulation.faucet_amount
+        config.simulation.faucet_amount,
+        config.simulation.bootstrap_concurrency,
     );
-    let funder = agent::funder::Funder::new();
+    let funder = agent::funder::Funder::with_concurrency(
+        config.simulation.bootstrap_concurrency,
+    );
 
     // Build fund list with per-agent cubes_per_agent
     let fund_list: Vec<(String, types::WalletInfo, usize)> = all_agents

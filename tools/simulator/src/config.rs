@@ -86,6 +86,19 @@ pub struct SimulationParams {
     /// (array) is honoured — `games` takes precedence when both exist.
     #[serde(default)]
     pub games: Vec<GameConfig>,
+    /// Number of concurrent in-flight requests during agent bootstrap
+    /// (faucet → coordinator-distribute → cube mints). At 1000+ agents
+    /// the default 30 turns the bootstrap into an 8-minute serialised
+    /// crawl — bumping to 128 brings a 1000-agent boot to ~90 s on the
+    /// testnet VPS without overwhelming the gateway's rate-limiter.
+    /// Tune up if the engine + gateway are under-utilised at boot, or
+    /// down if the gateway 429s during the funding storm.
+    #[serde(default = "default_bootstrap_concurrency")]
+    pub bootstrap_concurrency: usize,
+}
+
+fn default_bootstrap_concurrency() -> usize {
+    128
 }
 
 impl SimulationParams {

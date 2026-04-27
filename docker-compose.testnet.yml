@@ -195,8 +195,15 @@ services:
   pms-simulator:
     image: pms-simulator:testnet
     container_name: pms-simulator-testnet
-    mem_limit: 512m
-    memswap_limit: 512m
+    # Production-realistic load (1000+ clicker agents across 4 game
+    # ledgers, v0.7.8+) lifts steady-state RSS to ~1-1.5 GiB during
+    # the bootstrap+mint storm and ~700 MiB after. The previous 512m
+    # OOM-killed within seconds at the 100-agent boot phase. 2g leaves
+    # comfortable headroom for the per-agent cube_id Vecs (360 strings
+    # × 1000 agents × 64 chars ≈ 23 MiB raw, plus tokio task stacks
+    # at ~2 MiB × 1000 ≈ 2 GiB worst case if every agent is in flight).
+    mem_limit: 2g
+    memswap_limit: 2g
     logging:
       driver: json-file
       options:

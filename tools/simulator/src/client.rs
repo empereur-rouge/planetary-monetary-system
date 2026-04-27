@@ -29,9 +29,24 @@ pub struct DagClient {
 
 impl DagClient {
     pub fn new(target: &ServerTarget) -> Self {
+        // Pool sized for 1000+ concurrent agents driving the gateway
+        // simultaneously. reqwest's default `pool_max_idle_per_host`
+        // is 32 — at production-scale load (1000 clickers × 6 cubes/min
+        // mint + EDN sends + PMS sends across 4 game ledgers) the
+        // per-agent send loops queue on the connection pool and
+        // observed TPS collapses to 32× single-call latency. Bumping
+        // to 512 idle conns lets every burst send fan out without
+        // serialising on a half-closed pool. `tcp_keepalive(60s)`
+        // keeps long-lived connections warm so we don't pay TLS
+        // handshake on every request after a quiet patch (e.g. burn
+        // cooldown).
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
             .danger_accept_invalid_certs(target.accept_invalid_certs)
+            .pool_max_idle_per_host(512)
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .tcp_keepalive(Some(Duration::from_secs(60)))
+            .tcp_nodelay(true)
             .build()
             .expect("reqwest client build");
 

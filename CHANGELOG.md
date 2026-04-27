@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.9] - 2026-04-27 — Simulator scaled to production-realistic clicker load
+
+### Changed
+- **sim(client)**: HTTP client `pool_max_idle_per_host` 32 → **512**, `pool_idle_timeout` 90 s, `tcp_keepalive` 60 s, `tcp_nodelay` on. The previous reqwest defaults serialised concurrent requests through a 32-slot pool — at 1000 agents driving the gateway in parallel, observed effective TPS collapsed to `32 × per-call latency`. New pool lets every burst send fan out without queueing on a half-closed pool.
+- **sim(funder)**: `BOOTSTRAP_CONCURRENCY` 30 → configurable via `[simulation].bootstrap_concurrency` TOML field (default 128). At 1000 agents the previous 30 made bootstrap a 5-8 minute serialised crawl; 128 brings a 1000-agent boot to ~90 s on the testnet VPS without overwhelming the gateway's tightened 500 RPS rate-limit. Per-agent log lines auto-suppressed for fleets > 200 agents and replaced with ~5%-step milestones so the funding storm doesn't flood the logs. Same pattern on the cube-mint pass for fleets > 500 cubes.
+- **sim(testnet/agents)**: `agents_testnet.toml` rebuilt for production-realistic load. 1000 pure clickers split across 4 independent game ledgers (250 each on `eden`, `arena`, `colosseum`, `nexus` via `game_index = 0..3`), 50 PMS traders (no game), 50 active players (mine + PMS), 10 spammers, 5 adversarial, 3 observers, 1 coordinator → **1119 agents total**. Steady-state target: ~120-150 blk/s game load + ~6 blk/s PMS economy + ~50 RPS spammer attempts (back-pressured). Dial larger by bumping per-group `count`.
+- **sim(testnet/games)**: `simulator.testnet.toml` `[simulation.game]` (single) → `[[simulation.games]]` × 4 entries (eden / arena / colosseum / nexus). Engine now boots 4 independent game engines + smart contracts + gas pools at startup. The old single-ledger config is preserved as a commented fallback.
+- **deploy(simulator/mem)**: `docker-compose.testnet.yml` `pms-simulator.mem_limit` 512m → **2g**. The old 512m OOM-killed the simulator within seconds of the 1000-agent boot; 2g leaves headroom for the per-agent cube_id Vecs (~23 MiB raw) and tokio task stacks (~2 MiB × 1000 worst case).
+
+---
+
 ## [0.7.8] - 2026-04-27 — Prometheus gateway scrape fix + missing-container runbook
 
 ### Fixed

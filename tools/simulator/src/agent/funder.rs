@@ -8,10 +8,12 @@ use crate::types::{
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 
-/// Max concurrent API calls during bootstrap
-const BOOTSTRAP_CONCURRENCY: usize = 30;
+/// Default max concurrent API calls during bootstrap. Overridden via
+/// `[simulation].bootstrap_concurrency` — see `Funder::with_concurrency`.
+pub const DEFAULT_BOOTSTRAP_CONCURRENCY: usize = 128;
 
 /// Bootstrap funder: coordinator-based PMS distribution + optional cube NFT minting.
 ///
@@ -19,11 +21,25 @@ const BOOTSTRAP_CONCURRENCY: usize = 30;
 /// 1. Faucet a large sum to the coordinator wallet
 /// 2. Coordinator sends `faucet_amount` PMS to each agent via send_simple
 /// 3. Optionally mint cube NFTs for game-enabled agents
-pub struct Funder;
+pub struct Funder {
+    concurrency: usize,
+}
 
 impl Funder {
     pub fn new() -> Self {
-        Self
+        Self {
+            concurrency: DEFAULT_BOOTSTRAP_CONCURRENCY,
+        }
+    }
+
+    /// Build a funder with a custom concurrency cap. At 1000+ agents
+    /// the default 128 boots in ~90 s; lower values keep the gateway
+    /// rate-limiter happy if it's tightly tuned, higher values shave
+    /// boot time when the gateway can absorb the storm.
+    pub fn with_concurrency(concurrency: usize) -> Self {
+        Self {
+            concurrency: concurrency.max(1),
+        }
     }
 
     /// Fund all agents via coordinator distribution, then mint cube NFTs in parallel.
@@ -62,10 +78,13 @@ impl Funder {
             "Phase 1/2: Coordinator distributing {} PMS to {} agents ({}x concurrent)...",
             faucet_amount,
             agents.len(),
-            BOOTSTRAP_CONCURRENCY
+            self.concurrency
         );
-        let sem = Arc::new(Semaphore::new(BOOTSTRAP_CONCURRENCY));
+        let sem = Arc::new(Semaphore::new(self.concurrency));
+        let progress = Arc::new(AtomicUsize::new(0));
+        let total_agents = agents.len();
         let mut send_tasks = Vec::with_capacity(agents.len());
+        let log_per_n_agents = total_agents.max(100) / 20; // ~5% steps, min 5
 
         for (name, wallet, _) in agents {
             let client = client.clone();
@@ -75,6 +94,7 @@ impl Funder {
             let metrics_tx = metrics_tx.clone();
             let sem = sem.clone();
             let coord_key = coordinator_wallet.private_key_b64.clone();
+            let progress = progress.clone();
 
             send_tasks.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
@@ -85,12 +105,26 @@ impl Funder {
                     asset_id: None,
                 }).await?;
                 let block_id = resp.data.block_id.unwrap_or_default();
-                tracing::info!(
-                    "[coordinator → {}] Sent {} PMS (block {})",
-                    name,
-                    amount,
-                    &block_id[..16.min(block_id.len())]
-                );
+                let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+                // Emit per-agent log line only at small fleet sizes
+                // (otherwise a 1000-agent fleet floods the log with
+                // redundant lines). Bigger fleets get coarse progress
+                // milestones every ~5%.
+                if total_agents <= 200 {
+                    tracing::info!(
+                        "[coordinator → {}] Sent {} PMS (block {})",
+                        name,
+                        amount,
+                        &block_id[..16.min(block_id.len())]
+                    );
+                } else if done % log_per_n_agents == 0 || done == total_agents {
+                    tracing::info!(
+                        "Coordinator funding progress: {}/{} ({:.0}%)",
+                        done,
+                        total_agents,
+                        (done as f64 / total_agents as f64) * 100.0
+                    );
+                }
                 let _ = metrics_tx.try_send(MetricEvent::AgentFunded {
                     agent_name: name,
                     amount,
@@ -154,7 +188,7 @@ impl Funder {
                 "Phase 2/2: Minting {} cubes for {} agents ({}x concurrent)...",
                 total_cubes,
                 agents.iter().filter(|(_, _, c)| *c > 0).count(),
-                BOOTSTRAP_CONCURRENCY
+                self.concurrency
             );
 
             // Get the game_client from game engine (admin auth for custom ledger minting)
@@ -164,8 +198,10 @@ impl Funder {
             drop(ge);
 
             // Fire concurrent mint_nft calls
-            let sem = Arc::new(Semaphore::new(BOOTSTRAP_CONCURRENCY));
+            let sem = Arc::new(Semaphore::new(self.concurrency));
             let mut mint_tasks = Vec::with_capacity(total_cubes);
+            let mint_progress = Arc::new(AtomicUsize::new(0));
+            let mint_log_step = total_cubes.max(100) / 20;
 
             for (agent_name, owner_addr, owner_x25519, token_id, attrs) in &cube_specs {
                 let client = game_client.clone();
@@ -175,6 +211,7 @@ impl Funder {
                 let attrs = attrs.clone();
                 let agent_name = agent_name.clone();
                 let sem = sem.clone();
+                let mint_progress = mint_progress.clone();
 
                 mint_tasks.push(tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
@@ -198,13 +235,23 @@ impl Funder {
                     }).await?;
 
                     let reward = attrs.edenite_reward(divisor);
-                    tracing::info!(
-                        "[{}] Minted [{}] cube {} → {:.10} EDN",
-                        agent_name,
-                        rarity_label,
-                        &token_id[..16],
-                        reward,
-                    );
+                    let done = mint_progress.fetch_add(1, Ordering::Relaxed) + 1;
+                    if total_cubes <= 500 {
+                        tracing::info!(
+                            "[{}] Minted [{}] cube {} → {:.10} EDN",
+                            agent_name,
+                            rarity_label,
+                            &token_id[..16],
+                            reward,
+                        );
+                    } else if done % mint_log_step == 0 || done == total_cubes {
+                        tracing::info!(
+                            "Cube mint progress: {}/{} ({:.0}%)",
+                            done,
+                            total_cubes,
+                            (done as f64 / total_cubes as f64) * 100.0
+                        );
+                    }
                     Ok::<_, crate::error::SimError>(())
                 }));
             }
