@@ -93,6 +93,11 @@ impl RocksStore {
         // parent selection. by_time/id2ts grow unbounded for activity API.
         self.maybe_trim_tips()?;
 
+        // Record this id in the recent-blocks Bloom so the batch-append
+        // dedup path can skip the LSM read for it next time it sees the
+        // same id (genuine duplicate).
+        self.recent_blocks_bloom.write().insert(b.id.as_bytes());
+
         Ok(true)
     }
 

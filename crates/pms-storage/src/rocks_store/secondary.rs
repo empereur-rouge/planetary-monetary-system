@@ -43,6 +43,13 @@ impl RocksStore {
             append_us_build: std::sync::atomic::AtomicU64::new(0),
             append_us_write: std::sync::atomic::AtomicU64::new(0),
             append_us_trim: std::sync::atomic::AtomicU64::new(0),
+            recent_blocks_bloom: parking_lot::RwLock::new(
+                super::recent_blocks_bloom::RecentBlocksBloom::new(
+                    Self::BLOOM_CAPACITY_PER_SEGMENT,
+                ),
+            ),
+            bloom_skips: std::sync::atomic::AtomicU64::new(0),
+            bloom_hits: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -125,6 +132,13 @@ impl RocksStore {
             append_us_build: std::sync::atomic::AtomicU64::new(0),
             append_us_write: std::sync::atomic::AtomicU64::new(0),
             append_us_trim: std::sync::atomic::AtomicU64::new(0),
+            recent_blocks_bloom: parking_lot::RwLock::new(
+                super::recent_blocks_bloom::RecentBlocksBloom::new(
+                    Self::BLOOM_CAPACITY_PER_SEGMENT,
+                ),
+            ),
+            bloom_skips: std::sync::atomic::AtomicU64::new(0),
+            bloom_hits: std::sync::atomic::AtomicU64::new(0),
         })
     }
 }

@@ -87,6 +87,17 @@ pub struct RocksStore {
     pub append_us_build: std::sync::atomic::AtomicU64,
     pub append_us_write: std::sync::atomic::AtomicU64,
     pub append_us_trim: std::sync::atomic::AtomicU64,
+    /// Rotating Bloom filter of recently persisted block IDs. Fronts
+    /// the `multi_get_cf` dedup lookup in `append_blocks_batch` —
+    /// negative answers (after warm-up) skip the LSM read entirely.
+    /// See `recent_blocks_bloom.rs` for sizing and correctness notes.
+    pub(crate) recent_blocks_bloom: parking_lot::RwLock<
+        super::recent_blocks_bloom::RecentBlocksBloom,
+    >,
+    /// Counters of bloom outcomes since boot, exported by the metrics
+    /// sampler as `pms_persist_bloom_*_total`.
+    pub bloom_skips: std::sync::atomic::AtomicU64,
+    pub bloom_hits: std::sync::atomic::AtomicU64,
 }
 
 /// RocksDB memory tuning parameters, extracted from `[rocks]` config.
@@ -407,8 +418,28 @@ impl RocksStore {
             append_us_build: std::sync::atomic::AtomicU64::new(0),
             append_us_write: std::sync::atomic::AtomicU64::new(0),
             append_us_trim: std::sync::atomic::AtomicU64::new(0),
+            recent_blocks_bloom: parking_lot::RwLock::new(
+                super::recent_blocks_bloom::RecentBlocksBloom::new(
+                    Self::BLOOM_CAPACITY_PER_SEGMENT,
+                ),
+            ),
+            bloom_skips: std::sync::atomic::AtomicU64::new(0),
+            bloom_hits: std::sync::atomic::AtomicU64::new(0),
         })
     }
+
+    /// Per-segment capacity for the recent-blocks Bloom filter. Total
+    /// RAM ≈ 2 × capacity × 10 bits ÷ 8 = capacity × 2.5 bytes. With
+    /// 5M entries → ≈12 MB total. At 350 blk/s sustained that's a
+    /// ~4-hour rotation window — long enough to absorb any back-fill
+    /// that lands in the consumer queue minutes after a block was
+    /// first inserted.
+    pub const BLOOM_CAPACITY_PER_SEGMENT: usize = 5_000_000;
+
+    /// How many of the newest block IDs to walk into the bloom on
+    /// startup. Capped so warming doesn't dominate boot time on a
+    /// 20M-block DB. With ~1 µs per insert, 2M = ~2s.
+    pub const BLOOM_WARMUP_LIMIT: usize = 2_000_000;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Multi-Ledger: shared DB with multiple prefixes
@@ -557,6 +588,13 @@ impl RocksStore {
             append_us_build: std::sync::atomic::AtomicU64::new(0),
             append_us_write: std::sync::atomic::AtomicU64::new(0),
             append_us_trim: std::sync::atomic::AtomicU64::new(0),
+            recent_blocks_bloom: parking_lot::RwLock::new(
+                super::recent_blocks_bloom::RecentBlocksBloom::new(
+                    Self::BLOOM_CAPACITY_PER_SEGMENT,
+                ),
+            ),
+            bloom_skips: std::sync::atomic::AtomicU64::new(0),
+            bloom_hits: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -579,6 +617,12 @@ impl RocksStore {
         // 3. store
         self.db.put_cf(&cf_blocks, key, json)?;
         self.db.put_cf(&cf_idx, key, b"")?;
+
+        // Record in the recent-blocks Bloom — `put_block` is on the
+        // bootstrap / replay path; without this, a replay-then-batch
+        // sequence could classify the just-inserted id as "definitely
+        // new" and double-write.
+        self.recent_blocks_bloom.write().insert(key);
 
         Ok(PutResult::Inserted)
     }

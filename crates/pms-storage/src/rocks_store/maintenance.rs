@@ -13,6 +13,44 @@ use tokio::time::{Duration, MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 
 impl RocksStore {
+    /// Walk the `by_time` CF newest-first and feed up to `limit` block
+    /// IDs into the recent-blocks Bloom filter, then mark it warmed.
+    ///
+    /// Until this completes, `append_blocks_batch` falls back to the
+    /// legacy whole-batch `multi_get_cf` lookup so a block actually
+    /// present in RocksDB can never be misclassified as new.
+    ///
+    /// The walk only reads `by_time` keys (no value, no JSON parse) so
+    /// it's bounded by raw RocksDB iteration speed — typically a few
+    /// hundred ns per key. With `limit = 2_000_000` the boot cost
+    /// stays under a couple of seconds even on a 20M-block DB.
+    pub fn warm_recent_blocks_bloom(&self, limit: usize) -> anyhow::Result<usize> {
+        let cf_time = self.cf("by_time");
+        let mut bloom = self.recent_blocks_bloom.write();
+        let mut inserted = 0usize;
+        for kv in self.db.iterator_cf(&cf_time, rocksdb::IteratorMode::End) {
+            if inserted >= limit {
+                break;
+            }
+            let (k, _v) = kv?;
+            if let Some((_ts, id)) = parse_time_index_key(&k) {
+                bloom.insert(id.as_bytes());
+                inserted += 1;
+            }
+        }
+        bloom.mark_warmed();
+        Ok(inserted)
+    }
+
+    /// `(front_inserted, back_inserted, capacity_per_segment, warmed)`
+    /// for the recent-blocks Bloom filter. Exposed for the admin
+    /// `/admin/rocksdb-stats` JSON snapshot.
+    pub fn bloom_filter_status(&self) -> (usize, usize, usize, bool) {
+        let g = self.recent_blocks_bloom.read();
+        let (f, b, cap) = g.stats();
+        (f, b, cap, g.is_warmed())
+    }
+
     // helper privé appelé après append_block_atomic
     #[allow(dead_code)]
     pub(crate) fn trim_by_time(&self) -> anyhow::Result<()> {

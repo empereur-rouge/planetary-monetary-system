@@ -123,3 +123,27 @@ pub static PERSIST_CONSUMER_BLOCKS: Lazy<IntCounter> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+/// Number of dedup checks that the in-RAM Bloom filter answered
+/// authoritatively negative — i.e. the block_id was definitely not
+/// in RocksDB so the consumer skipped the LSM read entirely. The
+/// dominant outcome under steady state once warmed.
+pub static PERSIST_BLOOM_SKIPS: Lazy<IntCounter> = Lazy::new(|| {
+    prometheus::register_int_counter!(
+        "pms_persist_bloom_skips_total",
+        "Dedup checks resolved by the bloom (LSM read skipped)"
+    )
+    .unwrap()
+});
+
+/// Number of dedup checks where the Bloom filter returned a positive
+/// (and the consumer therefore had to confirm via `multi_get_cf`).
+/// Most of these are actual duplicates from network-level redelivery
+/// or producer races; the rest are false positives (≈0.8% by design).
+pub static PERSIST_BLOOM_HITS: Lazy<IntCounter> = Lazy::new(|| {
+    prometheus::register_int_counter!(
+        "pms_persist_bloom_hits_total",
+        "Dedup checks where the bloom said 'maybe' and triggered a fallback multi_get_cf"
+    )
+    .unwrap()
+});

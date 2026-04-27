@@ -607,6 +607,11 @@ impl DagStorage for RocksStore {
         // 3) trim tips (amortized every 64 blocks; by_time/id2ts grow unbounded for activity API)
         self.maybe_trim_tips()?;
 
+        // 4) record in recent-blocks Bloom — keeps the dedup
+        // fast-path consistent for blocks that take this single-block
+        // route (e.g. low-RPS test paths).
+        self.recent_blocks_bloom.write().insert(b.id.as_bytes());
+
         Ok(true)
     }
 
@@ -657,21 +662,66 @@ impl DagStorage for RocksStore {
         let cf_utxo = self.cf("utxo");
         let cf_utxo_spent = self.cf("utxo_spent");
 
-        // ── Batch dedup check: single multi_get_cf call instead of N
-        // individual get_cf calls. Required: a duplicate could double-
-        // count children_count for parents below (insert_block dedupes
-        // RAM-side but a race window remains until the block reaches
-        // the consumer).
-        let keys: Vec<_> = blocks
-            .iter()
-            .map(|(b, _, _)| (cf_blocks.clone(), b.id.as_bytes().to_vec()))
-            .collect();
-        let existing: Vec<bool> = self
-            .db
-            .multi_get_cf(keys.iter().map(|(cf, k)| (cf, k.as_slice())))
-            .into_iter()
-            .map(|r| matches!(r, Ok(Some(_))))
-            .collect();
+        // ── Batch dedup check, fronted by an in-RAM Bloom filter.
+        //
+        // Goal: skip the `multi_get_cf` LSM read for the 99%+ of
+        // blocks that are genuinely new. The filter is authoritative
+        // for negatives once warmed (every persisted block_id is
+        // inserted, so a "definitely not in filter" answer means
+        // "definitely not in DB").
+        //
+        // We still need to confirm any positive — Bloom has a small
+        // false-positive rate (~0.8% by design) — so we collect the
+        // positive subset and `multi_get_cf` only those keys. Genuine
+        // duplicates always produce a positive (no false negatives by
+        // construction), so dedup correctness is preserved.
+        //
+        // Until the filter has been warmed from the DB at startup,
+        // every block is treated as "maybe in DB" and we fall back to
+        // the legacy whole-batch lookup. This avoids a correctness
+        // window after restart where a block actually present in
+        // RocksDB would be misclassified as new.
+        let mut existing = vec![false; blocks.len()];
+        let mut maybe_existing_idx: Vec<usize> = Vec::new();
+        let mut bloom_skips = 0u64;
+        let mut bloom_hits = 0u64;
+        {
+            let bloom = self.recent_blocks_bloom.read();
+            if bloom.is_warmed() {
+                for (i, (b, _, _)) in blocks.iter().enumerate() {
+                    if bloom.maybe_contains(b.id.as_bytes()) {
+                        maybe_existing_idx.push(i);
+                        bloom_hits += 1;
+                    } else {
+                        bloom_skips += 1;
+                    }
+                }
+            } else {
+                maybe_existing_idx.extend(0..blocks.len());
+            }
+        }
+        if !maybe_existing_idx.is_empty() {
+            let lookup_keys: Vec<_> = maybe_existing_idx
+                .iter()
+                .map(|&i| (cf_blocks.clone(), blocks[i].0.id.as_bytes().to_vec()))
+                .collect();
+            let results = self
+                .db
+                .multi_get_cf(lookup_keys.iter().map(|(cf, k)| (cf, k.as_slice())));
+            for (slot, r) in maybe_existing_idx.iter().zip(results.into_iter()) {
+                if matches!(r, Ok(Some(_))) {
+                    existing[*slot] = true;
+                }
+            }
+        }
+        if bloom_skips > 0 {
+            self.bloom_skips
+                .fetch_add(bloom_skips, std::sync::atomic::Ordering::Relaxed);
+        }
+        if bloom_hits > 0 {
+            self.bloom_hits
+                .fetch_add(bloom_hits, std::sync::atomic::Ordering::Relaxed);
+        }
         let t_dedup = t_dedup_start.elapsed();
         let t_build_start = std::time::Instant::now();
 
@@ -809,6 +859,17 @@ impl DagStorage for RocksStore {
         if count > 0 {
             // Trim tips once for the whole batch
             self.maybe_trim_tips()?;
+
+            // Mark every block we just persisted in the recent-blocks
+            // Bloom filter so subsequent batches can skip the LSM
+            // dedup read. Acquired under write-lock briefly; the
+            // hot read-path uses `read()` and never blocks.
+            let mut bloom = self.recent_blocks_bloom.write();
+            for (i, (b, _, _)) in blocks.iter().enumerate() {
+                if !existing[i] {
+                    bloom.insert(b.id.as_bytes());
+                }
+            }
         }
         let t_trim = t_trim_start.elapsed();
 

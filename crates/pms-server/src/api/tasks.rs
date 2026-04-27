@@ -272,6 +272,12 @@ pub fn spawn_metrics_sampler_task(state: AppState) {
         // settle and avoids reporting transient zero values.
         interval.tick().await;
 
+        // Per-ledger memory of the previous bloom counter values so
+        // we can convert the per-store cumulative atomics into the
+        // global Prometheus IntCounters with correct deltas.
+        let mut prev_bloom: std::collections::HashMap<String, (u64, u64)> =
+            std::collections::HashMap::new();
+
         loop {
             interval.tick().await;
 
@@ -281,6 +287,8 @@ pub fn spawn_metrics_sampler_task(state: AppState) {
                 &*state.srv.adapter_arc(),
                 &state.fee_pool,
                 state.store.is_write_stopped(),
+                &state.store,
+                &mut prev_bloom,
             )
             .await;
 
@@ -299,6 +307,8 @@ pub fn spawn_metrics_sampler_task(state: AppState) {
                         &*instance.adapter,
                         &pool,
                         instance.store.is_write_stopped(),
+                        &instance.store,
+                        &mut prev_bloom,
                     )
                     .await;
                 }
@@ -314,11 +324,14 @@ async fn sample_ledger(
     adapter: &(dyn pms_interface::NetDagAdapter + 'static),
     fee_pool: &crate::fee_pool::SharedFeePool,
     is_write_stopped: Option<bool>,
+    store: &pms_storage::rocks_store::store::RocksStore,
+    prev_bloom: &mut std::collections::HashMap<String, (u64, u64)>,
 ) {
     use crate::metrics::{
         FEE_POOL_TOTAL, PERSIST_QUEUE_CAPACITY, PERSIST_QUEUE_DEPTH,
         ROCKSDB_WRITE_STALLED_SECONDS, UTXO_SET_SIZE,
     };
+    use std::sync::atomic::Ordering;
 
     // Persist queue gauges. `None` from the adapter means the backend
     // doesn't expose this introspection (e.g. mock adapters in tests);
@@ -351,6 +364,23 @@ async fn sample_ledger(
     if matches!(is_write_stopped, Some(true)) {
         ROCKSDB_WRITE_STALLED_SECONDS.inc_by(5);
     }
+
+    // Bloom filter outcome counters. The per-store atomics are
+    // monotonic; we publish the delta against our last sample to feed
+    // the global Prometheus IntCounter (which is also monotonic).
+    let cur_skips = store.bloom_skips.load(Ordering::Relaxed);
+    let cur_hits = store.bloom_hits.load(Ordering::Relaxed);
+    let (prev_s, prev_h) = prev_bloom
+        .get(ledger_id)
+        .copied()
+        .unwrap_or((0, 0));
+    if cur_skips > prev_s {
+        pms_core::metrics::PERSIST_BLOOM_SKIPS.inc_by(cur_skips - prev_s);
+    }
+    if cur_hits > prev_h {
+        pms_core::metrics::PERSIST_BLOOM_HITS.inc_by(cur_hits - prev_h);
+    }
+    prev_bloom.insert(ledger_id.to_string(), (cur_skips, cur_hits));
 }
 
 /// Spawns the auto UTXO-consolidation task (recommendation #5, v0.7.5).

@@ -55,6 +55,25 @@ impl LedgerInstance {
             .ensure_column_families()
             .with_context(|| format!("ensure_column_families for ledger '{}'", def.id))?;
 
+        // Warm the recent-blocks Bloom filter from the `by_time` CF so
+        // the persist consumer's dedup fast-path is correct from the
+        // first block. Cost is bounded by `BLOOM_WARMUP_LIMIT` newest
+        // keys; on a fresh DB this is a no-op that just flips the
+        // `warmed` flag.
+        let warm_started = std::time::Instant::now();
+        match store.warm_recent_blocks_bloom(RocksStore::BLOOM_WARMUP_LIMIT) {
+            Ok(n) => tracing::info!(
+                ledger = %def.id,
+                inserted = n,
+                elapsed_ms = warm_started.elapsed().as_millis() as u64,
+                "Recent-blocks Bloom warmed"
+            ),
+            Err(e) => tracing::warn!(
+                ledger = %def.id,
+                "warm_recent_blocks_bloom failed (dedup will use slow path): {e}"
+            ),
+        }
+
         store
             .ensure_schema()
             .await

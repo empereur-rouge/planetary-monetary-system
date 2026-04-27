@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.7] - 2026-04-27 — Recent-blocks Bloom filter eliminates LSM dedup growth
+
+### Performance
+- **storage(bloom-dedup)**: New in-RAM rotating Bloom filter fronts the `multi_get_cf` dedup lookup in `append_blocks_batch`. Before this change, the dedup sub-stage owned ~47% of consumer time after 11h of testnet traffic (189 µs/block) and grew sub-linearly with the DB size as parent block IDs aged out of the memtable into L0 SSTs. The filter answers the negative side authoritatively (every persisted block_id is inserted, so "definitely not in filter" → "definitely not in DB"); positives fall back to the existing `multi_get_cf` so correctness is preserved. Two-segment rotation caps RAM at ≈12 MB total (5M entries × 10 bits × 2 segments) and gives at least one full capacity window of recent IDs queryable. `[storage] recent_blocks_bloom.rs` (≈225 lines) + 4 unit tests (no false negatives, FPR < 2%, rotation preserves recents, warmed flag). Wired into both `RocksStore::new` and `from_shared_db` constructors plus the `secondary` read-only one. Inserts also fire from the single-block atomic paths (`append_block_atomic`, `append_block_atomic_with_utxo`, `put_block`) so low-RPS test paths stay consistent.
+- **storage(bloom-warmup)**: `RocksStore::warm_recent_blocks_bloom(limit)` walks `cf_by_time` newest-first (key-only, no JSON parse) and feeds up to `BLOOM_WARMUP_LIMIT = 2_000_000` block IDs into the filter at boot, then flips the `warmed` flag. Until warmed, every block falls back to the legacy whole-batch `multi_get_cf` so a block actually present in RocksDB can never be misclassified as new. Called once per ledger from `LedgerInstance::bootstrap`. Cost on a 20M-block DB: ≈2 s for 2M keys (RocksDB-iterator-bound, not hash-bound).
+
+### Added
+- **server(bloom-metrics)**: `pms_persist_bloom_skips_total` (LSM read skipped — the dominant outcome under steady state) and `pms_persist_bloom_hits_total` (bloom said "maybe", fallback `multi_get_cf` fired) IntCounters in `pms-core::metrics`. Per-ledger atomics on `RocksStore` (`bloom_skips`, `bloom_hits`) feed the global counters via the metrics sampler at 5 s cadence. Same reading also surfaced in `/admin/rocksdb-stats` JSON snapshot (`bloom_skips_total`, `bloom_hits_total`, `bloom_front_inserted`, `bloom_back_inserted`, `bloom_capacity_per_segment`, `bloom_warmed`) so the operator can watch saturation + skip ratio without Prometheus.
+
+### Validation
+- `cargo check -p pms-storage -p pms-ledger -p pms-server` clean.
+- `cargo test -p pms-storage --lib recent_blocks_bloom` 4/4 green; full storage lib suite 36/36 green.
+- `cargo test --release -p pms-server --test dag_sandbox test_edn_transfer_fee_flow` and `test_tps_degradation_profile` green — TPS profile shows degradation peak→last 14.5% over 90 s + 2.5M UTXO growth, no longer correlated with dedup (sub-stage stayed flat).
+
+---
+
 ## [0.7.6] - 2026-04-26 — Simulator hardening: 7 ROI-ranked recommendations
 
 ### Added

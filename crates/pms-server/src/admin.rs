@@ -433,6 +433,10 @@ pub async fn admin_rocksdb_stats(
         let append_build = store.append_us_build.load(Ordering::Relaxed);
         let append_write = store.append_us_write.load(Ordering::Relaxed);
         let append_trim = store.append_us_trim.load(Ordering::Relaxed);
+        let bloom_skips = store.bloom_skips.load(Ordering::Relaxed);
+        let bloom_hits = store.bloom_hits.load(Ordering::Relaxed);
+        let (bloom_front, bloom_back, bloom_capacity, bloom_warmed) =
+            store.bloom_filter_status();
 
         json!({
             "num_files_at_level0": read_u64("rocksdb.num-files-at-level0"),
@@ -450,6 +454,12 @@ pub async fn admin_rocksdb_stats(
             "append_us_build": append_build,
             "append_us_write": append_write,
             "append_us_trim": append_trim,
+            "bloom_skips_total": bloom_skips,
+            "bloom_hits_total": bloom_hits,
+            "bloom_front_inserted": bloom_front,
+            "bloom_back_inserted": bloom_back,
+            "bloom_capacity_per_segment": bloom_capacity,
+            "bloom_warmed": bloom_warmed,
         })
     })
     .await;
