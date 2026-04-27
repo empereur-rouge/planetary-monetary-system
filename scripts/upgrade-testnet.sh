@@ -393,6 +393,19 @@ printf '%s' "$ADMIN_TOKEN" > secrets/prometheus_admin_token
 # comment for the full rationale.
 chmod 644 secrets/prometheus_admin_token
 
+# Telegram bot token for Alertmanager. The container expects a
+# readable file at /etc/alertmanager/telegram_bot_token; if the
+# operator hasn't created secrets/telegram_bot_token, write a
+# placeholder so the bind-mount succeeds and alertmanager starts
+# clean. Until the placeholder is replaced with a real token from
+# @BotFather + chat_id is set in alertmanager.yml, alerts route to
+# the `null` receiver (silently dropped) — see
+# documentation/runbooks/alerting.md.
+if [ ! -s secrets/telegram_bot_token ]; then
+    printf '%s' 'PLACEHOLDER_PASTE_BOT_TOKEN_FROM_BOTFATHER_HERE' > secrets/telegram_bot_token
+fi
+chmod 644 secrets/telegram_bot_token
+
 # Clean stale Docker Compose state (ghost container fix).
 # Docker Compose v2 can desync with containerd, leaving phantom container
 # references that cause "No such container" errors on recreate.

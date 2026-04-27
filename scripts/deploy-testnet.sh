@@ -658,6 +658,19 @@ if [ "\$DO_BUILD" = "true" ]; then
     # already had directory access.
     chmod 644 secrets/prometheus_admin_token
     echo -e "   \${GREEN}Prometheus admin token written to secrets/prometheus_admin_token\${NC}"
+
+    # Telegram bot token for Alertmanager. We write a placeholder if
+    # the operator hasn't already provided a real token — the
+    # alertmanager container's bind-mount needs the file to exist or
+    # docker won't start the service. Until the placeholder is
+    # replaced with a token from @BotFather and chat_id is set in
+    # alertmanager.yml, alerts route to the null receiver. See
+    # documentation/runbooks/alerting.md.
+    if [ ! -s secrets/telegram_bot_token ]; then
+        printf '%s' 'PLACEHOLDER_PASTE_BOT_TOKEN_FROM_BOTFATHER_HERE' > secrets/telegram_bot_token
+        echo -e "   \${YELLOW}Telegram bot token placeholder created at secrets/telegram_bot_token (paging is OFF until you replace it).\${NC}"
+    fi
+    chmod 644 secrets/telegram_bot_token
     # Clean stale Docker Compose state (ghost container fix).
     # Docker Compose v2 can desync with containerd, leaving phantom container
     # references that cause "No such container" errors on recreate.

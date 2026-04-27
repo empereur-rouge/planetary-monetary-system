@@ -209,6 +209,15 @@ services:
         max-file: "3"
     volumes:
       - ./etc/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Telegram bot token mounted as a one-line file. Alertmanager
+      # reads it via `bot_token_file:` in `telegram_configs` so the
+      # token never appears in alertmanager.yml (which is checked into
+      # git). The file lives in `secrets/telegram_bot_token` on the
+      # host (gitignored) — `scripts/deploy-testnet.sh` creates a
+      # placeholder if missing so the service starts cleanly. Replace
+      # the placeholder with the real bot token from @BotFather to
+      # activate paging.
+      - ./secrets/telegram_bot_token:/etc/alertmanager/telegram_bot_token:ro
       - alertmanager_testnet_data:/alertmanager
     ports:
       # Loopback-only — operator can SSH-tunnel to inspect / silence

@@ -1,25 +1,31 @@
 # =============================================================================
-# Alertmanager — PMS Testnet routing
+# Alertmanager — PMS Testnet routing (Telegram-first)
 # =============================================================================
 #
-# This file ships with placeholder webhook URLs. To go live you need to
-# pick ONE of the receivers below (Better Uptime, PagerDuty, Discord,
-# or Slack) and put your integration URL where it says
-# `<PASTE_YOUR_..._URL_HERE>`. The runbook at
-# `documentation/runbooks/alerting.md` walks through each provider.
+# Default setup uses Alertmanager's built-in `telegram_configs` receiver
+# (added in v0.24, we're on v0.27.0). Two secrets you need to provide:
 #
-# Routing semantics:
-#   - `severity: critical` → `pager` receiver (paging channel: SMS/call)
-#   - `severity: warning`  → `notify` receiver (chat-only: Slack/Discord)
+#   1. `secrets/telegram_bot_token` — one-line file with your bot token
+#      from @BotFather (looks like `123456789:ABC-DEF...`). Mounted
+#      read-only into the container at `/etc/alertmanager/telegram_bot_token`.
+#      This file is .gitignored.
 #
-# Until URLs are filled in, alerts go to the `null` receiver (silently
-# dropped) so a fresh deploy doesn't crash on bad config. Health-check
-# status is visible at http://<vps>:9093 (loopback-bound by default).
+#   2. `chat_id:` below — set to your private channel ID. For channels
+#      it's a negative integer like `-1001234567890`. To get it: send
+#      any message in the channel, then
+#         curl https://api.telegram.org/bot<TOKEN>/getUpdates
+#      and look for `chat.id` in the JSON.
+#
+# Until those two are filled in, alerts go to the `null` receiver
+# (silently dropped) so a fresh deploy doesn't crash. Health-check the
+# alertmanager UI at http://127.0.0.1:9093 (loopback-bound).
+#
+# Want to use Better Uptime / PagerDuty / Slack / Discord instead?
+# See `documentation/runbooks/alerting.md` — the alternative receiver
+# blocks are commented at the bottom of this file.
 # =============================================================================
 
 global:
-  # Resolve timeout: how long an alert is considered firing after the
-  # last `firing` evaluation from Prometheus before we mark it resolved.
   resolve_timeout: 5m
 
 # ---------------------------------------------------------------------------
@@ -27,27 +33,23 @@ global:
 # ---------------------------------------------------------------------------
 route:
   # Default receiver — used by anything that doesn't match a child.
-  # `null` is a do-nothing receiver until you wire your real one in.
+  # Switch this to `pager` once you've filled in your bot_token + chat_id.
   receiver: 'null'
 
-  # Group alerts that share these labels into one notification — avoids
-  # 50 emails for one outage. `alertname` + `component` is the right
-  # grain for PMS (one batch per alert type per component).
   group_by: ['alertname', 'component']
-  group_wait: 30s        # wait this long before sending the first batch
-  group_interval: 5m     # wait this long before sending updates for a group
-  repeat_interval: 4h    # re-page every 4h while a critical alert stays firing
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
 
   routes:
-    # Critical → pager (Better Uptime / PagerDuty / on-call SMS)
+    # Critical → Telegram with sound (re-page hourly while firing)
     - matchers:
         - severity = critical
       receiver: 'pager'
-      # Re-page every hour for critical, not the default 4h.
       repeat_interval: 1h
-      group_wait: 10s    # don't sit on critical alerts
+      group_wait: 10s
 
-    # Warning → low-noise channel (Slack / Discord)
+    # Warning → Telegram silent (no re-page, just acknowledge)
     - matchers:
         - severity = warning
       receiver: 'notify'
@@ -57,69 +59,56 @@ route:
 # ---------------------------------------------------------------------------
 receivers:
 
-  # Default no-op. Catches anything not matched above so the daemon
-  # doesn't error out on routing.
   - name: 'null'
 
-  # ─── Pager (critical alerts) ────────────────────────────────────────────
-  #
-  # PICK ONE block below and uncomment it. The `webhook_configs` shape
-  # works with Better Uptime, PagerDuty webhook integrations, and most
-  # incident management tools that accept generic webhooks.
-  #
+  # ─── Pager (critical alerts) → Telegram with notification ────────────────
   - name: 'pager'
-    webhook_configs:
-      - url: '<PASTE_YOUR_PAGER_WEBHOOK_URL_HERE>'
-        send_resolved: true
+    telegram_configs:
+      - bot_token_file: '/etc/alertmanager/telegram_bot_token'
+        # Replace with your channel/chat ID. Negative for channels (e.g.
+        # -1001234567890), positive for direct messages to your user.
+        chat_id: 0
+        # Plays the channel's notification sound. Set to true to send a
+        # silent message (no sound, useful if you have multiple channels
+        # routed to the same chat).
+        disable_notifications: false
+        parse_mode: 'HTML'
+        message: |-
+          {{ if eq .Status "firing" }}🚨 <b>{{ .GroupLabels.alertname }}</b> [<i>FIRING</i>]{{ else }}✅ <b>{{ .GroupLabels.alertname }}</b> [<i>RESOLVED</i>]{{ end }}
 
-    # === Better Uptime ===
-    # Create an "Incoming webhook" integration on betteruptime.com,
-    # copy the URL it gives you (looks like
-    # https://uptime.betterstack.com/api/v1/incoming-webhooks/<token>)
-    # and replace `url:` above. send_resolved=true automatically clears
-    # incidents when Prometheus marks the alert resolved.
-    #
-    # === PagerDuty ===
-    # PagerDuty has a native receiver — replace the `webhook_configs`
-    # block above with this:
-    #
-    # pagerduty_configs:
-    #   - service_key: '<PASTE_YOUR_PAGERDUTY_INTEGRATION_KEY_HERE>'
-    #     send_resolved: true
-    #     description: '{{ .CommonAnnotations.summary }}'
-    #     details:
-    #       firing: '{{ .Alerts.Firing | len }}'
-    #       runbook: '{{ .CommonAnnotations.runbook }}'
-    #
-    # === Twilio (custom webhook → SMS) ===
-    # Self-host a 30-line webhook receiver that POSTs to Twilio. Cheap
-    # but no incident dedupe / on-call rotation. See alerting.md.
+          {{ range .Alerts -}}
+          <b>{{ .Annotations.summary }}</b>
 
-  # ─── Low-noise notify (warning alerts) ───────────────────────────────────
-  #
-  # Slack / Discord are the usual targets. Both accept raw webhook
-  # POSTs that Alertmanager's `webhook_configs` already speaks.
-  #
+          {{ .Annotations.description }}
+
+          {{ if .Annotations.runbook }}<i>Runbook:</i> <code>{{ .Annotations.runbook }}</code>
+          {{ end }}
+          {{ end -}}
+
+          <i>Component:</i> <code>{{ .CommonLabels.component }}</code>
+          <i>Severity:</i> <code>{{ .CommonLabels.severity }}</code>
+
+  # ─── Low-noise notify (warning alerts) → Telegram silent ────────────────
   - name: 'notify'
-    webhook_configs:
-      - url: '<PASTE_YOUR_CHAT_WEBHOOK_URL_HERE>'
-        send_resolved: true
+    telegram_configs:
+      - bot_token_file: '/etc/alertmanager/telegram_bot_token'
+        # Can be the same chat_id as `pager` above, or a separate
+        # "warnings-only" channel if you want to keep noise out of the
+        # paging channel.
+        chat_id: 0
+        # Silent: just lands in chat, no notification sound.
+        disable_notifications: true
+        parse_mode: 'HTML'
+        message: |-
+          {{ if eq .Status "firing" }}⚠️ <b>{{ .GroupLabels.alertname }}</b> [<i>FIRING</i>]{{ else }}✅ <b>{{ .GroupLabels.alertname }}</b> [<i>RESOLVED</i>]{{ end }}
 
-    # === Discord ===
-    # Server settings → Integrations → Webhooks → New Webhook → copy URL.
-    # Paste it as `url:` above. Alertmanager's default JSON shape
-    # renders fine in Discord; if you want pretty embeds, use a
-    # discord-shim (see alerting.md).
-    #
-    # === Slack ===
-    # Replace `webhook_configs` with:
-    #
-    # slack_configs:
-    #   - api_url: '<PASTE_YOUR_SLACK_INCOMING_WEBHOOK_URL_HERE>'
-    #     channel: '#pms-alerts'
-    #     send_resolved: true
-    #     title: '{{ .CommonAnnotations.summary }}'
-    #     text: '{{ .CommonAnnotations.description }}'
+          {{ range .Alerts -}}
+          <b>{{ .Annotations.summary }}</b>
+
+          {{ .Annotations.description }}
+          {{ end -}}
+
+          <i>Component:</i> <code>{{ .CommonLabels.component }}</code>
 
 # ---------------------------------------------------------------------------
 # Inhibition rules — silence redundant alerts
@@ -132,3 +121,34 @@ inhibit_rules:
     target_matchers:
       - component =~ "persist-pipeline|storage"
     equal: ['component']
+
+# ---------------------------------------------------------------------------
+# Alternative receivers (commented) — Better Uptime / PagerDuty / Slack / Discord
+# ---------------------------------------------------------------------------
+#
+# Want a different paging path? Replace the `telegram_configs` block(s)
+# above with one of these. Full setup walkthrough in
+# `documentation/runbooks/alerting.md`.
+#
+# === Better Uptime (incoming webhook) ===
+#   webhook_configs:
+#     - url: 'https://uptime.betterstack.com/api/v1/incoming-webhooks/<TOKEN>'
+#       send_resolved: true
+#
+# === PagerDuty (Events API v2) ===
+#   pagerduty_configs:
+#     - service_key: '<INTEGRATION_KEY>'
+#       send_resolved: true
+#       description: '{{ .CommonAnnotations.summary }}'
+#
+# === Discord (incoming webhook) ===
+#   webhook_configs:
+#     - url: 'https://discord.com/api/webhooks/<ID>/<TOKEN>'
+#       send_resolved: true
+#
+# === Slack (incoming webhook) ===
+#   slack_configs:
+#     - api_url: 'https://hooks.slack.com/services/<...>'
+#       channel: '#pms-alerts'
+#       send_resolved: true
+#       title: '{{ .CommonAnnotations.summary }}'

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.13] - 2026-04-27 — Alerting: Telegram-first via Alertmanager native receiver
+
+### Changed
+- **deploy(alerting/telegram-first)**: `etc/alertmanager/alertmanager.yml` rewritten to use Alertmanager's built-in `telegram_configs` receiver (added in v0.24, we're on v0.27.0) instead of generic webhooks. Two `telegram_configs` blocks (one for `pager` with sound, one for `notify` silent) read the bot token from `/etc/alertmanager/telegram_bot_token` (mounted from host's `secrets/telegram_bot_token` so the token never enters git or YAML) and post HTML-formatted messages to a configurable `chat_id`. Operator only fills two values (bot token + chat_id) instead of running a webhook adapter / n8n / PagerDuty subscription. Total cost: **zero** (Telegram bot API is free, unlimited at our volume).
+- **deploy(alerting/secrets)**: `docker-compose.testnet.yml` mounts `secrets/telegram_bot_token` into the alertmanager container as a one-line file (same pattern as the prometheus admin token). `scripts/deploy-testnet.sh` and `scripts/upgrade-testnet.sh` write a placeholder if the file is missing so the bind-mount succeeds and the service starts cleanly even on a fresh deploy without paging configured.
+- **doc(runbooks/alerting)**: Runbook rewritten Telegram-first. Step-by-step bot creation (@BotFather), channel + admin setup, getting `chat_id` from `getUpdates`, Android notification-sound override for "wake-me-up" critical alerts. Provider-comparison section moved to "Switching to another provider" — the four alternatives (Better Uptime / PagerDuty / Discord / Slack) are still documented for users who outgrow Telegram.
+- **deploy(alertmanager.yml)**: kept the four alternative receiver blocks (Better Uptime / PagerDuty / Discord / Slack) at the bottom of the file as commented YAML. Switching providers is one block-swap.
+
+### Operator action required to go live (5 min total)
+1. `@BotFather` on Telegram → `/newbot` → copy bot token.
+2. Create a private channel → add the bot as admin → send any message.
+3. `curl https://api.telegram.org/bot<TOKEN>/getUpdates` → grab `chat.id` (negative integer for channels).
+4. `echo -n '<TOKEN>' > secrets/telegram_bot_token`.
+5. Replace `chat_id: 0` in `etc/alertmanager/alertmanager.yml` (two places, can be the same chat).
+6. Switch `route: receiver: 'null'` → `'pager'` so unmatched alerts also page.
+7. `scp` both files to the VPS, `docker restart pms-alertmanager-testnet`.
+
+Test: `docker exec pms-alertmanager-testnet amtool alert add alertname=Test severity=critical` → phone buzzes within ~30 s.
+
+---
+
 ## [0.7.12] - 2026-04-27 — Alerting stack: Prometheus rules + Alertmanager + runbook
 
 ### Added
