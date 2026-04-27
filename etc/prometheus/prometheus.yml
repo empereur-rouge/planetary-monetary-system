@@ -31,12 +31,19 @@ scrape_configs:
     metrics_path: /metrics/all
 
   # Gateway exposes its own `/metrics` (request rates, upstream latency,
-  # rate-limit decisions). No admin auth required on the gateway side
-  # — that's a separate service with its own surface.
+  # rate-limit decisions). The endpoint sits behind the same admin-token
+  # check as the engine (the gateway reads `ADMIN_TOKEN` from the
+  # compose env and applies it on `/metrics`), so we reuse the same
+  # `credentials_file` that the engine job uses. Both services receive
+  # `PMS_ADMIN_TOKEN` from the same compose variable, so a single file
+  # is enough.
   - job_name: 'pms-gateway'
     scheme: https
     tls_config:
       insecure_skip_verify: true
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/admin_token
     static_configs:
       - targets: ['pms-gateway:8443']
     metrics_path: /metrics

@@ -105,6 +105,13 @@ docker inspect pms-engine-testnet --format='RestartCount: {{.RestartCount}} | OO
 - **Fix** : Upgrade VPS à 16 Go + `mem_limit: 14g` + tuning RocksDB pour 16 Go.
 - **Diagnostic** : `docker events` montre l'événement `oom` juste avant le `die exitCode:137`. `docker inspect` peut montrer `OOMKilled: false` même si le cgroup a tué le process (c'est un bug connu de Docker).
 
+### Bug historique : Prometheus disparu silencieusement (v0.7.6, 2026-04-27)
+- **Symptôme** : `pms-prometheus-testnet` absent de `docker ps -a`, scrape Grafana muet pendant ~24h. Les 4 autres containers tournent normalement.
+- **Cause** : `restart: unless-stopped` ne relance PAS un container arrêté explicitement par l'utilisateur. Si quelqu'un (ou un hook tiers) fait `docker stop pms-prometheus-testnet` ou `docker rm`, Docker traite ça comme une décision opérateur — la politique de restart est inhibée jusqu'à un `up -d` explicite. Le lockfile résiduel (`/prometheus/lock` recréé au restart) confirme une sortie brutale, mais la conso mémoire est minuscule (36 MiB / 512 MiB) → ce n'était PAS un OOM kill applicatif.
+- **Diagnostic** : `docker compose ps -a` montre seulement les services qu'il connaît comme actifs ; un container `rm`'d hors compose disparaît de cette vue. `docker inspect <container>` est impossible (n'existe plus). Les events Docker sont purgés avec le container.
+- **Fix** : `cd /opt/pms && PMS_ADMIN_TOKEN=$xxx docker compose -f docker-compose.testnet.yml up -d prometheus` — recréation propre, le volume `prometheus_testnet_data` est préservé donc l'historique TSDB est intact (WAL replay au boot).
+- **Bonus découvert** : le scrape config `pms-gateway` était cassé en 401 Unauthorized — le job n'envoyait pas le Bearer token alors que le gateway protège son `/metrics` avec le même `ADMIN_TOKEN` que l'engine. Fixé dans `etc/prometheus/prometheus.yml` (réutilise `credentials_file: /etc/prometheus/admin_token`).
+
 ## Related Projects
 
 ### PMS SDK (TypeScript)

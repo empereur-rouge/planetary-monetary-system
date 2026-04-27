@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.8] - 2026-04-27 — Prometheus gateway scrape fix + missing-container runbook
+
+### Fixed
+- **deploy(prometheus/gateway-scrape)**: The `pms-gateway` job in `etc/prometheus/prometheus.yml` was scraping `https://pms-gateway:8443/metrics` with no authorization, returning `401 Unauthorized` and leaving the gateway's request-rate / upstream-latency / rate-limit counters invisible to Grafana. The gateway protects its `/metrics` with the same admin token as the engine (`ADMIN_TOKEN` env var on both services), so the job now reuses `credentials_file: /etc/prometheus/admin_token` — the same one-line file already mounted into the prometheus container by `scripts/deploy-testnet.sh`. Hot-reloaded on the testnet VPS without a Prometheus restart; `pms-engine`, `pms-gateway` and `pms-simulator` targets all `up`.
+
+### Documentation
+- **CLAUDE.md**: New "Bug historique : Prometheus disparu silencieusement" runbook entry. Captures the symptom (`pms-prometheus-testnet` absent from `docker ps -a` while the other 4 containers stay healthy), the root cause (`restart: unless-stopped` is inhibited after an explicit `docker stop`/`rm`, even if the original kill was clean — Docker treats it as an operator decision), the diagnostic clues (residual `/prometheus/lock` lockfile + tiny memory footprint = not an OOM), and the one-shot fix (`docker compose up -d prometheus` recreates the container while preserving the TSDB volume). Sits next to the existing OOM-loop entry so the operator pattern is "if a service is missing, walk this list before assuming a code bug".
+
+---
+
 ## [0.7.7] - 2026-04-27 — Recent-blocks Bloom filter eliminates LSM dedup growth
 
 ### Performance
