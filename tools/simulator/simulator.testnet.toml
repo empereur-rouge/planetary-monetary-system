@@ -22,6 +22,12 @@ faucet_amount = "100.00"
 # 128 brings it down to ~90 s while staying inside the gateway's
 # tightened 500 RPS rate-limit. Bump to 256 for 5K+ agents.
 bootstrap_concurrency = 128
+# In-process memory watchdog. The simulator polls its own RSS every
+# 30 s and gracefully shuts down above this threshold. The 1000-agent
+# scenario peaks around ~700 MiB-1 GiB after bootstrap; 1500 keeps
+# 500 MiB headroom under the compose `mem_limit: 2g`. Set to 0 to
+# disable (cgroup OOM is the backstop).
+max_rss_mb = 1500
 
 # 4-ledger production-realistic clicker scenario (v0.7.8+). Each entry
 # boots an independent game engine on its own ledger with its own

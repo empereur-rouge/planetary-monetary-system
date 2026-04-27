@@ -95,10 +95,22 @@ pub struct SimulationParams {
     /// down if the gateway 429s during the funding storm.
     #[serde(default = "default_bootstrap_concurrency")]
     pub bootstrap_concurrency: usize,
+    /// In-process memory watchdog threshold in MB. The simulator polls
+    /// its own RSS every 30 s and triggers a graceful shutdown above
+    /// this. Pre-v0.7.9 the default was 400 MB which tripped during a
+    /// 1000-agent boot; v0.7.9 raises it to 1500 MB to fit the
+    /// `mem_limit: 2g` compose ceiling with headroom. Set to 0 to
+    /// disable (the cgroup OOM killer is the backstop).
+    #[serde(default = "default_max_rss_mb")]
+    pub max_rss_mb: usize,
 }
 
 fn default_bootstrap_concurrency() -> usize {
     128
+}
+
+fn default_max_rss_mb() -> usize {
+    1500
 }
 
 impl SimulationParams {

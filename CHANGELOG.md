@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.10] - 2026-04-27 — Simulator memory watchdog now configurable (was hardcoded 400 MB)
+
+### Fixed
+- **sim(memory-watchdog)**: The in-process RSS watchdog had a hardcoded **400 MB** ceiling — a leftover from when the simulator was sized for ~100 agents. At 1119 agents (post-v0.7.9 production-realistic config) the agent-task stack working set crosses 400 MB during the bootstrap-and-mint storm, triggering a graceful shutdown via `cancel.cancel()` with exit code 0. `restart: on-failure` doesn't relaunch on a clean exit, so the simulator stayed dead. Symptoms in the testnet logs: `Memory watchdog: RSS 404 MB exceeds limit 400 MB — shutting down` followed by `Simulation complete.`
+- **sim(config)**: New `[simulation].max_rss_mb` field on `SimulationParams` (default **1500 MB**). Set to 0 to disable the watchdog entirely (the cgroup OOM-killer is the backstop). Boot log now shows the resolved threshold so the operator can confirm what's actually enforced.
+
+---
+
 ## [0.7.9] - 2026-04-27 — Simulator scaled to production-realistic clicker load
 
 ### Changed

@@ -445,11 +445,27 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // 12b. Memory watchdog — log RSS every 30s, graceful shutdown at 400 MB
+    // 12b. Memory watchdog — log RSS every 30s, graceful shutdown at
+    // `[simulation].max_rss_mb` (default 1500 MB — pre-v0.7.9 the
+    // hardcoded 400 MB ceiling fit the 100-agent fleet but tripped at
+    // ~80% of the 1119-agent boot when the agent task stacks expanded
+    // past 400 MB RSS, even though the Docker mem_limit is 2 GiB).
+    // Bumping the default to 1500 MB leaves a 500 MB headroom under
+    // the compose limit. Set to 0 in TOML to disable the watchdog
+    // entirely (the cgroup OOM-killer is the backstop).
     {
         let cancel_clone = cancel.clone();
+        let max_rss_mb = config.simulation.max_rss_mb;
         tokio::spawn(async move {
-            let max_rss_bytes: u64 = 400 * 1024 * 1024; // 400 MB
+            if max_rss_mb == 0 {
+                tracing::info!("Memory watchdog: disabled (max_rss_mb=0)");
+                return;
+            }
+            let max_rss_bytes: u64 = max_rss_mb as u64 * 1024 * 1024;
+            tracing::info!(
+                "Memory watchdog: shutdown threshold = {} MB",
+                max_rss_mb
+            );
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
                 tokio::select! {
