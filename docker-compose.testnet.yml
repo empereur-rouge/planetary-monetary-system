@@ -190,6 +190,43 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
+  # Alertmanager — Routes Prometheus alerts to webhook receivers
+  # ---------------------------------------------------------------------------
+  # Stays loopback-only by default (paging happens via outbound webhooks
+  # to Better Uptime / PagerDuty / Slack — no inbound traffic needed).
+  # The `alertmanager.yml` ships with placeholder URLs; alerts are
+  # silently dropped until the operator wires real integrations.
+  # See `documentation/runbooks/alerting.md` for setup.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: pms-alertmanager-testnet
+    mem_limit: 256m
+    memswap_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - ./etc/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_testnet_data:/alertmanager
+    ports:
+      # Loopback-only — operator can SSH-tunnel to inspect / silence
+      # alerts. Outbound to webhook providers does not need any port
+      # open on the VPS.
+      - "127.0.0.1:9093:9093"
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.listen-address=0.0.0.0:9093'
+      - '--cluster.listen-address='
+    networks:
+      # Internal so prometheus can resolve `alertmanager:9093` for the
+      # `alerting:` section + the self-scrape job.
+      - pms-testnet-internal
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # PMS Simulator — Stress-test with ~97 agents
   # ---------------------------------------------------------------------------
   pms-simulator:
@@ -254,3 +291,4 @@ volumes:
   caddy_testnet_data:
   caddy_testnet_config:
   prometheus_testnet_data:
+  alertmanager_testnet_data:

@@ -221,6 +221,13 @@ if [ "$UPDATE_CONFIG" = "true" ]; then
     scp -q $SSH_OPTS "$COMPOSE_FILE" "$VPS_USER@$VPS_IP:$REMOTE_DIR/$COMPOSE_FILE"
     scp -q $SSH_OPTS "$CONFIG_FILE" "$VPS_USER@$VPS_IP:$REMOTE_DIR/$CONFIG_FILE"
     scp -q $SSH_OPTS etc/prometheus/prometheus.yml "$VPS_USER@$VPS_IP:$REMOTE_DIR/etc/prometheus/prometheus.yml"
+    scp -q $SSH_OPTS etc/prometheus/alerting_rules.yml "$VPS_USER@$VPS_IP:$REMOTE_DIR/etc/prometheus/alerting_rules.yml"
+    # Alertmanager config — placeholder webhook URLs are safe to ship as
+    # a default; alerts get silently dropped until the operator wires
+    # real Better Uptime / PagerDuty / Slack URLs in
+    # `etc/alertmanager/alertmanager.yml`.
+    ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" "mkdir -p $REMOTE_DIR/etc/alertmanager"
+    scp -q $SSH_OPTS etc/alertmanager/alertmanager.yml "$VPS_USER@$VPS_IP:$REMOTE_DIR/etc/alertmanager/alertmanager.yml"
     scp -q $SSH_OPTS tools/simulator/simulator.testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/simulator.testnet.toml"
     scp -q $SSH_OPTS tools/simulator/agents_testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/agents_testnet.toml"
 

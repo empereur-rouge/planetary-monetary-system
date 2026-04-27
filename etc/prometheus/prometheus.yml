@@ -2,6 +2,24 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Alert rules — see `etc/prometheus/alerting_rules.yml` for the full list.
+# `evaluation_interval: 15s` above means Prometheus checks every rule
+# every 15 s; `for: <duration>` in each rule decides how long the
+# expression must stay true before the alert actually fires.
+rule_files:
+  - /etc/prometheus/alerting_rules.yml
+
+# Alertmanager target. The Compose service name `alertmanager` resolves
+# via Docker DNS on the `pms_pms-testnet-internal` network. Port 9093
+# is the default. Until alertmanager.yml has real webhook URLs, alerts
+# are silently dropped (see the `null` receiver in that file) — so
+# enabling this section costs nothing operationally.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'alertmanager:9093'
+
 scrape_configs:
   # PMS Engine — full Prometheus registry (per-stage persist counters,
   # consumer timings, persist queue depth, fee-pool size, UTXO-set size,
@@ -58,4 +76,13 @@ scrape_configs:
     scheme: http
     static_configs:
       - targets: ['pms-simulator:9090']
+    metrics_path: /metrics
+
+  # Alertmanager self-metrics. Lets us alert on the alertmanager itself
+  # (e.g. dispatch failures) — without this we wouldn't know if our
+  # paging path was broken until an actual outage.
+  - job_name: 'alertmanager'
+    scheme: http
+    static_configs:
+      - targets: ['alertmanager:9093']
     metrics_path: /metrics

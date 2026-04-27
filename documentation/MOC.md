@@ -88,6 +88,12 @@ Voir le dossier [[api/README|documentation/api/]] pour la référence complète 
 | [Nodes](api/nodes.md) | Registre des nœuds |
 | [History](api/history.md) | Historique |
 
+## Runbooks (opérations)
+
+| Fiche | Description |
+|-------|-------------|
+| [[runbooks/alerting]] | Configurer Prometheus + Alertmanager → Better Uptime / PagerDuty / Slack / Discord. Test de bout en bout, coût, fallback en cas de panne du pipeline |
+
 ## Versions
 
 | Système | Fichier | Valeur actuelle |

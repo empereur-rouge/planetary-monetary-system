@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.12] - 2026-04-27 — Alerting stack: Prometheus rules + Alertmanager + runbook
+
+### Added
+- **deploy(alerting/rules)**: New `etc/prometheus/alerting_rules.yml` shipping 12 rules in two severity tiers. **Critical** (page immediately): `EngineDown`, `GatewayDown`, `PersistFailures` (data-loss), `RocksDBWriteStopped`, `HealthzFail`. **Warning** (notify, investigate during business hours): `PersistQueueBackpressure` (>80% capacity for 5m), `PersistRetriesElevated`, `PersistStallsAccumulating`, `BloomSkipRatioLow` (<90% for 10m), `EngineMemoryHigh` (>12 GiB for 10m), `AdminAuthFailureSpike` (>1/s for 2m, brute-force signal), `PrometheusTargetMissing`. All thresholds calibrated against the v0.7.10 1119-agent steady-state.
+- **deploy(alerting/alertmanager)**: New `etc/alertmanager/alertmanager.yml` with two-receiver routing (`pager` for critical, `notify` for warning), inhibition rules (don't page on persist-pipeline / storage symptoms while `EngineDown` is firing), and placeholder webhook URLs for Better Uptime / PagerDuty / Discord / Slack. Until URLs are wired, alerts go to a `null` receiver — safe default.
+- **deploy(alerting/compose)**: New `alertmanager` service in `docker-compose.testnet.yml` (image: `prom/alertmanager:v0.27.0`, mem_limit 256m, loopback-only port 9093). Integrated into `pms-testnet-internal` network so Prometheus can resolve it via Docker DNS. Volume `alertmanager_testnet_data` persists silences across restarts.
+- **deploy(alerting/prometheus)**: `etc/prometheus/prometheus.yml` now declares `rule_files` + `alerting.alertmanagers` blocks. Added a self-scrape job for `alertmanager:9093` so we can alert on the alerting layer itself (paging path can't be silently broken).
+- **doc(runbooks/alerting)**: New `documentation/runbooks/alerting.md` (190 lines) covering: pipeline architecture, provider comparison table (Better Uptime vs PagerDuty vs Slack vs Discord with free-tier matrix), step-by-step Better Uptime/PagerDuty/Slack/Discord setup, hot-reload via `curl -X POST /-/reload`, two end-to-end test methods (`amtool alert add` synthetic + real `docker stop` test), reading existing alerts, cost guardrails (`group_interval` / `repeat_interval` / inhibitions), and three-layer fallback strategy if alerting itself breaks.
+- **doc(MOC)**: New "Runbooks (opérations)" section linking to the alerting runbook.
+
+### Changed
+- **deploy(scripts)**: `scripts/deploy-testnet.sh` and `scripts/upgrade-testnet.sh` now `mkdir -p etc/alertmanager` on the VPS and `scp` both `etc/prometheus/alerting_rules.yml` and `etc/alertmanager/alertmanager.yml` on every deploy. The new alertmanager service is reachable to compose's normal lifecycle (no special restart logic required — `restart: unless-stopped` covers it). `bash -n` clean.
+
+### Operator action required to go live
+1. Pick a paging provider (Better Uptime free tier recommended).
+2. Paste the integration URL into `etc/alertmanager/alertmanager.yml` where it says `<PASTE_YOUR_..._URL_HERE>` (two slots: `pager` and `notify`).
+3. `scp etc/alertmanager/alertmanager.yml pms@VPS:/opt/pms/etc/alertmanager/alertmanager.yml`.
+4. `curl -X POST http://127.0.0.1:9093/-/reload` over SSH.
+
+Total time: ~5 min. The full walkthrough is in `documentation/runbooks/alerting.md`.
+
+---
+
 ## [0.7.11] - 2026-04-27 — Stop killing Prometheus on every upgrade
 
 ### Fixed

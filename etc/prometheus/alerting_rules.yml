@@ -1,0 +1,211 @@
+# =============================================================================
+# PMS Testnet — Prometheus Alert Rules
+# =============================================================================
+#
+# Two severity tiers:
+#
+#   critical: page someone immediately. Production is broken.
+#   warning : notify (Slack/Discord). Investigate during business hours.
+#
+# Routing happens in `etc/alertmanager/alertmanager.yml` — `severity` is
+# the only label the routing config matches on, so keep it consistent.
+#
+# Most thresholds are derived from observed steady-state on the v0.7.10
+# 1119-agent testnet (engine RSS ~4 GiB, persist queue ~0%, dedup
+# ~4 µs/block, bloom skip ratio ~99.99%). Tighten or relax based on
+# what your on-call appetite is.
+#
+# Use `promtool check rules etc/prometheus/alerting_rules.yml` (in the
+# prometheus container) to validate before reload.
+
+groups:
+  # ===========================================================================
+  # CRITICAL — production is down or losing data
+  # ===========================================================================
+  - name: pms_critical
+    interval: 30s
+    rules:
+
+      - alert: EngineDown
+        expr: up{job="pms-engine"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: engine
+        annotations:
+          summary: "PMS engine is unreachable from Prometheus"
+          description: |
+            Prometheus has been unable to scrape https://pms-engine:8080/metrics/all
+            for 2+ minutes. Either the container is down (check `docker ps`),
+            the admin token is wrong, or the network is broken.
+            Block production has stopped.
+          runbook: "Check `docker logs pms-engine-testnet` and `docker compose ps`."
+
+      - alert: GatewayDown
+        expr: up{job="pms-gateway"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: gateway
+        annotations:
+          summary: "PMS gateway is unreachable from Prometheus"
+          description: |
+            The gateway has been unscrapeable for 2+ minutes. Public API
+            traffic is failing. Engine may still be writing blocks but
+            users can't submit transactions.
+
+      - alert: PersistFailures
+        expr: increase(pms_persist_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          component: persist-pipeline
+        annotations:
+          summary: "Block lost in persist pipeline"
+          description: |
+            `pms_persist_failures_total` incremented in the last 5 minutes,
+            meaning at least one block exhausted every retry attempt and
+            was dropped. This is a data-loss event — investigate the
+            engine logs immediately for the underlying RocksDB / disk error.
+          runbook: "`docker logs pms-engine-testnet | grep -i \"persist.*fail\"`"
+
+      - alert: RocksDBWriteStopped
+        expr: increase(pms_rocksdb_write_stalled_seconds_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "RocksDB has stopped accepting writes"
+          description: |
+            The `is-write-stopped` property fired during the last 5 minutes —
+            RocksDB is throttling all writes, typically due to L0 file
+            backlog or a flush stall. Block production halts until
+            compaction catches up.
+          runbook: |
+            Check `num_files_at_level0` via /admin/rocksdb-stats.
+            If sustained, consider triggering `compact_all` or restarting
+            the engine to force flush.
+
+      - alert: HealthzFail
+        expr: probe_success{job="pms-engine-healthz"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: engine
+        annotations:
+          summary: "Engine /healthz reports fail status"
+          description: |
+            The engine healthz endpoint returns 503 (fail) — typically
+            either RocksDB is unwriteable, the persist queue is at
+            high-water mark, last block is older than 5 minutes, or the
+            disk is below 10% free.
+          runbook: "Curl /healthz, inspect the JSON `checks` field for the failing component."
+
+  # ===========================================================================
+  # WARNING — degradation, not yet failure
+  # ===========================================================================
+  - name: pms_warning
+    interval: 30s
+    rules:
+
+      - alert: PersistQueueBackpressure
+        expr: |
+          (pms_persist_queue_depth / pms_persist_queue_capacity) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: persist-pipeline
+        annotations:
+          summary: "Persist queue at >80% capacity for 5m"
+          description: |
+            The persist channel between the producer and the RocksDB
+            consumer is filling up. Producers are within seconds of
+            blocking on `send().await`. This usually means the engine
+            is being driven faster than RocksDB can absorb — investigate
+            whether load has spiked or whether compaction is lagging.
+
+      - alert: PersistRetriesElevated
+        expr: rate(pms_persist_retries_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: persist-pipeline
+        annotations:
+          summary: "Persist retries firing > 1 every 10 s"
+          description: |
+            Background persist task is hitting transient storage errors
+            and retrying. Brief spikes are tolerable; sustained means
+            the disk is unhealthy or RocksDB is under-tuned.
+
+      - alert: PersistStallsAccumulating
+        expr: rate(pms_persist_stall_seconds_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: persist-pipeline
+        annotations:
+          summary: "Producer back-pressure stalls accumulating > 1s/s"
+          description: |
+            The producer is spending more than a second per second
+            blocked on the persist channel — the consumer can't keep
+            up. Pair with `pms_persist_queue_depth` to see how deep.
+
+      - alert: BloomSkipRatioLow
+        expr: |
+          (rate(pms_persist_bloom_skips_total[10m]) /
+           (rate(pms_persist_bloom_skips_total[10m]) + rate(pms_persist_bloom_hits_total[10m])))
+          < 0.9
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Bloom dedup skip ratio < 90% (expected ~99%)"
+          description: |
+            The recent-blocks Bloom filter is producing more positives
+            than expected. Either the filter is saturated (check
+            `bloom_front_inserted` vs `bloom_capacity_per_segment`),
+            or there's a real surge of duplicates (network retransmits,
+            replay attempts).
+          runbook: "Inspect /admin/rocksdb-stats: bloom_front_inserted, bloom_back_inserted."
+
+      - alert: EngineMemoryHigh
+        expr: process_resident_memory_bytes{job="pms-engine"} > 12 * 1024 * 1024 * 1024
+        for: 10m
+        labels:
+          severity: warning
+          component: engine
+        annotations:
+          summary: "Engine RSS > 12 GiB (cgroup cap is 14 GiB)"
+          description: |
+            Engine memory has been above 12 GiB for 10 minutes. The
+            Docker `mem_limit: 14g` is 2 GiB away — at this rate we're
+            heading toward OOM kill. Check RocksDB tuning, RAM-DAG
+            capacity, and whether a memory leak is in flight.
+
+      - alert: AdminAuthFailureSpike
+        expr: rate(pms_admin_auth_failures_total[5m]) > 1
+        for: 2m
+        labels:
+          severity: warning
+          component: security
+        annotations:
+          summary: "Admin auth failures > 1/s for 2m"
+          description: |
+            Sustained admin-token rejections — could be a misconfigured
+            client or a brute-force attempt. Check the `endpoint` label
+            to see what's being targeted.
+
+      - alert: PrometheusTargetMissing
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: warning
+          component: observability
+        annotations:
+          summary: "Prometheus target {{ $labels.job }} is down"
+          description: |
+            Prometheus can't scrape {{ $labels.job }} for 5+ minutes.
+            Visibility into that component is lost — investigate before
+            making operational decisions.

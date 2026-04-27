@@ -255,7 +255,7 @@ if [ "$DO_BUILD" = "true" ]; then
 fi
 
 # Ensure remote directories exist
-ssh -T $SSH_OPTS "$VPS_USER@$VPS_IP" "mkdir -p $REMOTE_DIR/etc/config $REMOTE_DIR/etc/pms $REMOTE_DIR/secrets/tls $REMOTE_DIR/etc/prometheus $REMOTE_DIR/tools/simulator"
+ssh -T $SSH_OPTS "$VPS_USER@$VPS_IP" "mkdir -p $REMOTE_DIR/etc/config $REMOTE_DIR/etc/pms $REMOTE_DIR/secrets/tls $REMOTE_DIR/etc/prometheus $REMOTE_DIR/etc/alertmanager $REMOTE_DIR/tools/simulator"
 
 # Transfer config files (always — they may have changed locally)
 echo -e "   Uploading config files..."
@@ -321,6 +321,14 @@ fi
 
 scp -q $SSH_OPTS tools/simulator/simulator.testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/simulator.testnet.toml"
 scp -q $SSH_OPTS tools/simulator/agents_testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/agents_testnet.toml"
+# Prometheus alerting bundle: rules file + alertmanager config. The
+# alertmanager.yml ships with placeholder webhook URLs; alerts go to a
+# `null` receiver until the operator pastes real Better Uptime /
+# PagerDuty / Slack URLs. See documentation/runbooks/alerting.md.
+[ -f etc/prometheus/alerting_rules.yml ] && \
+    scp -q $SSH_OPTS etc/prometheus/alerting_rules.yml "$VPS_USER@$VPS_IP:$REMOTE_DIR/etc/prometheus/alerting_rules.yml"
+[ -f etc/alertmanager/alertmanager.yml ] && \
+    scp -q $SSH_OPTS etc/alertmanager/alertmanager.yml "$VPS_USER@$VPS_IP:$REMOTE_DIR/etc/alertmanager/alertmanager.yml"
 echo -e "   ${GREEN}Config files uploaded.${NC}"
 
 # Transfer Docker images (only if we built them)

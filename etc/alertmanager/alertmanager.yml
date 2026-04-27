@@ -1,0 +1,134 @@
+# =============================================================================
+# Alertmanager — PMS Testnet routing
+# =============================================================================
+#
+# This file ships with placeholder webhook URLs. To go live you need to
+# pick ONE of the receivers below (Better Uptime, PagerDuty, Discord,
+# or Slack) and put your integration URL where it says
+# `<PASTE_YOUR_..._URL_HERE>`. The runbook at
+# `documentation/runbooks/alerting.md` walks through each provider.
+#
+# Routing semantics:
+#   - `severity: critical` → `pager` receiver (paging channel: SMS/call)
+#   - `severity: warning`  → `notify` receiver (chat-only: Slack/Discord)
+#
+# Until URLs are filled in, alerts go to the `null` receiver (silently
+# dropped) so a fresh deploy doesn't crash on bad config. Health-check
+# status is visible at http://<vps>:9093 (loopback-bound by default).
+# =============================================================================
+
+global:
+  # Resolve timeout: how long an alert is considered firing after the
+  # last `firing` evaluation from Prometheus before we mark it resolved.
+  resolve_timeout: 5m
+
+# ---------------------------------------------------------------------------
+# Routing tree
+# ---------------------------------------------------------------------------
+route:
+  # Default receiver — used by anything that doesn't match a child.
+  # `null` is a do-nothing receiver until you wire your real one in.
+  receiver: 'null'
+
+  # Group alerts that share these labels into one notification — avoids
+  # 50 emails for one outage. `alertname` + `component` is the right
+  # grain for PMS (one batch per alert type per component).
+  group_by: ['alertname', 'component']
+  group_wait: 30s        # wait this long before sending the first batch
+  group_interval: 5m     # wait this long before sending updates for a group
+  repeat_interval: 4h    # re-page every 4h while a critical alert stays firing
+
+  routes:
+    # Critical → pager (Better Uptime / PagerDuty / on-call SMS)
+    - matchers:
+        - severity = critical
+      receiver: 'pager'
+      # Re-page every hour for critical, not the default 4h.
+      repeat_interval: 1h
+      group_wait: 10s    # don't sit on critical alerts
+
+    # Warning → low-noise channel (Slack / Discord)
+    - matchers:
+        - severity = warning
+      receiver: 'notify'
+
+# ---------------------------------------------------------------------------
+# Receivers
+# ---------------------------------------------------------------------------
+receivers:
+
+  # Default no-op. Catches anything not matched above so the daemon
+  # doesn't error out on routing.
+  - name: 'null'
+
+  # ─── Pager (critical alerts) ────────────────────────────────────────────
+  #
+  # PICK ONE block below and uncomment it. The `webhook_configs` shape
+  # works with Better Uptime, PagerDuty webhook integrations, and most
+  # incident management tools that accept generic webhooks.
+  #
+  - name: 'pager'
+    webhook_configs:
+      - url: '<PASTE_YOUR_PAGER_WEBHOOK_URL_HERE>'
+        send_resolved: true
+
+    # === Better Uptime ===
+    # Create an "Incoming webhook" integration on betteruptime.com,
+    # copy the URL it gives you (looks like
+    # https://uptime.betterstack.com/api/v1/incoming-webhooks/<token>)
+    # and replace `url:` above. send_resolved=true automatically clears
+    # incidents when Prometheus marks the alert resolved.
+    #
+    # === PagerDuty ===
+    # PagerDuty has a native receiver — replace the `webhook_configs`
+    # block above with this:
+    #
+    # pagerduty_configs:
+    #   - service_key: '<PASTE_YOUR_PAGERDUTY_INTEGRATION_KEY_HERE>'
+    #     send_resolved: true
+    #     description: '{{ .CommonAnnotations.summary }}'
+    #     details:
+    #       firing: '{{ .Alerts.Firing | len }}'
+    #       runbook: '{{ .CommonAnnotations.runbook }}'
+    #
+    # === Twilio (custom webhook → SMS) ===
+    # Self-host a 30-line webhook receiver that POSTs to Twilio. Cheap
+    # but no incident dedupe / on-call rotation. See alerting.md.
+
+  # ─── Low-noise notify (warning alerts) ───────────────────────────────────
+  #
+  # Slack / Discord are the usual targets. Both accept raw webhook
+  # POSTs that Alertmanager's `webhook_configs` already speaks.
+  #
+  - name: 'notify'
+    webhook_configs:
+      - url: '<PASTE_YOUR_CHAT_WEBHOOK_URL_HERE>'
+        send_resolved: true
+
+    # === Discord ===
+    # Server settings → Integrations → Webhooks → New Webhook → copy URL.
+    # Paste it as `url:` above. Alertmanager's default JSON shape
+    # renders fine in Discord; if you want pretty embeds, use a
+    # discord-shim (see alerting.md).
+    #
+    # === Slack ===
+    # Replace `webhook_configs` with:
+    #
+    # slack_configs:
+    #   - api_url: '<PASTE_YOUR_SLACK_INCOMING_WEBHOOK_URL_HERE>'
+    #     channel: '#pms-alerts'
+    #     send_resolved: true
+    #     title: '{{ .CommonAnnotations.summary }}'
+    #     text: '{{ .CommonAnnotations.description }}'
+
+# ---------------------------------------------------------------------------
+# Inhibition rules — silence redundant alerts
+# ---------------------------------------------------------------------------
+inhibit_rules:
+  # If the engine is fully down, don't also fire the secondary alerts
+  # (queue/persist/bloom) — they're symptoms, not new info.
+  - source_matchers:
+      - alertname = "EngineDown"
+    target_matchers:
+      - component =~ "persist-pipeline|storage"
+    equal: ['component']
