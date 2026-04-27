@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.11] - 2026-04-27 — Stop killing Prometheus on every upgrade
+
+### Fixed
+- **deploy(upgrade-testnet.sh)**: The script wiped `pms-prometheus-testnet` on every run via two compounded bugs:
+  1. `docker ps -a --filter "label=com.docker.compose.project=pms" -q | xargs docker rm -f` — supposed to clear "ghost" Compose containers before recreate, but it removed **every** container in the project regardless of whether it was in `$SERVICES_TO_RECREATE = "pms-engine pms-gateway pms-simulator"`. Prometheus and Caddy got force-killed every time.
+  2. `docker compose up -d --force-recreate --remove-orphans $SERVICES_TO_RECREATE` — passing `--remove-orphans` with a *subset* of services makes Compose treat the omitted siblings as orphans (Prometheus is in the YAML, just not in the targeted list).
+  Caddy was rescued by a downstream `up -d caddy` block; Prometheus had no such fallback so it stayed dead until manually restarted. The earlier "Prometheus disparu silencieusement" runbook entry blamed `restart: unless-stopped` after a manual `docker stop` — that was wrong; the real culprit was our own upgrade script all along, and the residual `/prometheus/lock` lockfile was just the SIGKILL trace.
+- **Fix**: cleanup loop now iterates only `$SERVICES_TO_RECREATE` and `docker rm -f` each by name; `up -d` calls dropped `--remove-orphans` (both for the main batch and the Caddy follow-up). The CLAUDE.md runbook entry is rewritten with the correct root cause so future me doesn't chase the same wrong hypothesis. `bash -n` syntax-checked.
+
+---
+
 ## [0.7.10] - 2026-04-27 — Simulator memory watchdog now configurable (was hardcoded 400 MB)
 
 ### Fixed

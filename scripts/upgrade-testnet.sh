@@ -389,12 +389,35 @@ chmod 644 secrets/prometheus_admin_token
 # Clean stale Docker Compose state (ghost container fix).
 # Docker Compose v2 can desync with containerd, leaving phantom container
 # references that cause "No such container" errors on recreate.
+#
+# Targeted cleanup: stop+rm only the services we're about to recreate.
+# An earlier version of this block did `docker rm -f` on every pms-project
+# container, which silently wiped pms-prometheus-testnet at every upgrade
+# (it's not in the recreate list, so nothing brought it back). Keep the
+# blast radius scoped to $SERVICES_TO_RECREATE.
 docker compose -f $COMPOSE_FILE rm -f -s $SERVICES_TO_RECREATE 2>/dev/null || true
-docker ps -a --filter "label=com.docker.compose.project=pms" -q | xargs docker rm -f 2>/dev/null || true
+for _svc_to_rm in $SERVICES_TO_RECREATE; do
+    case "\$_svc_to_rm" in
+        pms-engine)    _cname_rm="pms-engine-testnet" ;;
+        pms-gateway)   _cname_rm="pms-gateway-testnet" ;;
+        pms-simulator) _cname_rm="pms-simulator-testnet" ;;
+        caddy)         _cname_rm="pms-caddy-testnet" ;;
+        prometheus)    _cname_rm="pms-prometheus-testnet" ;;
+        *) _cname_rm="" ;;
+    esac
+    [ -n "\$_cname_rm" ] && docker rm -f "\$_cname_rm" 2>/dev/null || true
+done
 
 # Start services. Use || true because ghost containers may cause a non-zero
 # exit even though the real services are created successfully.
-docker compose -f $COMPOSE_FILE up -d --force-recreate --remove-orphans $SERVICES_TO_RECREATE 2>&1 || true
+#
+# NOTE: NO --remove-orphans here. With $SERVICES_TO_RECREATE being a subset
+# of the compose file, --remove-orphans was previously misclassifying
+# pms-prometheus-testnet as orphaned and removing it on every upgrade
+# (the script was thinking "you only asked for engine+gateway+simulator,
+# so prometheus must be an orphan"). It's not — it's a sibling service
+# we're choosing not to touch. Same fix on the caddy block below.
+docker compose -f $COMPOSE_FILE up -d --force-recreate $SERVICES_TO_RECREATE 2>&1 || true
 
 # Verify each requested service is running (retry individually if ghost blocked it)
 for _compose_svc in $SERVICES_TO_RECREATE; do
@@ -416,7 +439,7 @@ done
 # If we upgraded engine or gateway, caddy may need a restart too (depends_on)
 if echo "$SERVICES_TO_RECREATE" | grep -q "pms-gateway"; then
     echo -e "\${YELLOW}   Restarting Caddy (depends on gateway)...\${NC}"
-    docker compose -f $COMPOSE_FILE up -d --force-recreate --remove-orphans caddy 2>&1 || true
+    docker compose -f $COMPOSE_FILE up -d --force-recreate caddy 2>&1 || true
 fi
 
 echo -e "\${GREEN}   Containers restarted.\${NC}"

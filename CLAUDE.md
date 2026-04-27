@@ -105,11 +105,14 @@ docker inspect pms-engine-testnet --format='RestartCount: {{.RestartCount}} | OO
 - **Fix** : Upgrade VPS à 16 Go + `mem_limit: 14g` + tuning RocksDB pour 16 Go.
 - **Diagnostic** : `docker events` montre l'événement `oom` juste avant le `die exitCode:137`. `docker inspect` peut montrer `OOMKilled: false` même si le cgroup a tué le process (c'est un bug connu de Docker).
 
-### Bug historique : Prometheus disparu silencieusement (v0.7.6, 2026-04-27)
-- **Symptôme** : `pms-prometheus-testnet` absent de `docker ps -a`, scrape Grafana muet pendant ~24h. Les 4 autres containers tournent normalement.
-- **Cause** : `restart: unless-stopped` ne relance PAS un container arrêté explicitement par l'utilisateur. Si quelqu'un (ou un hook tiers) fait `docker stop pms-prometheus-testnet` ou `docker rm`, Docker traite ça comme une décision opérateur — la politique de restart est inhibée jusqu'à un `up -d` explicite. Le lockfile résiduel (`/prometheus/lock` recréé au restart) confirme une sortie brutale, mais la conso mémoire est minuscule (36 MiB / 512 MiB) → ce n'était PAS un OOM kill applicatif.
-- **Diagnostic** : `docker compose ps -a` montre seulement les services qu'il connaît comme actifs ; un container `rm`'d hors compose disparaît de cette vue. `docker inspect <container>` est impossible (n'existe plus). Les events Docker sont purgés avec le container.
-- **Fix** : `cd /opt/pms && PMS_ADMIN_TOKEN=$xxx docker compose -f docker-compose.testnet.yml up -d prometheus` — recréation propre, le volume `prometheus_testnet_data` est préservé donc l'historique TSDB est intact (WAL replay au boot).
+### Bug historique : Prometheus tué par `upgrade-testnet.sh` (v0.7.6→v0.7.10, 2026-04-27)
+- **Symptôme** : `pms-prometheus-testnet` absent de `docker ps -a` après chaque upgrade ; scrape Grafana muet jusqu'à ce qu'on relance Prometheus à la main. Les 4 autres containers tournent normalement.
+- **Cause racine (le vrai !)** : deux bugs cumulés dans `scripts/upgrade-testnet.sh` qui supprimaient Prometheus à chaque upgrade :
+  1. `docker ps -a --filter "label=com.docker.compose.project=pms" -q | xargs docker rm -f` — supprimait **tous** les containers du projet pour nettoyer les "ghost containers", mais `$SERVICES_TO_RECREATE = "pms-engine pms-gateway pms-simulator"` ne contient pas Prometheus, donc rien ne le rebrulait après.
+  2. `docker compose up -d --force-recreate --remove-orphans $SERVICES_TO_RECREATE` — le `--remove-orphans` avec un sous-ensemble des services Compose marque Prometheus comme "orphelin" alors qu'il existe bien dans le YAML.
+- **Hypothèse rejetée** : "arrêt manuel + `unless-stopped` inhibé". C'est ce que j'avais documenté la première fois, à tort — le lockfile résiduel + le timing collait. Mais l'observation du run de v0.7.10 (Prometheus disparu **immédiatement après l'upgrade**, sans `docker stop` ni opérateur) a démasqué le vrai script coupable.
+- **Diagnostic** : grep dans le upgrade script pour `--remove-orphans` ou `docker rm` à blast-radius large. Le lockfile résiduel est en fait juste la conséquence du `docker rm -f` (SIGKILL).
+- **Fix** : `scripts/upgrade-testnet.sh` réécrit pour scoper la cleanup et le `up -d` au seul `$SERVICES_TO_RECREATE` (pas de `--remove-orphans`, pas de `xargs docker rm` global). Dans v0.7.11.
 - **Bonus découvert** : le scrape config `pms-gateway` était cassé en 401 Unauthorized — le job n'envoyait pas le Bearer token alors que le gateway protège son `/metrics` avec le même `ADMIN_TOKEN` que l'engine. Fixé dans `etc/prometheus/prometheus.yml` (réutilise `credentials_file: /etc/prometheus/admin_token`).
 
 ## Related Projects
