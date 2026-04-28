@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.16] - 2026-04-29 — Dashboard: stop cascade-blanking the admin token on a single 401
+
+### Fixed
+- **dashboard(api.ts/cascade-blanking)**: `apiCall()` was calling `adminToken.set('')` whenever any endpoint returned 401/403. With the Dashboard component firing 6 parallel calls on mount (`/metrics`, `/v1/nodes`, `/v1/peers`, `/v1/supply`, `/admin/ping`, `/v1/tokens`), a single failing endpoint would wipe the token store globally → App swaps to Login → other in-flight requests + polling timers retry with empty token → all log `with token: MISSING` and 401-loop. Symptom seen 2026-04-29 with a stale local admin token: the user's correct dashboard token was saved by Login, then nuked by a 401 cascade from `/metrics` before they could even see the dashboard.
+- **Fix**: `apiCall()` now only `throw`s on 401/403, leaving the token in place. The decision to clear the token belongs to the caller. Login.svelte already has its own `adminToken.set('')` in its catch when `/admin/ping` fails — that's the only place where blanking is correct (explicit auth-check failure during login). The Dashboard's other calls now fail individually without taking the entire session down.
+
+---
+
 ## [0.7.15] - 2026-04-29 — Gateway nofile ulimit: prevent 502 under production-realistic load
 
 ### Fixed

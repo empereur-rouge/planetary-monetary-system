@@ -23,8 +23,15 @@ export async function apiCall(endpoint: string, method = 'GET', body?: any) {
         });
 
         if (res.status === 401 || res.status === 403) {
-            console.warn('Unauthorized access');
-            adminToken.set('');
+            // Don't blank the token globally on a single 401 — that
+            // pattern cascades: one failing endpoint (e.g. /metrics
+            // returning 401 for any reason) wipes the store, the
+            // Dashboard's other in-flight requests + polling timers
+            // then log "token: MISSING" and 401-loop forever.
+            // Let the caller decide. Login.svelte explicitly clears
+            // the token in its own catch when /admin/ping fails,
+            // which is the right place for that decision.
+            console.warn(`Unauthorized access on ${endpoint}`);
             throw new Error('Unauthorized');
         }
 
