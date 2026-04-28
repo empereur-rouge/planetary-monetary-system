@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.15] - 2026-04-29 — Gateway nofile ulimit: prevent 502 under production-realistic load
+
+### Fixed
+- **deploy(gateway/nofile)**: `pms-gateway` container in `docker-compose.testnet.yml` now has `ulimits.nofile.soft/hard: 65536` (matching the engine). Without it, the gateway runs on Linux's default 1024 fd limit per process — fine for ~100 agents but the v0.7.9 production-realistic config (1119 simulator agents + dashboard clients × multiple HTTP/2 streams to the upstream `pms-engine`) burns through it within hours. Symptoms: gateway logs spam `Too many open files (os error 24)` followed by `dns error` (because socket-creation failure inside reqwest masquerades as DNS failure), and the dashboard loads HTML/JS/CSS but every API call returns `502 Bad Gateway` because the gateway can't open a new socket to the engine. Hit on 2026-04-29 ~30 min after the post-reboot redeploy. Recovery: hot-recreate the gateway via `docker compose up -d --force-recreate pms-gateway` (data lives in the engine, gateway is stateless).
+
+---
+
 ## [0.7.14] - 2026-04-29 — upgrade-testnet.sh: pre-deploy guard against stale non-testnet containers
 
 ### Fixed

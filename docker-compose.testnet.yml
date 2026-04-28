@@ -82,6 +82,17 @@ services:
     hostname: pms-gateway
     mem_limit: 512m
     memswap_limit: 512m
+    # 1119 simulator agents + dashboard clients × multiple HTTP/2
+    # streams quickly burns through the default 1024 fd limit (each
+    # active connection to the upstream pms-engine = 1 fd, plus
+    # inbound sockets, plus log files). Without this ulimit the
+    # gateway hits "Too many open files (os error 24)" under
+    # production-realistic load and starts returning 502 to dashboard
+    # API calls — observed 2026-04-28. Match the engine's 65536.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     logging:
       driver: json-file
       options:
