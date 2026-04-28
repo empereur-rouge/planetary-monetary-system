@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.14] - 2026-04-29 — upgrade-testnet.sh: pre-deploy guard against stale non-testnet containers
+
+### Fixed
+- **deploy(upgrade/stale-containers)**: `scripts/upgrade-testnet.sh` now `docker rm -f` any containers using the *simple* names (`pms-engine`, `pms-gateway`, `pms-caddy`, `pms-prometheus`, `pms-alertmanager`) before the `up -d` step. These stale containers come from the legacy `/opt/pms/docker-compose.yml` (the pre-multi-ledger prod compose file) and have their own `restart: unless-stopped` policy that makes them auto-resurrect on every host reboot. Until v0.7.14 we never removed them — just created the parallel `-testnet` versions — so a host reboot would silently bring back the *stale* ones first (via Docker's reverse-creation-order startup), leaving the simulator crash-looping with `Cannot reach gateway` because `pms-gateway` resolved to the wrong network. Hit on 2026-04-28 after an IONOS reboot. Volumes are named and persistent — nothing is lost, just the shell containers are recreated.
+
+### Documentation
+- **CLAUDE.md**: New "Bug historique : Containers fantômes non-testnet au reboot" runbook entry. Captures the symptom (mixed `pms-engine` / `pms-engine-testnet` names in `docker ps`), the diagnostic clues (`docker inspect <name> --format '{{.Config.Image}}'` shows `:latest` instead of `:testnet`; the compose project label points at the legacy YAML), the root cause (two compose files sharing the same `project=pms` label, host-reboot brings back both), and the manual-recovery one-liner.
+
+---
+
 ## [0.7.13] - 2026-04-27 — Alerting: Telegram-first via Alertmanager native receiver
 
 ### Changed

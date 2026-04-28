@@ -428,6 +428,28 @@ for _svc_to_rm in $SERVICES_TO_RECREATE; do
     [ -n "\$_cname_rm" ] && docker rm -f "\$_cname_rm" 2>/dev/null || true
 done
 
+# Pre-deploy guard: nuke any stale containers from a non-testnet
+# `docker-compose.yml` deploy that may still be lingering on the host.
+# These have the same SERVICE name (pms-engine / pms-gateway / etc.)
+# but NO `-testnet` suffix on their container_name, and are tied to
+# `:latest` images instead of `:testnet`. They get auto-restarted by
+# their own `restart: unless-stopped` policy after a host reboot,
+# which then conflicts with our testnet stack on Docker DNS / network
+# resolution (a clicker can suddenly find itself talking to pms-gateway
+# on a stale `:latest` image instead of pms-gateway-testnet). Seen
+# 2026-04-28 after the IONOS reboot — simulator was healthy but
+# crash-looping with "Cannot reach gateway" because it was trying
+# pms-testnet-public DNS while the live gateway was on pms-public.
+# Removing them here is safe: their volumes (`rocksdb_data`, etc.) are
+# named and persistent so the data survives; we just disconnect the
+# container shell.
+for _stale in pms-engine pms-gateway pms-caddy pms-prometheus pms-alertmanager; do
+    if docker inspect "\$_stale" >/dev/null 2>&1; then
+        echo -e "\${YELLOW}   Removing stale non-testnet container: \$_stale\${NC}"
+        docker rm -f "\$_stale" 2>/dev/null || true
+    fi
+done
+
 # Start services. Use || true because ghost containers may cause a non-zero
 # exit even though the real services are created successfully.
 #
