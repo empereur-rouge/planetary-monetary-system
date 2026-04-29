@@ -1,0 +1,149 @@
+# =============================================================================
+# Configuration Mainnet PMS (VPS production)
+# =============================================================================
+# Mode MAINNET strict : coordinator requis, signatures obligatoires.
+# Faucet désactivé. Inflation quotidienne réelle (pas accélérée comme testnet).
+# Rétention activité longue (90j) pour l'audit. Reste idem testnet
+# pour les invariants moteur (DAG, bloom, fees, persist pipeline).
+
+[rocks]
+path = "/home/pms/data/rocks"
+prefix = "pms:main"
+tip_limit = 256
+max_dag_blocks = 10000           # RAM DAG window (identique testnet)
+# UTXO LRU cache. À calibrer après le 1er mois de prod en fonction du
+# nombre réel d'utilisateurs ; 500K = ~24x la baseline testnet (21K
+# UTXOs), confortable pour le soft-launch <10K users.
+max_utxos = 500000
+auto_reindex_activity_items = false
+checkpoint_interval_secs = 3600
+# ── Memory tuning pour 16 GB VPS (identique testnet) ────────────────────────
+# Direct I/O, 5 prefixes max (main + future custom ledgers), 33 CFs/prefix.
+# write_buffer × max_buffers × num_CFs ≤ memtable budget cible.
+# Si tu prends un VPS 32 GB pour le mainnet, bump : write_buffer=32,
+# max_write_buffer_number=3, block_cache=1024, db_write_buffer=512,
+# et docker mem_limit=28g dans le compose.
+write_buffer_size_mb = 16
+max_write_buffer_number = 2
+block_cache_size_mb = 256
+db_write_buffer_size_mb = 256
+max_open_files = 4096
+
+[network]
+mode = "mainnet"
+network_id = "pms-mainnet-v1"
+protocol_version = 1
+
+[address]
+hrp = "8e"
+
+[admin]
+wallet_addresses = []
+treasury_wallets_file = "/home/pms/config/pms/treasury-wallets.json"
+
+[client]
+bind_addr = "0.0.0.0:8443"
+api_addr = "0.0.0.0:8080"
+internal_api_addr = "0.0.0.0:3000"
+allow_insecure_tls = true
+
+[p2p]
+known_peers = ""
+allowed_peer_ips = []
+strict_whitelist = false
+max_connections = 256
+per_peer_queue_cap = 2000
+max_orphans = 2000
+max_inflight_requests = 10000
+max_parent_deps = 5000
+max_peer_retries = 20
+
+[tls]
+cert_pem = "/home/pms/tls/cert.pem"
+key_pem = "/home/pms/tls/key.pem"
+whitelist_fp256 = []
+
+[limits]
+max_body_bytes = 1048576
+request_timeout_ms = 30000
+rate_limit_rps = 10000
+burst = 20000
+
+[fees]
+epsilon = "0.001"
+mode = "uniform"
+enforce_fee_recipient = false
+coordinator_fee_percent = 65
+treasury_fee_percent = 35
+distribution_interval_sec = 10
+# ── Inflation MAINNET : cycle quotidien réel (pas accéléré comme testnet) ─
+# Testnet utilise daily_inflation_interval_sec = 120 (= 2 minutes) pour
+# stress-tester la mécanique. Mainnet repasse au cycle "vrai" quotidien.
+daily_inflation_enabled = true
+daily_inflation_interval_sec = 86400          # 24h (testnet : 120s)
+annual_inflation_percent = 3.0
+treasury_reward_percent = 20
+creator_reward_percent = 70
+burn_percent = 10
+# Coordinator sub-address sharding : sur mainnet on garde 32 (audit-able
+# via /v1/coordinator/info::shards). Bump à 64 ou 128 si on dépasse
+# 1000 distributions/jour (un shard plein = ~200 UTXOs avant
+# consolidation auto).
+coord_shard_count = 32
+
+[auth]
+require_signed_submit = true
+admin_api_token = "env:PMS_ADMIN_TOKEN"
+allowed_ips = []
+api_keys_file = "/home/pms/config/pms/api-keys.json"
+
+[secrets]
+# Clé d'identité du noeud (ECDSA secp256k1). Sur mainnet, ce path
+# pointe vers le même fichier physique que la coordinator.key — c'est
+# le node identity ET la coordinator key (single-coordinator design).
+# RECOMMANDATION : à terme, chiffrer cette clé via
+# `node_identity_key_encrypted_path` + PMS_COORDINATOR_KEY_PASSPHRASE
+# pour qu'elle ne soit pas en clair sur le disque. Étape suivante :
+# HSM (YubiHSM 2 / AWS KMS) qui retire complètement la key de la VM.
+node_identity_key_path = "/home/pms/config/pms/node.key"
+admin_wallet_file = "/home/pms/config/pms/coordinator.json"
+
+# /healthz thresholds — légèrement plus stricts en mainnet pour catcher
+# les dégradations plus tôt (vrais utilisateurs, pas de simulateur).
+[health]
+# Mainnet : 2 minutes max sans bloc (vs 5 min testnet). Si un coordinator
+# stuck pendant 2 min en prod = page-er immédiatement.
+max_last_block_age_seconds = 120
+# Persist queue high-water identique (0.8 = 80%).
+persist_queue_high_water = 0.8
+# Disk free : 15% au lieu de 10% sur mainnet — marge pour les snapshots
+# RocksDB et les backups planifiés.
+min_disk_free_percent = 15.0
+# Rétention activité : 90 jours en mainnet (vs 30 testnet).
+# Utilisateurs ont besoin d'un historique consultable plus long pour
+# leurs balances + audit fiscal. Compliance log NON purgé (operator-only
+# via `/admin/purge-compliance-log`).
+activity_retention_days = 90
+# Auto UTXO consolidation : 5 minutes en mainnet (vs 10 testnet) pour
+# garder le coordinator master léger sous un trafic continu de fees.
+auto_consolidate_interval_secs = 300
+auto_consolidate_min_utxos = 200
+
+[validation]
+min_pow_leading_zero_bits = 0
+max_payload_bytes = 65536
+min_parents_after_boot = 1
+max_parents = 8
+require_unique_parents = true
+forbid_self_parent = true
+max_inputs = 64
+max_outputs = 64
+max_tx_bytes = 65536
+max_fee_per_tx = 1000
+enforce_parent_existence = false
+enforce_fee_recipient = false
+# Ces deux champs sont remplis automatiquement par `gen-coordinator`
+# au premier deploy. NE PAS coller les valeurs testnet ici — chaque
+# environnement doit avoir SA paire de clés.
+coordinator_public_key = ""
+coordinator_x25519_public_key = ""

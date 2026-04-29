@@ -23,6 +23,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.21] - 2026-04-30 — Mainnet config + scripts (artifacts only, deploy plus tard)
+
+### Added
+- **deploy(mainnet/config)**: Nouveau `etc/config/config.mainnet.toml` — clone du testnet avec `[network] mode = "mainnet"`, `network_id = "pms-mainnet-v1"`, `[rocks] prefix = "pms:main"`. Diffs sémantiques : `daily_inflation_interval_sec` 120s → 86400s (cycle réel quotidien, pas accéléré), `max_last_block_age_seconds` 300 → 120 (alerte plus stricte), `min_disk_free_percent` 10 → 15, `activity_retention_days` 30 → 90 (audit fiscal), `auto_consolidate_interval_secs` 600 → 300.
+- **deploy(mainnet/compose)**: Nouveau `docker-compose.mainnet.yml` — engine/gateway/caddy/prometheus/alertmanager/cadvisor avec suffixe `-mainnet`, networks `pms-mainnet-{internal,public}`, volumes `*_mainnet_data`. Image tags semver immutables via `${IMAGE_VERSION:-v0.7.21}` (vs `:testnet` mutable). Engine `mem_limit: 12g` (sans simulator on a moins besoin). **PAS de service `pms-simulator`** — vrais utilisateurs uniquement.
+- **deploy(mainnet/alertmanager)**: Nouveau `etc/alertmanager/alertmanager.mainnet.yml` — channel Telegram dédié "PMS Mainnet Alerts" via le même bot que testnet (`secrets/telegram_bot_token` partagé). Préfixe message `🟢 [MAINNET]` pour distinguer visuellement des alertes testnet. `chat_id: 0` placeholder à remplacer par l'ID réel du channel quand l'opérateur le crée.
+- **deploy(mainnet/prometheus)**: Nouveau `etc/prometheus/prometheus.mainnet.yml` — scrape config sans le job `pms-simulator`. `rule_files: alerting_rules.yml` partagé avec testnet (les filtres `up{job="..."}` sont environment-agnostic, chaque Prometheus scrape son propre engine local).
+- **deploy(mainnet/scripts)**: Nouveaux `scripts/deploy-mainnet.sh` (840 lignes) et `scripts/upgrade-mainnet.sh` (489 lignes) — clonés des testnet scripts avec : domaine `pms-network.com` (root), tags semver via `IMAGE_VERSION` env, build de **2 images** au lieu de 3 (drop simulator), backup paths `pms-mainnet-*.json`, init coordinator avec génération de keys mainnet uniques (le script garde-fou contre l'éventuelle confusion testnet/mainnet).
+- **doc(CLAUDE.md)**: Nouvelle section "VPS Mainnet — Infrastructure de Production (à provisionner)" parallèle à la section testnet : tableau des diffs config, checklist pre-launch (provision VPS + DNS + Telegram channel + chat_id + 1er deploy + backup + paging test + 24h stability run), commandes de déploiement et rollback.
+
+### Validation locale (cette release)
+- `bash -n scripts/deploy-mainnet.sh && bash -n scripts/upgrade-mainnet.sh` : clean.
+- `docker compose -f docker-compose.mainnet.yml config --quiet` : clean. Liste services : `alertmanager`, `caddy`, `cadvisor`, `pms-engine`, `pms-gateway`, `prometheus` — confirmé **pas de simulator**.
+- `cargo check -p pms-server` : clean (5m10s, no errors). La nouvelle config n'introduit aucun changement de code, seulement de nouvelles valeurs lues à runtime.
+
+### Hors scope (action ultérieure de l'opérateur)
+- Provisionner un second VPS IONOS (16 Go min, 32 Go recommandé)
+- DNS `pms-network.com` → IP du nouveau VPS
+- Création du channel Telegram "PMS Mainnet Alerts" + récupération du `chat_id`
+- Premier `deploy-mainnet.sh` avec génération de coordinator keys uniques
+- 24h stability run avant ouverture aux vrais utilisateurs
+- Stripe / fiat on-ramp (étape suivante après stabilité confirmée)
+
+---
+
 ## [0.7.20] - 2026-04-29 — Launch-readiness: token mint UTXO double-apply fix + 4 sandbox tests
 
 ### Fixed

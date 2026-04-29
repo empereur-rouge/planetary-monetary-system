@@ -131,6 +131,60 @@ Toute la stack a `restart: unless-stopped` (sauf simulator avec `on-failure`, by
 4. Smoke test post-reboot : `docker compose ps -a` doit ne montrer que les `*-testnet` et tous doivent revenir healthy en moins de 5 minutes (engine `start_period: 300s` est le plus long).
 5. **Gateway recovery (sous-piège connu)** : si le gateway montre `Up (healthy)` mais que le simulator boucle avec `Cannot reach gateway` ou des 502 apparaissent dans `docker logs pms-gateway-testnet` (`Connection refused (os error 111)` vers `pms-engine:8080`), c'est un état dégradé du connection pool reqwest du gateway après reboot. **Fix : `docker restart pms-gateway-testnet`** — propre en 10 sec. Reproduit lors du test de reboot 2026-04-29 ; la cause probable est une connexion TCP marquée vivante par le pool mais en réalité morte côté engine pendant la fenêtre de bootstrap parallèle. À surveiller pour un fix de fond dans le code gateway (eviction agressive du pool sur 502, ou healthcheck upstream).
 
+## VPS Mainnet — Infrastructure de Production (à provisionner)
+
+**Status** : config + scripts prêts dans le repo, **pas encore déployé** (en attente d'un second VPS dédié au mainnet).
+
+### Serveur (à provisionner)
+- **Hébergeur** : IONOS VPS (recommandé : 16 Go RAM minimum, 32 Go pour confort lancement)
+- **IP** : à remplir au moment du provision
+- **Domaine** : `pms-network.com` (root) — Let's Encrypt via Caddy
+- **User SSH** : `pms`
+- **OS** : Debian 12
+
+### Stack Docker (docker-compose.mainnet.yml)
+Identique au testnet **sauf** :
+- **Pas de simulator** (vrais utilisateurs uniquement, pas de stress-test producer-side)
+- **Image tags semver** (`pms-node:v0.7.21`, `pms-gateway:v0.7.21`) au lieu de `:testnet` mutable — bump avec chaque release
+- **Container suffix `-mainnet`** (pms-engine-mainnet, pms-gateway-mainnet, etc.)
+- **Networks** : `pms-mainnet-internal` / `pms-mainnet-public`
+- **Volumes** : `rocksdb_mainnet_data`, `caddy_mainnet_data`, `prometheus_mainnet_data`, `alertmanager_mainnet_data`
+- **Engine `mem_limit: 12g`** (vs 14g testnet — sans simulator on a moins besoin)
+- **Channel Telegram dédié "PMS Mainnet Alerts"** (même bot que testnet, chat_id différent dans `etc/alertmanager/alertmanager.mainnet.yml`)
+
+### Différences clés de config (`config.mainnet.toml` vs `config.testnet.toml`)
+| Champ | Testnet | Mainnet |
+|---|---|---|
+| `[network] mode` | `testnet` | `mainnet` |
+| `[network] network_id` | `pms-testnet-v1` | `pms-mainnet-v1` |
+| `[rocks] prefix` | `pms:test` | `pms:main` |
+| `[fees] daily_inflation_interval_sec` | `120` (= 2 min, accéléré pour stress test) | `86400` (= 24h, cycle réel) |
+| `[health] max_last_block_age_seconds` | `300` (5 min) | `120` (2 min — plus strict en prod) |
+| `[health] min_disk_free_percent` | `10.0` | `15.0` (marge backups) |
+| `[health] activity_retention_days` | `30` | `90` (audit fiscal) |
+| `[health] auto_consolidate_interval_secs` | `600` | `300` |
+| `coordinator_public_key` | (testnet keys) | (clés UNIQUES mainnet, NEVER reuse testnet) |
+
+### Déploiement
+- **Full deploy** (build + init coordinator) : `IMAGE_VERSION=v0.7.21 scripts/deploy-mainnet.sh [--yes] <IP> [USER] [SSH_KEY]`
+- **Upgrade** (code only, preserve data) : `IMAGE_VERSION=v0.7.22 scripts/upgrade-mainnet.sh <IP> [USER] [SSH_KEY]`
+- **Rollback** : `IMAGE_VERSION=v0.7.20 scripts/upgrade-mainnet.sh <IP>` — repush l'ancien tag, RocksDB data préservé.
+- Avant le 1er deploy : provisionner VPS, configurer DNS `pms-network.com`, créer le channel Telegram "PMS Mainnet Alerts" et coller son `chat_id` dans `etc/alertmanager/alertmanager.mainnet.yml`.
+
+### Checklist pre-launch
+- [ ] VPS provisionné (16 Go min)
+- [ ] DNS `pms-network.com` → IP du VPS (TTL 300)
+- [ ] Channel Telegram "PMS Mainnet Alerts" créé + bot ajouté admin + chat_id récupéré
+- [ ] `chat_id` collé dans `etc/alertmanager/alertmanager.mainnet.yml` (deux fois : pager + notify)
+- [ ] Première exécution `IMAGE_VERSION=v0.7.21 scripts/deploy-mainnet.sh --yes <IP> pms ~/.ssh/pms_vps`
+- [ ] Backup `pms-mainnet-*.json` sauvegardé sur le drive externe (jamais committé)
+- [ ] Test de paging via `amtool alert add` → confirmation Telegram reçue dans le bon channel
+- [ ] 24h stability run sans incidents avant ouverture aux vrais utilisateurs
+- [ ] Stripe / fiat on-ramp activé (étape suivante, hors scope deploy)
+
+### Boot-resiliency mainnet
+Mêmes invariants que testnet (compose.yaml symlink, no stale containers, --remove-orphans avoided), juste avec `-mainnet` au lieu de `-testnet`. `scripts/{deploy,upgrade}-mainnet.sh` les portent automatiquement.
+
 ## Related Projects
 
 ### PMS SDK (TypeScript)

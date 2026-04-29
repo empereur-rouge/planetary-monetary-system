@@ -1,0 +1,285 @@
+# =============================================================================
+# Mainnet Docker Compose — Engine + Gateway + Caddy + Prometheus + Alertmanager + cAdvisor
+# =============================================================================
+#
+# Architecture (production) :
+#   Internet -> Caddy (80/443, Let's Encrypt sur pms-network.com)
+#                -> Gateway (8443, self-signed TLS interne)
+#                    -> Engine (8080, HTTPS self-signed TLS interne)
+#              Prometheus (9091, localhost only)
+#              Alertmanager (9093, localhost only)
+#              cAdvisor (8082, localhost only) — métriques cgroup pour HostMemoryHigh
+#
+#   PAS DE SIMULATEUR en mainnet — vrais utilisateurs uniquement.
+#
+# Usage :
+#   IMAGE_VERSION=v0.7.21 PMS_ADMIN_TOKEN=xxx \
+#   docker compose -f docker-compose.mainnet.yml up -d
+#
+# Images : tags semver immutables (`:v0.7.21`, `:v0.7.22`, ...). Bump
+# pour chaque release ; rollback = `IMAGE_VERSION=v0.7.20 docker
+# compose up -d`. Ne PAS utiliser `:latest` (mutable, perd la
+# traçabilité). Build local + transfert via `scripts/deploy-mainnet.sh`
+# ou `scripts/upgrade-mainnet.sh` — pas de build sur le VPS.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PMS Engine (Coordinator) — INTERNAL ONLY
+  # ---------------------------------------------------------------------------
+  pms-engine:
+    image: pms-node:${IMAGE_VERSION:-v0.7.21}
+    container_name: pms-engine-mainnet
+    hostname: pms-engine
+    user: "pms"
+    # Sans simulateur, le baseline est plus léger qu'en testnet.
+    # 12g laisse 3-4 GB libres au système pour Caddy / Prometheus /
+    # Alertmanager / cAdvisor + buff_cache. Bump à 14g si tu vises un
+    # VPS 16 GB et tu acceptes un système plus serré, ou bump à 28g sur
+    # un VPS 32 GB.
+    mem_limit: 12g
+    memswap_limit: 12g
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    environment:
+      RUST_LOG: info,pms_server=info,pms_core=info
+      PMS_CONFIG: /home/pms/config/config.mainnet.toml
+      PMS_ADMIN_TOKEN: "${PMS_ADMIN_TOKEN}"
+      # Optional: passphrase pour la coordinator key chiffrée (recommandé
+      # en mainnet). Quand `[secrets].node_identity_key_encrypted_path`
+      # est set dans config.mainnet.toml, l'engine lit cette passphrase
+      # pour AES-GCM-decrypt node.key.enc au boot. Vide / unset = clé
+      # plain (acceptable en démarrage, à durcir avant >100 users réels).
+      PMS_COORDINATOR_KEY_PASSPHRASE: "${PMS_COORDINATOR_KEY_PASSPHRASE:-}"
+    command: ["--config", "/home/pms/config/config.mainnet.toml"]
+    volumes:
+      - ./etc/config:/home/pms/config:rw
+      - ./etc/pms:/home/pms/config/pms:rw
+      - ./secrets/tls:/home/pms/tls:ro
+      - rocksdb_mainnet_data:/home/pms/data
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sk -f https://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 300s
+    networks:
+      - pms-mainnet-internal
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # PMS Gateway — Auth/RateLimit/Public Routes
+  # ---------------------------------------------------------------------------
+  pms-gateway:
+    image: pms-gateway:${IMAGE_VERSION:-v0.7.21}
+    container_name: pms-gateway-mainnet
+    hostname: pms-gateway
+    mem_limit: 512m
+    memswap_limit: 512m
+    # Mainnet n'a pas le flood d'agents simulator, mais les vrais users
+    # (dashboard, SDK, mobile clicker) génèrent aussi pas mal de
+    # connexions HTTP/2. On garde le 65536 pour matcher l'engine et
+    # avoir de la marge pour les pics post-launch.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    depends_on:
+      pms-engine:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info,pms_gateway=info
+      UPSTREAM_URL: https://pms-engine:8080
+      LISTEN_ADDR: 0.0.0.0:8443
+      TLS_CERT: /app/tls/cert.pem
+      TLS_KEY: /app/tls/key.pem
+      ADMIN_TOKEN: "${PMS_ADMIN_TOKEN}"
+      DASHBOARD_PATH: /app/dashboard
+      # Per-IP rate limit. Mainnet : on garde 500 RPS par IP (suffisant
+      # pour un mobile client agressif), les vrais utilisateurs viennent
+      # avec des IPs différentes donc le total cumulé scale linéairement.
+      # Si tu vois des 429 légitimes côté users, bump à 1000/2000.
+      RATE_LIMIT_RPS: 500
+      BURST_SIZE: 1000
+      # Pas de simulator dans la liste — supprimé du SERVICES_MONITOR.
+      SERVICES_MONITOR: "Engine|https://pms-engine:8080/internal/health|ok,Prometheus|http://prometheus:9090/-/healthy|,Caddy|http://caddy:80|"
+      SERVICES_CHECK_INTERVAL: "20"
+    volumes:
+      - ./secrets/tls:/app/tls:ro
+    expose:
+      - "8443"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8443' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    networks:
+      - pms-mainnet-internal
+      - pms-mainnet-public
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Caddy — TLS termination + Let's Encrypt sur pms-network.com
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    container_name: pms-caddy-mainnet
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.mainnet:/etc/caddy/Caddyfile:ro
+      - caddy_mainnet_data:/data
+      - caddy_mainnet_config:/config
+    depends_on:
+      pms-gateway:
+        condition: service_healthy
+    networks:
+      - pms-mainnet-public
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Prometheus — Metrics (localhost only)
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: pms-prometheus-mainnet
+    mem_limit: 512m
+    memswap_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - ./etc/prometheus/prometheus.mainnet.yml:/etc/prometheus/prometheus.yml:ro
+      # alerting_rules.yml est partagé avec testnet (les filtres `up{job="..."}`
+      # sont environment-agnostic — chaque Prometheus scrape son propre engine
+      # local, pas de collision possible cross-VPS).
+      - ./etc/prometheus/alerting_rules.yml:/etc/prometheus/alerting_rules.yml:ro
+      - ./secrets/prometheus_admin_token:/etc/prometheus/admin_token:ro
+      - prometheus_mainnet_data:/prometheus
+    ports:
+      - "127.0.0.1:9091:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+      # Mainnet : on garde 7 jours de TSDB (vs 3j testnet) pour les
+      # dashboards Grafana et l'investigation post-incident. 1 GB
+      # storage = ~6 mois à 1Hz d'enregistrement actuel.
+      - '--storage.tsdb.retention.time=7d'
+      - '--storage.tsdb.retention.size=2GB'
+    networks:
+      - pms-mainnet-internal
+      # Public network uniquement pour les scrape de containers exposés
+      # côté public (caddy). En mainnet PAS de simulator donc moins de
+      # raisons d'être ici, mais on garde par cohérence avec testnet.
+      - pms-mainnet-public
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Alertmanager — Routes Prometheus alerts to Telegram
+  # ---------------------------------------------------------------------------
+  # Channel Telegram dédié "PMS Mainnet Alerts" via le même bot que
+  # testnet. Le chat_id est dans alertmanager.mainnet.yml. Tant qu'il
+  # vaut `0` (placeholder), les alertes vont au receiver `null`
+  # (silently dropped) — pas de spam pendant le bring-up.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: pms-alertmanager-mainnet
+    mem_limit: 256m
+    memswap_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - ./etc/alertmanager/alertmanager.mainnet.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Bot token Telegram partagé avec testnet — un seul bot, deux
+      # channels distincts. Le fichier est créé par deploy-mainnet.sh
+      # (placeholder si absent, la valeur réelle = celle du testnet).
+      - ./secrets/telegram_bot_token:/etc/alertmanager/telegram_bot_token:ro
+      - alertmanager_mainnet_data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.listen-address=0.0.0.0:9093'
+      - '--cluster.listen-address='
+    networks:
+      - pms-mainnet-internal
+      # Public requis pour outbound vers api.telegram.org (sinon le
+      # `internal: true` du réseau internal bloque toute resolution DNS
+      # externe — bug observé 2026-04-29 sur testnet).
+      - pms-mainnet-public
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # cAdvisor — Container-level cgroup metrics for Prometheus
+  # ---------------------------------------------------------------------------
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    container_name: pms-cadvisor-mainnet
+    privileged: true
+    mem_limit: 256m
+    memswap_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "127.0.0.1:8082:8080"
+    networks:
+      - pms-mainnet-internal
+    command:
+      - '--docker_only=true'
+    restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  pms-mainnet-internal:
+    driver: bridge
+    internal: true
+  pms-mainnet-public:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  rocksdb_mainnet_data:
+  caddy_mainnet_data:
+  caddy_mainnet_config:
+  prometheus_mainnet_data:
+  alertmanager_mainnet_data:

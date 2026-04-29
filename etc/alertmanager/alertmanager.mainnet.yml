@@ -1,0 +1,114 @@
+# =============================================================================
+# Alertmanager — PMS Mainnet routing (Telegram-first)
+# =============================================================================
+#
+# Setup identique à testnet, sauf :
+#
+#   - chat_id pointe vers un channel Telegram DÉDIÉ "PMS Mainnet Alerts"
+#     pour ne pas mélanger les alertes mainnet et testnet
+#   - Préfixe visuel `🟢 [MAINNET]` dans les messages pour qu'on
+#     identifie au premier coup d'oeil sur le téléphone
+#   - Le bot lui-même est partagé avec testnet (même
+#     secrets/telegram_bot_token sur les deux VPS) — un seul token à
+#     gérer, mais deux channels distincts pour le routage
+#
+# AVANT LE PREMIER DEPLOY :
+#   1. Crée le channel Telegram "PMS Mainnet Alerts" → ajoute le bot
+#      comme admin → envoie un message
+#   2. `curl https://api.telegram.org/bot<TOKEN>/getUpdates` →
+#      récupère le `chat.id` du channel
+#   3. Remplace les deux `chat_id: 0` ci-dessous par cet ID (négatif
+#      pour les channels, ex: `-1009876543210`)
+#   4. Le `secrets/telegram_bot_token` est créé en placeholder par
+#      deploy-mainnet.sh — copie le token réel (le même que testnet)
+#      depuis le VPS testnet ou ton backup local
+# =============================================================================
+
+global:
+  resolve_timeout: 5m
+
+# ---------------------------------------------------------------------------
+# Routing tree — identique testnet
+# ---------------------------------------------------------------------------
+route:
+  receiver: 'pager'
+
+  group_by: ['alertname', 'component']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    - matchers:
+        - severity = critical
+      receiver: 'pager'
+      repeat_interval: 1h
+      group_wait: 10s
+
+    - matchers:
+        - severity = warning
+      receiver: 'notify'
+
+# ---------------------------------------------------------------------------
+# Receivers
+# ---------------------------------------------------------------------------
+receivers:
+
+  - name: 'null'
+
+  # ─── Pager (critical alerts) → Telegram MAINNET avec son ─────────────────
+  - name: 'pager'
+    telegram_configs:
+      - bot_token_file: '/etc/alertmanager/telegram_bot_token'
+        # IMPORTANT : channel "PMS Mainnet Alerts", PAS le channel testnet.
+        # Remplace par l'ID réel du channel mainnet.
+        chat_id: 0
+        disable_notifications: false
+        parse_mode: 'HTML'
+        message: |-
+          {{ if eq .Status "firing" }}🚨🟢 <b>[MAINNET] {{ .GroupLabels.alertname }}</b> [<i>FIRING</i>]{{ else }}✅🟢 <b>[MAINNET] {{ .GroupLabels.alertname }}</b> [<i>RESOLVED</i>]{{ end }}
+
+          {{ range .Alerts -}}
+          <b>{{ .Annotations.summary }}</b>
+
+          {{ .Annotations.description }}
+
+          {{ if .Annotations.runbook }}<i>Runbook:</i> <code>{{ .Annotations.runbook }}</code>
+          {{ end }}
+          {{ end -}}
+
+          <i>Component:</i> <code>{{ .CommonLabels.component }}</code>
+          <i>Severity:</i> <code>{{ .CommonLabels.severity }}</code>
+          <i>Stack:</i> <code>mainnet</code>
+
+  # ─── Notify (warning alerts) → Telegram MAINNET silent ──────────────────
+  - name: 'notify'
+    telegram_configs:
+      - bot_token_file: '/etc/alertmanager/telegram_bot_token'
+        # Peut être le même chat_id que `pager` au-dessus (un seul channel
+        # mainnet, distinction audio via `disable_notifications`), ou un
+        # channel "PMS Mainnet Warnings" séparé pour isoler le bruit.
+        chat_id: 0
+        disable_notifications: true
+        parse_mode: 'HTML'
+        message: |-
+          {{ if eq .Status "firing" }}⚠️🟢 <b>[MAINNET] {{ .GroupLabels.alertname }}</b> [<i>FIRING</i>]{{ else }}✅🟢 <b>[MAINNET] {{ .GroupLabels.alertname }}</b> [<i>RESOLVED</i>]{{ end }}
+
+          {{ range .Alerts -}}
+          <b>{{ .Annotations.summary }}</b>
+
+          {{ .Annotations.description }}
+          {{ end -}}
+
+          <i>Component:</i> <code>{{ .CommonLabels.component }}</code>
+          <i>Stack:</i> <code>mainnet</code>
+
+# ---------------------------------------------------------------------------
+# Inhibition rules
+# ---------------------------------------------------------------------------
+inhibit_rules:
+  - source_matchers:
+      - alertname = "EngineDown"
+    target_matchers:
+      - component =~ "persist-pipeline|storage"
+    equal: ['component']

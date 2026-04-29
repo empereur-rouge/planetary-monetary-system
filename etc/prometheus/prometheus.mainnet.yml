@@ -1,0 +1,58 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Alert rules — fichier partagé avec testnet (rules `up{job="..."}` sont
+# environment-agnostic, les jobs ont les mêmes noms sur les deux stacks).
+rule_files:
+  - /etc/prometheus/alerting_rules.yml
+
+# Alertmanager target.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'alertmanager:9093'
+
+scrape_configs:
+  # PMS Engine — full Prometheus registry. Bearer auth obligatoire
+  # (engine derrière `require_local_or_admin`, prometheus n'est pas
+  # loopback). Token mounted via `credentials_file`.
+  - job_name: 'pms-engine'
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/admin_token
+    static_configs:
+      - targets: ['pms-engine:8080']
+    metrics_path: /metrics/all
+
+  # Gateway — `/metrics` derrière le même admin token.
+  - job_name: 'pms-gateway'
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/admin_token
+    static_configs:
+      - targets: ['pms-gateway:8443']
+    metrics_path: /metrics
+
+  # PAS de `pms-simulator` job en mainnet (pas de simulator déployé).
+
+  # Alertmanager self-metrics — détecte si la layer paging est cassée.
+  - job_name: 'alertmanager'
+    scheme: http
+    static_configs:
+      - targets: ['alertmanager:9093']
+    metrics_path: /metrics
+
+  # cAdvisor — métriques cgroup pour HostMemoryHigh (proxy host RSS).
+  - job_name: 'cadvisor'
+    scheme: http
+    static_configs:
+      - targets: ['cadvisor:8080']
+    metrics_path: /metrics
