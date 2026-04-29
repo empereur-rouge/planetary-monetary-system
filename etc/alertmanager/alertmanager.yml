@@ -34,7 +34,7 @@ global:
 route:
   # Default receiver — used by anything that doesn't match a child.
   # Switch this to `pager` once you've filled in your bot_token + chat_id.
-  receiver: 'null'
+  receiver: 'pager'
 
   group_by: ['alertname', 'component']
   group_wait: 30s
@@ -67,7 +67,7 @@ receivers:
       - bot_token_file: '/etc/alertmanager/telegram_bot_token'
         # Replace with your channel/chat ID. Negative for channels (e.g.
         # -1001234567890), positive for direct messages to your user.
-        chat_id: 0
+        chat_id: 1800635048
         # Plays the channel's notification sound. Set to true to send a
         # silent message (no sound, useful if you have multiple channels
         # routed to the same chat).
@@ -95,7 +95,7 @@ receivers:
         # Can be the same chat_id as `pager` above, or a separate
         # "warnings-only" channel if you want to keep noise out of the
         # paging channel.
-        chat_id: 0
+        chat_id: 1800635048
         # Silent: just lands in chat, no notification sound.
         disable_notifications: true
         parse_mode: 'HTML'

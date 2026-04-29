@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.18] - 2026-04-29 — Alertmanager dual-network: fix Telegram outbound delivery
+
+### Fixed
+- **deploy(alertmanager/networks)**: Alertmanager was attached only to `pms-testnet-internal` (which has `internal: true` → no Internet egress), so it could resolve sibling containers (`pms-engine:8080`, `prometheus:9090`) but couldn't reach `api.telegram.org`. Symptom: alert fires, gets stuck in retry loop with `lookup api.telegram.org on 127.0.0.11:53: server misbehaving` in alertmanager logs. Same trap would've hit Better Uptime / PagerDuty / Slack — every external paging API needs Internet egress. **Fix**: `alertmanager` service now joins both `pms-testnet-internal` (for Prometheus to scrape it) AND `pms-testnet-public` (for outbound to paging providers).
+
+---
+
 ## [0.7.17] - 2026-04-29 — Single-ledger stability run (eden only)
 
 ### Changed
