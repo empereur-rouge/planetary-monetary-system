@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.19] - 2026-04-29 — Boot-resiliency: prevent stale-stack reboot trap
+
+### Fixed
+- **deploy(boot-resiliency)**: After a host reboot Docker auto-restarts every container with `restart: unless-stopped`. If a stale `docker compose up -d` had ever been run from `/opt/pms/` without `-f docker-compose.testnet.yml`, Compose v2 defaulted to `docker-compose.yml` (the pre-multi-ledger legacy compose), creating a parallel set of containers (`pms-engine`, `pms-gateway`, `pms-caddy`, `pms-prometheus`) on `:latest` images. After reboot, BOTH stacks came back, the testnet simulator pointed at the wrong gateway via Docker DNS, and the system silently regressed. Hit 2026-04-28.
+- **Fix**: both `scripts/deploy-testnet.sh` and `scripts/upgrade-testnet.sh` now (idempotently, on every run):
+  1. Create `compose.yaml → docker-compose.testnet.yml` symlink in `/opt/pms/`. Compose v2 prefers `compose.yaml` over `docker-compose.yml` so plain `docker compose up -d` resolves to the testnet stack — no `-f` required.
+  2. Rename `docker-compose.yml` to `docker-compose.legacy-prod.yml.disabled` if still present, killing the trap completely.
+- **doc(CLAUDE.md)**: New "Boot-resiliency (post-reboot)" subsection in the runbook listing the 4 invariants the operator should verify when checking the testnet after a reboot (no ghost containers, symlink intact, legacy compose disabled, smoke test).
+
+### Operator action — already applied to current testnet
+Hot-applied 2026-04-29 via SSH: symlink created, legacy renamed, `docker compose up -d` (no `-f`) tested and confirmed picks up the 6 testnet services correctly.
+
+---
+
 ## [0.7.18] - 2026-04-29 — Alertmanager dual-network: fix Telegram outbound delivery
 
 ### Fixed

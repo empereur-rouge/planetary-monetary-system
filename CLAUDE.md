@@ -121,6 +121,14 @@ docker inspect pms-engine-testnet --format='RestartCount: {{.RestartCount}} | OO
 - **Diagnostic** : `docker ps` montre des noms mixés (avec et sans `-testnet`). `docker inspect <name> --format '{{.Config.Image}}'` révèle `:latest` au lieu de `:testnet`. `docker inspect <name> --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'` pointe vers `docker-compose.yml` au lieu de `docker-compose.testnet.yml`.
 - **Fix** : `scripts/upgrade-testnet.sh` ajoute (v0.7.14) un guard pre-deploy qui `docker rm -f` les containers fantômes par nom simple (`pms-engine`, `pms-gateway`, `pms-caddy`, `pms-prometheus`, `pms-alertmanager`) avant le `up -d`. Les volumes nommés (`rocksdb_testnet_data`, etc.) survivent — pas de perte de données, juste le shell container qui est recréé proprement.
 - **Recovery (sans deploy script)** : `docker rm -f pms-engine pms-gateway pms-caddy pms-prometheus pms-simulator-testnet && cd /opt/pms && PMS_ADMIN_TOKEN=$xxx docker compose -f docker-compose.testnet.yml up -d`.
+- **Hardening permanent (v0.7.19)** : `scripts/{deploy,upgrade}-testnet.sh` créent maintenant un symlink `compose.yaml → docker-compose.testnet.yml` sur le VPS et renomment l'ancien `docker-compose.yml` en `.disabled`. Compose v2 préfère `compose.yaml` à `docker-compose.yml`, donc `docker compose up -d` (sans `-f`) charge automatiquement le bon fichier — l'erreur de typo qui re-créait la stack legacy est désormais impossible.
+
+### Boot-resiliency (post-reboot)
+Toute la stack a `restart: unless-stopped` (sauf simulator avec `on-failure`, by design). Au reboot du host, Docker daemon relance automatiquement les containers. Pour que ça ne re-déclenche PAS le bug ci-dessus :
+1. **Aucun container fantôme** ne doit traîner dans Docker daemon. `docker ps -a` doit ne montrer que les noms `*-testnet`. Si un container sans suffixe apparaît, c'est qu'un `docker compose up -d` a été lancé avec un mauvais fichier — `docker rm -f <nom>` immédiat.
+2. **`compose.yaml` symlink intact** : `ls -la /opt/pms/compose.yaml` doit pointer vers `docker-compose.testnet.yml`. Recréer si cassé : `cd /opt/pms && ln -sf docker-compose.testnet.yml compose.yaml`.
+3. **`docker-compose.yml` doit rester `.disabled`** ou inexistant. Si quelqu'un le restaure (depuis git ou autre), le piège revient.
+4. Smoke test post-reboot : `docker compose ps -a` doit ne montrer que les `*-testnet` et tous doivent revenir healthy en moins de 5 minutes (engine `start_period: 300s` est le plus long).
 
 ## Related Projects
 

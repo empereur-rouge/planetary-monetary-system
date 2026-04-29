@@ -231,6 +231,29 @@ if [ "$UPDATE_CONFIG" = "true" ]; then
     scp -q $SSH_OPTS tools/simulator/simulator.testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/simulator.testnet.toml"
     scp -q $SSH_OPTS tools/simulator/agents_testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/agents_testnet.toml"
 
+    # Boot-resiliency: ensure `docker compose` (without `-f`) on the VPS
+    # always picks up the testnet stack. Two invariants:
+    #
+    #   1. `compose.yaml` symlink → `docker-compose.testnet.yml` —
+    #      Compose v2 prefers `compose.yaml` over `docker-compose.yml`,
+    #      so plain `docker compose up -d` resolves to the testnet
+    #      services. No more `-f` required, no more accidental legacy
+    #      stack creation.
+    #
+    #   2. The legacy `docker-compose.yml` (the pre-multi-ledger prod
+    #      compose) is renamed to `.disabled` if still present. Its
+    #      service names collided with the testnet stack on `project=pms`
+    #      label and bit us 2026-04-28 after a host reboot — see
+    #      CLAUDE.md "Containers fantômes non-testnet au reboot".
+    #
+    # Both operations are idempotent — re-running the upgrade is safe.
+    ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" "cd $REMOTE_DIR && \
+        ln -sf docker-compose.testnet.yml compose.yaml && \
+        if [ -f docker-compose.yml ] && [ ! -L docker-compose.yml ]; then \
+            mv docker-compose.yml docker-compose.legacy-prod.yml.disabled; \
+            echo '   Disabled legacy docker-compose.yml'; \
+        fi"
+
     # Restore VPS-specific values.
     # IMPORTANT: Use heredocs (<< EOF) instead of ssh "..." for sed commands.
     # TOML values contain double quotes (e.g. key = "02abc..."). In ssh "...",

@@ -329,6 +329,16 @@ scp -q $SSH_OPTS tools/simulator/agents_testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_
     scp -q $SSH_OPTS etc/prometheus/alerting_rules.yml "$VPS_USER@$VPS_IP:$REMOTE_DIR/etc/prometheus/alerting_rules.yml"
 [ -f etc/alertmanager/alertmanager.yml ] && \
     scp -q $SSH_OPTS etc/alertmanager/alertmanager.yml "$VPS_USER@$VPS_IP:$REMOTE_DIR/etc/alertmanager/alertmanager.yml"
+
+# Boot-resiliency: same invariants as upgrade-testnet.sh — `compose.yaml`
+# symlink → testnet, legacy `docker-compose.yml` disabled. See
+# CLAUDE.md "Containers fantômes non-testnet au reboot".
+ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" "cd $REMOTE_DIR && \
+    ln -sf docker-compose.testnet.yml compose.yaml && \
+    if [ -f docker-compose.yml ] && [ ! -L docker-compose.yml ]; then \
+        mv docker-compose.yml docker-compose.legacy-prod.yml.disabled; \
+        echo '   Disabled legacy docker-compose.yml'; \
+    fi"
 echo -e "   ${GREEN}Config files uploaded.${NC}"
 
 # Transfer Docker images (only if we built them)
