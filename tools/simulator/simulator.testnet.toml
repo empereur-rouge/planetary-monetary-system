@@ -29,54 +29,23 @@ bootstrap_concurrency = 128
 # disable (cgroup OOM is the backstop).
 max_rss_mb = 1500
 
-# 4-ledger production-realistic clicker scenario (v0.7.8+). Each entry
-# boots an independent game engine on its own ledger with its own
-# EDN-equivalent token + smart contract + gas pool. Clicker agents
-# spread across them via `[agents.game].game_index = 0..3` in
-# `agents_testnet.toml`. This gives the engine a multi-ledger
-# steady-state load that mirrors what the launched game is expected
-# to look like at first-week scale.
+# Single-ledger stability test (v0.7.17+). Reduced from 4 ledgers to
+# 1 (eden) to validate that the DAG runs permanently without bugs
+# under a steady-state, production-shaped load. The 3 dormant
+# ledgers (arena/colosseum/nexus) created during earlier multi-ledger
+# tests still exist on the VPS — they sit idle, consuming a small
+# constant memtable footprint but zero compute. Wipe them only if
+# memory becomes a concern (see the "wipe unused ledger" runbook).
 #
-# Single-ledger fallback `[simulation.game]` is kept commented out
-# below for reference; uncomment it (and remove the `games` array) to
-# revert to the legacy single-ledger shape used pre-v0.7.5.
+# To re-enable multi-ledger stress: add additional `[[simulation.games]]`
+# blocks below + bump the agents' `game_index` to 1..N in
+# `agents_testnet.toml`.
 [[simulation.games]]
 ledger_id = "eden"
 network_id = "eden-net"
 symbol = "EDN"
 divisor = 13700
 gas_pool_deposit = "50000"
-
-[[simulation.games]]
-ledger_id = "arena"
-network_id = "arena-net"
-symbol = "ARN"
-divisor = 13700
-gas_pool_deposit = "50000"
-
-[[simulation.games]]
-ledger_id = "colosseum"
-network_id = "colosseum-net"
-symbol = "COL"
-divisor = 13700
-gas_pool_deposit = "50000"
-
-[[simulation.games]]
-ledger_id = "nexus"
-network_id = "nexus-net"
-symbol = "NEX"
-divisor = 13700
-gas_pool_deposit = "50000"
-
-# Legacy single-ledger config (pre-v0.7.5). Kept as a working example;
-# uncomment + remove the `games` array above to revert.
-#
-# [simulation.game]
-# ledger_id = "eden"
-# network_id = "eden-net"
-# symbol = "EDN"
-# divisor = 13700
-# gas_pool_deposit = "50000"
 
 [coordinator]
 private_key_hex = "env:PMS_COORDINATOR_KEY"

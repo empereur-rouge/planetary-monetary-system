@@ -1,59 +1,36 @@
 # =============================================================================
-# Agent definitions for Testnet VPS — Production-realistic clicker load
+# Agent definitions for Testnet VPS — Single-ledger stability run
 # =============================================================================
-# REAL-CONDITIONS SCENARIO (v0.7.8+): a thousand active clickers spread
-# across 4 independent game ledgers, plus a small population of pure
-# PMS traders, plus the standard adversarial / spammer / observer
-# coverage. The shape mirrors what the launched EDN clicker is expected
-# to look like at first-week steady state.
+# CONTEXT (v0.7.17+): consolidated from 4-ledger × 250 clickers down to
+# 1 ledger (eden) × 250 clickers. The goal of this scenario is to
+# validate long-term stability — the DAG should run for days/weeks
+# under a steady, production-shaped load without OOM, persist stalls,
+# bloom degradation, or RocksDB write throttle.
 #
-# TARGET LOAD (rough back-of-envelope):
-#   - Cube mints   : 1000 × 6/min            = 100 blk/s
-#   - Cube burns   : 1000 × 1/hour           = ~0.28 blk/s (each batch=360 cubes)
-#   - EDN sends    : 1000 × ~0.6/min          = ~10 blk/s post-burn windows
-#   - PMS sends    : trader+active groups     = ~6 blk/s
-#   - Spammers     : back-pressured           = ~50 RPS attempted
-#   - 4 ledgers    : load × 4 (each clicker plays only one but the engine
-#                    persists every block from every ledger into the same
-#                    process — fee distribution + contract eval per ledger)
-#   Total target  : ~120-150 sustained blk/s, peak ~200 blk/s during
-#                    bootstrap-and-burn windows.
+# TARGET LOAD (single eden ledger):
+#   - Cube mints   : 250 × 6/min          = ~25 blk/s
+#   - Cube burns   : 250 × 1/h            = ~0.07 blk/s (each batch=360 cubes)
+#   - EDN sends    : 250 × 0.6/min        = ~2.5 blk/s post-burn windows
+#   - PMS sends    : trader+active groups = ~6 blk/s
+#   - Spammers     : back-pressured       = ~25 RPS attempted
+#   - Total target : ~30-40 blk/s sustained, peak ~60 during burn windows
 #
-# This is NOT 4K TPS — at 1000 clickers the GAME load alone tops out
-# around 100-150 blk/s steady state. Push the `count` fields on the
-# clicker groups proportionally to validate higher targets (e.g. 4000
-# clickers → ~500 blk/s game load, which combined with PMS spammers
-# and multi-ledger contention should approach the 4K TPS engine ceiling).
+# This is well below the engine's measured ceiling (~10K TPS local
+# bench, ~150 blk/s tested at 1119 agents on 4 ledgers). The slack is
+# intentional: a stability test should run with comfortable headroom
+# so any anomaly is signal, not load saturation.
 #
-# MEMORY BUDGET: 16 GB VPS, 14 GiB engine container, 67 RocksDB CFs ×
-#   (4 game ledgers + main = 5 prefixes) → 5 × 33 = 165 CFs in steady
-#   state. With write_buffer_size_mb=16 × max_write_buffer_number=2 ×
-#   165 = 5.3 GB headroom on memtables. Engine RSS observed at 11h:
-#   ~2.8 GiB on 1 ledger; expect ~8-10 GiB on 5 ledgers. Bump
-#   `max_dag_blocks` if RAM headroom shrinks.
-#
-# CYCLE MECHANIC (progressive mining, v0.7.5+ unchanged):
-#   - interval_ms = 10000      → 10 s tick
-#   - target_cubes = 360        → burn when inventory hits 360
-#   - mint_per_tick = 1         → 6 cubes/min @ 10s tick ✓
-#   - burn_cooldown_ticks = 6   → ~60s post-burn for EDN delivery
-#   - burn_cooldown_jitter_pct = 0.5 → ±50% spread on cooldown
-#
-# SCALING DIAL: to dial real-test load up or down, change the per-group
-# `count` only — no other field needs touching. The simulator's
-# `bootstrap_concurrency` (in `simulator.testnet.toml`) auto-handles
-# 1K-10K agent boots without serialising on the funder.
+# Scale up via the per-group `count` only when this baseline has run
+# clean for ≥ 24 h.
 
 # ---------------------------------------------------------------------------
-# CLICKER LEDGER 0 — main eden game (250 agents)
-# Pure clicker behaviour: mine 6 cubes/min, burn at 360, EDN-only sends.
-# No PMS sends (`send_probability = 0.0`) — these are mobile users
-# who only interact with their game token.
+# CLICKERS — main playerbase, mine 6 cubes/min on eden, no PMS sends
+# 250 agents, 10s tick → 25 mint blk/s steady, ~250 cube burns/hour
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 250
 interval_ms = 10000
-name_prefix = "click0"
+name_prefix = "click"
 
 [agents.behavior]
 type = "random"
@@ -64,96 +41,9 @@ sends_per_tick = 0
 
 [agents.game]
 enabled = true
-game_index = 0
+game_index = 0           # eden (the only game)
 cubes_per_agent = 0
-target_cubes = 360
-mint_per_tick = 1
-cubes_remint_min = 350
-cubes_remint_max = 380
-burn_cooldown_ticks = 6
-burn_cooldown_jitter_pct = 0.5
-edn_send_min_pct = 30
-edn_send_max_pct = 70
-edn_sends_per_tick = 1
-
-# ---------------------------------------------------------------------------
-# CLICKER LEDGER 1 — arena game (250 agents)
-# ---------------------------------------------------------------------------
-[[agents]]
-count = 250
-interval_ms = 10000
-name_prefix = "click1"
-
-[agents.behavior]
-type = "random"
-min_amount = 0.0
-max_amount = 0.0
-send_probability = 0.0
-sends_per_tick = 0
-
-[agents.game]
-enabled = true
-game_index = 1
-cubes_per_agent = 0
-target_cubes = 360
-mint_per_tick = 1
-cubes_remint_min = 350
-cubes_remint_max = 380
-burn_cooldown_ticks = 6
-burn_cooldown_jitter_pct = 0.5
-edn_send_min_pct = 30
-edn_send_max_pct = 70
-edn_sends_per_tick = 1
-
-# ---------------------------------------------------------------------------
-# CLICKER LEDGER 2 — colosseum game (250 agents)
-# ---------------------------------------------------------------------------
-[[agents]]
-count = 250
-interval_ms = 10000
-name_prefix = "click2"
-
-[agents.behavior]
-type = "random"
-min_amount = 0.0
-max_amount = 0.0
-send_probability = 0.0
-sends_per_tick = 0
-
-[agents.game]
-enabled = true
-game_index = 2
-cubes_per_agent = 0
-target_cubes = 360
-mint_per_tick = 1
-cubes_remint_min = 350
-cubes_remint_max = 380
-burn_cooldown_ticks = 6
-burn_cooldown_jitter_pct = 0.5
-edn_send_min_pct = 30
-edn_send_max_pct = 70
-edn_sends_per_tick = 1
-
-# ---------------------------------------------------------------------------
-# CLICKER LEDGER 3 — nexus game (250 agents)
-# ---------------------------------------------------------------------------
-[[agents]]
-count = 250
-interval_ms = 10000
-name_prefix = "click3"
-
-[agents.behavior]
-type = "random"
-min_amount = 0.0
-max_amount = 0.0
-send_probability = 0.0
-sends_per_tick = 0
-
-[agents.game]
-enabled = true
-game_index = 3
-cubes_per_agent = 0
-target_cubes = 360
+target_cubes = 360       # burn at 360 cubes (= 1h × 6/min)
 mint_per_tick = 1
 cubes_remint_min = 350
 cubes_remint_max = 380
@@ -165,8 +55,7 @@ edn_sends_per_tick = 1
 
 # ---------------------------------------------------------------------------
 # PMS TRADERS — pure PMS economy, no game (50 agents)
-# These represent users who buy/sell PMS but don't play the clicker:
-# OTC-style transfers, fiat off-ramp settlements, exchange flows.
+# Represents OTC / fiat-on-ramp traffic that doesn't touch the clicker.
 # 50 × 0.5 × 1 / 5 = 5 PMS tx/s
 # ---------------------------------------------------------------------------
 [[agents]]
@@ -182,10 +71,9 @@ send_probability = 0.5
 sends_per_tick = 1
 
 # ---------------------------------------------------------------------------
-# ACTIVE PLAYERS — mine + trade PMS (50 agents, on ledger 0)
+# ACTIVE PLAYERS — mine + trade PMS (50 agents on eden)
 # Power players who do both: mine cubes AND move PMS economically.
 # Lighter cube cadence (mint_per_tick=2 → 12/min) + 2 PMS sends/tick.
-# Helps stress the cross-ledger contract evaluation path.
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 50
@@ -214,13 +102,14 @@ edn_send_max_pct = 70
 edn_sends_per_tick = 2
 
 # ---------------------------------------------------------------------------
-# SPAMMERS — adversarial flood, no game, fast micro-tx (10 agents)
-# 10 × 1.0 × 2 / 0.2 = 100 PMS tx/s attempted. Engine's persist channel
-# back-pressure plus gateway rate limit (500 RPS post-v0.7.6) keep
-# them in their lane while letting the legitimate fleet through.
+# SPAMMERS — adversarial flood, no game, fast micro-tx (5 agents)
+# 5 × 1.0 × 2 / 0.2 = 50 PMS tx/s attempted. Engine BP + gateway 500
+# RPS rate-limit keep them throttled so they don't drown the legitimate
+# fleet. Reduced from 10 → 5 for the stability run; spammers stress
+# the BP path which is what we want, but more than 5 is gratuitous.
 # ---------------------------------------------------------------------------
 [[agents]]
-count = 10
+count = 5
 interval_ms = 200
 name_prefix = "spammer"
 
@@ -232,11 +121,11 @@ send_probability = 1.0
 sends_per_tick = 2
 
 # ---------------------------------------------------------------------------
-# ADVERSARIAL — invalid-signature / over-balance / malformed / replay
-# (5 agents, 1s tick) — validates the engine's REJECT paths.
+# ADVERSARIAL — invalid sigs / over-balance / malformed / replay
+# (3 agents, 1s tick) — keeps the engine's REJECT paths warm.
 # ---------------------------------------------------------------------------
 [[agents]]
-count = 5
+count = 3
 interval_ms = 1000
 name_prefix = "adversarial"
 
@@ -246,7 +135,7 @@ attacks = ["bad_signature", "over_balance", "malformed_json", "no_auth"]
 sends_per_tick = 1
 
 # ---------------------------------------------------------------------------
-# OBSERVERS — passive monitoring (3 agents, 10s tick)
+# OBSERVERS — passive read-only monitoring (3 agents, 10s tick)
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 3

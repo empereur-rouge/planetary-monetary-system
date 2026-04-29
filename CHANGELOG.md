@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.17] - 2026-04-29 — Single-ledger stability run (eden only)
+
+### Changed
+- **sim(testnet/single-ledger)**: `simulator.testnet.toml` reduced from 4 `[[simulation.games]]` (eden / arena / colosseum / nexus) to **1** (eden only). The 3 multi-ledger entries served their purpose during the v0.7.9 scalability validation; for the long-running stability test the operator wants confidence that the DAG runs days/weeks without bugs under a steady, production-shaped load — not max stress. Dormant ledgers (arena/colosseum/nexus) still exist on the VPS but receive no new traffic.
+- **sim(testnet/agents)**: `agents_testnet.toml` consolidated from 4×250 click groups (1119 agents) to **1×250 + 50 trader + 50 active + 5 spammer + 3 adversarial + 3 obs + 1 coord = 362 agents** on eden. Target steady-state load: ~30-40 blk/s sustained, peak ~60 during burn windows. Comfortable headroom under the engine's measured ceiling — anomalies during this run will be signal, not load saturation.
+
+### Notes (operational)
+- Engine RSS at boot in this configuration: ~5 GiB (baseline RocksDB memtables for 5 prefixes × 33 CFs × 16 MiB × 2 ≈ 5.3 GiB even with 3 dormant ledgers). Headroom under the 14 GiB cgroup cap is ~9 GiB. To reclaim ~3 GiB, the dormant arena/colosseum/nexus ledgers can be wiped (drop their CFs in RocksDB + remove entries from `ledger_defs`) — destructive for those test ledgers' data, no real-user impact.
+- Bloom skip ratio still at 99.99% with 6.3M+ blocks in main alone, so dedup is no longer in the critical path of the stability test.
+
+---
+
 ## [0.7.16] - 2026-04-29 — Dashboard: stop cascade-blanking the admin token on a single 401
 
 ### Fixed
