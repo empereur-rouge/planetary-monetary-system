@@ -174,6 +174,11 @@ services:
         max-file: "3"
     volumes:
       - ./etc/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Alerting rules — referenced by `rule_files:` in prometheus.yml.
+      # Without this mount the rules silently never load (groups: []
+      # in the API response) and no alerts ever fire. Bit us
+      # 2026-04-29 right after wiring cAdvisor.
+      - ./etc/prometheus/alerting_rules.yml:/etc/prometheus/alerting_rules.yml:ro
       # Admin token mounted as a one-line file. Prometheus reads it via
       # `credentials_file: /etc/prometheus/admin_token` in the scrape
       # config to authenticate `/metrics/all` (the engine's full
@@ -251,6 +256,59 @@ services:
       # and you see `lookup api.telegram.org on 127.0.0.11:53: server
       # misbehaving` in the alertmanager logs.
       - pms-testnet-public
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # cAdvisor — Container-level cgroup metrics for Prometheus
+  # ---------------------------------------------------------------------------
+  # The Rust prometheus client doesn't auto-expose `process_resident_memory_bytes`
+  # (that's a Go-isms). Without cAdvisor the EngineMemoryHigh alert silently
+  # never fires — bit us 2026-04-29 when the engine grew to 12.67 GiB without
+  # any paging. cAdvisor reads cgroup stats directly and exposes them as
+  # `container_memory_rss{name=...}`, `container_memory_usage_bytes{name=...}`,
+  # `container_oom_events_total{name=...}`, etc. — so memory alerts work even
+  # without per-binary instrumentation.
+  cadvisor:
+    # v0.52.1 — v0.49.x ships with a Docker client pinned at API 1.41
+    # which is rejected by Docker daemons ≥ 25 (the testnet VPS runs
+    # 29.1.3, server API 1.52). Without per-container Docker labels
+    # only the system-wide cgroup root series comes through, breaking
+    # all `name="pms-engine-testnet"` filtered alerts.
+    # v0.52.1+ uses a Docker client that negotiates the version
+    # correctly with the daemon.
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    container_name: pms-cadvisor-testnet
+    privileged: true
+    mem_limit: 256m
+    memswap_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      # cAdvisor needs read-only access to the host's cgroup tree, the
+      # docker socket (to enumerate containers + their labels), and a
+      # few root paths for filesystem metrics. Everything is `:ro`.
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      # Loopback-only — operator can SSH-tunnel to inspect cAdvisor's UI
+      # at http://127.0.0.1:8082, but no inbound from the public Internet.
+      - "127.0.0.1:8082:8080"
+    networks:
+      # Internal so prometheus can scrape `cadvisor:8080`.
+      - pms-testnet-internal
+    command:
+      # `docker_only` filters out Kubernetes / systemd-only containers.
+      # We KEEP `store_container_labels` enabled (the default) because
+      # it's what populates the `name` label on every metric — without
+      # it the alert rules `container_memory_rss{name="..."}` filter
+      # produces zero results.
+      - '--docker_only=true'
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------

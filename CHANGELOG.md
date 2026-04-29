@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.21] - 2026-04-29 — Memory alerting via cAdvisor (host-level proxy)
+
+### Fixed
+- **deploy(alerting/memory-blind-spot)**: `EngineMemoryHigh` was relying on `process_resident_memory_bytes{job="pms-engine"}` — a Go-prometheus-client convention NOT auto-exposed by the Rust client. The alert silently never fired during the 2026-04-29 incident where the engine grew from 5 GiB to 12.67 GiB in ~13 hours without any Telegram notification. Replaced with cAdvisor-backed `HostMemoryHigh` (`container_memory_rss{id="/"} > 13 GiB` for 5 min). Imperfect (cAdvisor produces only the cgroup-root series due to a Docker 29.x overlayfs incompatibility — see "Known limitations" below), but on the testnet VPS the engine is by far the dominant memory consumer so root RSS > 13 GiB ≈ engine OOM imminent on its 14 GiB cgroup cap.
+- **deploy(prometheus/rules-not-mounted)**: `prometheus.yml` declared `rule_files: alerting_rules.yml` but the alerting rules file was never bind-mounted into the prometheus container. The rules silently never loaded (`/api/v1/rules` returned `groups: []`). Fixed by adding `./etc/prometheus/alerting_rules.yml:/etc/prometheus/alerting_rules.yml:ro` to the prometheus volumes.
+
+### Added
+- **deploy(cadvisor)**: New `pms-cadvisor-testnet` service in `docker-compose.testnet.yml` (image `gcr.io/cadvisor/cadvisor:v0.52.1`, privileged, mem_limit 256m, loopback `:8082`, on `pms-testnet-internal`). Reads cgroup metrics directly so memory alerts work without per-binary instrumentation. Wired as a Prometheus scrape job. v0.49.x first attempted but the Docker client is pinned at API 1.41 which Docker 29.x rejects (`client version 1.41 is too old`). v0.52.1 negotiates correctly.
+
+### Known limitations (cAdvisor + Docker 29.x compat)
+- cAdvisor v0.52.1 successfully registers the Docker factory but fails to enumerate the per-container overlayfs layer paths (`/rootfs/var/lib/docker/image/overlayfs/layerdb/mounts/<id>/mount-id` doesn't exist on Docker 29.x's newer storage scheme). Net effect: only the cgroup root `id="/"` series flows through, no `name="pms-engine-testnet"` per-container labeling.
+- The cgroup root RSS (~75% of `free -h Used`) is consistently lower than the actual sum of container RSS reported by `docker stats`. The 13 GiB threshold is empirical: ≈ "engine + sim + gateway + system overhead = host at risk".
+- For proper per-container alerting we'd need either (a) wait for cAdvisor compat fix in a future release, or (b) add `pms_engine_rss_bytes` directly via `/proc/self/statm` read in the engine's metrics sampler (already done in the simulator — copy the pattern). The latter is the cleanest fix and is queued for the next iteration.
+
+---
+
 ## [0.7.20] - 2026-04-29 — Launch-readiness: token mint UTXO double-apply fix + 4 sandbox tests
 
 ### Fixed

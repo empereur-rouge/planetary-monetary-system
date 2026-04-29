@@ -170,19 +170,32 @@ groups:
             replay attempts).
           runbook: "Inspect /admin/rocksdb-stats: bloom_front_inserted, bloom_back_inserted."
 
-      - alert: EngineMemoryHigh
-        expr: process_resident_memory_bytes{job="pms-engine"} > 12 * 1024 * 1024 * 1024
-        for: 10m
+      - alert: HostMemoryHigh
+        # cAdvisor on Docker 29.x has a known incompatibility (overlayfs
+        # layer-id paths missing) that prevents it from emitting
+        # per-container metrics — only the cgroup-root series comes
+        # through. So we alert on TOTAL host memory (cgroup root) as a
+        # proxy: on the testnet VPS the engine is by far the dominant
+        # consumer, so root-RSS > 13 GiB ≈ engine in trouble + ~1 GiB
+        # of misc. The 14 GiB `mem_limit: 14g` on the engine itself is
+        # the hard cap. For proper per-container alerting we'd need to
+        # either fix the cAdvisor/Docker compat OR add a metric to the
+        # engine binary directly (next iteration).
+        expr: container_memory_rss{id="/"} > 13 * 1024 * 1024 * 1024
+        for: 5m
         labels:
           severity: warning
-          component: engine
+          component: infrastructure
         annotations:
-          summary: "Engine RSS > 12 GiB (cgroup cap is 14 GiB)"
+          summary: "Host RSS > 13 GiB (cap 15 GiB, OOM imminent)"
           description: |
-            Engine memory has been above 12 GiB for 10 minutes. The
-            Docker `mem_limit: 14g` is 2 GiB away — at this rate we're
-            heading toward OOM kill. Check RocksDB tuning, RAM-DAG
-            capacity, and whether a memory leak is in flight.
+            Total host memory has been above 13 GiB for 5 minutes on
+            a 15 GiB VPS. The engine's mem_limit is 14 GiB so a cgroup
+            OOM kill on pms-engine-testnet is imminent — that means up
+            to 2K blocks lost from the persist channel. Check
+            `docker stats` to find the offending container, restart it
+            gracefully if it's the engine to flush the persist queue
+            cleanly before the kernel does it for you.
 
       - alert: AdminAuthFailureSpike
         expr: rate(pms_admin_auth_failures_total[5m]) > 1

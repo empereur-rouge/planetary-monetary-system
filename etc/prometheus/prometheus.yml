@@ -86,3 +86,14 @@ scrape_configs:
     static_configs:
       - targets: ['alertmanager:9093']
     metrics_path: /metrics
+
+  # cAdvisor — per-container cgroup metrics (memory, cpu, oom events).
+  # Gives us the visibility the Rust prometheus client doesn't auto-
+  # expose. Memory alerts (EngineMemoryHigh, SimulatorMemoryHigh,
+  # ContainerOOMKilled) all key off cadvisor metrics — without this
+  # job they silently don't fire.
+  - job_name: 'cadvisor'
+    scheme: http
+    static_configs:
+      - targets: ['cadvisor:8080']
+    metrics_path: /metrics
