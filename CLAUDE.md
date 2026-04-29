@@ -129,6 +129,7 @@ Toute la stack a `restart: unless-stopped` (sauf simulator avec `on-failure`, by
 2. **`compose.yaml` symlink intact** : `ls -la /opt/pms/compose.yaml` doit pointer vers `docker-compose.testnet.yml`. Recréer si cassé : `cd /opt/pms && ln -sf docker-compose.testnet.yml compose.yaml`.
 3. **`docker-compose.yml` doit rester `.disabled`** ou inexistant. Si quelqu'un le restaure (depuis git ou autre), le piège revient.
 4. Smoke test post-reboot : `docker compose ps -a` doit ne montrer que les `*-testnet` et tous doivent revenir healthy en moins de 5 minutes (engine `start_period: 300s` est le plus long).
+5. **Gateway recovery (sous-piège connu)** : si le gateway montre `Up (healthy)` mais que le simulator boucle avec `Cannot reach gateway` ou des 502 apparaissent dans `docker logs pms-gateway-testnet` (`Connection refused (os error 111)` vers `pms-engine:8080`), c'est un état dégradé du connection pool reqwest du gateway après reboot. **Fix : `docker restart pms-gateway-testnet`** — propre en 10 sec. Reproduit lors du test de reboot 2026-04-29 ; la cause probable est une connexion TCP marquée vivante par le pool mais en réalité morte côté engine pendant la fenêtre de bootstrap parallèle. À surveiller pour un fix de fond dans le code gateway (eviction agressive du pool sur 502, ou healthcheck upstream).
 
 ## Related Projects
 
