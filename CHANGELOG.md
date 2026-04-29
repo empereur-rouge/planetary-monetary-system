@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.20] - 2026-04-29 — Launch-readiness: token mint UTXO double-apply fix + 4 sandbox tests
+
+### Fixed
+- **fix(api/token-mint/double-utxo-apply)**: `admin_mint_token` (`POST /admin/tokens/mint`) was the last handler missed by the v0.6.4 mass-fix for the plain-payload double-apply bug. After `persist_block(&wb).await` (which already applies the `UtxoDelta` for plain `Mint` payloads via `apply_diff()`), the handler called `adapter.add_utxo(...)` again for every output. Net effect: minted token supply doubled in the supply endpoint, and the redundant `push()` on the LRU shard evicted the freshly-added UTXO and removed it from the address index — so the recipient saw a balance of 0 even though the mint succeeded. Detected by the new `test_token_lifecycle_and_token_burn_warning` sandbox test (user1 had 0 USDX after a 1000 USDX mint, while circulating supply showed 2000). Removed the redundant loop. The plain `Mint` payload is auto-applied by `persist_block` — see CLAUDE.md "UTXO Delta — Plain vs Encrypted".
+
+### Added (tests/launch-readiness)
+- **test(sandbox/sse-stream)**: `test_sse_activity_stream_real_time` — opens an SSE connection on `GET /v1/wallet/{addr}/activity/stream`, triggers two faucet mints to the user, and asserts that at least one `event: activity` frame containing the user's address arrives within 8 seconds. Closes the audit gap "SSE streaming endpoint exists but zero E2E coverage". Uses `reqwest::Response::chunk()` with a tokio timeout — no extra dependency.
+- **test(sandbox/token-lifecycle)**: `test_token_lifecycle_and_token_burn_warning` — creates a custom token `USDX` with `max_supply: 1_000_000`, mints 1000 to user1, asserts balance + circulating supply match, asserts an over-mint of 1_000_000 returns 422, transfers 250 USDX user1 → user2 and asserts conservation (supply unchanged). Then simulates an `OnTokenBurn` contract via `/admin/contracts/simulate` and asserts the engine emits the documented "not yet implemented" warning — a regression guard that prevents accidentally shipping the trigger as if it worked.
+- **test(sandbox/gas-pool)**: `test_gas_pool_deposit_withdraw_consumption` — exercises the per-ledger gas-pool custody surface: deposit 1000 PMS → withdraw 200 → verify `balance=800, total_deposited=1000` → over-withdraw 99999 returns 402 PaymentRequired with balance untouched → a user tx never makes the pool grow → unknown ledger `GET` returns 404. Consumption is reported but not asserted (default sandbox boots without a fee policy active; economic enforcement is exercised separately in `fee_consistency_test.rs`).
+- **test(sandbox/contract-killswitch)**: `test_contract_toggle_kill_switch` — closes the audit gap that `test_contract_simulate_endpoint` only exercised `false → true` once and never observed runtime behavior change. Registers an enabled 5% transfer-fee contract on eden, sends a transfer and asserts `transfer_fee=5` (active), toggles to `enabled=false`, sends another transfer and asserts `transfer_fee=0` (kill switch effective), re-enables and asserts the fee comes back. Operators rely on the toggle as a runtime kill switch — this test now proves it.
+
+### Audit context
+- These four tests were added to close the gaps surfaced by the launch-readiness audit run in this conversation. With them, the e2e sandbox now covers: wallet/coordinator funding (existing), token full lifecycle including supply consistency (new), NFT mint/transfer/burn + refund (existing), per-ledger gas pool custody (new), smart contract simulate + register + **runtime toggle behavior** (new), SSE streaming (new), fee distribution + conservation (existing).
+
+---
+
 ## [0.7.19] - 2026-04-29 — Boot-resiliency: prevent stale-stack reboot trap
 
 ### Fixed

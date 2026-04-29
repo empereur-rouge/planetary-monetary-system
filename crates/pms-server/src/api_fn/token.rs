@@ -461,27 +461,17 @@ pub async fn admin_mint_token(
         }
     }
 
-    // Persist & update UTXOs
+    // Persist. The plain `Mint` payload is auto-applied to the UTXO set
+    // by `persist_block` — calling `add_utxo` here would double-count
+    // supply and evict the fresh entries from the LRU shard, destroying
+    // the address index. See CLAUDE.md "UTXO Delta — Plain vs Encrypted".
+    // This handler was missed by the v0.6.4 mass-fix; corrected in v0.7.20.
     match state.srv.adapter_arc().persist_block(&wb).await {
         Ok(PutResult::Inserted) => {
             crate::metrics::BLOCKS_PERSISTED
                 .with_label_values(&[&state.ledger_id])
                 .inc();
             let _ = state.srv.enqueue_broadcast(wb.id.clone()).await;
-
-            // Update UTXO set for all outputs
-            let adapter = state.srv.adapter_arc();
-            for (idx, output) in outputs.iter().enumerate() {
-                adapter
-                    .add_utxo(
-                        wb.id.clone(),
-                        idx as u32,
-                        output.address.clone(),
-                        output.amount.clone(),
-                        output.asset_id.clone(),
-                    )
-                    .await;
-            }
 
             // Accumulate mint fee in pool
             if mint_fee_dec > Decimal::ZERO {
