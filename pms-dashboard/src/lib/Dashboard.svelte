@@ -138,23 +138,45 @@
 
         nodeStatus.set(data);
 
-        const currentBlocks = parseInt(data["pms_blocks_persisted_total"] || "0");
+        // v0.7.25+: prefer the server-smoothed `pms_blocks_per_second_ewma`
+        // gauge over computing the rate ourselves. Reason: with 1-second
+        // polling the previous `Δblocks / Δwall_time` math produced fake
+        // 1500 blk/s spikes whenever the persist consumer drained a
+        // 64-block WriteBatch in the same second the browser scheduler
+        // happened to fire `setInterval` at sub-millisecond drift —
+        // dividing 64 blocks by ~0.05s wall time gave the 1280-blk/s
+        // illusion. The engine now publishes a 5-second-sampled EWMA
+        // (alpha=0.2, ~25s effective window) so we just read it.
+        //
+        // Fallback to the legacy delta math for engines that predate
+        // v0.7.25 — once the testnet/mainnet are on >=0.7.25 this branch
+        // never runs.
+        const ewmaTpsRaw = data["pms_blocks_per_second_ewma"];
+        const ewmaTps = ewmaTpsRaw !== undefined ? parseFloat(ewmaTpsRaw) : NaN;
         const now = Date.now();
-
-        if (lastBlockCount > 0) {
-            const deltaBlocks = currentBlocks - lastBlockCount;
-            const deltaTime = (now - lastTime) / 1000;
-
-            if (deltaTime > 0 && deltaTime < 30) {
-                const tps = Math.max(0, deltaBlocks / deltaTime);
-                tpsHistory = [...tpsHistory.slice(1), tps];
-                const timeStr = new Date().toLocaleTimeString();
-                chartLabels = [...chartLabels.slice(1), timeStr];
+        if (!isNaN(ewmaTps)) {
+            tpsHistory = [...tpsHistory.slice(1), ewmaTps];
+            const timeStr = new Date().toLocaleTimeString();
+            chartLabels = [...chartLabels.slice(1), timeStr];
+            // Track the counter anyway so a downgrade to a pre-0.7.25
+            // engine flips back to the delta math without a stale baseline.
+            lastBlockCount = parseInt(data["pms_blocks_persisted_total"] || "0");
+            lastTime = now;
+        } else {
+            const currentBlocks = parseInt(data["pms_blocks_persisted_total"] || "0");
+            if (lastBlockCount > 0) {
+                const deltaBlocks = currentBlocks - lastBlockCount;
+                const deltaTime = (now - lastTime) / 1000;
+                if (deltaTime > 0 && deltaTime < 30) {
+                    const tps = Math.max(0, deltaBlocks / deltaTime);
+                    tpsHistory = [...tpsHistory.slice(1), tps];
+                    const timeStr = new Date().toLocaleTimeString();
+                    chartLabels = [...chartLabels.slice(1), timeStr];
+                }
             }
+            lastBlockCount = currentBlocks;
+            lastTime = now;
         }
-
-        lastBlockCount = currentBlocks;
-        lastTime = now;
     }
 
     function resetDashboardData() {
