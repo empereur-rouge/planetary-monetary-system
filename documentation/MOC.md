@@ -87,6 +87,7 @@ Voir le dossier [[api/README|documentation/api/]] pour la référence complète 
 | [DAG](api/dag.md) | Opérations DAG |
 | [Nodes](api/nodes.md) | Registre des nœuds |
 | [History](api/history.md) | Historique |
+| [Error Codes](api/error-codes.md) | Grille stable des codes d'erreur numériques + catégorisation public/privé |
 
 ## Runbooks (opérations)
 

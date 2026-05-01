@@ -164,6 +164,25 @@ pub static READ_ONLY_REJECTIONS: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Cumulative count of API errors returned to clients, broken down by
+/// numeric error code (see `api_error::ApiError`). Bounded cardinality
+/// (~30 codes) — safe for Prometheus. Pair with `pms_api_request_duration_seconds`
+/// to compute error rate per route.
+///
+/// Operators alert on:
+///   - `rate(pms_api_errors_total{code="9999"}[5m]) > 0` — internal errors
+///     surfacing means a handler still returns generic anyhow (migration target).
+///   - `rate(pms_api_errors_total{code=~"4...""}[5m]) > 1` — sustained crypto /
+///     auth failures usually mean replay / brute force.
+pub static API_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
+    prometheus::register_int_counter_vec!(
+        "pms_api_errors_total",
+        "API errors returned to clients, labelled by stable numeric code",
+        &["code"]
+    )
+    .unwrap()
+});
+
 /// API request latency histogram (seconds) — labels: method, route.
 ///
 /// Uses `MatchedPath` from axum to get route templates (e.g. `/v1/wallet/{addr}/balance`)

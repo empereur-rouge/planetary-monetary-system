@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.24] - 2026-05-01 — Stable numeric API error codes (anti-enumeration framework)
+
+### Added
+- **api(error-codes)**: new `pms-server::api_error::ApiError` enum with stable 4-digit numeric codes for every API error. Each variant carries the precise internal context (address, amount, signature failure reason, RocksDB error, …) which is logged via `tracing::warn!` / `tracing::error!` with `target: "api_error"`, but exposes only a vague public message in the JSON body for state/auth/crypto categories. Wire format: `{"code": NNNN, "message": "..."}`.
+- **Numbering grid** (28 codes, all enumerated in `documentation/api/error-codes.md`):
+  - `1xxx` auth/authz: `1001 MissingAuth`, `1002 InvalidAuth`, `1010 AdminRequired`, `1020 ReadOnly`, `1030 IpNotAllowed`, `1040 InsufficientScope`.
+  - `2xxx` validation: `2001 MalformedJson`, `2010 InvalidAddress`, `2020 InvalidAmount`, `2030 InvalidField`, `2040 TooLarge` — specific public OK, no security info.
+  - `3xxx` state/business: `3001 InsufficientBalance`, `3010 AlreadySpent`, `3020 UnknownLedger`, `3030 ContractDisabled`, `3040 NotFound`, `3050 AlreadyExists`, `3060 AddressFrozen`, `3070 Conflict` — vague public, anti-enumeration.
+  - `4xxx` crypto/security: `4001 SignatureMismatch`, `4002 ReplayDetected`, `4010 CryptoFailure`, `4020 AuthorizationSignatureInvalid` — always vague, status 401 instead of 400 to defeat timing attacks.
+  - `5xxx` resource/quota: `5001 RateLimited`, `5010 GasPoolEmpty`, `5020 SubscriptionInactive`.
+  - `9xxx` internal: `9001 StorageError`, `9002 ConsensusError`, `9999 Internal` — never leaks RocksDB error / stack trace.
+- **First migration wave** (4 sites): `require_writable` middleware now returns `ApiError::ReadOnly { reason }` (preserves v0.7.23 wire fields `error/reason/retry_after_seconds` for backward compat, adds `code: 1020`). `require_local_or_admin`, `require_admin_token`, `require_api_key` migrated to `ApiError::MissingAuth`/`InvalidAuth`/`IpNotAllowed`/`InsufficientScope`.
+- **Prometheus metric**: `pms_api_errors_total{code}` counter (bounded cardinality, ~30 codes). Operators can alert on `rate(pms_api_errors_total{code=~"9..."}[5m]) > 0` (handler still on legacy `anyhow` path = migration target) or `rate(pms_api_errors_total{code=~"4..."}[5m]) > 1` (sustained crypto / replay = brute force).
+- **Documentation**: `documentation/api/error-codes.md` — full grid with public message + internal detail per variant, recommended alerts, migration roadmap (high-value financial paths next: `wallet_send_simple`, `wallet_send_tx`, `prepare_tx`, NFT mint/burn, token mint/create, `submit_block`, compliance handlers). Linked from `documentation/MOC.md`.
+- **Sandbox tests**:
+  - `test_read_only_mode_gates_writes` extended to assert `body["code"] == 1020` alongside the existing legacy fields.
+  - `test_api_error_codes_on_auth_failure` — boots a custom ledger to escape the loopback bypass, exercises both `1001 MissingAuth` (no token) and `1002 InvalidAuth` (wrong token). Confirms public messages stay vague (`"Authentication required"` vs `"Authentication failed"`).
+- **Unit tests** in `api_error.rs`:
+  - `codes_are_unique` enumerates all 29 variants and panics on a duplicate code (catches mistakes when adding a new variant).
+  - `public_message_never_leaks_internal_detail` asserts no substring of the internal detail (addresses, amounts, RocksDB errors) appears in the public message.
+
+### Why it matters
+Public error messages are an attack surface. A handler that returns `"insufficient balance: addr=8e1... requested=100 available=3"` lets an attacker probe wallets and infer balances, rate-limited but cheap. Generic strings like `"Operation failed"` paired with a stable `code: 3001` give SDK clients exactly what they need to handle errors programmatically (branch on the number, retry policy, user-facing translation) without leaking state. The same pattern Stripe / AWS / OAuth use, adapted for a banking-grade DAG.
+
+### Migration plan
+- v0.7.24 ships the framework + middleware migration. Internal handlers continue using `anyhow::Error` until migrated.
+- Next waves migrate financial / crypto paths (highest leak risk). The `pms_api_errors_total{code="9999"}` rate is the migration tracking metric — every `9999` increment is a handler still on legacy path that needs an `ApiError` variant.
+
+### Files
+- New: `crates/pms-server/src/api_error.rs` (430 lines, including unit tests).
+- New: `documentation/api/error-codes.md` (full grid + migration roadmap).
+- Modified: `crates/pms-server/src/api/middleware.rs` (4 middlewares migrated), `crates/pms-server/src/metrics.rs` (new counter), `crates/pms-server/src/lib.rs` (export `pub mod api_error`), `crates/pms-server/tests/dag_sandbox.rs` (sandbox test additions), `documentation/MOC.md` (index entry).
+
+---
+
 ## [0.7.23] - 2026-05-01 — Read-only mode (graceful degradation under resource pressure)
 
 ### Added

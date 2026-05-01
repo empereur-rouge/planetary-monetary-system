@@ -6,6 +6,7 @@
 #![allow(unused_variables)]
 mod admin;
 pub mod api;
+pub mod api_error;
 pub mod api_fn;
 pub mod fee_distribution;
 pub mod fee_pool;

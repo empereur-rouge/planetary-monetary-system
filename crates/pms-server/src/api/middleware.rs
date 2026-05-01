@@ -1,13 +1,12 @@
 // pms-server/src/api/middleware — Authentication, authorization, and observability middleware.
 
 use super::state::AppState;
+use crate::api_error::ApiError;
 use crate::api_keys;
-use axum::Json;
 use axum::extract::{ConnectInfo, MatchedPath, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::middleware::Next;
-use serde_json::json;
 use std::net::SocketAddr;
 
 /// Middleware to check if request is allowed for admin routes.
@@ -44,11 +43,13 @@ pub(super) async fn require_local_or_admin(
             .iter()
             .any(|net| net.contains(client_ip));
         if !ip_allowed {
-            tracing::warn!("Admin access denied: IP {} not in allowlist", client_ip);
             crate::metrics::ADMIN_AUTH_FAILURES
                 .with_label_values(&["ip_not_allowed"])
                 .inc();
-            return (StatusCode::FORBIDDEN, "IP not allowed").into_response();
+            return ApiError::IpNotAllowed {
+                ip: client_ip.to_string(),
+            }
+            .into_response();
         }
     }
 
@@ -58,18 +59,21 @@ pub(super) async fn require_local_or_admin(
     }
 
     // Differentiate "no token supplied" from "wrong token" so alerts can
-    // distinguish brute force from a misconfigured client.
-    let reason = if headers.get(axum::http::header::AUTHORIZATION).is_none()
-        && headers.get("X-Admin-Token").is_none()
-    {
-        "missing_token"
+    // distinguish brute force from a misconfigured client. The legacy
+    // `pms_admin_auth_failures_total{reason}` counter stays for
+    // dashboards; the new `pms_api_errors_total{code}` is incremented
+    // by the `ApiError::IntoResponse` impl with code 1001 vs 1002.
+    let has_token = headers.get(axum::http::header::AUTHORIZATION).is_some()
+        || headers.get("X-Admin-Token").is_some();
+    let (reason_label, err) = if has_token {
+        ("wrong_token", ApiError::InvalidAuth)
     } else {
-        "wrong_token"
+        ("missing_token", ApiError::MissingAuth)
     };
     crate::metrics::ADMIN_AUTH_FAILURES
-        .with_label_values(&[reason])
+        .with_label_values(&[reason_label])
         .inc();
-    (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+    err.into_response()
 }
 
 /// Admin-token-only middleware for per-ledger admin routes where `ConnectInfo`
@@ -85,17 +89,17 @@ pub(super) async fn require_admin_token(
     if crate::helper::is_admin_authorized(&state, &headers) {
         return next.run(request).await;
     }
-    let reason = if headers.get(axum::http::header::AUTHORIZATION).is_none()
-        && headers.get("X-Admin-Token").is_none()
-    {
-        "missing_token"
+    let has_token = headers.get(axum::http::header::AUTHORIZATION).is_some()
+        || headers.get("X-Admin-Token").is_some();
+    let (reason_label, err) = if has_token {
+        ("wrong_token", ApiError::InvalidAuth)
     } else {
-        "wrong_token"
+        ("missing_token", ApiError::MissingAuth)
     };
     crate::metrics::ADMIN_AUTH_FAILURES
-        .with_label_values(&[reason])
+        .with_label_values(&[reason_label])
         .inc();
-    (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+    err.into_response()
 }
 
 /// Middleware pour vérifier la clé API (header `X-API-Key`) sur les routes publiques.
@@ -132,22 +136,15 @@ pub(super) async fn require_api_key(
         Some(value) => match value.to_str() {
             Ok(s) => s,
             Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "Invalid X-API-Key header encoding"})),
-                )
-                    .into_response();
+                return ApiError::InvalidField {
+                    field: "X-API-Key",
+                    reason: "header contains non-ASCII bytes".into(),
+                }
+                .into_response();
             }
         },
         None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "error": "Missing API Key",
-                    "hint": "Add header X-API-Key: pk_live_... to your request"
-                })),
-            )
-                .into_response();
+            return ApiError::MissingAuth.into_response();
         }
     };
 
@@ -155,33 +152,18 @@ pub(super) async fn require_api_key(
     let entry = match store.verify_key(api_key) {
         Some(entry) => entry.clone(),
         None => {
-            tracing::warn!("🔑 Invalid API key attempt");
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": "Invalid API Key"})),
-            )
-                .into_response();
+            return ApiError::InvalidAuth.into_response();
         }
     };
 
     // Vérifier les permissions (scope vs path)
     let path = request.uri().path().to_string();
     if !api_keys::has_permission(&entry, &path) {
-        tracing::warn!(
-            "🔑 API key '{}' denied access to {} (scopes: {:?})",
-            entry.id,
-            path,
-            entry.scopes
-        );
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "error": "Insufficient permissions",
-                "scope_required": api_keys::resolve_scope(&path),
-                "your_scopes": entry.scopes
-            })),
-        )
-            .into_response();
+        return ApiError::InsufficientScope {
+            required: api_keys::resolve_scope(&path).to_string(),
+            granted: entry.scopes.iter().map(|s| s.to_string()).collect(),
+        }
+        .into_response();
     }
 
     // Libérer le lock avant de continuer
@@ -192,11 +174,22 @@ pub(super) async fn require_api_key(
 /// Middleware that rejects write requests with `503 Service Unavailable`
 /// when the engine is in read-only mode (v0.7.23).
 ///
-/// The body is JSON `{"error": "read_only", "reason": "...",
-/// "message": "...", "retry_after_seconds": 30}` with a stable `reason`
-/// field so SDK clients can branch on it (memory / disk / rocksdb /
-/// manual). A `Retry-After: 30` header is set so well-behaved HTTP
-/// clients back off automatically.
+/// Returns `ApiError::ReadOnly { reason }` which renders to:
+///
+/// ```json
+/// {
+///   "code": 1020,
+///   "message": "Service temporarily unavailable (manual): retry in 30s",
+///   "error": "read_only",
+///   "reason": "manual",
+///   "retry_after_seconds": 30
+/// }
+/// ```
+///
+/// The `error` / `reason` / `retry_after_seconds` fields are preserved
+/// for backward compatibility with v0.7.23 SDK clients; new code should
+/// branch on the numeric `code` field (1020). A `Retry-After: 30` header
+/// is also set so well-behaved HTTP clients back off automatically.
 ///
 /// Apply this to the routes that produce blocks or otherwise generate
 /// disk pressure (tx submit, mint, burn, faucet, fee distribution,
@@ -216,19 +209,10 @@ pub(super) async fn require_writable(
         crate::metrics::READ_ONLY_REJECTIONS
             .with_label_values(&[reason.as_str()])
             .inc();
-        let body = json!({
-            "error": "read_only",
-            "reason": reason.as_str(),
-            "message": "Engine is temporarily not accepting writes due to resource pressure. \
-                        Reads continue normally; retry the write in 30s.",
-            "retry_after_seconds": 30,
-        });
-        let mut response = (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
-        response.headers_mut().insert(
-            axum::http::header::RETRY_AFTER,
-            axum::http::HeaderValue::from_static("30"),
-        );
-        return response;
+        return ApiError::ReadOnly {
+            reason: reason.as_str(),
+        }
+        .into_response();
     }
     next.run(request).await
 }
