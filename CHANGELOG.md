@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.27] - 2026-05-01 — Read-only mode 4th trigger: persist queue saturation (banking-grade fast-fail)
+
+### Fixed
+- **engine(persist/back-pressure)**: testnet 2026-05-01 logged `persist_tx.send was back-pressured` events with `elapsed_ms` up to **21,147 ms** — producers blocked for 21 s on a single `persist_tx.send().await` waiting for the bounded mpsc channel (2 000 capacity) to free up. Diagnosis: simulator producer rate peaks ~200 blk/s during burst while the RocksDB consumer drain caps at ~94 blk/s peak (observed via `rate(pms_persist_consumer_blocks_total[1m])`); the gap (~106 blk/s net fill) saturates the 2 000-block buffer in ~19 s, which matches the 21 s blocking observed. A 21-second blocking send is unacceptable for a banking-grade engine — clients hit unrelated request timeouts, and the engine surface up to the SDK looks like a hang rather than a structured back-pressure signal.
+
+### Added
+- **engine(read-only/persist-queue)**: new `ReadOnlyReason::PersistQueue` (string `"persist_queue"`, code `1020` HTTP 503) and 4th check in the resource-guard task. When ANY ledger's persist channel depth crosses `[health].persist_queue_critical_pct` (default `0.8` = 80 %) for `ARM_TICKS` consecutive samples (10 s), the engine flips into read-only mode globally. Writes return a fast `503 read_only` with `Retry-After: 30` — machine-readable, SDK-handleable, and gives the consumer breathing room without forcing client timeouts. Subject to the v0.7.26 60 s min-arm-duration floor so a single burst doesn't flap.
+- **walks all ledgers**: main + custom (eden, etc.) — if any saturates, arm globally. Producers hitting the wall on one ledger's `send().await` block their HTTP handlers; shedding load across the engine keeps the SDK happy for unrelated reads on other ledgers (which still serve since reads are never gated).
+- **stable wire**: same code `1020`, only the `reason` field changes. Existing SDK clients that switch on `code` continue to work; they get an additional `reason: "persist_queue"` value to surface to users (useful for "we're catching up, retry in 30 s" UX).
+- **Unit test added** to `read_only.rs` lock-down list (`reason_str_is_stable` now asserts `"persist_queue"` is the stable wire string).
+
+### Why not just bump the channel buffer?
+Considered. 2 000 → 5 000 would cost ~30-100 MB extra RAM (10-100 KB per block × 5 K) and would absorb 2.5× longer bursts — but it just delays the saturation, doesn't prevent it. With the engine-side persist consumer capped at ~94 blk/s peak (RocksDB WAL fsync × 67 CFs serialised), any sustained producer rate above that fills the buffer eventually. The 503 fast-fail is the structurally correct answer: it propagates back-pressure to the SDK, which already implements exponential backoff via the existing `Retry-After` semantics.
+
+### Configuration
+- `[health].persist_queue_critical_pct` — fraction of capacity at which to arm. Default `0.8`. Set per-network in `etc/config/config.{testnet,mainnet}.toml` with explanatory comments. Mainnet could tighten to `0.7` if real load demands earlier shedding; the default is intentionally permissive.
+
+### Files
+- `crates/pms-server/src/read_only.rs` — new variant `ReadOnlyReason::PersistQueue` + `as_str` + `from_u8` + unit-test assertion. The numeric discriminant `5` is part of the wire — adding new variants is additive, renumbering would be a breaking change.
+- `crates/pms-config/src/config.rs` — new `HealthSettings::persist_queue_critical_pct` field, default 0.8.
+- `crates/pms-server/src/api/tasks.rs` — new `check_persist_saturated` helper that walks main + custom ledgers via `LedgerManager`; new 4th check in the watcher loop wired into the existing reason-priority cascade.
+- `etc/config/config.{testnet,mainnet}.toml` — explicit setting + comment.
+
+---
+
 ## [0.7.26] - 2026-05-01 — Read-only mode anti-flap (memtable-flush cycle fix)
 
 ### Fixed

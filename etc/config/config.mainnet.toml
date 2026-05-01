@@ -147,6 +147,12 @@ rocksdb_l0_critical_files = 100
 # mainnet on garde la même valeur que testnet — c'est le pattern de
 # memtable burst qui est universel, pas spécifique au profile de charge.
 read_only_min_arm_duration_secs = 60
+# Persist queue saturation gate (v0.7.27) : 0.8 = 80% du buffer 2000
+# blocs. Au-delà, les send().await producteurs bloquent jusqu'à 21s
+# (incident testnet 2026-05-01) — bien pire qu'un 503 Retry-After: 30
+# géré côté SDK. En mainnet on pourrait être plus strict (0.7) si le
+# load réel l'exige, mais 0.8 est un bon défaut.
+persist_queue_critical_pct = 0.8
 
 [validation]
 min_pow_leading_zero_bits = 0

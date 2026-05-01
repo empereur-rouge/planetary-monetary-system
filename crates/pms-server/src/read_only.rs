@@ -55,6 +55,12 @@ pub enum ReadOnlyReason {
     /// engine in a known state during maintenance windows without the
     /// guard fighting them.
     Manual = 4,
+    /// Persist channel depth crossed the configured percentage of
+    /// its capacity. Producer-side `persist_tx.send().await` is
+    /// about to block for seconds-to-minutes waiting for a free
+    /// slot — much better to return a clean 503 to the client now
+    /// and let the SDK back off, than let it hang. v0.7.27.
+    PersistQueue = 5,
 }
 
 impl ReadOnlyReason {
@@ -68,6 +74,7 @@ impl ReadOnlyReason {
             ReadOnlyReason::Disk => "disk",
             ReadOnlyReason::RocksDb => "rocksdb",
             ReadOnlyReason::Manual => "manual",
+            ReadOnlyReason::PersistQueue => "persist_queue",
         }
     }
 
@@ -77,6 +84,7 @@ impl ReadOnlyReason {
             2 => ReadOnlyReason::Disk,
             3 => ReadOnlyReason::RocksDb,
             4 => ReadOnlyReason::Manual,
+            5 => ReadOnlyReason::PersistQueue,
             _ => ReadOnlyReason::None,
         }
     }
@@ -170,5 +178,6 @@ mod tests {
         assert_eq!(ReadOnlyReason::Disk.as_str(), "disk");
         assert_eq!(ReadOnlyReason::RocksDb.as_str(), "rocksdb");
         assert_eq!(ReadOnlyReason::Manual.as_str(), "manual");
+        assert_eq!(ReadOnlyReason::PersistQueue.as_str(), "persist_queue");
     }
 }

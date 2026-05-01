@@ -160,6 +160,13 @@ rocksdb_l0_critical_files = 100
 # read-only every 1-2 minutes (testnet incident 2026-05-01). Manual
 # arms ignore this floor and disarm immediately on operator command.
 read_only_min_arm_duration_secs = 60
+# Persist channel saturation gate (v0.7.27). When the producer-side
+# persist_tx mpsc fills past this fraction of capacity, arm read-only
+# proactively. Without this, send().await blocks the HTTP handler for
+# seconds-to-minutes (testnet 2026-05-01 saw 21s on a single block) —
+# returning 503 read_only with Retry-After: 30 is far cleaner. Capacity
+# is hardcoded at 2000 in pms-core::core_adapter; 0.8 = 1600 blocks.
+persist_queue_critical_pct = 0.8
 
 [validation]
 min_pow_leading_zero_bits = 0

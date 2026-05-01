@@ -426,6 +426,20 @@ pub struct HealthSettings {
     /// to this — they release immediately on operator disarm.
     #[serde(default = "default_read_only_min_arm_duration_secs")]
     pub read_only_min_arm_duration_secs: u64,
+
+    /// Persist channel depth, as a fraction of capacity, at which the
+    /// engine flips into read-only mode (v0.7.27). When the producer
+    /// side starts to saturate the bounded `persist_tx` mpsc channel
+    /// (default capacity 2 000 blocks), `send().await` blocks waiting
+    /// for the consumer to drain a slot — observed up to 21 s on
+    /// testnet 2026-05-01 during a simulator burst. A 21-second
+    /// blocking send is far worse for clients than a fast 503: arming
+    /// read-only at e.g. 80 % depth shifts the failure mode from
+    /// "client waits indefinitely until timeout" to "503 read_only,
+    /// retry in 30 s" — clean, machine-readable, SDK-handleable.
+    /// Default: `0.8` (80 % of capacity).
+    #[serde(default = "default_persist_queue_critical_pct")]
+    pub persist_queue_critical_pct: f64,
 }
 
 fn default_auto_consolidate_min_utxos() -> usize {
@@ -447,6 +461,7 @@ impl Default for HealthSettings {
             disk_critical_free_percent: default_disk_critical_free_percent(),
             rocksdb_l0_critical_files: default_rocksdb_l0_critical_files(),
             read_only_min_arm_duration_secs: default_read_only_min_arm_duration_secs(),
+            persist_queue_critical_pct: default_persist_queue_critical_pct(),
         }
     }
 }
@@ -477,6 +492,9 @@ fn default_rocksdb_l0_critical_files() -> u64 {
 }
 fn default_read_only_min_arm_duration_secs() -> u64 {
     60
+}
+fn default_persist_queue_critical_pct() -> f64 {
+    0.8
 }
 
 #[derive(Deserialize, Clone, Debug)]

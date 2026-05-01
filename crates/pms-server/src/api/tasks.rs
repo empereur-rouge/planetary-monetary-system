@@ -618,6 +618,11 @@ pub fn spawn_resource_guard_task(state: AppState) {
     let low_pct = state.settings.health.memory_low_watermark_pct;
     let disk_critical_pct = state.settings.health.disk_critical_free_percent;
     let l0_critical = state.settings.health.rocksdb_l0_critical_files;
+    let persist_queue_critical_pct = state
+        .settings
+        .health
+        .persist_queue_critical_pct
+        .clamp(0.0, 1.0);
     let min_arm_duration = Duration::from_secs(state.settings.health.read_only_min_arm_duration_secs);
     let rocks_path = std::path::PathBuf::from(&state.settings.rocks.path);
 
@@ -648,6 +653,7 @@ pub fn spawn_resource_guard_task(state: AppState) {
             low_pct,
             disk_critical_pct,
             l0_critical,
+            persist_queue_critical_pct,
             arm_ticks = ARM_TICKS,
             disarm_ticks = DISARM_TICKS,
             min_arm_duration_secs = min_arm_duration.as_secs(),
@@ -704,14 +710,26 @@ pub fn spawn_resource_guard_task(state: AppState) {
                 .unwrap_or(false);
             let rocks_pressure = rocks_stalled || rocks_l0_critical;
 
-            // ─── 4. Decide ──────────────────────────────────────────
-            let any_pressure = mem_pressure || disk_pressure || rocks_pressure;
+            // ─── 4. Persist queue saturation check ──────────────────
+            // Walks all ledgers — if ANY persist channel crosses the
+            // threshold we arm read-only globally. Reason: producers
+            // hitting the wall on one ledger's `send().await` will
+            // block their HTTP handlers for seconds-to-minutes;
+            // shedding load via 503 across the whole engine keeps
+            // the SDK happy and gives the consumer headroom.
+            let persist_pressure = check_persist_saturated(&state, persist_queue_critical_pct);
+
+            // ─── 5. Decide ──────────────────────────────────────────
+            let any_pressure =
+                mem_pressure || disk_pressure || rocks_pressure || persist_pressure;
             let new_reason = if mem_pressure {
                 ReadOnlyReason::Memory
             } else if disk_pressure {
                 ReadOnlyReason::Disk
             } else if rocks_pressure {
                 ReadOnlyReason::RocksDb
+            } else if persist_pressure {
+                ReadOnlyReason::PersistQueue
             } else {
                 ReadOnlyReason::None
             };
@@ -866,6 +884,55 @@ fn read_cgroup_memory_pct() -> Option<f64> {
         return None;
     }
     Some((cur as f64 / max as f64) * 100.0)
+}
+
+/// Returns `true` when ANY ledger's persist channel depth crosses
+/// `threshold_pct` of its capacity (v0.7.27). Walks main + each
+/// custom ledger registered in `LedgerManager`.
+///
+/// **Why it matters**: the persist channel is a bounded mpsc with a
+/// hard cap (2 000 blocks per CoreAdapter at the time of writing).
+/// When producers fill it faster than the RocksDB consumer drains,
+/// `persist_tx.send().await` blocks the HTTP handler for the duration
+/// of the saturation. Testnet 2026-05-01 observed up to 21 s of
+/// blocking on a single block. Arming read-only proactively at 80 %
+/// depth turns that into a fast 503 with `Retry-After: 30` —
+/// machine-readable, SDK-handleable, and gives the consumer breathing
+/// room without forcing client timeouts.
+///
+/// `threshold_pct` is clamped to `[0.0, 1.0]` by the caller. Returns
+/// `false` when the adapter doesn't expose queue depth (mock backends,
+/// tests) — better to skip the check than to arm on missing data.
+fn check_persist_saturated(state: &super::state::AppState, threshold_pct: f64) -> bool {
+    // Closure that decides for one (depth, capacity) pair. Returns
+    // false when capacity is 0 (uninitialised / unbounded backend).
+    let saturated = |depth: usize, capacity: usize| -> bool {
+        capacity > 0 && (depth as f64 / capacity as f64) >= threshold_pct
+    };
+
+    if let Some((depth, capacity)) = state.srv.adapter_arc().persist_queue_depth() {
+        if saturated(depth, capacity) {
+            return true;
+        }
+    }
+
+    if let Some(ref mgr) = state.ledger_mgr {
+        for lid in mgr.list_ids() {
+            if lid == state.ledger_id {
+                continue;
+            }
+            let Some(instance) = mgr.get(&lid) else {
+                continue;
+            };
+            if let Some((depth, capacity)) = instance.adapter.persist_queue_depth() {
+                if saturated(depth, capacity) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Sum the reclaimable memory categories from
