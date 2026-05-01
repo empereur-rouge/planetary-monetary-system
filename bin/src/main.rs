@@ -366,6 +366,13 @@ async fn main() -> Result<()> {
             coord_shard_round_robin: std::sync::Arc::new(
                 std::sync::atomic::AtomicUsize::new(0),
             ),
+            // Internal API shares the same read-only flag as the main
+            // engine so a `Manual` arm via /admin/read-only/arm gates
+            // both routers consistently. Fresh ReadOnlyMode here would
+            // be a no-op anyway: the internal API doesn't gate writes
+            // (it's the gateway-only path) but we keep the field in
+            // sync with the type so the struct literal compiles.
+            read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
         };
 
         eprintln!("🔧 Launching Internal API at {}", addr);
