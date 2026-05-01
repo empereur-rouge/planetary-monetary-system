@@ -293,19 +293,49 @@ impl RandomAgent {
                         .await;
                 }
                 Err(e) => {
+                    let err_str = format!("{:#}", e);
                     tracing::warn!(
-                        "[{}] Failed to batch burn {} cubes: {:#}",
-                        self.name, count, e
+                        "[{}] Failed to batch burn {} cubes: {}",
+                        self.name, count, err_str
                     );
                     SIM_TX_FAILED
                         .with_label_values(&[group_of(&self.name), "cube_burn", "other"])
                         .inc();
-                    // Restore cubes in registry + local list
-                    {
+                    // Distinguish state-divergence errors from transient ones.
+                    //
+                    // 404 / "not found or already burned" means the cubes are
+                    // GONE on the engine side — restoring them locally puts
+                    // the agent in a perma-loop where every subsequent burn
+                    // attempt 404s again on the same NFT IDs (the simulator
+                    // RAM holds ghost references the engine can't honor).
+                    // Observed 2026-05-01 after an engine restart left 1.35M
+                    // burn 404s accumulated and dropped TPS from ~50 to ~3.
+                    //
+                    // Drop the local cube_ids unconditionally on 404 — the
+                    // agent's `cubes < target_cubes` guard will re-mint
+                    // fresh cubes next tick and progress resumes. We accept
+                    // the loss of the ghost references since they can't be
+                    // burned anyway. For genuinely transient errors
+                    // (network, 5xx), keep restoring so the agent retries
+                    // with the same cubes after the engine recovers.
+                    let is_state_divergence = err_str.contains("404")
+                        || err_str.contains("not found")
+                        || err_str.contains("already burned");
+                    if is_state_divergence {
+                        tracing::warn!(
+                            "[{}] State-divergence detected: dropping {} ghost cube IDs from local state (engine sees them as gone)",
+                            self.name, count
+                        );
+                        // cube_ids stays empty (we already drained), drained
+                        // entries are NOT restored to the registry — they're
+                        // truly gone. Agent will re-mint next tick.
+                    } else {
+                        // Transient error: restore both the registry and the
+                        // local list so the agent retries the same batch.
                         let mut ge = game_engine.write().await;
                         ge.restore_cubes(drained);
+                        self.cube_ids = cubes_to_burn;
                     }
-                    self.cube_ids = cubes_to_burn;
                 }
             }
         } else {

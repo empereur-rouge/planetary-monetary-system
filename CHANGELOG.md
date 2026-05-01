@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.22] - 2026-05-01 — Simulator burn perma-loop fix (state-divergence on 404)
+
+### Fixed
+- **sim(burn-state-divergence)**: the burn-failure handler in `tools/simulator/src/agent/random.rs::game_tick` previously restored the local `cube_ids: Vec<String>` to the agent's RAM whenever a batch burn failed — including 404 ("NFT not found or already burned"). When the engine restarts mid-burn or any RPC drops a response after the engine processed it, the simulator's RAM holds **ghost cube IDs** that the engine sees as already gone. Every subsequent burn 404s on the same IDs, blocking the agent's mint→burn→EDN-send cycle. Observed 2026-05-01: after an engine restart at 00:04 UTC, **1.35M burn 404s** accumulated on click agents and 354K on active agents, dropping testnet TPS from ~50 blk/s to ~3 blk/s (only spammers + traders + observers were producing).
+- **Fix**: distinguish state-divergence errors (404 / "not found" / "already burned") from transient errors (network, 5xx). State-divergence → drop the local IDs unconditionally, the agent's `cubes < target_cubes` guard re-mints fresh cubes next tick. Transient → restore registry + local list as before, agent retries the same batch. ~30 lines diff. cargo check clean.
+
+### Recovery applied
+- Restarted `pms-simulator-testnet` on the testnet VPS to clear the existing ghost state. Agents re-mint from scratch via `funder` then resume normal cycles. Will deploy the code fix via `scripts/upgrade-testnet.sh` at the next routine push.
+
+---
+
 ## [0.7.21] - 2026-04-30 — Mainnet config + scripts (artifacts only, deploy plus tard)
 
 ### Added
