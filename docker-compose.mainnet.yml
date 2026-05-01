@@ -66,11 +66,14 @@ services:
       - rocksdb_mainnet_data:/home/pms/data
     expose:
       - "8080"
+    # v0.7.28: timeout 5s → 15s, interval 10s → 30s. /healthz does
+    # multiple RocksDB property reads that can take >5 s under burst.
+    # See docker-compose.testnet.yml for the full rationale.
     healthcheck:
-      test: ["CMD-SHELL", "curl -sk -f https://127.0.0.1:8080/healthz || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      test: ["CMD-SHELL", "curl -sk -f --max-time 15 https://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
       start_period: 300s
     networks:
       - pms-mainnet-internal

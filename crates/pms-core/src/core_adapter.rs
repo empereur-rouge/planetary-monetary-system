@@ -202,14 +202,17 @@ impl<
         let (activity_tx, _activity_handle) =
             spawn_activity_writer(store.clone(), 50_000);
 
-        // Spawn background persist task (buffer 2K blocks — smaller buffer limits
-        // RAM usage under write pressure; back-pressure in persist.rs ensures no drops).
-        // The persist consumer forwards each freshly-persisted block to the
-        // activity writer via `activity_tx` so the dashboard's history is
-        // populated without blocking the critical persist `db.write()` slot.
+        // Spawn background persist task. v0.7.28: buffer 5 K blocks
+        // (was 2 K) — gives the v0.7.27 read-only resource guard more
+        // headroom to detect saturation (1-tick fast-arm = 5 s) before
+        // producers hit the wall. RAM cost: ~30-100 MB at 10-100 KB
+        // per block, acceptable on a 14 GB cgroup. The persist consumer
+        // forwards each freshly-persisted block to the activity writer
+        // via `activity_tx` so the dashboard's history is populated
+        // without blocking the critical persist `db.write()` slot.
         let (persist_tx, _handle) = spawn_background_persist_with_activity(
             store.clone(),
-            2_000,
+            5_000,
             activity_tx,
         );
 
@@ -313,14 +316,17 @@ impl<
         let (activity_tx, _activity_handle) =
             spawn_activity_writer(store.clone(), 50_000);
 
-        // Spawn background persist task (buffer 2K blocks — smaller buffer limits
-        // RAM usage under write pressure; back-pressure in persist.rs ensures no drops).
-        // The persist consumer forwards each freshly-persisted block to the
-        // activity writer via `activity_tx` so the dashboard's history is
-        // populated without blocking the critical persist `db.write()` slot.
+        // Spawn background persist task. v0.7.28: buffer 5 K blocks
+        // (was 2 K) — gives the v0.7.27 read-only resource guard more
+        // headroom to detect saturation (1-tick fast-arm = 5 s) before
+        // producers hit the wall. RAM cost: ~30-100 MB at 10-100 KB
+        // per block, acceptable on a 14 GB cgroup. The persist consumer
+        // forwards each freshly-persisted block to the activity writer
+        // via `activity_tx` so the dashboard's history is populated
+        // without blocking the critical persist `db.write()` slot.
         let (persist_tx, _handle) = spawn_background_persist_with_activity(
             store.clone(),
-            2_000,
+            5_000,
             activity_tx,
         );
 

@@ -639,12 +639,21 @@ pub fn spawn_resource_guard_task(state: AppState) {
 
     tokio::spawn(async move {
         const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
-        // ARM after 2 consecutive over-watermark samples (10 s).
+        // ARM after 2 consecutive over-watermark samples (10 s) for
+        // memory / disk / RocksDB. PersistQueue uses a faster 1-tick
+        // arm (5 s) — observed v0.7.27 testnet 2026-05-02: the
+        // disarm→re-arm window let bursts saturate the channel and
+        // produce 20 s `send().await` blocks before the watcher had
+        // time to re-arm. Persist queue is the most time-sensitive
+        // signal because the producer hits the wall in seconds, not
+        // tens of seconds like memory pressure.
+        //
         // DISARM after 6 consecutive under-watermark samples (30 s) —
         // intentionally asymmetric: armed is cheap (rejects writes,
         // already-running ops keep going), so we err on the side of
         // staying armed a little longer than strictly necessary.
-        const ARM_TICKS: u32 = 2;
+        const ARM_TICKS_DEFAULT: u32 = 2;
+        const ARM_TICKS_PERSIST: u32 = 1;
         const DISARM_TICKS: u32 = 6;
 
         tracing::info!(
@@ -654,7 +663,8 @@ pub fn spawn_resource_guard_task(state: AppState) {
             disk_critical_pct,
             l0_critical,
             persist_queue_critical_pct,
-            arm_ticks = ARM_TICKS,
+            arm_ticks_default = ARM_TICKS_DEFAULT,
+            arm_ticks_persist = ARM_TICKS_PERSIST,
             disarm_ticks = DISARM_TICKS,
             min_arm_duration_secs = min_arm_duration.as_secs(),
             interval_secs = SAMPLE_INTERVAL.as_secs(),
@@ -741,7 +751,19 @@ pub fn spawn_resource_guard_task(state: AppState) {
                 under_count = 0;
                 over_count = over_count.saturating_add(1);
 
-                if !was_armed && over_count >= ARM_TICKS {
+                // Fast-arm on PersistQueue: producer-side back-pressure
+                // hits the wall in seconds, so we accept the slightly
+                // higher false-positive risk in exchange for closing
+                // the disarm→re-arm window observed on testnet
+                // 2026-05-02 (v0.7.27 deployed but bursts still
+                // produced 20 s blocks during the 10 s arm latency).
+                let arm_threshold = if new_reason == ReadOnlyReason::PersistQueue {
+                    ARM_TICKS_PERSIST
+                } else {
+                    ARM_TICKS_DEFAULT
+                };
+
+                if !was_armed && over_count >= arm_threshold {
                     state.read_only.arm(new_reason);
                     crate::metrics::ENGINE_READ_ONLY.set(1);
                     armed_at = Some(std::time::Instant::now());
@@ -749,6 +771,7 @@ pub fn spawn_resource_guard_task(state: AppState) {
                         target = "read_only_guard",
                         reason = new_reason.as_str(),
                         consecutive_samples = over_count,
+                        arm_threshold,
                         "🛑 Engine entering READ-ONLY mode — writes will return 503"
                     );
                 } else if was_armed

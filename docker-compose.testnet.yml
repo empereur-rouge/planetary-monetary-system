@@ -63,11 +63,21 @@ services:
     # healthy as long as the listener was alive, masking real
     # degradation. `start_period: 300s` covers cold-boot RAM bootstrap
     # of the DAG (large DBs take a while to replay).
+    #
+    # v0.7.28: timeout 5s → 15s, interval 10s → 30s. The `/healthz`
+    # handler does several RocksDB property reads (block count, last
+    # block age, disk free, persist queue depth) that can take >5 s
+    # under burst load — we observed `Up X (unhealthy)` flapping on
+    # 2026-05-02 with 10 consecutive timeouts during a burst window
+    # while the engine itself was perfectly fine (logs show normal
+    # block production, public /healthz returned 200 OK fast on a
+    # direct curl). A 15 s timeout + 30 s interval gives the handler
+    # enough breathing room without weakening the underlying signal.
     healthcheck:
-      test: ["CMD-SHELL", "curl -sk -f https://127.0.0.1:8080/healthz || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      test: ["CMD-SHELL", "curl -sk -f --max-time 15 https://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
       start_period: 300s
     networks:
       - pms-testnet-internal

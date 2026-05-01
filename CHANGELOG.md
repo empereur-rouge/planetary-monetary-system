@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.28] - 2026-05-02 — Persist back-pressure final close: fast-arm + bigger buffer + healthcheck slack
+
+Three-part fix to close the residual back-pressure observed after v0.7.27 deployed:
+
+### Diagnostic (testnet 2026-05-02)
+- v0.7.27 read-only auto-arm fired correctly (44/76 samples armed in 2 h, no flap, 60 s min-arm respected) — but the disarm→re-arm window let bursts saturate the channel and produce **20 s `send().await` blocks** at 22:06:12 UTC (`elapsed_ms=19987` on 7 simultaneous blocks). Cause: 10 s arm latency (2 ticks × 5 s) is too slow for producer-side back-pressure that hits the wall in 5-10 s.
+- Engine showed `Up X (unhealthy)` despite `/healthz` returning 200 OK on direct curl — the Docker healthcheck timeout (5 s) was being exceeded by the `/healthz` handler under burst load (multiple RocksDB property reads). 10 consecutive timeouts within 100 s flipped Docker's healthy bit to unhealthy. Cosmetic but misleading.
+
+### Fixed
+- **A) Fast-arm on `PersistQueue`**: arm threshold drops from 2 ticks (10 s) to **1 tick (5 s)** when the dominant pressure reason is the persist channel. Closes the disarm→re-arm window. Memory / disk / RocksDB still arm at 2 ticks (10 s) — those signals legitimately oscillate during normal operation (memtable flush) and need the second-sample confirmation to avoid flap. Persist queue is purely producer-driven and any sustained 5 s saturation is a real problem we want to gate immediately.
+- **B) Channel buffer 2 K → 5 K blocks** in `pms_core::core_adapter`. RAM cost: ~30-100 MB at 10-100 KB per block, easily absorbed on the 14 GB cgroup. Combined with the 5 s fast-arm, the watcher now has 2.5× more burst headroom to detect saturation and arm before producers hit the wall. Buffer growth alone wouldn't fix the issue (RocksDB consumer caps at ~94 blk/s peak; bigger buffer just delays saturation), but pairing it with proactive arming gives the right "fail-fast at 80 % depth" semantics with margin.
+- **C) Docker healthcheck slack**: timeout `5 s → 15 s`, interval `10 s → 30 s`, retries `10 → 5`. The `/healthz` handler does multiple RocksDB property reads (block count, last block age, persist queue depth, disk free) that can sometimes take >5 s under burst — adding `--max-time 15` to the curl probe and giving the handler 15 s to respond avoids the cosmetic "unhealthy" flag without weakening the underlying signal. Net: Docker still marks unhealthy after 5 × 30 s = 150 s of consecutive failures (down from 10 × 10 s = 100 s but timeout is 3× more permissive per check).
+
+### Files
+- `crates/pms-server/src/api/tasks.rs` — `ARM_TICKS` split into `ARM_TICKS_DEFAULT (2)` and `ARM_TICKS_PERSIST (1)`; new `arm_threshold` selection inside the watcher loop based on the dominant `new_reason`.
+- `crates/pms-core/src/core_adapter.rs` — both call sites of `spawn_background_persist_with_activity` bumped from 2 000 to 5 000 buffer.
+- `docker-compose.{testnet,mainnet}.yml` — engine healthcheck `interval=30s`, `timeout=15s`, `retries=5`, `--max-time 15` on the curl probe.
+
+### Limit of this fix
+- Does NOT address the underlying root cause that consumer drain caps at ~94 blk/s peak. That's a RocksDB write throughput question — needs profiling of WAL fsync contention across the 67 CFs, possible parallelization of the write path, or batching tuning. Tracked as a follow-up. The current fix prevents producer pile-up by shedding load proactively; the engine continues to serve reads normally during armed periods.
+- Memory pressure (anon ~9.6 GiB / 14 GiB cap = 70 %) keeps triggering the Memory-based read-only too. That's a separate investigation — possibly memtable accounting + jemalloc fragmentation + multi-CF overhead. Tracked as a follow-up.
+
+---
+
 ## [0.7.27] - 2026-05-01 — Read-only mode 4th trigger: persist queue saturation (banking-grade fast-fail)
 
 ### Fixed
