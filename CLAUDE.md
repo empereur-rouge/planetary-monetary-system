@@ -116,6 +116,20 @@ docker inspect pms-engine-testnet --format='RestartCount: {{.RestartCount}} | OO
 - **Config** : `[health].read_only_guard_enabled = true` (défaut), `memory_high_watermark_pct = 90.0` (88 mainnet), `memory_low_watermark_pct = 75.0` (70 mainnet), `disk_critical_free_percent = 5.0`, `rocksdb_l0_critical_files = 100`. Désactivable pour benchmarks.
 - **Pourquoi** : sans ce mécanisme, sous pression mémoire le cgroup OOM killer SIGKILL le container engine, perdant le persist channel buffer (~2K blocs au sizing v0.7.1). C'est un événement de data-loss. Le 503 graceful permet aux clients de retry et à RocksDB de drainer ses memtables avant de réautoriser les écritures.
 
+#### Règles d'ajout d'endpoints / tâches sous read-only mode
+
+**CRITICAL: Toute nouvelle route admin doit être catégorisée writable OU recovery — pas une troisième option.** L'omettre casse soit le read-only mode (route oubliée du gating → on continue à produire des blocs sous pression) soit la récupération (route recovery gated par erreur → l'opérateur ne peut plus sortir du read-only).
+
+- **`admin_writable`** (gated par `require_writable`) — toute route qui produit un bloc DAG : faucet, mint, burn, transfer, distribute_fees, ledger create / transfer-ownership, bridge transfer, compliance freeze/seize/reverse/unfreeze.
+- **`admin_recovery`** (NON gated) — read-only sur la DB, mutations légères CF-only, ou explicitement nécessaire pour sortir du read-only : compact, reindex, rebuild-tips, purge, consolidate-utxos, config GET/POST, api-keys CRUD, contracts CRUD/toggle (CF writes, pas de blocs), gas-pool deposit/withdraw, rocksdb-stats, read-only/*.
+- **Test** : si la route appelle `persist_block` / `forge_and_persist` / `append_block` (direct ou indirect via SDK), elle est writable. Sinon recovery.
+- **Fichier** : `crates/pms-server/src/api/routes.rs` → split `admin_writable` / `admin_recovery`.
+
+**CRITICAL: Toute nouvelle background task qui produit des blocs DOIT vérifier `state.read_only.is_armed()` au début de chaque itération et `continue;` sinon.** Le middleware HTTP ne protège QUE les routes — les boucles de fond bypassent. Sans le check, le `fee_distributor` continuerait à produire des Reward blocks pendant que le moteur est en pression mémoire, exactement le scénario qu'on veut prévenir.
+
+- Pattern de référence : `spawn_fee_distributor_task` et `spawn_inflation_mint_task` dans `crates/pms-server/src/api/tasks.rs`.
+- Tasks qui ne produisent PAS de blocs (metrics sampler, activity retention, consolidation diagnostic) n'ont pas besoin du check.
+
 ### Bug historique : Prometheus tué par `upgrade-testnet.sh` (v0.7.6→v0.7.10, 2026-04-27)
 - **Symptôme** : `pms-prometheus-testnet` absent de `docker ps -a` après chaque upgrade ; scrape Grafana muet jusqu'à ce qu'on relance Prometheus à la main. Les 4 autres containers tournent normalement.
 - **Cause racine (le vrai !)** : deux bugs cumulés dans `scripts/upgrade-testnet.sh` qui supprimaient Prometheus à chaque upgrade :
@@ -349,6 +363,50 @@ Règles impératives tirées de bugs production. Chaque pattern documente un pi�
 - `UtxoFlatItem` DOIT inclure le champ `asset_id` — son absence cause un balance de 0 quand on filtre par asset.
 - **Fichier de référence** : `crates/pms-storage/src/rocks_store/dag_storage_impl.rs` → `persist_block()`.
 - **Bug historique (v0.5.15)** : la supply était doublée car `apply_utxo_delta()` était appelé pour les payloads plain ET dans `persist_block`.
+
+### State-divergence vs transient errors (client-side cache)
+
+**CRITICAL: Quand un client (simulateur, SDK, dashboard, agent) maintient un état local qui mirror un état distant, après une erreur RPC il faut DISCRIMINER state-divergence (le local est obsolète) de transient (le RPC a juste raté).** Les traiter pareil = restore le local sur 404 = ghost references = perma-loop.
+
+- **State-divergence** = `404 Not Found`, `"not found"`, `"already burned"`, `"already spent"`, `"unknown <X>"` dans la réponse. Le serveur affirme que l'état distant est différent du local. **Action : drop le local, ne pas restore.** Le client re-synchronisera sur l'opération suivante.
+- **Transient** = `network error`, `5xx`, `connection reset`, `timeout`. Le serveur n'a pas pu répondre, l'état distant peut très bien être inchangé. **Action : restore le local, retry plus tard.**
+- **Pattern de référence** : `tools/simulator/src/agent/random.rs::game_tick` (burn handler, v0.7.22). Avant : restore unconditionnel sur Err → 1.35M burn 404s, TPS testnet 50→3 blk/s. Après : `is_state_divergence = err.contains("404") || err.contains("not found") || err.contains("already burned")` → drop ghost cube_ids, agent re-mint au prochain tick.
+- **Bug historique (v0.7.22, 2026-05-01)** : engine restart à 00:04 UTC laisse les agents simulator avec des `cube_ids: Vec<String>` que le serveur ne connaît plus. Toute tentative de burn 404. La logique précédente "restore on Err" maintient les ghost IDs en RAM → chaque tick re-tente, re-404, re-restore, ad infinitum.
+- **Où ça peut bite** : SDK qui cache `wallet_state.utxos` (un UTXO peut être spent côté serveur après un crash → 404 au prochain spend → drop le UTXO, ne pas restore), dashboard qui cache `nft_ownership` (NFT peut être burned hors session → 404 au prochain hover → drop), agent qui cache `subscription_state` (subscription peut être expired → drop, ne pas retry indéfiniment).
+
+### API Errors — Stable numeric codes (anti-enumeration)
+
+**CRITICAL: Toute erreur HTTP renvoyée par un handler DOIT passer par `ApiError` (`crates/pms-server/src/api_error.rs`).** Pas de `anyhow::bail!` direct dans les chemins financiers / crypto / auth — le message public DOIT être vague pour ces catégories pour empêcher l'enumération de l'état du moteur via les error strings.
+
+- **Wire format** : `{"code": NNNN, "message": "..."}`. Les SDK clients branchent sur le `code` numérique, pas sur le message.
+- **Catégories** :
+  - `1xxx` auth/authz — vague public
+  - `2xxx` validation requête — spécifique OK (no info leak)
+  - `3xxx` état/business (balance, UTXO, ledger, contract) — vague public
+  - `4xxx` crypto/sécurité (signature, replay, encryption) — vague public + status 401 anti-timing
+  - `5xxx` resource/quota — vague public
+  - `9xxx` internal — jamais de stack trace / RocksDB error verbatim
+- **Documentation source** : [documentation/api/error-codes.md](documentation/api/error-codes.md) — grille complète + alertes Prometheus + roadmap migration.
+- **Métrique de dette** : `pms_api_errors_total{code="9999"}` — chaque incrément = un handler renvoie encore `anyhow::Error` générique, à migrer.
+
+#### Règle d'ajout d'un nouveau code
+
+1. Ajouter une variant à `ApiError` dans `crates/pms-server/src/api_error.rs`.
+2. L'inscrire dans **les 4 match exhaustifs** : `code()`, `http_status()`, `public_message()`, `internal_detail()`. Le compilateur force la complétude.
+3. Ajouter le code au test `codes_are_unique` (panique sur doublon).
+4. Mettre à jour la grille dans [documentation/api/error-codes.md](documentation/api/error-codes.md).
+5. Si la variant transporte des champs sensibles (adresse, montant, raison crypto), ajouter un cas dans `public_message_never_leaks_internal_detail` qui vérifie qu'aucun substring du `internal_detail` n'apparaît dans le `public_message`.
+
+#### Règle de migration d'un handler
+
+Quand tu touches un handler qui retourne encore `anyhow::Error` ou un `(StatusCode, Json(json!({"error": "..."})))` ad hoc :
+1. Identifier les chemins d'erreur du handler (insufficient balance, invalid signature, not found, etc.).
+2. Mapper chacun à une variant `ApiError` existante OU créer la variant si elle manque (cf. règle d'ajout).
+3. Remplacer `anyhow::bail!("insufficient balance for ...")` par `Err(ApiError::InsufficientBalance { addr, asset_id, requested, available })?`.
+4. Le `IntoResponse` de `ApiError` log automatiquement le détail interne via `tracing` ET incrémente `pms_api_errors_total{code}` — pas besoin de tracing manuel à côté.
+5. Ajouter un test sandbox qui assert `body["code"] == NNNN` pour au moins un chemin d'erreur du handler migré.
+
+**Ordre prioritaire de migration** (high-value financial / crypto paths) : `wallet_send_simple` → `wallet_send_tx` → `prepare_tx` → `nft_mint`/`nft_burn` → `admin_mint_token`/`admin_create_token` → `submit_block` → `compliance/{freeze,seize,reverse}`. Voir la roadmap dans [error-codes.md](documentation/api/error-codes.md) pour les codes attendus par handler.
 
 ## Versioning
 
