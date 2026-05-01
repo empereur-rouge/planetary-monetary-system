@@ -102,6 +102,36 @@ groups:
             disk is below 10% free.
           runbook: "Curl /healthz, inspect the JSON `checks` field for the failing component."
 
+      - alert: EngineReadOnly
+        expr: pms_engine_read_only == 1
+        for: 5m
+        labels:
+          severity: critical
+          component: engine
+        annotations:
+          summary: "Engine in READ-ONLY mode for 5+ minutes"
+          description: |
+            The resource guard task has held the engine in read-only mode
+            for 5+ minutes (writes are returning 503; reads still work).
+            Possible causes: cgroup memory near `mem_limit`, free disk
+            < 5%, RocksDB write stall (L0 backlog or `is-write-stopped`).
+            Without this safety valve the next step would be a Docker
+            cgroup OOM kill that would lose the persist channel buffer.
+          runbook: |
+            1. `curl -H "Authorization: Bearer $PMS_ADMIN_TOKEN" \
+                  https://testnet.pms-network.com/admin/read-only/status`
+               → returns the active reason (memory / disk / rocksdb / manual).
+            2. memory  → check `docker stats pms-engine-testnet`. Restart engine
+                         (`docker restart pms-engine-testnet`) to flush memtables;
+                         data is preserved in RocksDB.
+            3. disk    → free space on the volume holding /home/pms/data/rocks.
+                         `du -sh /home/pms/data/rocks/*` then prune old checkpoints
+                         under /home/pms/data/backups.
+            4. rocksdb → `curl .../admin/rocksdb-stats` for L0 file count + flush
+                         stats. Trigger `POST /admin/compact` to drain L0.
+            5. manual  → operator-initiated; clear with `POST /admin/read-only/disarm`.
+          dashboard: "https://testnet.pms-network.com/dashboard/"
+
   # ===========================================================================
   # WARNING — degradation, not yet failure
   # ===========================================================================

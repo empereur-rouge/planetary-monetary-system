@@ -189,6 +189,50 @@ pub(super) async fn require_api_key(
     next.run(request).await
 }
 
+/// Middleware that rejects write requests with `503 Service Unavailable`
+/// when the engine is in read-only mode (v0.7.23).
+///
+/// The body is JSON `{"error": "read_only", "reason": "...",
+/// "message": "...", "retry_after_seconds": 30}` with a stable `reason`
+/// field so SDK clients can branch on it (memory / disk / rocksdb /
+/// manual). A `Retry-After: 30` header is set so well-behaved HTTP
+/// clients back off automatically.
+///
+/// Apply this to the routes that produce blocks or otherwise generate
+/// disk pressure (tx submit, mint, burn, faucet, fee distribution,
+/// compliance freeze/seize/reverse, contract registration, gas-pool
+/// deposit/withdraw, ledger create / transfer, bridge transfer).
+/// **Do NOT apply** to read endpoints, recovery endpoints (compact,
+/// rebuild-tips, reindex, purge, consolidate-utxos, config GET/POST,
+/// api-keys CRUD) — those are how the operator gets out of read-only
+/// in the first place, so blocking them defeats the purpose.
+pub(super) async fn require_writable(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> impl IntoResponse {
+    if state.read_only.is_armed() {
+        let reason = state.read_only.reason();
+        crate::metrics::READ_ONLY_REJECTIONS
+            .with_label_values(&[reason.as_str()])
+            .inc();
+        let body = json!({
+            "error": "read_only",
+            "reason": reason.as_str(),
+            "message": "Engine is temporarily not accepting writes due to resource pressure. \
+                        Reads continue normally; retry the write in 30s.",
+            "retry_after_seconds": 30,
+        });
+        let mut response = (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("30"),
+        );
+        return response;
+    }
+    next.run(request).await
+}
+
 /// Middleware to record API request latency as a Prometheus histogram.
 ///
 /// Uses `MatchedPath` to get the route template (e.g. `/v1/wallet/{addr}/balance`)

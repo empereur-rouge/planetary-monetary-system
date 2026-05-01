@@ -1,6 +1,6 @@
 // pms-server/src/metrics.rs
 use once_cell::sync::Lazy;
-use prometheus::{Encoder, GaugeVec, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, TextEncoder};
+use prometheus::{Encoder, GaugeVec, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder};
 
 pub static BLOCKS_REJECTED: Lazy<IntCounterVec> = Lazy::new(|| {
     prometheus::register_int_counter_vec!(
@@ -130,6 +130,36 @@ pub static ROCKSDB_WRITE_STALLED_SECONDS: Lazy<IntCounter> = Lazy::new(|| {
     prometheus::register_int_counter!(
         "pms_rocksdb_write_stalled_seconds_total",
         "Cumulative seconds RocksDB was reporting is-write-stopped == 1"
+    )
+    .unwrap()
+});
+
+/// 1 when the engine has flipped into read-only mode (writes return
+/// 503), 0 otherwise. Sampled by the resource-guard task on every
+/// state transition. Pair with `pms_read_only_rejections_total` to
+/// see how much traffic the guard is shedding while armed.
+///
+/// The reason ("memory" / "disk" / "rocksdb" / "manual") is intentionally
+/// NOT a label — it would multiply gauge cardinality with no useful
+/// dashboard value. The reason is exposed instead via `/healthz` and
+/// `/admin/read-only/status`, and is logged on every transition.
+pub static ENGINE_READ_ONLY: Lazy<IntGauge> = Lazy::new(|| {
+    prometheus::register_int_gauge!(
+        "pms_engine_read_only",
+        "1 when the engine is in read-only mode (writes return 503), 0 otherwise"
+    )
+    .unwrap()
+});
+
+/// Cumulative count of write requests rejected with 503 because the
+/// engine was in read-only mode. Labelled by `reason` so an operator
+/// can see whether the rejections are driven by memory, disk, or
+/// RocksDB pressure (or were operator-initiated via `Manual`).
+pub static READ_ONLY_REJECTIONS: Lazy<IntCounterVec> = Lazy::new(|| {
+    prometheus::register_int_counter_vec!(
+        "pms_read_only_rejections_total",
+        "Write requests rejected because the engine was in read-only mode",
+        &["reason"]
     )
     .unwrap()
 });

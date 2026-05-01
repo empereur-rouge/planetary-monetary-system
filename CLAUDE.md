@@ -105,6 +105,17 @@ docker inspect pms-engine-testnet --format='RestartCount: {{.RestartCount}} | OO
 - **Fix** : Upgrade VPS à 16 Go + `mem_limit: 14g` + tuning RocksDB pour 16 Go.
 - **Diagnostic** : `docker events` montre l'événement `oom` juste avant le `die exitCode:137`. `docker inspect` peut montrer `OOMKilled: false` même si le cgroup a tué le process (c'est un bug connu de Docker).
 
+### Read-only mode (safety valve, v0.7.23)
+- **Mécanisme** : tâche `spawn_resource_guard_task` qui sample toutes les 5s la mémoire cgroup, le disk free, et `rocksdb.is-write-stopped` + L0 file count. Quand l'un de ces signaux franchit son seuil critique, l'engine flippe en read-only : les écritures renvoient `503 {"error": "read_only", "reason": "memory|disk|rocksdb|manual"}` avec un header `Retry-After: 30`. Les lectures continuent normalement.
+- **Hystérésis** : ARM après 2 ticks consécutifs (10s) au-dessus du high watermark, DISARM après 6 ticks (30s) en-dessous du low watermark — pas de flapping. Un ARM `Manual` n'est jamais auto-clearé (l'opérateur doit explicitement `POST /admin/read-only/disarm`).
+- **Endpoints opérateur** : `GET /admin/read-only/status`, `POST /admin/read-only/arm` (forçage maintenance), `POST /admin/read-only/disarm`.
+- **Métriques** : `pms_engine_read_only` (gauge 0/1), `pms_read_only_rejections_total{reason}` (counter). Alert `EngineReadOnly` (5min sustained = critical).
+- **Tasks pausées** quand armed : `spawn_fee_distributor_task`, `spawn_inflation_mint_task`. Les fees s'accumulent dans le pool, distribués au prochain tick clear.
+- **Routes gated** : submit/block, wallet/tx/send, send-simple, NFT mint/burn, admin (faucet, distribute_fees, tokens create/mint, ledgers create/transfer, bridge/transfer, compliance freeze/unfreeze/seize/reverse).
+- **Routes recovery NON gated** (l'opérateur peut les utiliser pour sortir du read-only) : `/admin/compact`, `/admin/reindex-*`, `/admin/rebuild-tips`, `/admin/purge-*`, `/admin/consolidate-utxos`, `/admin/config` GET/POST, `/admin/api-keys` CRUD, `/admin/contracts` CRUD/toggle (CF writes, pas de blocs), `/admin/gas-pool` deposit/withdraw, `/admin/rocksdb-stats`, `/admin/read-only/*`.
+- **Config** : `[health].read_only_guard_enabled = true` (défaut), `memory_high_watermark_pct = 90.0` (88 mainnet), `memory_low_watermark_pct = 75.0` (70 mainnet), `disk_critical_free_percent = 5.0`, `rocksdb_l0_critical_files = 100`. Désactivable pour benchmarks.
+- **Pourquoi** : sans ce mécanisme, sous pression mémoire le cgroup OOM killer SIGKILL le container engine, perdant le persist channel buffer (~2K blocs au sizing v0.7.1). C'est un événement de data-loss. Le 503 graceful permet aux clients de retry et à RocksDB de drainer ses memtables avant de réautoriser les écritures.
+
 ### Bug historique : Prometheus tué par `upgrade-testnet.sh` (v0.7.6→v0.7.10, 2026-04-27)
 - **Symptôme** : `pms-prometheus-testnet` absent de `docker ps -a` après chaque upgrade ; scrape Grafana muet jusqu'à ce qu'on relance Prometheus à la main. Les 4 autres containers tournent normalement.
 - **Cause racine (le vrai !)** : deux bugs cumulés dans `scripts/upgrade-testnet.sh` qui supprimaient Prometheus à chaque upgrade :

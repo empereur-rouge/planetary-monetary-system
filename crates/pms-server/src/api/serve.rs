@@ -2,7 +2,7 @@
 
 use super::routes::build_api_router;
 use super::state::{AppState, FeePoolRefundSink};
-use super::tasks::{spawn_activity_backfill_task, spawn_activity_retention_task, spawn_consolidation_task, spawn_fee_distributor_task, spawn_inflation_mint_task, spawn_metrics_sampler_task};
+use super::tasks::{spawn_activity_backfill_task, spawn_activity_retention_task, spawn_consolidation_task, spawn_fee_distributor_task, spawn_inflation_mint_task, spawn_metrics_sampler_task, spawn_resource_guard_task};
 use crate::Server;
 use crate::api_keys;
 use crate::helper::resolve_admin_token;
@@ -255,6 +255,7 @@ pub async fn serve_api(
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
         coord_shard_wallets: Arc::new(coord_shard_wallets),
         coord_shard_round_robin: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        read_only: Arc::new(crate::read_only::ReadOnlyMode::new()),
     };
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -294,6 +295,16 @@ pub async fn serve_api(
     // when [health].auto_consolidate_interval_secs is None (default).
     // ═══════════════════════════════════════════════════════════════════════
     spawn_consolidation_task(state.clone());
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // RESOURCE GUARD (v0.7.23) — graceful read-only degradation under
+    // memory / disk / RocksDB pressure. Flips a global flag that causes
+    // write-producing API routes to return 503 with `error: read_only`
+    // and pauses fee distribution + inflation mint, preferring a clean
+    // 503 to clients over a SIGKILL that would lose the persist queue.
+    // No-op when [health].read_only_guard_enabled is false (tests/bench).
+    // ═══════════════════════════════════════════════════════════════════════
+    spawn_resource_guard_task(state.clone());
 
     // ═══════════════════════════════════════════════════════════════════════
     // TPS LOGGER (periodic JSONL file — every 10 min)

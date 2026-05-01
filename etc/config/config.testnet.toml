@@ -136,6 +136,24 @@ activity_retention_days = 30
 # coord_shard_count > 0 already caps per-address accumulation.
 auto_consolidate_interval_secs = 600
 auto_consolidate_min_utxos = 200
+# Resource guard / read-only mode (v0.7.23).
+# Background task that flips the engine into read-only when memory,
+# disk, or RocksDB cross critical thresholds — preferring a clean 503
+# to clients over a Docker SIGKILL that loses the persist queue.
+read_only_guard_enabled = true
+# Memory hysteresis (% of cgroup memory.max). On the 16 GiB testnet
+# VPS with mem_limit=14g, 90% ~= 12.6 GiB used. Compaction on RocksDB
+# saw-tooth peaks at ~12.4 GiB so 90% triggers right BEFORE OOM.
+memory_high_watermark_pct = 90.0
+memory_low_watermark_pct = 75.0
+# Disk free percent below which the engine flips read-only. Distinct
+# from `min_disk_free_percent` (the /healthz "degraded" signal at 10%);
+# read-only kicks in lower so a slow leak first warns, then gates writes.
+disk_critical_free_percent = 5.0
+# L0 file count above which the engine flips read-only — early-warning
+# before RocksDB's hard `level0_stop_writes_trigger` (120, set in
+# apply_db_tuning).
+rocksdb_l0_critical_files = 100
 
 [validation]
 min_pow_leading_zero_bits = 0

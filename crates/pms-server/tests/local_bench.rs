@@ -284,6 +284,7 @@ async fn local_bench() -> Result<()> {
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
         coord_shard_wallets: std::sync::Arc::new(Vec::new()),
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
     };
 
     // ── 8. Build router and bind to random port ──────────────────────────

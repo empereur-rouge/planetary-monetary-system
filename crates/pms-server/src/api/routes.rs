@@ -1,7 +1,7 @@
 // pms-server/src/api/routes — Router construction (ledger-scoped, admin, full API).
 
 use super::ledger_dispatch::dynamic_ledger_handler;
-use super::middleware::{require_admin_token, require_api_key, require_local_or_admin, track_latency};
+use super::middleware::{require_admin_token, require_api_key, require_local_or_admin, require_writable, track_latency};
 use super::state::{sync_all_dag_size_metrics, sync_dag_size_metric, sync_dag_size_metric_for, AppState};
 use crate::admin::{
     admin_compact, admin_get_config, admin_ping, admin_purge_activity,
@@ -74,13 +74,24 @@ use tower_http::{
 };
 
 /// Construit les routes ledger-scoped (celles qui dépendent de l'adapter/store d'un ledger).
-/// Retourne (public_routes, auth_routes) — les routes publiques n'exigent pas d'API key.
-pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState>) {
-    // Endpoint: /submit/block (Main ingestion)
+///
+/// Retourne `(public, auth_read, auth_write)` :
+///   - **public** — endpoints anonymes (pas d'API key, ex. `/v1/supply`, `/v1/version`).
+///   - **auth_read** — endpoints lecture-seule qui exigent l'API key (history, activity, balance, NFT lookups, draft tx).
+///     **Continuent de servir** quand l'engine est en read-only mode — c'est exactement le scénario
+///     où on veut que les utilisateurs puissent encore voir leurs balances pendant qu'on rétablit
+///     les écritures.
+///   - **auth_write** — endpoints qui produisent des blocs (submit/block, tx/send, send-simple,
+///     nft/mint, nft/burn*). Gated derrière `require_writable` en plus de l'API key, donc ils
+///     renvoient 503 quand le resource guard a armé le read-only mode.
+pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState>, Router<AppState>) {
+    // Endpoint: /submit/block (Main ingestion) — produces blocks, write-gated
     let submit = Router::new().route("/submit/block", post(submit_block));
 
-    let wallet = Router::new()
-        .route("/wallet/tx/send", post(wallet_send_tx))
+    // Read-only wallet endpoints (balance, history, draft-tx prepare, key derivation).
+    // None of these mutate state on the engine: prepare returns an unsigned tx,
+    // create/restore just derive keys client-side.
+    let wallet_read = Router::new()
         .route("/wallet/balance", post(wallet_balance))
         .route("/wallet/history", post(get_wallet_history))
         .route("/v1/balance", post(balance_by_address))
@@ -90,7 +101,11 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
         .route(
             "/v1/wallet/restore/private-key",
             post(wallet_restore_private_key),
-        )
+        );
+
+    // Write-producing wallet endpoints — gated.
+    let wallet_write = Router::new()
+        .route("/wallet/tx/send", post(wallet_send_tx))
         .route("/v1/wallet/send-simple", post(wallet_send_simple));
 
     let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
@@ -112,18 +127,22 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
         .route("/v1/config", get(crate::api_fn::config::get_config))
         .route("/v1/blocks/{id}", get(get_block_by_id));
 
-    let nft_routes = Router::new()
+    // NFT read endpoints (lookup, owner list, transfer prepare, utxos)
+    let nft_read = Router::new()
         .route("/v1/nft/{token_id}", get(get_nft))
         .route("/v1/wallet/{address}/nfts", get(get_nfts_by_owner))
-        .route("/v1/nft/mint", post(mint_nft)) // Main ledger: API-key auth
-        .route("/v1/nft/burn", post(burn_nft))
-        .route("/v1/nft/burn-simple", post(burn_nft_simple))
-        .route("/v1/nft/burn-batch-simple", post(burn_nft_batch_simple))
         .route("/v1/nft/transfer/prepare", post(prepare_nft_transfer))
         .route(
             "/v1/wallet/{address}/utxos",
             get(crate::api_fn::wallet::get_utxos_by_address),
         );
+
+    // NFT write endpoints — produce blocks, gated.
+    let nft_write = Router::new()
+        .route("/v1/nft/mint", post(mint_nft))
+        .route("/v1/nft/burn", post(burn_nft))
+        .route("/v1/nft/burn-simple", post(burn_nft_simple))
+        .route("/v1/nft/burn-batch-simple", post(burn_nft_batch_simple));
 
     let coordinator_routes = Router::new().route("/v1/coordinator/info", get(get_coordinator_info));
 
@@ -144,14 +163,18 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
             .merge(version_routes)
             .merge(dag_routes)
             .merge(token_routes),
-        // Authenticated routes (require API key)
+        // Authenticated read-only routes (require API key, NOT write-gated)
         Router::new()
-            .merge(submit)
-            .merge(wallet)
+            .merge(wallet_read)
             .merge(blocks)
             .merge(history)
-            .merge(nft_routes)
+            .merge(nft_read)
             .merge(activity_routes),
+        // Authenticated write routes (require API key AND writable engine)
+        Router::new()
+            .merge(submit)
+            .merge(wallet_write)
+            .merge(nft_write),
     )
 }
 
@@ -196,12 +219,21 @@ async fn admin_revoke_api_key(
 /// **Security**: NFT minting on custom ledgers requires admin auth to prevent
 /// unauthorized NFT creation that could exploit smart contracts (e.g. spoofing
 /// nft_type to trigger contract refunds).
+///
+/// All four routes here produce blocks (token create/mint, faucet, NFT mint),
+/// so the whole router is wrapped with `require_writable` in addition to the
+/// admin-token gate — operators get a clean 503 instead of fighting the
+/// resource guard during memory pressure.
 pub(super) fn build_ledger_admin_routes(state: AppState) -> Router {
     Router::new()
         .route("/admin/tokens/create", post(admin_create_token))
         .route("/admin/tokens/mint", post(admin_mint_token))
         .route("/admin/faucet", post(faucet_mint))
         .route("/admin/nft/mint", post(mint_nft)) // NFT mint admin-only on custom ledgers
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_writable,
+        ))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_admin_token,
@@ -307,32 +339,59 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     // happens to have an admin session cookie / localStorage token (audit
     // finding H-auth-E). Operator tooling (curl, CLI scripts, Postman) is not
     // a browser and therefore not affected.
-    let admin = Router::new()
-        .route("/admin/ping", get(admin_ping))
-        .route("/admin/compact", post(admin_compact))
+    //
+    // Split into two sub-routers for the read-only mode gate (v0.7.23):
+    //
+    //   - `admin_writable` — endpoints that produce blocks (distribute_fees,
+    //     tokens create/mint, ledgers create / transfer-ownership, bridge
+    //     transfer, faucet, compliance freeze/seize/reverse/unfreeze).
+    //     Wrapped with `require_writable` so they 503 when the resource
+    //     guard has armed read-only mode.
+    //
+    //   - `admin_recovery` — read endpoints, config updates, and operator
+    //     recovery operations (compact, reindex, rebuild-tips, purge,
+    //     consolidate-utxos, api-keys CRUD, contracts CRUD/toggle, gas-pool
+    //     deposit/withdraw, read-only arm/disarm/status). NOT write-gated:
+    //     these are how the operator gets out of read-only in the first
+    //     place, so blocking them defeats the purpose.
+    //
+    // Both share `require_local_or_admin` (auth) applied to the merged
+    // router below.
+    let admin_writable = Router::new()
         .route("/admin/distribute_fees", post(distribute_fees))
-        // Admin Config API - Hot-Swap de la RuntimeConfig
-        .route("/admin/config", get(admin_get_config))
-        .route("/admin/config", post(admin_update_config))
         // Admin Token API - Create and Mint custom tokens
         .route("/admin/tokens/create", post(admin_create_token))
         .route("/admin/tokens/mint", post(admin_mint_token))
-        // Admin Ledger API - Create and manage ledgers
-        .route("/admin/ledgers", get(admin_list_ledgers))
+        // Admin Ledger API - block-producing operations only
         .route("/admin/ledgers/create", post(admin_create_ledger))
-        .route("/admin/ledgers/{ledger_id}", get(admin_get_ledger))
         .route("/admin/ledgers/{ledger_id}/transfer-ownership", post(transfer_ledger_ownership))
-        // Admin Bridge API - Cross-ledger bridge management
-        .route("/admin/bridge/enable", post(admin_bridge_enable))
-        .route("/admin/bridge/disable", post(admin_bridge_disable))
+        // Admin Bridge API - cross-ledger transfer (produces lock + release blocks)
         .route("/admin/bridge/transfer", post(admin_bridge_transfer))
         // Admin Faucet - Mint native PMS (dev/testnet)
         .route("/admin/faucet", post(faucet_mint))
-        // Admin Compliance API - Freeze, Seize, Reverse, Shadow Balance
+        // Admin Compliance API — write-producing operations
         .route("/admin/compliance/freeze", post(admin_freeze))
         .route("/admin/compliance/unfreeze", post(admin_unfreeze))
         .route("/admin/compliance/seize", post(admin_seize))
         .route("/admin/compliance/reverse", post(admin_reverse))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_writable,
+        ));
+
+    let admin_recovery = Router::new()
+        .route("/admin/ping", get(admin_ping))
+        .route("/admin/compact", post(admin_compact))
+        // Admin Config API - Hot-Swap de la RuntimeConfig (no blocks)
+        .route("/admin/config", get(admin_get_config))
+        .route("/admin/config", post(admin_update_config))
+        // Admin Ledger API - read endpoints
+        .route("/admin/ledgers", get(admin_list_ledgers))
+        .route("/admin/ledgers/{ledger_id}", get(admin_get_ledger))
+        // Admin Bridge API - control plane (CF writes only, no blocks)
+        .route("/admin/bridge/enable", post(admin_bridge_enable))
+        .route("/admin/bridge/disable", post(admin_bridge_disable))
+        // Admin Compliance API - read endpoints
         .route("/admin/compliance/frozen", get(admin_list_frozen))
         .route("/admin/compliance/log", get(admin_compliance_log))
         .route(
@@ -364,7 +423,7 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
             "/admin/api-keys/{key_id}",
             axum::routing::delete(admin_revoke_api_key),
         )
-        // Admin Contract API - Declarative smart contracts
+        // Admin Contract API - Declarative smart contracts (CF writes, no blocks)
         .route("/admin/contracts", post(register_contract))
         .route("/admin/contracts", get(list_contracts))
         .route("/admin/contracts/simulate", post(simulate_contract_handler))
@@ -373,9 +432,17 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
             "/admin/contracts/{contract_id}/toggle",
             post(toggle_contract),
         )
-        // Admin Gas Pool API - Per-ledger gas pool management
+        // Admin Gas Pool API - Per-ledger gas pool management (CF writes)
         .route("/admin/gas-pool/deposit", post(admin_gas_pool_deposit))
         .route("/admin/gas-pool/withdraw", post(admin_gas_pool_withdraw))
+        // Read-only mode operator controls (v0.7.23)
+        .route("/admin/read-only/status", get(crate::admin::admin_read_only_status))
+        .route("/admin/read-only/arm", post(crate::admin::admin_read_only_arm))
+        .route("/admin/read-only/disarm", post(crate::admin::admin_read_only_disarm));
+
+    let admin = Router::new()
+        .merge(admin_writable)
+        .merge(admin_recovery)
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_local_or_admin,
@@ -406,12 +473,26 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     // Endpoint: /dashboard (Static Files)
     let dashboard = Router::new().nest_service("/dashboard", ServeDir::new("pms-dashboard/dist"));
 
-    // Ledger-scoped routes (default ledger)
-    let (public_ledger_routes, auth_ledger_routes) = build_ledger_scoped_routes();
-    // Only authenticated routes require API key; public routes are open
-    let auth_ledger_routes = auth_ledger_routes.route_layer(
+    // Ledger-scoped routes (default ledger). Three buckets:
+    //   - public          — anonymous reads (supply, version, dag tips, etc.)
+    //   - auth_read       — API-key-gated reads (balance, history, NFT lookup, draft tx)
+    //   - auth_write      — API-key-gated AND read-only-gated writes (submit/block,
+    //                       wallet send, NFT mint/burn). 503 with `error: read_only`
+    //                       when the resource guard has armed read-only mode.
+    let (public_ledger_routes, auth_ledger_read_routes, auth_ledger_write_routes) =
+        build_ledger_scoped_routes();
+    let auth_ledger_read_routes = auth_ledger_read_routes.route_layer(
         middleware::from_fn_with_state(state.clone(), require_api_key),
     );
+    let auth_ledger_write_routes = auth_ledger_write_routes
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_writable,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_key,
+        ));
 
     // Dynamic per-ledger routing: /l/{ledger_id}/{*rest}
     // Resolves the ledger at request time from LedgerManager, so newly created
@@ -432,7 +513,8 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .merge(admin)
         .merge(internal_routes)
         .merge(public_ledger_routes)
-        .merge(auth_ledger_routes)
+        .merge(auth_ledger_read_routes)
+        .merge(auth_ledger_write_routes)
         .merge(node_routes)
         .merge(ledger_routes)
         .merge(bridge_routes)

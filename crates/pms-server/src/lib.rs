@@ -17,6 +17,7 @@ pub mod internal_api;
 pub mod limits;
 pub mod metrics;
 mod rate;
+pub mod read_only;
 pub mod server;
 pub mod stats;
 pub mod tls;

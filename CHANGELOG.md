@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.23] - 2026-05-01 — Read-only mode (graceful degradation under resource pressure)
+
+### Added
+- **engine(read-only-mode)**: new resource-guard task and `require_writable` middleware. When cgroup memory usage crosses `[health].memory_high_watermark_pct` (default 90%), free disk drops below `disk_critical_free_percent` (default 5%), or RocksDB reports `is-write-stopped == 1` / L0 file count crosses `rocksdb_l0_critical_files` (default 100), the engine flips into **read-only mode**:
+  - Write-producing API routes (submit/block, wallet/tx/send, send-simple, NFT mint/burn, faucet, distribute_fees, tokens create/mint, ledgers create / transfer-ownership, bridge/transfer, compliance freeze/unfreeze/seize/reverse, per-ledger admin tokens/faucet/nft/mint) return `503 Service Unavailable` with body `{"error": "read_only", "reason": "memory|disk|rocksdb|manual", "message": "...", "retry_after_seconds": 30}` and a `Retry-After: 30` header.
+  - Background tasks `spawn_fee_distributor_task` and `spawn_inflation_mint_task` skip their tick (fees keep accumulating in the pool, distributed on the next clear tick).
+  - **Reads keep serving normally** (balance, supply, history, blocks, NFT lookup, version, dag tips, dashboard streams, `/v1/tx/prepare`, wallet create/restore) so users see their state without disruption.
+  - **Recovery endpoints stay open** (`/admin/compact`, `/admin/reindex-*`, `/admin/rebuild-tips`, `/admin/purge-*`, `/admin/consolidate-utxos`, `/admin/config` GET/POST, `/admin/api-keys` CRUD, `/admin/contracts` CRUD/toggle, `/admin/gas-pool` deposit/withdraw, `/admin/rocksdb-stats`, `/admin/read-only/*`) so the operator can bring the engine back without fighting the guard.
+- **Hysteresis** prevents flapping: ARM after 2 consecutive samples (10 s) over the high watermark; DISARM after 6 consecutive samples (30 s) below the low watermark. A `Manual` arm is **never** auto-cleared — only `POST /admin/read-only/disarm` releases it (so an operator can hold the engine in a known state during maintenance windows).
+- **Operator controls**:
+  - `GET /admin/read-only/status` — `{"armed": bool, "reason": "..."}`.
+  - `POST /admin/read-only/arm` — manually flip into read-only (reason `manual`).
+  - `POST /admin/read-only/disarm` — clear the flag.
+- **Prometheus metrics**:
+  - `pms_engine_read_only` — gauge, 1 when armed, 0 otherwise.
+  - `pms_read_only_rejections_total{reason}` — cumulative count of write requests rejected with 503, labelled by reason.
+- **Alert rule**: new `EngineReadOnly` (severity `critical`, `for: 5m`) with a runbook covering the four reasons (memory restart engine, disk free space, rocksdb compact, manual disarm).
+- **`/healthz`** gains a `read_only_mode` check that returns `degraded` when armed, with detail `{"armed": true, "reason": "..."}`.
+- **Sandbox test**: `test_read_only_mode_gates_writes` in `crates/pms-server/tests/dag_sandbox.rs` validates the full pipeline end-to-end via HTTP — baseline write 201, manual arm, write 503 with `error: read_only` + `Retry-After: 30`, reads 200 (`/v1/version`, `/v1/balance`), disarm, write 201 again.
+
+### Configuration
+- New `[health]` fields with defaults: `read_only_guard_enabled = true`, `memory_high_watermark_pct = 90.0`, `memory_low_watermark_pct = 75.0`, `disk_critical_free_percent = 5.0`, `rocksdb_l0_critical_files = 100`.
+- `etc/config/config.testnet.toml` — defaults applied (90% / 75% / 5% / 100).
+- `etc/config/config.mainnet.toml` — stricter watermarks (88% / 70%) for more headroom under real traffic spikes.
+- `etc/prometheus/alerting_rules.yml` — `EngineReadOnly` alert added under `pms_critical`.
+
+### Why it matters
+Without this safety valve, a memory leak or a sustained traffic spike on the testnet 14 GiB cgroup limit would result in a Docker SIGKILL on `pms-engine-testnet`. That kill loses the persist channel buffer (~2K blocks at the 0.7.1 sizing), which is a **data-loss event**. Read-only mode degrades gracefully: 503 to clients (which retry with backoff), pause block-producing background work, give RocksDB compaction time to free pages, then resume automatically when the watermark drops. The operator can also trigger this manually for maintenance windows.
+
+### Files
+- New: `crates/pms-server/src/read_only.rs` (lock-free `ReadOnlyMode` + `ReadOnlyReason` enum + unit tests).
+- New tasks: `crates/pms-server/src/api/tasks.rs::spawn_resource_guard_task` + `read_cgroup_memory_pct` helper (cgroup v2 first, v1 fallback).
+- New middleware: `crates/pms-server/src/api/middleware.rs::require_writable`.
+- New admin handlers: `crates/pms-server/src/admin.rs::admin_read_only_{status,arm,disarm}`.
+- New helper: `crates/pms-storage/src/rocks_store/helpers.rs::l0_files()` — exposes `rocksdb.num-files-at-level0` for the guard.
+- Routes refactored: `build_ledger_scoped_routes` now returns `(public, auth_read, auth_write)`; admin Router split into `admin_writable` (+ `require_writable`) and `admin_recovery` (free); per-ledger admin Router gains `require_writable`.
+- New gauge / counter in `crates/pms-server/src/metrics.rs`.
+- Test: `test_read_only_mode_gates_writes` in `dag_sandbox.rs`.
+
+---
+
 ## [0.7.21] - 2026-04-29 — Memory alerting via cAdvisor (host-level proxy)
 
 ### Fixed

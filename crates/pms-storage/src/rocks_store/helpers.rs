@@ -12,6 +12,18 @@ impl RocksStore {
         Ok(())
     }
 
+    /// Returns the current L0 file count, or `None` if the property is
+    /// unsupported / unparseable. Used by the resource-guard task as
+    /// an early-warning signal for "compaction is falling behind"
+    /// before RocksDB itself trips its hard `level0_stop_writes_trigger`.
+    pub fn l0_files(&self) -> Option<u64> {
+        self.db
+            .property_value("rocksdb.num-files-at-level0")
+            .ok()
+            .flatten()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    }
+
     /// Compacte toutes les column families connues avec rate-limiting.
     /// Yields 200ms between each CF to avoid a sustained write stall
     /// (200ms × 31 CFs = ~6.2s total spread vs a single multi-second wall).

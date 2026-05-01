@@ -597,3 +597,109 @@ pub async fn admin_update_config(
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Read-only mode operator controls (v0.7.23)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// These three endpoints expose the read-only flag to operators:
+//
+//   - GET  /admin/read-only/status  — current flag state and reason
+//   - POST /admin/read-only/arm     — manually flip into read-only (Manual reason)
+//   - POST /admin/read-only/disarm  — clear the flag (works on auto- AND manual-armed)
+//
+// `Manual` arms are intentionally NOT auto-cleared by the resource-guard
+// task — the operator owns the lifecycle so a maintenance window can hold
+// the engine in a known state without the watcher fighting them. Calling
+// `disarm` from `Manual` returns the engine to normal; if real pressure
+// re-asserts itself the watcher will re-arm with the appropriate reason
+// on its next tick.
+
+/// `GET /admin/read-only/status` — returns whether the engine is in
+/// read-only mode and, if so, the reason ("memory" / "disk" / "rocksdb"
+/// / "manual"). Useful as a quick poll target for an ops dashboard,
+/// and from the alert runbook.
+pub async fn admin_read_only_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+
+    let armed = state.read_only.is_armed();
+    let reason = state.read_only.reason();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "armed": armed,
+            "reason": reason.as_str(),
+        })),
+    )
+}
+
+/// `POST /admin/read-only/arm` — manually flip the engine into read-only
+/// mode (reason `manual`). Use during maintenance windows or to drain
+/// the persist queue before a planned restart.
+pub async fn admin_read_only_arm(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+
+    let prev = state.read_only.arm(crate::read_only::ReadOnlyReason::Manual);
+    crate::metrics::ENGINE_READ_ONLY.set(1);
+    tracing::warn!(
+        target = "read_only_guard",
+        prev_reason = prev.as_str(),
+        "🛑 Read-only mode armed manually by admin"
+    );
+    (
+        StatusCode::OK,
+        Json(json!({
+            "armed": true,
+            "reason": "manual",
+            "previous_reason": prev.as_str(),
+        })),
+    )
+}
+
+/// `POST /admin/read-only/disarm` — clear the read-only flag. Works
+/// on both manually-armed and auto-armed states. If real resource
+/// pressure is still present the watcher will re-arm on its next tick
+/// (within ~10 s) — this isn't a way to override the guard, just to
+/// release a manual hold.
+pub async fn admin_read_only_disarm(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !is_admin_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        );
+    }
+
+    let prev = state.read_only.disarm();
+    crate::metrics::ENGINE_READ_ONLY.set(0);
+    tracing::info!(
+        target = "read_only_guard",
+        prev_reason = prev.as_str(),
+        "✅ Read-only mode disarmed manually by admin"
+    );
+    (
+        StatusCode::OK,
+        Json(json!({
+            "armed": false,
+            "previous_reason": prev.as_str(),
+        })),
+    )
+}

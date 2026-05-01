@@ -120,6 +120,13 @@ pub struct AppState {
     /// keeps the round-robin truly fair under load instead of restarting
     /// from 0 on every clone.
     pub coord_shard_round_robin: Arc<std::sync::atomic::AtomicUsize>,
+    /// Read-only mode flag (v0.7.23). Flipped by the resource-guard
+    /// task when cgroup memory, disk, or RocksDB cross critical
+    /// thresholds. While armed, the `require_writable` middleware
+    /// rejects write requests with `503 read_only` and the fee
+    /// distribution / inflation mint tasks pause. Reads always continue.
+    /// Shared `Arc` so every cloned `AppState` sees the same flag.
+    pub read_only: Arc<crate::read_only::ReadOnlyMode>,
 }
 
 impl AppState {

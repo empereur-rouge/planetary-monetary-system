@@ -369,6 +369,48 @@ pub struct HealthSettings {
     /// don't churn no-op blocks.
     #[serde(default = "default_auto_consolidate_min_utxos")]
     pub auto_consolidate_min_utxos: usize,
+
+    /// Resource-guard task (v0.7.23). When `true`, a background task
+    /// watches cgroup memory, free disk, and RocksDB write-stall
+    /// signals every 5s; when any crosses its critical threshold the
+    /// engine flips into read-only mode (writes return 503) until the
+    /// pressure clears. Reads always continue. Default: `true`.
+    /// Disable only for benchmarks where you want to measure raw OOM
+    /// behaviour, or in tests where the watcher would interfere.
+    #[serde(default = "default_read_only_guard_enabled")]
+    pub read_only_guard_enabled: bool,
+
+    /// cgroup memory percent (used / max) at which the engine flips
+    /// into read-only mode. Hysteresis: arm at or above this; disarm
+    /// at or below `memory_low_watermark_pct`. Default: `90.0` — gives
+    /// ~10% headroom before the cgroup OOM killer fires (we want a
+    /// 503 to clients, not a SIGKILL that loses the persist queue).
+    #[serde(default = "default_memory_high_watermark_pct")]
+    pub memory_high_watermark_pct: f64,
+
+    /// cgroup memory percent (used / max) at which the engine exits
+    /// read-only mode. Must be < `memory_high_watermark_pct` to give
+    /// compaction time to free pages before re-allowing writes.
+    /// Default: `75.0`.
+    #[serde(default = "default_memory_low_watermark_pct")]
+    pub memory_low_watermark_pct: f64,
+
+    /// Free-disk percent below which the engine flips into read-only
+    /// mode. Distinct from `min_disk_free_percent` (the `/healthz`
+    /// "degraded" threshold) — read-only kicks in lower so a slow-
+    /// leaking disk first surfaces as a healthz warning, then gates
+    /// writes when truly critical. Default: `5.0`.
+    #[serde(default = "default_disk_critical_free_percent")]
+    pub disk_critical_free_percent: f64,
+
+    /// L0 file count at or above which the engine flips into read-
+    /// only mode (proxy for "compaction can't keep up; admitting more
+    /// writes will only deepen the stall"). Tune below the RocksDB
+    /// hard stop at `level0_stop_writes_trigger` (120 by default in
+    /// `apply_db_tuning`) so we degrade gracefully before RocksDB
+    /// itself blocks producers. Default: `100`.
+    #[serde(default = "default_rocksdb_l0_critical_files")]
+    pub rocksdb_l0_critical_files: u64,
 }
 
 fn default_auto_consolidate_min_utxos() -> usize {
@@ -384,6 +426,11 @@ impl Default for HealthSettings {
             activity_retention_days: None,
             auto_consolidate_interval_secs: None,
             auto_consolidate_min_utxos: default_auto_consolidate_min_utxos(),
+            read_only_guard_enabled: default_read_only_guard_enabled(),
+            memory_high_watermark_pct: default_memory_high_watermark_pct(),
+            memory_low_watermark_pct: default_memory_low_watermark_pct(),
+            disk_critical_free_percent: default_disk_critical_free_percent(),
+            rocksdb_l0_critical_files: default_rocksdb_l0_critical_files(),
         }
     }
 }
@@ -396,6 +443,21 @@ fn default_persist_queue_high_water() -> f64 {
 }
 fn default_min_disk_free_percent() -> f64 {
     10.0
+}
+fn default_read_only_guard_enabled() -> bool {
+    true
+}
+fn default_memory_high_watermark_pct() -> f64 {
+    90.0
+}
+fn default_memory_low_watermark_pct() -> f64 {
+    75.0
+}
+fn default_disk_critical_free_percent() -> f64 {
+    5.0
+}
+fn default_rocksdb_l0_critical_files() -> u64 {
+    100
 }
 
 #[derive(Deserialize, Clone, Debug)]

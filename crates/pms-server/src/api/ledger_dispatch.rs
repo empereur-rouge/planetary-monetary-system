@@ -1,6 +1,6 @@
 // pms-server/src/api/ledger_dispatch — Dynamic per-ledger request routing.
 
-use super::middleware::require_api_key;
+use super::middleware::{require_api_key, require_writable};
 use super::routes::{build_ledger_scoped_routes, build_ledger_admin_routes};
 use super::state::AppState;
 use axum::Json;
@@ -60,16 +60,32 @@ pub(super) async fn dynamic_ledger_handler(
         instance.def.fees.as_ref(),
     ));
 
-    // Build a router with ledger-scoped routes + per-ledger admin routes
+    // Build a router with ledger-scoped routes + per-ledger admin routes.
+    //
     // **Security fix**: Apply require_api_key to auth routes on custom ledgers
-    // (was missing — auth routes were previously unprotected on per-ledger handler)
-    let (public_routes, auth_routes) = build_ledger_scoped_routes();
-    let auth_routes = auth_routes.route_layer(middleware::from_fn_with_state(
+    // (was missing — auth routes were previously unprotected on per-ledger handler).
+    //
+    // **v0.7.23**: write routes additionally get `require_writable` so they
+    // 503 with `error: read_only` when the resource guard has armed read-only
+    // mode (cgroup memory / disk / RocksDB pressure). Read routes keep
+    // serving normally on custom ledgers — same semantics as the main ledger.
+    let (public_routes, auth_read_routes, auth_write_routes) = build_ledger_scoped_routes();
+    let auth_read_routes = auth_read_routes.route_layer(middleware::from_fn_with_state(
         ledger_state.clone(),
         require_api_key,
     ));
+    let auth_write_routes = auth_write_routes
+        .route_layer(middleware::from_fn_with_state(
+            ledger_state.clone(),
+            require_writable,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            ledger_state.clone(),
+            require_api_key,
+        ));
     let router = public_routes
-        .merge(auth_routes)
+        .merge(auth_read_routes)
+        .merge(auth_write_routes)
         .with_state(ledger_state.clone())
         .merge(build_ledger_admin_routes(ledger_state));
 

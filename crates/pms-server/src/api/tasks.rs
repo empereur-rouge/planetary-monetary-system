@@ -1,6 +1,7 @@
 // pms-server/src/api/tasks — Background tasks (fee distribution, inflation mint, activity backfill).
 
 use super::state::AppState;
+use crate::read_only::ReadOnlyReason;
 use pms_storage::DagStorage;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +27,20 @@ pub fn spawn_fee_distributor_task(state: AppState) {
 
             loop {
                 interval.tick().await; // Wait for next tick
+
+                // Skip the entire round when the engine is in read-only
+                // mode — distribution produces a Reward block, and we
+                // promised callers no new blocks while armed. Fees keep
+                // accumulating in the pool; once the guard disarms the
+                // next tick will flush them out without loss.
+                if state_distrib.read_only.is_armed() {
+                    tracing::debug!(
+                        target = "fee_distribution",
+                        reason = state_distrib.read_only.reason().as_str(),
+                        "skipping fee distribution: engine is read-only"
+                    );
+                    continue;
+                }
 
                 // 1. Distribute main ledger
                 distribute_for_ledger(&state_distrib).await;
@@ -130,6 +145,20 @@ pub fn spawn_inflation_mint_task(state: AppState) {
 
             loop {
                 interval.tick().await;
+
+                // Same rationale as `spawn_fee_distributor_task`: skip
+                // the round under read-only mode. Inflation mint is a
+                // strictly additive operation — deferring a single
+                // round just delays inflation by `interval_sec`,
+                // which is harmless.
+                if state_inflation.read_only.is_armed() {
+                    tracing::debug!(
+                        target = "inflation_mint",
+                        reason = state_inflation.read_only.reason().as_str(),
+                        "skipping inflation mint: engine is read-only"
+                    );
+                    continue;
+                }
 
                 match crate::fee_distribution::perform_daily_inflation_mint(&state_inflation).await
                 {
@@ -475,6 +504,244 @@ pub fn spawn_consolidation_task(state: AppState) {
             .await;
         }
     });
+}
+
+/// Spawns the resource-guard task (v0.7.23) — graceful read-only degradation.
+///
+/// On a fixed cadence (5 s) this task samples three pressure signals:
+///
+///   1. **cgroup memory** (used / max). On Linux + Docker (the production
+///      target) this maps to the cgroup limit set by `mem_limit` in
+///      `docker-compose.*.yml`, so the watcher arms read-only mode
+///      *before* the kernel OOM killer fires — preferring a 503 to
+///      clients over a SIGKILL that would lose the persist channel.
+///   2. **Free disk percent** on the RocksDB volume. Distinct from
+///      the `[health].min_disk_free_percent` "degraded" signal: this
+///      threshold (`disk_critical_free_percent`) is lower so a slow-
+///      leaking disk first surfaces as a healthz warning, then gates
+///      writes when actually critical.
+///   3. **RocksDB stall**: `is-write-stopped` (canonical signal) and
+///      L0 file count crossing `rocksdb_l0_critical_files`. The L0
+///      check is an early-warning that fires before RocksDB's own
+///      hard `level0_stop_writes_trigger` so writes degrade gracefully
+///      to 503 instead of blocking indefinitely on the producer side.
+///
+/// **Hysteresis** prevents flapping: ARM after 2 consecutive samples
+/// (10 s) above the high watermark; DISARM after 6 consecutive samples
+/// (30 s) below the low watermark. A `Manual` arm via
+/// `POST /admin/read-only/arm` is **never** auto-cleared — only the
+/// matching `disarm` endpoint releases it (so an operator can hold
+/// the engine in read-only state during maintenance without the
+/// guard fighting them).
+///
+/// When `[health].read_only_guard_enabled` is `false`, this task is a
+/// no-op (returns immediately on spawn). Recommended `false` only for
+/// benchmarks and local tests where the guard would interfere; every
+/// production deployment should leave it on.
+pub fn spawn_resource_guard_task(state: AppState) {
+    if !state.settings.health.read_only_guard_enabled {
+        tracing::info!(
+            target = "read_only_guard",
+            "Resource guard task disabled (health.read_only_guard_enabled = false)"
+        );
+        return;
+    }
+
+    let high_pct = state.settings.health.memory_high_watermark_pct;
+    let low_pct = state.settings.health.memory_low_watermark_pct;
+    let disk_critical_pct = state.settings.health.disk_critical_free_percent;
+    let l0_critical = state.settings.health.rocksdb_l0_critical_files;
+    let rocks_path = std::path::PathBuf::from(&state.settings.rocks.path);
+
+    if low_pct >= high_pct {
+        tracing::error!(
+            target = "read_only_guard",
+            high_pct, low_pct,
+            "memory_low_watermark_pct ({:.1}) >= memory_high_watermark_pct ({:.1}); \
+             disabling resource guard to prevent flapping. Fix the config and restart.",
+            low_pct, high_pct
+        );
+        return;
+    }
+
+    tokio::spawn(async move {
+        const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+        // ARM after 2 consecutive over-watermark samples (10 s).
+        // DISARM after 6 consecutive under-watermark samples (30 s) —
+        // intentionally asymmetric: armed is cheap (rejects writes,
+        // already-running ops keep going), so we err on the side of
+        // staying armed a little longer than strictly necessary.
+        const ARM_TICKS: u32 = 2;
+        const DISARM_TICKS: u32 = 6;
+
+        tracing::info!(
+            target = "read_only_guard",
+            high_pct,
+            low_pct,
+            disk_critical_pct,
+            l0_critical,
+            arm_ticks = ARM_TICKS,
+            disarm_ticks = DISARM_TICKS,
+            interval_secs = SAMPLE_INTERVAL.as_secs(),
+            "Resource guard task started"
+        );
+
+        let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
+        // Consume immediate first tick so the first real sample lands
+        // SAMPLE_INTERVAL after boot — gives RocksDB time to settle
+        // and avoids a spurious arm during a heavy boot-time backfill.
+        interval.tick().await;
+
+        let mut over_count: u32 = 0;
+        let mut under_count: u32 = 0;
+
+        loop {
+            interval.tick().await;
+
+            // ─── 1. Memory check ────────────────────────────────────
+            // While clear, arm at >= high_pct. While armed, only clear
+            // at < low_pct — that's the hysteresis band.
+            let mem_pressure = match read_cgroup_memory_pct() {
+                Some(pct) => {
+                    if state.read_only.is_armed() {
+                        pct >= low_pct
+                    } else {
+                        pct >= high_pct
+                    }
+                }
+                None => false, // no cgroup info → don't arm on memory
+            };
+
+            // ─── 2. Disk check ──────────────────────────────────────
+            let disk_pressure = crate::api_fn::healthz::disk_free_percent(&rocks_path)
+                .map(|free_pct| free_pct < disk_critical_pct)
+                .unwrap_or(false);
+
+            // ─── 3. RocksDB stall check ─────────────────────────────
+            let rocks_stalled = matches!(state.store.is_write_stopped(), Some(true));
+            let rocks_l0_critical = state
+                .store
+                .l0_files()
+                .map(|n| n >= l0_critical)
+                .unwrap_or(false);
+            let rocks_pressure = rocks_stalled || rocks_l0_critical;
+
+            // ─── 4. Decide ──────────────────────────────────────────
+            let any_pressure = mem_pressure || disk_pressure || rocks_pressure;
+            let new_reason = if mem_pressure {
+                ReadOnlyReason::Memory
+            } else if disk_pressure {
+                ReadOnlyReason::Disk
+            } else if rocks_pressure {
+                ReadOnlyReason::RocksDb
+            } else {
+                ReadOnlyReason::None
+            };
+
+            let was_armed = state.read_only.is_armed();
+            let cur_reason = state.read_only.reason();
+
+            if any_pressure {
+                under_count = 0;
+                over_count = over_count.saturating_add(1);
+
+                if !was_armed && over_count >= ARM_TICKS {
+                    state.read_only.arm(new_reason);
+                    crate::metrics::ENGINE_READ_ONLY.set(1);
+                    tracing::warn!(
+                        target = "read_only_guard",
+                        reason = new_reason.as_str(),
+                        consecutive_samples = over_count,
+                        "🛑 Engine entering READ-ONLY mode — writes will return 503"
+                    );
+                } else if was_armed
+                    && cur_reason != ReadOnlyReason::Manual
+                    && cur_reason != new_reason
+                {
+                    // Already armed by the watcher, but the dominant
+                    // reason changed (e.g. memory cleared but disk
+                    // tripped). Update so the metric / healthz / 503
+                    // body reflect the live cause. Don't override a
+                    // Manual arm — operator decisions take precedence.
+                    state.read_only.arm(new_reason);
+                    tracing::warn!(
+                        target = "read_only_guard",
+                        prev_reason = cur_reason.as_str(),
+                        new_reason = new_reason.as_str(),
+                        "Read-only reason changed"
+                    );
+                }
+            } else {
+                over_count = 0;
+                if was_armed {
+                    if cur_reason == ReadOnlyReason::Manual {
+                        // Operator-armed: never auto-disarm.
+                        under_count = 0;
+                    } else {
+                        under_count = under_count.saturating_add(1);
+                        if under_count >= DISARM_TICKS {
+                            let prev = state.read_only.disarm();
+                            crate::metrics::ENGINE_READ_ONLY.set(0);
+                            under_count = 0;
+                            tracing::info!(
+                                target = "read_only_guard",
+                                prev_reason = prev.as_str(),
+                                consecutive_samples = DISARM_TICKS,
+                                "✅ Engine exiting READ-ONLY mode — writes accepted again"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Read cgroup memory usage as a percentage of its limit.
+///
+/// Returns `None` when the cgroup interface is unavailable (non-Linux,
+/// fallback paths missing) or the cgroup has no memory limit set —
+/// in those cases the resource guard simply skips the memory check.
+///
+/// Tries cgroup v2 first (`/sys/fs/cgroup/memory.{current,max}`) which
+/// is the default on Debian 12 + Docker 29.x (the production target),
+/// then falls back to cgroup v1 (`memory.usage_in_bytes` /
+/// `memory.limit_in_bytes`) for older hosts.
+fn read_cgroup_memory_pct() -> Option<f64> {
+    // cgroup v2
+    if let (Ok(cur_str), Ok(max_str)) = (
+        std::fs::read_to_string("/sys/fs/cgroup/memory.current"),
+        std::fs::read_to_string("/sys/fs/cgroup/memory.max"),
+    ) {
+        let cur: u64 = cur_str.trim().parse().ok()?;
+        let max_trim = max_str.trim();
+        if max_trim == "max" {
+            return None;
+        }
+        let max: u64 = max_trim.parse().ok()?;
+        if max == 0 {
+            return None;
+        }
+        return Some((cur as f64 / max as f64) * 100.0);
+    }
+
+    // cgroup v1 fallback
+    let cur: u64 = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let max: u64 = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    // cgroup v1 reports a huge sentinel (~9.2 EB) when no memory limit
+    // is set. Treat anything north of 1 EB as "no limit".
+    if max == 0 || max > (1u64 << 60) {
+        return None;
+    }
+    Some((cur as f64 / max as f64) * 100.0)
 }
 
 /// Spawns a background task to backfill missing `activity_items` entries.

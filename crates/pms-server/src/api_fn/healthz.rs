@@ -67,7 +67,7 @@ pub async fn enriched_healthz(State(state): State<AppState>) -> impl IntoRespons
             .into_response();
     }
 
-    let mut checks: Vec<HealthCheck> = Vec::with_capacity(4);
+    let mut checks: Vec<HealthCheck> = Vec::with_capacity(5);
 
     // 1. rocksdb_writable — read a cheap, O(1) property to prove the
     //    handle is open and responding. We don't actually write because
@@ -201,6 +201,24 @@ pub async fn enriched_healthz(State(state): State<AppState>) -> impl IntoRespons
         });
     }
 
+    // 5. read_only_mode — if the resource guard task has flipped the
+    //    engine into read-only mode, surface the reason in the response
+    //    so an operator can see WHY at a glance without having to grep
+    //    logs. `ok = !armed` so any read-only state shows as a 503
+    //    healthz, matching the alert semantics elsewhere.
+    {
+        let armed = state.read_only.is_armed();
+        let reason = state.read_only.reason();
+        checks.push(HealthCheck {
+            name: "read_only_mode",
+            ok: !armed,
+            detail: json!({
+                "armed": armed,
+                "reason": reason.as_str(),
+            }),
+        });
+    }
+
     let any_failed = checks.iter().any(|c| !c.ok);
     let status = if any_failed { "degraded" } else { "ok" };
     let http = if any_failed {
@@ -228,7 +246,7 @@ fn now_ms() -> i64 {
 /// Returns the percentage of free space on the filesystem holding `path`,
 /// or `None` if we can't determine it (not Unix, statvfs failure, etc.).
 #[cfg(unix)]
-fn disk_free_percent(path: &std::path::Path) -> Option<f64> {
+pub(crate) fn disk_free_percent(path: &std::path::Path) -> Option<f64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -272,6 +290,6 @@ fn disk_free_percent(path: &std::path::Path) -> Option<f64> {
 }
 
 #[cfg(not(unix))]
-fn disk_free_percent(_path: &std::path::Path) -> Option<f64> {
+pub(crate) fn disk_free_percent(_path: &std::path::Path) -> Option<f64> {
     None
 }

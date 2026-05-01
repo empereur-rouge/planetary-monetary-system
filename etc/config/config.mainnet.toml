@@ -128,6 +128,21 @@ activity_retention_days = 90
 # garder le coordinator master léger sous un trafic continu de fees.
 auto_consolidate_interval_secs = 300
 auto_consolidate_min_utxos = 200
+# Resource guard / read-only mode (v0.7.23).
+# OBLIGATOIRE en mainnet : c'est la safety valve qui empêche un OOM
+# kill sous pression mémoire. Sans ce flag, les blocs en attente dans
+# le persist channel buffer sont perdus quand cgroup tue le container.
+read_only_guard_enabled = true
+# Memory watermarks plus stricts qu'en testnet : on veut une marge
+# plus large sur mainnet pour absorber les pics de trafic réels sans
+# basculer en read-only au moindre stress.
+memory_high_watermark_pct = 88.0
+memory_low_watermark_pct = 70.0
+# Disk free critique : 5%. Avec min_disk_free_percent=15% en /healthz
+# on a une fenêtre de 10% pour les alertes warning avant le gating.
+disk_critical_free_percent = 5.0
+# L0 file count : 100 (early-warning sous le hard stop RocksDB à 120).
+rocksdb_l0_critical_files = 100
 
 [validation]
 min_pow_leading_zero_bits = 0

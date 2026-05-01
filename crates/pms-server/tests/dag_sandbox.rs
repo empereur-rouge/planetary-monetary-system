@@ -584,6 +584,7 @@ async fn boot_sandbox() -> Result<Sandbox> {
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
         coord_shard_wallets: std::sync::Arc::new(coord_shard_wallets),
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
     };
 
     // ── 11. Spawn fee distributor task (2s interval) ─────────────────
@@ -3236,6 +3237,7 @@ async fn boot_one_engine(
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
         coord_shard_wallets: std::sync::Arc::new(Vec::new()),
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
     };
 
     // Only the coordinator runs the fee distributor — followers don't
@@ -4627,5 +4629,174 @@ async fn test_contract_toggle_kill_switch() -> Result<()> {
     println!("   - Enabled  → fee = {}", fee_active);
     println!("   - Disabled → fee = {} (zero)", fee_disabled);
     println!("   - Re-enabled → fee = {}", fee_re);
+    Ok(())
+}
+
+/// Read-only mode end-to-end: arm the flag, prove writes 503, disarm, prove
+/// writes resume (v0.7.23).
+///
+/// This is the user-visible contract of the read-only safety valve. The
+/// resource-guard task itself is hard to unit-test (cgroup files in /sys
+/// can't be mocked easily), but the manual arm/disarm path drives the
+/// exact same atomic + middleware code path that the watcher uses, so
+/// proving this works proves the core gating contract.
+///
+/// Steps:
+///   1. Boot sandbox, faucet-mint to a fresh user — expect 200 (baseline).
+///   2. POST /admin/read-only/arm → expect 200, armed=true, reason=manual.
+///   3. Faucet-mint again — expect 503 with body `{"error": "read_only",
+///      "reason": "manual"}` and `Retry-After: 30`.
+///   4. Read endpoints (`/v1/balance`, `/v1/version`) keep returning 200
+///      while armed — proves we didn't gate too aggressively.
+///   5. POST /admin/read-only/disarm → expect 200, armed=false.
+///   6. Faucet-mint again — expect 200 (writes resume).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn test_read_only_mode_gates_writes() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    println!("\n╔═══════════════════════════════════════════════════════════╗");
+    println!("║  TEST: Read-Only Mode Gates Writes (v0.7.23)              ║");
+    println!("╚═══════════════════════════════════════════════════════════╝\n");
+
+    let user = Wallet::generate();
+    let user_addr = user.get_address("8e");
+
+    // ── 1. Baseline: faucet-mint succeeds ─────────────────────────────
+    println!("   [1/6] Baseline: faucet 100 PMS to fresh user...");
+    let (status, body) = sandbox
+        .admin_post(
+            "/admin/faucet",
+            json!({ "to": user_addr.clone(), "amount": "100" }),
+        )
+        .await;
+    println!("      Faucet: {} — {:?}", status, body);
+    anyhow::ensure!(
+        status.is_success(),
+        "Baseline faucet should succeed before arming read-only. Got {}: {}",
+        status,
+        body
+    );
+
+    // ── 2. Arm read-only mode manually ────────────────────────────────
+    println!("   [2/6] Arming read-only mode (reason=manual)...");
+    let (status, body) = sandbox
+        .admin_post("/admin/read-only/arm", json!({}))
+        .await;
+    println!("      Arm: {} — {:?}", status, body);
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body["armed"], json!(true));
+    assert_eq!(body["reason"], json!("manual"));
+
+    // Verify status endpoint also reports armed.
+    let (status, body) = sandbox.admin_get("/admin/read-only/status").await;
+    println!("      Status: {} — {:?}", status, body);
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body["armed"], json!(true));
+    assert_eq!(body["reason"], json!("manual"));
+
+    // ── 3. Write attempt → 503 with stable reason field ───────────────
+    println!("   [3/6] Faucet-mint while armed — expecting 503 read_only...");
+    let resp = sandbox
+        .client
+        .post(format!("{}/admin/faucet", sandbox.base_url))
+        .bearer_auth(&sandbox.admin_token)
+        .json(&json!({ "to": user_addr.clone(), "amount": "100" }))
+        .send()
+        .await
+        .expect("HTTP POST failed");
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+    let body: Value = resp.json().await.unwrap_or(json!({}));
+    println!(
+        "      Faucet (armed): {} retry-after={:?} — {:?}",
+        status, retry_after, body
+    );
+    assert_eq!(
+        status,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "While armed, write must return 503 (got {}). Body: {}",
+        status,
+        body
+    );
+    assert_eq!(body["error"], json!("read_only"));
+    assert_eq!(body["reason"], json!("manual"));
+    assert_eq!(body["retry_after_seconds"], json!(30));
+    assert_eq!(retry_after.as_deref(), Some("30"));
+
+    // ── 4. Reads still succeed while armed ────────────────────────────
+    println!("   [4/6] Reads (/v1/version, /v1/balance) while armed...");
+    let resp_version = sandbox
+        .client
+        .get(format!("{}/v1/version", sandbox.base_url))
+        .send()
+        .await
+        .expect("HTTP GET /v1/version failed");
+    println!("      /v1/version: {}", resp_version.status());
+    assert!(
+        resp_version.status().is_success(),
+        "Read endpoint /v1/version must keep serving while read-only. Got {}",
+        resp_version.status()
+    );
+
+    let resp_balance = sandbox
+        .client
+        .post(format!("{}/v1/balance", sandbox.base_url))
+        .header("X-API-Key", "any") // store empty in tests → bypass
+        .json(&json!({ "address": user_addr.clone() }))
+        .send()
+        .await
+        .expect("HTTP POST /v1/balance failed");
+    let bal_status = resp_balance.status();
+    let bal_body: Value = resp_balance.json().await.unwrap_or(json!({}));
+    println!("      /v1/balance: {} — {:?}", bal_status, bal_body);
+    assert!(
+        bal_status.is_success(),
+        "Read endpoint /v1/balance must keep serving while read-only. \
+         Got {}: {}",
+        bal_status,
+        bal_body
+    );
+
+    // ── 5. Disarm — works on Manual ───────────────────────────────────
+    println!("   [5/6] Disarming read-only mode...");
+    let (status, body) = sandbox
+        .admin_post("/admin/read-only/disarm", json!({}))
+        .await;
+    println!("      Disarm: {} — {:?}", status, body);
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body["armed"], json!(false));
+    assert_eq!(body["previous_reason"], json!("manual"));
+
+    // ── 6. Writes resume ──────────────────────────────────────────────
+    println!("   [6/6] Faucet-mint after disarm — expecting 200...");
+    let (status, body) = sandbox
+        .admin_post(
+            "/admin/faucet",
+            json!({ "to": user_addr.clone(), "amount": "100" }),
+        )
+        .await;
+    println!("      Faucet (cleared): {} — {:?}", status, body);
+    assert!(
+        status.is_success(),
+        "After disarm, faucet must succeed again. Got {}: {}",
+        status,
+        body
+    );
+
+    println!("\n   ╔══════════════════════════════════════════════════════════╗");
+    println!("   ║  READ-ONLY MODE — END-TO-END VALIDATION                  ║");
+    println!("   ╠══════════════════════════════════════════════════════════╣");
+    println!("   ║  Pre-arm faucet:    200 ✓                                ║");
+    println!("   ║  Armed (manual):    armed=true reason=manual ✓           ║");
+    println!("   ║  Faucet while armed:503 error=read_only retry-after=30 ✓ ║");
+    println!("   ║  Reads while armed: 200 ✓ (not gated)                    ║");
+    println!("   ║  Disarmed:          armed=false ✓                        ║");
+    println!("   ║  Post-disarm faucet:200 ✓ (writes resume)                ║");
+    println!("   ╚══════════════════════════════════════════════════════════╝");
     Ok(())
 }
