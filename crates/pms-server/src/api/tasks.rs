@@ -307,6 +307,13 @@ pub fn spawn_metrics_sampler_task(state: AppState) {
         let mut prev_bloom: std::collections::HashMap<String, (u64, u64)> =
             std::collections::HashMap::new();
 
+        // Per-ledger memory of the previous `pms_blocks_persisted_total`
+        // counter value + the previous EWMA reading. Used to compute the
+        // smoothed `pms_blocks_per_second_ewma` gauge each tick — see
+        // `update_blocks_per_second_ewma` below for the math.
+        let mut prev_blocks: std::collections::HashMap<String, (u64, f64)> =
+            std::collections::HashMap::new();
+
         loop {
             interval.tick().await;
 
@@ -320,6 +327,7 @@ pub fn spawn_metrics_sampler_task(state: AppState) {
                 &mut prev_bloom,
             )
             .await;
+            update_blocks_per_second_ewma(&state.ledger_id, &mut prev_blocks);
 
             // ---- custom ledgers from the registry ------------------
             if let Some(ref mgr) = state.ledger_mgr {
@@ -340,10 +348,69 @@ pub fn spawn_metrics_sampler_task(state: AppState) {
                         &mut prev_bloom,
                     )
                     .await;
+                    update_blocks_per_second_ewma(&lid, &mut prev_blocks);
                 }
             }
         }
     });
+}
+
+/// Update the smoothed `pms_blocks_per_second_ewma{ledger_id}` gauge
+/// from the cumulative `pms_blocks_persisted_total{ledger_id}` counter.
+///
+/// **EWMA** (exponentially weighted moving average) with `α = 0.2`:
+///
+/// ```text
+///   instant_rate = (current_count - previous_count) / SAMPLE_INTERVAL_SECS
+///   ewma         = α * instant_rate + (1 - α) * previous_ewma
+/// ```
+///
+/// `α = 0.2` means each new 5 s sample contributes 20 % to the
+/// displayed value while 80 % is retained from history — effective
+/// smoothing window ~25 s. Tuned to match the natural cadence of the
+/// `background_persist_task` drain bursts (one WriteBatch every
+/// ~5-10 s under load) so a single batch landing inside one sample
+/// window doesn't move the displayed rate by more than ~20 % of its
+/// peak. The dashboard reading this gauge sees the **honest sustained
+/// throughput**, never the sub-second drain-burst artifacts.
+///
+/// First sample (no prior counter value yet) is skipped — we'd need to
+/// know the boot time to compute a meaningful rate, and reporting 0 or
+/// `current_count / sample_interval` would both be misleading.
+fn update_blocks_per_second_ewma(
+    ledger_id: &str,
+    prev: &mut std::collections::HashMap<String, (u64, f64)>,
+) {
+    const SAMPLE_INTERVAL_SECS: f64 = 5.0;
+    const ALPHA: f64 = 0.2;
+
+    let cur_count = crate::metrics::BLOCKS_PERSISTED
+        .with_label_values(&[ledger_id])
+        .get();
+
+    match prev.get(ledger_id).copied() {
+        None => {
+            // First observation — store the baseline, don't publish a
+            // rate yet (nothing to compare against). The next tick
+            // produces the first real EWMA value.
+            prev.insert(ledger_id.to_string(), (cur_count, 0.0));
+        }
+        Some((prev_count, prev_ewma)) => {
+            // Counter is monotonic — `cur_count >= prev_count` always.
+            // Use saturating subtraction to be safe against any future
+            // counter reset (e.g. a Prometheus client library bug we
+            // can't see today).
+            let delta = cur_count.saturating_sub(prev_count);
+            let instant_rate = delta as f64 / SAMPLE_INTERVAL_SECS;
+            let ewma = ALPHA * instant_rate + (1.0 - ALPHA) * prev_ewma;
+
+            crate::metrics::BLOCKS_PER_SECOND_EWMA
+                .with_label_values(&[ledger_id])
+                .set(ewma);
+
+            prev.insert(ledger_id.to_string(), (cur_count, ewma));
+        }
+    }
 }
 
 /// Sample one ledger's gauges and feed them into the Prometheus registry.

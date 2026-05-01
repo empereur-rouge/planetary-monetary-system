@@ -120,6 +120,31 @@ pub static UTXO_SET_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Smoothed blocks-per-second per ledger, computed by the metrics
+/// sampler as an exponentially weighted moving average (alpha=0.2)
+/// over the 5s sampling interval. Effective smoothing window: ~25 s.
+///
+/// **Why a separate gauge instead of `rate(pms_blocks_persisted_total[1m])`** :
+/// dashboards that poll the raw counter at sub-second cadence and
+/// compute their own `Δcounter / Δwall_time` show enormous fake
+/// spikes when the persist consumer drains its 64-block WriteBatch
+/// (~30-50 ms wall time = >1500 blk/s instantaneous). This gauge
+/// pre-smooths the rate at the source so the dashboard doesn't have
+/// to be clever — the value is already the right honest sustained
+/// throughput.
+///
+/// Dashboards should display **this** instead of computing rates
+/// themselves. Operators who want a longer window keep using
+/// `rate(pms_blocks_persisted_total[5m])` directly in Prometheus.
+pub static BLOCKS_PER_SECOND_EWMA: Lazy<GaugeVec> = Lazy::new(|| {
+    prometheus::register_gauge_vec!(
+        "pms_blocks_per_second_ewma",
+        "Smoothed blocks-per-second per ledger (EWMA alpha=0.2 over 5s samples, ~25s effective window)",
+        &["ledger_id"]
+    )
+    .unwrap()
+});
+
 /// Cumulative seconds during which RocksDB had `is-write-stopped == 1`.
 /// Sampled every 5s by the metrics task: each tick where the property
 /// reads `1` adds the sampling interval to the counter. A growing rate
@@ -209,10 +234,19 @@ pub fn render() -> String {
 
 /// Render metrics for a specific ledger in dashboard-compatible format.
 /// Outputs plain metric names (no labels) so the dashboard parseMetrics() works unchanged.
+///
+/// **`pms_blocks_per_second_ewma`** is the smoothed throughput gauge —
+/// dashboards should display this for "current TPS" instead of computing
+/// `Δblocks_persisted / Δwall_time` themselves, which produces fake
+/// 1500-blk/s spikes when the persist consumer drains a 64-block
+/// WriteBatch in ~30 ms.
 pub fn render_for_ledger(ledger_id: &str) -> String {
     let blocks_total = PMS_BLOCKS_TOTAL.with_label_values(&[ledger_id]).get();
     let persisted = BLOCKS_PERSISTED.with_label_values(&[ledger_id]).get();
     let rejected = BLOCKS_REJECTED.with_label_values(&[ledger_id]).get();
+    let bps_ewma = BLOCKS_PER_SECOND_EWMA
+        .with_label_values(&[ledger_id])
+        .get();
 
     format!(
         "# HELP pms_blocks_total Nombre total de blocs connus (DAG size)\n\
@@ -223,7 +257,10 @@ pub fn render_for_ledger(ledger_id: &str) -> String {
          pms_blocks_persisted_total {}\n\
          # HELP pms_blocks_rejected_total Blocs rejetés lors de la persistance\n\
          # TYPE pms_blocks_rejected_total counter\n\
-         pms_blocks_rejected_total {}\n",
-        blocks_total, persisted, rejected
+         pms_blocks_rejected_total {}\n\
+         # HELP pms_blocks_per_second_ewma Smoothed blocks-per-second (EWMA, ~25s window)\n\
+         # TYPE pms_blocks_per_second_ewma gauge\n\
+         pms_blocks_per_second_ewma {:.2}\n",
+        blocks_total, persisted, rejected, bps_ewma
     )
 }

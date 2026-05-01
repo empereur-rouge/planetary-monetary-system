@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.25] - 2026-05-01 — Smoothed `pms_blocks_per_second_ewma` gauge (kills the fake-1500-blk/s dashboard artifact)
+
+### Added
+- **metrics(blocks_per_second)**: new `pms_blocks_per_second_ewma{ledger_id}` Prometheus gauge, computed by the metrics sampler every 5 s as an exponentially weighted moving average (`α = 0.2`) of the per-ledger block production rate. Effective smoothing window ~25 s. Exposed in both `/metrics/all` (full Prometheus format) and `/l/{id}/metrics` (dashboard-compatible label-free format).
+
+### Why
+Dashboards that polled the raw `pms_blocks_persisted_total` counter at sub-second cadence and computed their own `Δcounter / Δwall_time` were showing **fake 1500 blk/s spikes** under normal load. The cause: the `background_persist_task` drains the persist channel in `WriteBatch`-es of up to 64 blocks, and a single batch completes in ~30-50 ms (RocksDB amortizes the fsync). When that 64-block jump landed inside a 50 ms dashboard polling window, the displayed rate was `64 / 0.05s ≈ 1280 blk/s` — a visualization artifact of sub-second sampling on a counter that increments in batches, **not** real throughput.
+
+Diagnostic on testnet 2026-05-01 (1 h window via Prometheus):
+- Median rate (30 s windows): **60 blk/s** consumer.
+- p95: **80 blk/s**.
+- Max sustained: **146 blk/s** aggregated across ledgers.
+- Persist queue depth max: 56 blocks (2.8 % of 2 K capacity → 35× headroom). Queue oscillates 0 → 56 → 0 every ~5-10 s under load — exactly the burst pattern that fooled the dashboard.
+
+### How to consume
+- **Dashboards**: read `pms_blocks_per_second_ewma` directly. No more `Δcounter / Δwall_time` logic; the smoothing is done at the source. Honest sustained throughput, no sub-second drain-burst illusions.
+- **Operators**: keep using `rate(pms_blocks_persisted_total[5m])` for the long-window view; the new gauge is the short-window dashboard equivalent (~25 s effective window).
+- **Multi-ledger**: per-ledger gauge — `pms_blocks_per_second_ewma{ledger_id="main"}`, `{ledger_id="eden"}`, …
+
+### Files
+- New gauge in `crates/pms-server/src/metrics.rs::BLOCKS_PER_SECOND_EWMA` + emission in `render_for_ledger` (dashboard format).
+- New `update_blocks_per_second_ewma` helper in `crates/pms-server/src/api/tasks.rs` driven by the existing `spawn_metrics_sampler_task` 5 s loop. State is a per-ledger `(prev_count, prev_ewma)` map; first observation initialises the baseline, second observation onward publishes a smoothed rate.
+
+---
+
 ## [0.7.24] - 2026-05-01 — Stable numeric API error codes (anti-enumeration framework)
 
 ### Added
