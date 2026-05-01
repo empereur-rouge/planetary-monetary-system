@@ -411,6 +411,21 @@ pub struct HealthSettings {
     /// itself blocks producers. Default: `100`.
     #[serde(default = "default_rocksdb_l0_critical_files")]
     pub rocksdb_l0_critical_files: u64,
+
+    /// Minimum time (in seconds) the engine stays armed in read-only
+    /// mode after an auto arm before it can auto-disarm, regardless
+    /// of how quickly memory / disk / RocksDB pressure clears.
+    /// Anti-flap (v0.7.26): without this, a memtable burst that
+    /// crosses the high watermark for 10 s then drops 30 s later
+    /// when the flush completes would loop the engine in/out of
+    /// read-only every ~1-2 minutes — observed on testnet
+    /// 2026-05-01. The DISARM_TICKS hysteresis (30 s under low
+    /// watermark) alone isn't enough because RocksDB legitimately
+    /// frees ~2 GiB on every memtable flush. Default: `60` s.
+    /// Manual arms via `POST /admin/read-only/arm` are NOT subject
+    /// to this — they release immediately on operator disarm.
+    #[serde(default = "default_read_only_min_arm_duration_secs")]
+    pub read_only_min_arm_duration_secs: u64,
 }
 
 fn default_auto_consolidate_min_utxos() -> usize {
@@ -431,6 +446,7 @@ impl Default for HealthSettings {
             memory_low_watermark_pct: default_memory_low_watermark_pct(),
             disk_critical_free_percent: default_disk_critical_free_percent(),
             rocksdb_l0_critical_files: default_rocksdb_l0_critical_files(),
+            read_only_min_arm_duration_secs: default_read_only_min_arm_duration_secs(),
         }
     }
 }
@@ -458,6 +474,9 @@ fn default_disk_critical_free_percent() -> f64 {
 }
 fn default_rocksdb_l0_critical_files() -> u64 {
     100
+}
+fn default_read_only_min_arm_duration_secs() -> u64 {
+    60
 }
 
 #[derive(Deserialize, Clone, Debug)]

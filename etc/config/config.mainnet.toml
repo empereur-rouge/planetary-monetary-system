@@ -143,6 +143,10 @@ memory_low_watermark_pct = 70.0
 disk_critical_free_percent = 5.0
 # L0 file count : 100 (early-warning sous le hard stop RocksDB à 120).
 rocksdb_l0_critical_files = 100
+# Anti-flap floor (v0.7.26) : 60s minimum armed après auto-arm. En
+# mainnet on garde la même valeur que testnet — c'est le pattern de
+# memtable burst qui est universel, pas spécifique au profile de charge.
+read_only_min_arm_duration_secs = 60
 
 [validation]
 min_pow_leading_zero_bits = 0

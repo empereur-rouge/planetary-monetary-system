@@ -154,6 +154,12 @@ disk_critical_free_percent = 5.0
 # before RocksDB's hard `level0_stop_writes_trigger` (120, set in
 # apply_db_tuning).
 rocksdb_l0_critical_files = 100
+# Anti-flap floor (v0.7.26): once auto-armed, stay armed at least 60 s
+# before allowing auto-disarm. Without this, memtable bursts that trip
+# 90% then drop to 75% after a flush would loop the engine in/out of
+# read-only every 1-2 minutes (testnet incident 2026-05-01). Manual
+# arms ignore this floor and disarm immediately on operator command.
+read_only_min_arm_duration_secs = 60
 
 [validation]
 min_pow_leading_zero_bits = 0

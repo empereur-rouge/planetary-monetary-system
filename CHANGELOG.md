@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.26] - 2026-05-01 — Read-only mode anti-flap (memtable-flush cycle fix)
+
+### Fixed
+- **engine(read-only/flap)**: testnet was looping in/out of read-only mode every 1-2 minutes — observed 2026-05-01 with arm/disarm pairs at 15:46:03→15:46:32, 15:47:12→15:47:42, 15:50:52→15:51:22 (engine logs). Each cycle: memtable burst pushes anonymous memory > 90 % for 10 s → ARM, RocksDB flushes ~2 GiB of memtables → memory drops < 75 % over the next 30 s → DISARM, memtable refills → repeat. Two changes:
+  1. **Effective memory excludes reclaimable** (`pms-server::api::tasks::read_cgroup_memory_pct`): subtracts `file` (page cache) + `slab_reclaimable` from `memory.current` before computing the percentage. The OOM killer triggers on irreclaimable memory only — page cache and reclaimable slabs are released by the kernel under pressure, so counting them toward our 90 % watermark would arm read-only on a perfectly healthy process. On testnet today the file cache is only ~100 MiB so the immediate impact is small; this is correct semantics + future-proofing. Matches what `docker stats` displays in its memory column for the same reason.
+  2. **Min-arm-duration floor** (`[health].read_only_min_arm_duration_secs`, default `60`): once auto-armed, refuse to auto-disarm before this many seconds have elapsed — even when pressure has cleared for the full `DISARM_TICKS` window. Breaks the memtable-flush cycle: the burst-then-flush sequence is now treated as one sustained pressure event rather than a flap-able toggle. **Manual arms** via `POST /admin/read-only/arm` are NOT subject to this floor — they release immediately on operator `disarm`.
+- **Why the cycle was bad** (beyond the cosmetic flap): each ARM rejected legitimate writes for ~30 s with `503 read_only`; the simulator and SDK clients backed off and retried, adding pressure to the persist channel during the recovery window. Net effect: artificial throughput dips that propagated all the way to the dashboard's TPS chart.
+
+### Tuning notes
+- Watermarks unchanged (testnet: 90 % / 75 %, mainnet: 88 % / 70 %). Hysteresis ticks unchanged (ARM=2/10 s, DISARM=6/30 s).
+- The min-arm floor is independent: a sustained-pressure event still releases on the same cadence as before *plus* the 60 s floor (whichever is longer). On a real OOM-imminent leak the floor is irrelevant — pressure stays high, the watcher stays armed, the operator restarts.
+- Next step: investigate the persist-channel back-pressure observed during the same window (212 `persist_tx.send back-pressured` events in 5 min, `elapsed_ms` up to 6.9 s) — separate from the flap. RocksDB stats survey TBD.
+
+### Files
+- `crates/pms-config/src/config.rs` — new `HealthSettings::read_only_min_arm_duration_secs` field, default 60.
+- `crates/pms-server/src/api/tasks.rs` — `read_cgroup_memory_pct` subtracts reclaimable via new `read_cgroup_v2_reclaimable` helper; watcher loop tracks `armed_at: Option<Instant>` and gates auto-disarm on min-duration elapsed.
+- `etc/config/config.{testnet,mainnet}.toml` — both pinned at 60 s (the memtable-burst pattern is universal, not load-profile specific).
+
+---
+
 ## [0.7.25] - 2026-05-01 — Smoothed `pms_blocks_per_second_ewma` gauge (kills the fake-1500-blk/s dashboard artifact)
 
 ### Added

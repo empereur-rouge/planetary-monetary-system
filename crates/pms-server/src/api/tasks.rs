@@ -618,6 +618,7 @@ pub fn spawn_resource_guard_task(state: AppState) {
     let low_pct = state.settings.health.memory_low_watermark_pct;
     let disk_critical_pct = state.settings.health.disk_critical_free_percent;
     let l0_critical = state.settings.health.rocksdb_l0_critical_files;
+    let min_arm_duration = Duration::from_secs(state.settings.health.read_only_min_arm_duration_secs);
     let rocks_path = std::path::PathBuf::from(&state.settings.rocks.path);
 
     if low_pct >= high_pct {
@@ -649,6 +650,7 @@ pub fn spawn_resource_guard_task(state: AppState) {
             l0_critical,
             arm_ticks = ARM_TICKS,
             disarm_ticks = DISARM_TICKS,
+            min_arm_duration_secs = min_arm_duration.as_secs(),
             interval_secs = SAMPLE_INTERVAL.as_secs(),
             "Resource guard task started"
         );
@@ -661,6 +663,15 @@ pub fn spawn_resource_guard_task(state: AppState) {
 
         let mut over_count: u32 = 0;
         let mut under_count: u32 = 0;
+        // When the watcher arms (auto), record the wall-clock instant
+        // so we can enforce `min_arm_duration` before allowing an
+        // auto-disarm. Without this floor, a memtable burst that
+        // crosses the high watermark for ~10 s then drops 30 s later
+        // when RocksDB flushes loops the engine in/out of read-only
+        // every ~1-2 minutes (testnet incident 2026-05-01). Manual
+        // arms set this to `None` so the operator's `disarm` releases
+        // immediately.
+        let mut armed_at: Option<std::time::Instant> = None;
 
         loop {
             interval.tick().await;
@@ -715,6 +726,7 @@ pub fn spawn_resource_guard_task(state: AppState) {
                 if !was_armed && over_count >= ARM_TICKS {
                     state.read_only.arm(new_reason);
                     crate::metrics::ENGINE_READ_ONLY.set(1);
+                    armed_at = Some(std::time::Instant::now());
                     tracing::warn!(
                         target = "read_only_guard",
                         reason = new_reason.as_str(),
@@ -746,15 +758,43 @@ pub fn spawn_resource_guard_task(state: AppState) {
                         under_count = 0;
                     } else {
                         under_count = under_count.saturating_add(1);
-                        if under_count >= DISARM_TICKS {
+                        // Anti-flap floor (v0.7.26): even when pressure
+                        // has cleared for DISARM_TICKS samples, refuse
+                        // to disarm before `min_arm_duration` has
+                        // elapsed since the arm. Breaks the memtable-
+                        // flush cycle that previously toggled the
+                        // engine in/out of read-only every 1-2 min.
+                        let min_duration_elapsed = armed_at
+                            .map(|t| t.elapsed() >= min_arm_duration)
+                            .unwrap_or(true);
+                        if under_count >= DISARM_TICKS && min_duration_elapsed {
                             let prev = state.read_only.disarm();
                             crate::metrics::ENGINE_READ_ONLY.set(0);
                             under_count = 0;
+                            let armed_for_secs = armed_at
+                                .map(|t| t.elapsed().as_secs())
+                                .unwrap_or(0);
+                            armed_at = None;
                             tracing::info!(
                                 target = "read_only_guard",
                                 prev_reason = prev.as_str(),
                                 consecutive_samples = DISARM_TICKS,
+                                armed_for_secs,
                                 "✅ Engine exiting READ-ONLY mode — writes accepted again"
+                            );
+                        } else if under_count >= DISARM_TICKS {
+                            // Pressure has cleared but the min-arm
+                            // floor hasn't elapsed yet — log at debug
+                            // so an operator can see the floor at
+                            // work without spamming warn.
+                            let armed_for_secs = armed_at
+                                .map(|t| t.elapsed().as_secs())
+                                .unwrap_or(0);
+                            tracing::debug!(
+                                target = "read_only_guard",
+                                armed_for_secs,
+                                min_arm_duration_secs = min_arm_duration.as_secs(),
+                                "Pressure cleared but holding read-only until min-arm floor elapses"
                             );
                         }
                     }
@@ -764,16 +804,28 @@ pub fn spawn_resource_guard_task(state: AppState) {
     });
 }
 
-/// Read cgroup memory usage as a percentage of its limit.
+/// Read cgroup memory usage as a percentage of its limit, **excluding
+/// reclaimable memory** (page cache + reclaimable slabs).
 ///
 /// Returns `None` when the cgroup interface is unavailable (non-Linux,
 /// fallback paths missing) or the cgroup has no memory limit set —
 /// in those cases the resource guard simply skips the memory check.
 ///
-/// Tries cgroup v2 first (`/sys/fs/cgroup/memory.{current,max}`) which
-/// is the default on Debian 12 + Docker 29.x (the production target),
-/// then falls back to cgroup v1 (`memory.usage_in_bytes` /
-/// `memory.limit_in_bytes`) for older hosts.
+/// **Why subtract reclaimable** (v0.7.26): the OOM killer triggers
+/// on irreclaimable memory (anonymous heap, kernel slabs that can't
+/// be returned). Page cache and reclaimable slabs are released by
+/// the kernel automatically under pressure. Counting them toward
+/// our 90 % watermark would arm read-only on a process that is in
+/// fact perfectly healthy. On the testnet engine the file cache is
+/// only ~100 MiB so this is mostly future-proofing, but it's the
+/// correct semantics — and matches what `docker stats` displays in
+/// its memory column (which subtracts cache for the same reason).
+///
+/// Tries cgroup v2 first (`/sys/fs/cgroup/memory.{current,max,stat}`)
+/// which is the default on Debian 12 + Docker 29.x (the production
+/// target), then falls back to cgroup v1 for older hosts. v1 fallback
+/// does NOT subtract reclaimable — those hosts are old enough that
+/// the file format differs and the precision isn't worth the complexity.
 fn read_cgroup_memory_pct() -> Option<f64> {
     // cgroup v2
     if let (Ok(cur_str), Ok(max_str)) = (
@@ -789,7 +841,12 @@ fn read_cgroup_memory_pct() -> Option<f64> {
         if max == 0 {
             return None;
         }
-        return Some((cur as f64 / max as f64) * 100.0);
+        // Subtract reclaimable categories. None means we couldn't
+        // read memory.stat — fall back to raw `current` rather than
+        // skip the whole check (better signal than no signal).
+        let reclaimable = read_cgroup_v2_reclaimable().unwrap_or(0);
+        let effective = cur.saturating_sub(reclaimable);
+        return Some((effective as f64 / max as f64) * 100.0);
     }
 
     // cgroup v1 fallback
@@ -809,6 +866,37 @@ fn read_cgroup_memory_pct() -> Option<f64> {
         return None;
     }
     Some((cur as f64 / max as f64) * 100.0)
+}
+
+/// Sum the reclaimable memory categories from
+/// `/sys/fs/cgroup/memory.stat` (cgroup v2) — page cache + reclaimable
+/// slabs. Returns `None` when the file is unreadable or unparseable.
+///
+/// Only `file` (page cache) and `slab_reclaimable` are counted as
+/// reclaimable. Anonymous (`anon`), kernel stacks, page tables, and
+/// `slab_unreclaimable` all stay in the irreclaimable footprint
+/// because they can't be evicted under memory pressure.
+fn read_cgroup_v2_reclaimable() -> Option<u64> {
+    let s = std::fs::read_to_string("/sys/fs/cgroup/memory.stat").ok()?;
+    let mut file: u64 = 0;
+    let mut slab_reclaimable: u64 = 0;
+    for line in s.lines() {
+        let mut parts = line.split_whitespace();
+        let key = match parts.next() {
+            Some(k) => k,
+            None => continue,
+        };
+        let val: u64 = match parts.next().and_then(|v| v.parse().ok()) {
+            Some(v) => v,
+            None => continue,
+        };
+        match key {
+            "file" => file = val,
+            "slab_reclaimable" => slab_reclaimable = val,
+            _ => {}
+        }
+    }
+    Some(file + slab_reclaimable)
 }
 
 /// Spawns a background task to backfill missing `activity_items` entries.
