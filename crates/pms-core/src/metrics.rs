@@ -15,7 +15,7 @@
 //! metrics sampler task — those keep the per-ledger view.
 
 use once_cell::sync::Lazy;
-use prometheus::{IntCounter, IntCounterVec};
+use prometheus::{Histogram, IntCounter, IntCounterVec};
 
 /// Number of `append_blocks_batch` retry attempts. Incremented every time a
 /// transient storage error fires the retry path in
@@ -120,6 +120,43 @@ pub static PERSIST_CONSUMER_BLOCKS: Lazy<IntCounter> = Lazy::new(|| {
     prometheus::register_int_counter!(
         "pms_persist_consumer_blocks_total",
         "Total blocks written by the background persist consumer"
+    )
+    .unwrap()
+});
+
+/// Distribution of consumer batch sizes (v0.7.30). Cumulative counters
+/// (`PERSIST_CONSUMER_BLOCKS / PERSIST_CONSUMER_BATCHES`) only give us
+/// the **average** batch size. Under bursty load the distribution
+/// bimodal: idle ticks process 1-block batches while saturated ticks
+/// process MAX_BATCH_SIZE blocks. Average hides this. Knowing the p50
+/// vs p99 batch size tells us whether RocksDB is starved (p99 = 1) or
+/// fully amortizing fsync (p99 = MAX_BATCH_SIZE).
+///
+/// Buckets cover 1..256 in geometric steps, matching the typical batch
+/// distribution we expect to observe.
+pub static PERSIST_CONSUMER_BATCH_SIZE: Lazy<Histogram> = Lazy::new(|| {
+    prometheus::register_histogram!(
+        "pms_persist_consumer_batch_size",
+        "Distribution of consumer batch sizes per `append_blocks_batch` call",
+        vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0]
+    )
+    .unwrap()
+});
+
+/// Distribution of `append_blocks_batch` wall-time durations in
+/// milliseconds (v0.7.30). Pair with `PERSIST_CONSUMER_BATCH_SIZE` to
+/// detect compaction stalls: a single batch taking >1 s means RocksDB
+/// is holding a lock during compaction or memtable flush. The bucket
+/// edges are tuned for the expected range — sub-ms typical, with a
+/// long tail up to 30 s for the worst stalls observed on testnet.
+pub static PERSIST_CONSUMER_BATCH_DURATION_MS: Lazy<Histogram> = Lazy::new(|| {
+    prometheus::register_histogram!(
+        "pms_persist_consumer_batch_duration_ms",
+        "Wall-time duration of each `append_blocks_batch` call, in milliseconds",
+        vec![
+            0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0,
+            1000.0, 2500.0, 5000.0, 10_000.0, 30_000.0,
+        ]
     )
     .unwrap()
 });

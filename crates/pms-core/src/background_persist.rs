@@ -50,8 +50,27 @@ pub struct PersistJob {
 }
 
 /// Maximum blocks drained per batch iteration.
+///
+/// **v0.7.30: 64 → 256.** Each `append_blocks_batch` call commits one
+/// `WriteBatch` with one WAL fsync — the fsync cost is paid PER batch,
+/// not per block, so larger batches amortize the I/O cost linearly.
+/// Testnet diagnostic 2026-05-02: producer rate 200 blk/s sustained
+/// during burst, consumer drain capped at ~94 blk/s. With batch=64 the
+/// consumer was effectively limited by fsync rate × 64 amortization.
+/// Bumping to 256 quadruples the amortization headroom under burst.
+///
+/// Memory cost: each batch holds up to 256 `PersistJob`s in transient
+/// `Vec`. Each PersistJob is ~10-100 KB (block + delta + finality
+/// updates), so worst-case batch is ~25 MB. Acceptable on the 14 GB
+/// cgroup. Idle scenarios still process size-1 batches via `try_recv`
+/// — the cap only matters under burst.
+///
+/// Histograms (v0.7.30) `pms_persist_consumer_batch_size` and
+/// `pms_persist_consumer_batch_duration_ms` let us validate this
+/// change actually improves drain rate in practice — without them
+/// we're tuning blind.
 /// Higher = more WAL amortization, but higher per-block latency.
-const MAX_BATCH_SIZE: usize = 64;
+const MAX_BATCH_SIZE: usize = 256;
 
 /// Default exponential backoff delays between `append_blocks_batch` retries
 /// after a transient storage failure. Six attempts spread over ~52 seconds.
@@ -206,11 +225,21 @@ where
                 let batch_start = std::time::Instant::now();
                 match store.append_blocks_batch(&block_refs).await {
                     Ok(new_count) => {
-                        let batch_us = batch_start.elapsed().as_micros() as u64;
+                        let batch_elapsed = batch_start.elapsed();
+                        let batch_us = batch_elapsed.as_micros() as u64;
                         crate::metrics::PERSIST_CONSUMER_US.inc_by(batch_us);
                         crate::metrics::PERSIST_CONSUMER_BATCHES.inc();
                         crate::metrics::PERSIST_CONSUMER_BLOCKS
                             .inc_by(batch_size as u64);
+                        // Histograms (v0.7.30) — let operators see the
+                        // distribution of batch sizes + durations, not
+                        // just the cumulative average. Critical for
+                        // diagnosing whether the consumer is fsync-bound,
+                        // compaction-bound, or genuinely idle.
+                        crate::metrics::PERSIST_CONSUMER_BATCH_SIZE
+                            .observe(batch_size as f64);
+                        crate::metrics::PERSIST_CONSUMER_BATCH_DURATION_MS
+                            .observe(batch_elapsed.as_secs_f64() * 1000.0);
                         persisted_count += new_count as u64;
                         if attempt > 0 {
                             tracing::warn!(

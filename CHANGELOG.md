@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.30] - 2026-05-02 — RocksDB drain rate visibility (histograms) + 4× batch amortization
+
+### Why
+Diagnostic 2026-05-02 found the persist consumer capped at ~94 blk/s peak drain rate, while the producer rate hit 200 blk/s during simulator bursts — the 106 blk/s gap saturated the channel and caused 21 s `send().await` blocks. The cumulative counters `pms_persist_consumer_blocks_total` / `pms_persist_consumer_us_total` give us only the **average** batch metrics; we couldn't see whether the consumer was processing 64-block batches at high rate (fsync-bound — try larger batches) or 1-block batches in a tight loop (drip-fed — fsync rate × tiny amortization). Without distribution data, any tuning is blind.
+
+### Added
+- **metrics(consumer-batch-size)**: new `pms_persist_consumer_batch_size` Prometheus histogram. Buckets `1, 2, 4, 8, 16, 32, 64, 128, 256` cover the typical batch range. Lets operators see p50 vs p99 batch fill — bimodal distribution (idle = 1, saturated = MAX) reveals whether amortization is actually happening.
+- **metrics(consumer-batch-duration)**: new `pms_persist_consumer_batch_duration_ms` Prometheus histogram with buckets from `0.1 ms` (sub-ms typical) to `30 000 ms` (worst observed stall). A long-tail at >1 s under load means RocksDB is holding a lock during compaction / memtable flush — different fix than fsync amortization.
+
+### Changed
+- **`MAX_BATCH_SIZE` 64 → 256** in `pms_core::background_persist`. Each `append_blocks_batch` commits one `WriteBatch` with one WAL fsync — the cost is paid per **batch**, not per **block**. Bumping to 256 gives 4× more amortization headroom under burst. Memory cost: ~25 MB transient at worst case (256 × 100 KB), acceptable on the 14 GB cgroup. Idle scenarios still process size-1 batches via `try_recv` — the cap only matters under burst, where the channel has many blocks queued.
+
+### How to read the new metrics
+```promql
+# Average batch size over 5min — close to 256 = fsync amortization working
+histogram_quantile(0.5, rate(pms_persist_consumer_batch_size_bucket[5m]))
+
+# Worst-case batch duration — >1s sustained = compaction stall
+histogram_quantile(0.99, rate(pms_persist_consumer_batch_duration_ms_bucket[5m]))
+
+# Drain rate (blocks/sec)
+rate(pms_persist_consumer_blocks_total[5m])
+```
+
+### Limit
+- This is **measurement + 1 low-risk tuning knob**, not a structural fix for the underlying drain rate cap. If after deploy the histograms show batches consistently at 256 with durations of seconds, the real bottleneck is RocksDB internals (probably WAL fsync serialization × 67 CFs or compaction lock contention) — that needs a deeper investigation with `tokio-console` / flame graphs / RocksDB `OPTIONS` tuning. Tracked as the next iteration.
+
+### Files
+- `crates/pms-core/src/metrics.rs` — `Histogram` import + 2 new `register_histogram!` declarations.
+- `crates/pms-core/src/background_persist.rs` — `MAX_BATCH_SIZE 64 → 256` + 2 `.observe()` calls in the consumer loop after every successful `append_blocks_batch`.
+
+---
+
 ## [0.7.29] - 2026-05-02 — Forensic shutdown + persist drain (close banking-grade data-loss bug) + memory profile endpoint
 
 ### Fixed
