@@ -438,7 +438,16 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         // Read-only mode operator controls (v0.7.23)
         .route("/admin/read-only/status", get(crate::admin::admin_read_only_status))
         .route("/admin/read-only/arm", post(crate::admin::admin_read_only_arm))
-        .route("/admin/read-only/disarm", post(crate::admin::admin_read_only_disarm));
+        .route("/admin/read-only/disarm", post(crate::admin::admin_read_only_disarm))
+        // Memory profile endpoint (v0.7.29) — read-only cgroup snapshot
+        // for forensic analysis of memory growth without docker exec.
+        // Sits in admin_recovery (not gated) so it remains queryable
+        // when the engine is in read-only mode for memory pressure
+        // (the time you most need it).
+        .route(
+            "/admin/memory-profile",
+            get(crate::api_fn::memory_profile::admin_memory_profile),
+        );
 
     let admin = Router::new()
         .merge(admin_writable)

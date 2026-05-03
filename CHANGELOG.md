@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.7.29] - 2026-05-02 — Forensic shutdown + persist drain (close banking-grade data-loss bug) + memory profile endpoint
+
+### Fixed
+- **bin(shutdown/data-loss)**: on `SIGTERM` (Docker stop, k8s pod cycle, `upgrade-testnet.sh`), the previous shutdown handler flushed RocksDB WALs but **dropped the persist channel mid-batch**. Up to 5 K blocks (v0.7.28 buffer) had been acknowledged to clients with `PutResult::Inserted` but never written to RocksDB. On restart they were silently lost — banking-grade data loss event. **Fixed**: shutdown now drains the persist queues with a 25 s deadline, polling depth every 100 ms across all ledgers (main + customs). Drains in well under 1 s under normal conditions (5 K / 64 batch × ~50 ms ≈ 4 s worst case). If the deadline hits with blocks still queued, logs an `ERROR` line at `target = "shutdown_data_loss"` with per-ledger counts so the operator KNOWS this restart corresponds to lost blocks.
+- **bin(shutdown/forensic-logging)**: `shutdown_signal()` now logs at `WARN` level with the signal name (SIGINT / SIGTERM / SIGHUP) so operators can correlate clean exits with their cause via grep. Pre-shutdown logs the persist queue depths per ledger; post-drain logs total ms spent. Combined with the data-loss check above, the diagnostic of "37 historical clean exits, what caused them?" becomes a one-line grep instead of inspect-ex-post.
+- **bin**: registered SIGHUP handler in addition to SIGINT/SIGTERM so a controlling-terminal close on dev boxes is also logged loudly.
+
+### Added
+- **api(memory-profile)**: new `GET /admin/memory-profile` endpoint exposes the full cgroup v2 memory breakdown (`memory.current`, `memory.max`, every key in `memory.stat` — `anon`, `file`, `kernel`, `kernel_stack`, `pagetables`, `slab`, `slab_reclaimable`, `slab_unreclaimable`, etc.) plus `/proc/self/status` totals (`VmRSS`, `VmPeak`, `VmSize`, `RssAnon`, `RssFile`, `VmSwap`, etc.). Returns `current_pct` (matches `docker stats`) and `irreclaimable_pct` (the value the read-only resource guard uses for the memory watermark check since v0.7.26). Drops in `admin_recovery` so it stays queryable while the engine is in read-only mode for memory pressure (the time you most need it). Linux + cgroup v2 only; on non-Linux platforms returns 503 `{"error":"unsupported"}` with a clear reason.
+- **Why now**: the testnet engine showed `anon = 9.6 GiB` (out of 14 GiB cgroup cap) under load, with documented memtable cap = 2.1 GiB and block cache = 256 MiB, leaving ~7 GiB unaccounted for. The read-only safety valve (v0.7.23) arms before OOM kill but doesn't help diagnose. This endpoint lets us correlate allocation patterns with workload changes without `docker exec` + manual `cat`. **Future**: integrate `tikv-jemalloc-ctl` (`stats.allocated/active/resident/mapped`) to quantify allocator fragmentation specifically.
+
+### Files
+- `bin/src/main.rs` — shutdown branch rewritten with drain loop + forensic logs; `shutdown_signal()` upgraded with WARN-level signal-source logging.
+- `crates/pms-server/src/api_fn/memory_profile.rs` — new module with `admin_memory_profile` handler and `read_cgroup_v2_snapshot` helper.
+- `crates/pms-server/src/api_fn/mod.rs` — register the new module.
+- `crates/pms-server/src/api/routes.rs` — wire `/admin/memory-profile` into `admin_recovery`.
+
+### Limit
+- The persist drain is best-effort: we don't gate new writes during the drain window (would need to wire `AppState.read_only` into the main shutdown path, which is a bigger refactor). In practice SIGTERM means clients are also being torn down so new writes are minimal during the drain. A future iteration can `state.read_only.arm(Manual)` for a hard stop.
+- Memory profile shows cgroup categories but not allocator internals. The 9.6 GiB anon mystery may need jemalloc-ctl integration to fully resolve.
+
+---
+
 ## [0.7.28] - 2026-05-02 — Persist back-pressure final close: fast-arm + bigger buffer + healthcheck slack
 
 Three-part fix to close the residual back-pressure observed after v0.7.27 deployed:

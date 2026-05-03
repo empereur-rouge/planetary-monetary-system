@@ -11,6 +11,7 @@ pub mod dag;
 pub mod healthz;
 pub mod history;
 pub mod ledger;
+pub mod memory_profile;
 pub mod milestone;
 pub mod nft;
 pub mod nodes;

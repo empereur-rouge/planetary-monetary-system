@@ -407,10 +407,149 @@ async fn main() -> Result<()> {
             }
         }
         _ = shutdown_signal() => {
-            tracing::info!("Shutdown signal received, flushing RocksDB WAL...");
-            eprintln!("🛑 Shutdown signal received — flushing RocksDB...");
+            // ─────────────────────────────────────────────────────────────
+            // Forensic shutdown sequence (v0.7.29) — banking-grade
+            // ─────────────────────────────────────────────────────────────
+            // The previous code path lost blocks on SIGTERM: the persist
+            // channel buffers up to 5 K blocks in memory that the
+            // background consumer hadn't flushed to RocksDB yet, but
+            // the producer-side HTTP handlers had ALREADY returned
+            // `Inserted` to the client. Dropping those tasks at exit
+            // = silent data loss. The DAG is reconstructed from RocksDB
+            // on restart; missing blocks are gone forever.
+            //
+            // Three fixes here:
+            //
+            //   1. Snapshot the persist queue depth at signal time so
+            //      operators can correlate clean exits with backlog.
+            //   2. Wait up to `DRAIN_DEADLINE` for every ledger's
+            //      persist queue to drain to zero before flushing
+            //      WALs. Best-effort: caller (Docker, k8s, operator)
+            //      sets its own SIGTERM-to-SIGKILL window — typically
+            //      10 s or 30 s — so we cap our drain to 25 s and
+            //      leave 5 s of headroom for the WAL flush + exit.
+            //   3. If the deadline elapses with blocks still queued,
+            //      log an ERROR-level "data loss risk" line with the
+            //      counts per ledger so the operator KNOWS which
+            //      restart corresponds to lost blocks.
+            //
+            // This is best-effort: we don't gate new writes during the
+            // drain (would need to wire AppState here). In practice
+            // SIGTERM means clients are also being torn down, so new
+            // writes are minimal during the drain window. A future
+            // iteration can add `state.read_only.arm(Manual)` here for
+            // a hard stop.
+            const DRAIN_DEADLINE: std::time::Duration =
+                std::time::Duration::from_secs(25);
+            const DRAIN_POLL_INTERVAL: std::time::Duration =
+                std::time::Duration::from_millis(100);
 
-            // Flush RocksDB WAL for all ledgers to prevent corruption
+            // Snapshot queue depths at signal time for forensic logs.
+            let mut depths_at_signal: Vec<(String, usize, usize)> = Vec::new();
+            if let Some((d, c)) = srv.adapter_arc().persist_queue_depth() {
+                depths_at_signal.push(("main".into(), d, c));
+            }
+            for instance in ledger_mgr.list_all() {
+                if instance.id == "main" {
+                    continue;
+                }
+                if let Some((d, c)) = instance.adapter.persist_queue_depth() {
+                    depths_at_signal.push((instance.id.clone(), d, c));
+                }
+            }
+            let total_at_signal: usize =
+                depths_at_signal.iter().map(|(_, d, _)| *d).sum();
+            tracing::warn!(
+                total_pending = total_at_signal,
+                ledgers = ?depths_at_signal,
+                "🛑 SHUTDOWN signal received — draining persist queues (deadline: 25s)"
+            );
+            eprintln!(
+                "🛑 SHUTDOWN: {} blocks pending in persist queues (per-ledger: {:?}). Draining...",
+                total_at_signal, depths_at_signal
+            );
+
+            // Poll every 100 ms until all queues are empty or the
+            // deadline elapses. The consumer task drains 64-block
+            // batches per iteration in ~30-50 ms, so 5 K blocks at
+            // worst case = 5000 / 64 × 50 ms ≈ 3.9 s. The 25 s
+            // deadline leaves 6× headroom for slow disks.
+            let drain_start = std::time::Instant::now();
+            loop {
+                let mut all_drained = true;
+                if let Some((d, _)) = srv.adapter_arc().persist_queue_depth() {
+                    if d > 0 {
+                        all_drained = false;
+                    }
+                }
+                if all_drained {
+                    for instance in ledger_mgr.list_all() {
+                        if instance.id == "main" {
+                            continue;
+                        }
+                        if let Some((d, _)) = instance.adapter.persist_queue_depth() {
+                            if d > 0 {
+                                all_drained = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if all_drained {
+                    tracing::info!(
+                        drain_ms = drain_start.elapsed().as_millis() as u64,
+                        "✅ Persist queues fully drained"
+                    );
+                    eprintln!(
+                        "✅ Persist queues drained in {} ms",
+                        drain_start.elapsed().as_millis()
+                    );
+                    break;
+                }
+                if drain_start.elapsed() >= DRAIN_DEADLINE {
+                    // Deadline hit. Re-snapshot what's still queued
+                    // and log it loudly — these blocks ARE in the
+                    // DAG RAM (client received Inserted) but will
+                    // not survive the restart. This is a data-loss
+                    // event and operators must know about it.
+                    let mut leftover: Vec<(String, usize)> = Vec::new();
+                    if let Some((d, _)) = srv.adapter_arc().persist_queue_depth() {
+                        if d > 0 {
+                            leftover.push(("main".into(), d));
+                        }
+                    }
+                    for instance in ledger_mgr.list_all() {
+                        if instance.id == "main" {
+                            continue;
+                        }
+                        if let Some((d, _)) = instance.adapter.persist_queue_depth() {
+                            if d > 0 {
+                                leftover.push((instance.id.clone(), d));
+                            }
+                        }
+                    }
+                    let lost: usize = leftover.iter().map(|(_, d)| *d).sum();
+                    tracing::error!(
+                        target = "shutdown_data_loss",
+                        blocks_lost = lost,
+                        ledgers = ?leftover,
+                        drain_deadline_secs = DRAIN_DEADLINE.as_secs(),
+                        "⚠️ DATA LOSS: {} blocks still pending after {}s drain deadline. \
+                         These blocks were acknowledged to clients (Inserted) but never \
+                         persisted to RocksDB — they will NOT survive the restart.",
+                        lost, DRAIN_DEADLINE.as_secs()
+                    );
+                    eprintln!(
+                        "⚠️  DATA LOSS RISK: {} blocks pending after deadline. Per-ledger: {:?}",
+                        lost, leftover
+                    );
+                    break;
+                }
+                tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+            }
+
+            // Now flush all RocksDB WALs (data we already wrote).
+            tracing::info!("Flushing RocksDB WALs...");
             for instance in ledger_mgr.list_all() {
                 if let Err(e) = instance.store.flush_wal().await {
                     tracing::error!(ledger = %instance.id, error = %e, "Failed to flush WAL on shutdown");
@@ -423,8 +562,16 @@ async fn main() -> Result<()> {
                 tracing::error!(error = %e, "Failed to flush main store WAL on shutdown");
             }
 
-            eprintln!("✅ Graceful shutdown complete.");
-            tracing::info!("Graceful shutdown complete");
+            let total_shutdown_ms = drain_start.elapsed().as_millis();
+            eprintln!(
+                "✅ Graceful shutdown complete in {} ms (drain: {} ms + WAL flush)",
+                total_shutdown_ms,
+                drain_start.elapsed().as_millis()
+            );
+            tracing::info!(
+                total_shutdown_ms = total_shutdown_ms as u64,
+                "Graceful shutdown complete"
+            );
         }
     }
 
@@ -432,6 +579,14 @@ async fn main() -> Result<()> {
 }
 
 /// Wait for SIGTERM (Docker stop) or SIGINT (Ctrl+C).
+///
+/// **Forensic logging** (v0.7.29): logs at WARN level so operators can
+/// correlate clean exits with their causes. Stack trace via
+/// `std::backtrace::Backtrace::capture()` would be over-kill for a
+/// signal that's normal in production (Docker stop, k8s pod cycle),
+/// but we tag it loudly enough that grep-based incident analysis
+/// finds the cause without having to parse `docker inspect` exit
+/// codes ex-post.
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
 
@@ -440,9 +595,35 @@ async fn shutdown_signal() {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .expect("failed to register SIGTERM handler");
+        let mut sighup =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                .expect("failed to register SIGHUP handler");
         tokio::select! {
-            _ = ctrl_c => { tracing::info!("Received SIGINT (Ctrl+C)"); }
-            _ = sigterm.recv() => { tracing::info!("Received SIGTERM"); }
+            _ = ctrl_c => {
+                tracing::warn!(
+                    target = "shutdown_signal",
+                    signal = "SIGINT",
+                    "Received SIGINT (Ctrl+C) — operator-initiated"
+                );
+                eprintln!("📥 Received SIGINT (Ctrl+C)");
+            }
+            _ = sigterm.recv() => {
+                tracing::warn!(
+                    target = "shutdown_signal",
+                    signal = "SIGTERM",
+                    "Received SIGTERM — Docker stop / k8s pod cycle / operator restart / \
+                     `upgrade-testnet.sh` are the usual senders"
+                );
+                eprintln!("📥 Received SIGTERM");
+            }
+            _ = sighup.recv() => {
+                tracing::warn!(
+                    target = "shutdown_signal",
+                    signal = "SIGHUP",
+                    "Received SIGHUP — typically a controlling terminal closed"
+                );
+                eprintln!("📥 Received SIGHUP");
+            }
         }
     }
 
