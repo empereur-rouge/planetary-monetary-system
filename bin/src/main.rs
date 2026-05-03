@@ -386,6 +386,11 @@ async fn main() -> Result<()> {
     // 10) Graceful shutdown: race srv.run() against SIGTERM/SIGINT
     let store_for_shutdown = store.clone();
     let cfg = Arc::new(cfg);
+    // Clone the Arc<Server> for the shutdown branch (v0.7.29). srv.run()
+    // takes `self: Arc<Self>` which consumes the original; without
+    // this clone the shutdown branch can't call srv.adapter_arc()
+    // to snapshot the persist queue depth at signal time.
+    let srv_for_shutdown = srv.clone();
 
     tokio::select! {
         result = srv.run(cfg, store) => {
@@ -446,7 +451,7 @@ async fn main() -> Result<()> {
 
             // Snapshot queue depths at signal time for forensic logs.
             let mut depths_at_signal: Vec<(String, usize, usize)> = Vec::new();
-            if let Some((d, c)) = srv.adapter_arc().persist_queue_depth() {
+            if let Some((d, c)) = srv_for_shutdown.adapter_arc().persist_queue_depth() {
                 depths_at_signal.push(("main".into(), d, c));
             }
             for instance in ledger_mgr.list_all() {
@@ -477,7 +482,7 @@ async fn main() -> Result<()> {
             let drain_start = std::time::Instant::now();
             loop {
                 let mut all_drained = true;
-                if let Some((d, _)) = srv.adapter_arc().persist_queue_depth() {
+                if let Some((d, _)) = srv_for_shutdown.adapter_arc().persist_queue_depth() {
                     if d > 0 {
                         all_drained = false;
                     }
@@ -513,7 +518,7 @@ async fn main() -> Result<()> {
                     // not survive the restart. This is a data-loss
                     // event and operators must know about it.
                     let mut leftover: Vec<(String, usize)> = Vec::new();
-                    if let Some((d, _)) = srv.adapter_arc().persist_queue_depth() {
+                    if let Some((d, _)) = srv_for_shutdown.adapter_arc().persist_queue_depth() {
                         if d > 0 {
                             leftover.push(("main".into(), d));
                         }
