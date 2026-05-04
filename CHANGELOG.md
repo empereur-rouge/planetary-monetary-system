@@ -7,15 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.8.0] - Unreleased — Cross-chain replay protection (BREAKING) + HD wallet (BIP32) + Payment-rail RPC
+## [0.8.0] - Unreleased — Cross-chain replay protection (BREAKING) + HD wallet (BIP32) + Payment-rail RPC + Watcher API
 
 ### Why
 Intégration PMS comme rail de paiement dans un SaaS streaming white-label.
 - **Phase 1 (sécurité)** : `Transaction::signing_message()` ne hashait que `(inputs, outputs, fee)`, sans aucun lien avec le réseau. Une TX signée sur testnet était valide bit-pour-bit sur mainnet → cross-chain replay trivial. Blocker pour des dépôts à garanties bancaires.
 - **Phase 2 (HD wallet)** : la plateforme doit pouvoir émettre une adresse de dépôt par utilisateur (potentiellement millions) sans stocker N clés privées. Standard BIP32/BIP39/BIP44 attendu par la plupart des SDK et hardware wallets.
 - **Phase 3 (RPC)** : la SaaS a besoin de 4 endpoints qui n'existaient pas — un snapshot DAG monotone (équivalent `get_block_height` linéaire), une estimation de fee découplée du `prepare_tx`, un lookup de TX unifié (`{from, to, amount, fee, depth, is_finalized}` au lieu du raw block JSON), et un scan de range pour rattraper après un crash watcher.
+- **Phase 4 (watcher API)** : les SaaS qui surveillent des millions d'adresses ne peuvent pas tenir N connexions SSE (une par user). Multi-address SSE = un seul stream qui filtre N adresses. Webhook subscription = pour les SaaS serverless (Lambda, Cloud Functions) qui ne peuvent pas garder un stream ouvert.
 
-Faire les trois maintenant, avant lancement mainnet, évite une migration chaotique plus tard.
+Faire les quatre maintenant, avant lancement mainnet, évite une migration chaotique plus tard.
+
+### Phase 4 — Watcher API (multi-address SSE + webhooks)
+
+#### Added
+- **`GET /v1/activity/stream?addresses=a,b,c`** ([crates/pms-server/src/api_fn/activity/stream.rs](crates/pms-server/src/api_fn/activity/stream.rs)) : single SSE stream qui filtre N adresses (capé à `MAX_ADDRESSES_PER_STREAM = 1000`). Chaque event matchant émet un `ActivityItem` avec un champ `address` injecté dans le payload pour permettre au SaaS de router vers le user record sans re-parser. Encrypted payloads → événement `encrypted` générique avec l'adresse matchée (pas de décryptage côté serveur). >1000 adresses → 400.
+- **Webhook subscription** ([crates/pms-server/src/api_fn/webhooks.rs](crates/pms-server/src/api_fn/webhooks.rs)) — module complet :
+  - `POST /admin/webhooks` : crée une subscription `{addresses, callback_url, secret?}`. Si `secret` omis, le serveur génère 32 bytes aléatoires. Retour : `{subscription_id, secret, addresses_count}` — le secret n'est exposé qu'**une fois**, le SaaS doit le persister.
+  - `GET /admin/webhooks` : liste les subscriptions. Le secret est `#[serde(skip_serializing)]` — jamais re-exposé après création.
+  - `DELETE /admin/webhooks/{id}` : unsubscribe.
+  - **Storage in-memory** (`DashMap`) — perdu au restart. Le SaaS ré-enregistre via heartbeat. Persistance en Phase 4.5 si demande réelle (évite un CF + migration RocksDB pour cette release).
+  - Limites : `MAX_ADDRESSES_PER_SUBSCRIPTION = 1000`, `MAX_SUBSCRIPTIONS = 10_000`.
+- **Background delivery worker** ([crates/pms-server/src/api_fn/webhooks.rs::run_delivery_loop](crates/pms-server/src/api_fn/webhooks.rs)) : subscribe au `pms_event::PmsEvent::BlockPersisted` du bus, intersecte les `involved_addresses` avec chaque subscription, POST signé HMAC-SHA256 vers chaque `callback_url`. Headers `X-PMS-Signature`, `X-PMS-Subscription-Id`, `X-PMS-Delivery-Id`, `X-PMS-Delivery-Attempt`. Body : `{subscription_id, block_id, address, ts_ms, encrypted, ledger_id}`. Retry exponentiel max 5 tentatives (1, 2, 4, 8, 16 s — total worst-case ~31s avant abandon avec `tracing::error!` + counter `failed_count`). Spawn-per-delivery pour qu'un callback lent ne bloque pas la pump.
+- **`AppState.webhook_store`** ([crates/pms-server/src/api/state.rs](crates/pms-server/src/api/state.rs)) : nouveau champ partagé. Initialisé en `serve.rs` + delivery loop spawnée si `event_bus` disponible.
+
+#### Changed
+- **Bumped** `API_VERSION` : `11` → `12` (multi-SSE route + 3 webhook routes).
+
+#### Tests
+- **Unit tests** dans `crates/pms-server/src/api_fn/webhooks.rs` (run via `cargo test -p pms-server --lib api_fn::webhooks`) :
+  - `hmac_signature_is_deterministic_and_distinguishes_inputs` — same secret + body → same sig (64 hex chars), différent secret/body → différente. Vital pour que le SaaS reproduise la signature dans n'importe quelle lib crypto.
+  - `store_matching_returns_intersection_per_subscription` — l'intersection adresses-event × adresses-subscription est correcte (bug = revenue lost OU privacy leak).
+- **Sandbox tests** ([crates/pms-server/tests/dag_sandbox.rs](crates/pms-server/tests/dag_sandbox.rs)) — run avec `cargo test --release -p pms-server --test dag_sandbox -- --ignored --nocapture --test-threads=1 <test_name>` :
+  - `test_multi_address_sse_filters_correctly` — connect SSE pour 2 adresses, mint à A/C/B, reçoit exactement 2 events (pas l'unwatched). 1001 adresses → 400.
+  - `test_webhook_subscribe_list_unsubscribe_roundtrip` — CRUD complet : subscribe (CREATED + secret returned), list (sans secret), bad request → 400 code=2030, delete (200), re-delete → 404 code=3040.
+
+#### Dépendances ajoutées (pms-server)
+- `hmac = "0.12"` (RustCrypto, compatible avec sha2 0.10 déjà présent)
+- `reqwest = "0.12"` (était dans dev-dependencies, déplacée en runtime pour le delivery worker)
+
+---
 
 ### Phase 3 — Payment-rail RPC endpoints
 

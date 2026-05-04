@@ -10,4 +10,4 @@ mod tests;
 pub use cache::ActivityCache;
 // classify functions are pub(crate) — accessed directly via crate::api_fn::activity::classify::*
 pub use handler::{get_wallet_activity, ActivityItem, ActivityQuery, ActivityResp};
-pub use stream::{stream_wallet_activity, StreamActivityQuery};
+pub use stream::{stream_multi_address_activity, stream_wallet_activity, StreamActivityQuery};

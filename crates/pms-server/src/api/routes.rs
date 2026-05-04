@@ -8,7 +8,9 @@ use crate::admin::{
     admin_purge_compliance_log, admin_rebuild_tips, admin_reindex_activity,
     admin_reindex_activity_items, admin_rocksdb_stats, admin_update_config,
 };
-use crate::api_fn::activity::{get_wallet_activity, stream_wallet_activity};
+use crate::api_fn::activity::{
+    get_wallet_activity, stream_multi_address_activity, stream_wallet_activity,
+};
 use crate::api_fn::blocks::{blocks_range, get_block_by_id, submit_block};
 use crate::api_fn::bridge::{
     admin_bridge_disable, admin_bridge_enable, admin_bridge_transfer, bridge_status,
@@ -159,6 +161,10 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
         .route(
             "/v1/wallet/{address}/activity/stream",
             get(stream_wallet_activity),
+        )
+        .route(
+            "/v1/activity/stream",
+            get(stream_multi_address_activity),
         );
 
     (
@@ -453,6 +459,18 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route(
             "/admin/memory-profile",
             get(crate::api_fn::memory_profile::admin_memory_profile),
+        )
+        // Webhook subscriptions (Phase 4 — payment-rail integration).
+        // CF write only (in-memory DashMap, no DAG block) → admin_recovery
+        // by the rule in CLAUDE.md (writable iff produces a block).
+        .route(
+            "/admin/webhooks",
+            post(crate::api_fn::webhooks::subscribe_webhook)
+                .get(crate::api_fn::webhooks::list_webhooks),
+        )
+        .route(
+            "/admin/webhooks/{id}",
+            axum::routing::delete(crate::api_fn::webhooks::unsubscribe_webhook),
         );
 
     let admin = Router::new()

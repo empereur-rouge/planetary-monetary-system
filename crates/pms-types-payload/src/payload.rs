@@ -179,6 +179,21 @@ pub struct OwnershipTransferData {
     pub reason: String,
 }
 
+impl PayloadEnvelope {
+    /// True iff the payload is wrapped in (or itself wraps) an encrypted
+    /// envelope the server cannot decrypt. Used by webhook delivery and
+    /// the multi-address SSE to flag events whose detail the server can't
+    /// surface — the SaaS must use the per-wallet activity stream
+    /// (which has the recipient X25519 key) for full detail.
+    pub fn is_encrypted(&self) -> bool {
+        matches!(
+            self,
+            PayloadEnvelope::Encrypted(_)
+                | PayloadEnvelope::Plain(PlainPayload::EncryptedReward { .. })
+        )
+    }
+}
+
 impl PlainPayload {
     /// Returns the outputs created by this payload, in the same order as
     /// they're indexed when forming `OutputId.index`. Used by every site

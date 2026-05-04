@@ -70,6 +70,13 @@ chrono = "0.4.42"
 async-stream = "0.3"
 tokio-stream = "0.1"
 futures-util = "0.3"
+# Webhook delivery worker (Phase 4): HMAC-SHA256 for signing the body, and
+# reqwest for the outbound POST. RustCrypto compatible with sha2 0.10.
+hmac = "0.12"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 
 
 [dev-dependencies]

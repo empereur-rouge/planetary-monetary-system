@@ -162,6 +162,21 @@ impl Sandbox {
         (status, json)
     }
 
+    /// DELETE with admin Bearer token.
+    #[allow(dead_code)]
+    async fn admin_delete(&self, path: &str) -> (reqwest::StatusCode, Value) {
+        let resp = self
+            .client
+            .delete(format!("{}{}", self.base_url, path))
+            .bearer_auth(&self.admin_token)
+            .send()
+            .await
+            .expect("HTTP DELETE failed");
+        let status = resp.status();
+        let json = resp.json::<Value>().await.unwrap_or(json!({}));
+        (status, json)
+    }
+
     /// GET on a public (unauthenticated) endpoint.
     #[allow(dead_code)]
     async fn public_get(&self, path: &str) -> (reqwest::StatusCode, Value) {
@@ -599,6 +614,7 @@ async fn boot_sandbox() -> Result<Sandbox> {
         coord_shard_wallets: std::sync::Arc::new(coord_shard_wallets),
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
+        webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
     };
 
     // ── 11. Spawn fee distributor task (2s interval) ─────────────────
@@ -3252,6 +3268,7 @@ async fn boot_one_engine(
         coord_shard_wallets: std::sync::Arc::new(Vec::new()),
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
+        webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
     };
 
     // Only the coordinator runs the fee distributor — followers don't
@@ -5189,6 +5206,175 @@ async fn test_blocks_range_endpoint() -> Result<()> {
         page2_ids.is_disjoint(&page1_ids),
         "page 1 and page 2 must not overlap (cursor is exclusive)"
     );
+
+    Ok(())
+}
+
+// ============================================================================
+// PHASE 4 — Watcher API (multi-address SSE + webhooks)
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_multi_address_sse_filters_correctly() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    let watched_a = Wallet::generate().get_address("8e");
+    let watched_b = Wallet::generate().get_address("8e");
+    let unwatched = Wallet::generate().get_address("8e");
+
+    // Subscribe to a 2-address stream BEFORE generating the events,
+    // otherwise the broadcast bus has no receiver and emissions are lost.
+    let url = format!(
+        "{}/v1/activity/stream?addresses={},{}",
+        sandbox.base_url, watched_a, watched_b
+    );
+    let resp = sandbox
+        .client
+        .get(&url)
+        .send()
+        .await
+        .expect("connect SSE");
+    assert!(resp.status().is_success(), "expected 200, got {}", resp.status());
+
+    let mut stream = resp;
+    println!("   [1/3] Connected to multi-address SSE for 2 addresses");
+
+    // Mint to A (watched), C (unwatched), B (watched). Only 2/3 events
+    // should reach the stream.
+    sandbox.faucet_mint(None, &watched_a, "10").await?;
+    sandbox.faucet_mint(None, &unwatched, "10").await?;
+    sandbox.faucet_mint(None, &watched_b, "10").await?;
+
+    let mut events: Vec<Value> = Vec::new();
+    let mut accumulated = String::new();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline && events.len() < 2 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, stream.chunk()).await {
+            Ok(Ok(Some(bytes))) => {
+                accumulated.push_str(&String::from_utf8_lossy(&bytes));
+                // Frames separated by \n\n; each contains lines like
+                // "event: activity" / "data: {...json...}".
+                while let Some(idx) = accumulated.find("\n\n") {
+                    let frame = accumulated[..idx].to_string();
+                    accumulated.drain(..idx + 2);
+                    for line in frame.lines() {
+                        if let Some(payload) = line.strip_prefix("data: ") {
+                            if let Ok(v) = serde_json::from_str::<Value>(payload) {
+                                events.push(v);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Ok(None)) | Ok(Err(_)) => break,
+            Err(_) => continue, // timeout — keep waiting up to deadline
+        }
+    }
+
+    println!("   [2/3] Received {} events: {events:?}", events.len());
+    assert_eq!(
+        events.len(),
+        2,
+        "expected exactly 2 events for the watched addresses, got {}",
+        events.len()
+    );
+
+    let combined = serde_json::to_string(&events).unwrap();
+    assert!(
+        combined.contains(&watched_a) || combined.contains(&watched_b),
+        "events should reference watched addresses"
+    );
+    assert!(
+        !combined.contains(&unwatched),
+        "unwatched address must NOT appear in stream events: {combined}"
+    );
+    println!("   [3/3] Watched-only filter verified ✓");
+
+    // Reject too-many-addresses: 1001 addresses → 400.
+    let many: Vec<String> = (0..1001).map(|i| format!("8e1addr{i:04}")).collect();
+    let url_many = format!("{}/v1/activity/stream?addresses={}", sandbox.base_url, many.join(","));
+    let resp = sandbox.client.get(&url_many).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    println!("   [BONUS] >1000 addresses → 400 ✓");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_webhook_subscribe_list_unsubscribe_roundtrip() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    let addr = Wallet::generate().get_address("8e");
+
+    let body = json!({
+        "addresses": [addr.clone()],
+        "callback_url": "http://127.0.0.1:1/webhook",
+        "secret": "test_secret",
+    });
+    let (status, resp) = sandbox.admin_post("/admin/webhooks", body).await;
+    assert_eq!(status, reqwest::StatusCode::CREATED, "expected 201, got {status} {resp}");
+    let sub_id = resp["subscription_id"]
+        .as_str()
+        .expect("subscription_id present")
+        .to_string();
+    assert_eq!(resp["addresses_count"], json!(1));
+    assert_eq!(resp["secret"], json!("test_secret"));
+    println!("   [1/4] Subscribed: id={} addresses=1", sub_id);
+
+    // List — must contain the new sub WITHOUT exposing the secret.
+    let (status_list, list) = sandbox.admin_get("/admin/webhooks").await;
+    assert_eq!(status_list, reqwest::StatusCode::OK);
+    let arr = list.as_array().expect("list is array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["subscription_id"], json!(sub_id));
+    assert!(
+        arr[0].get("secret").is_none() || arr[0]["secret"].is_null(),
+        "secret MUST NOT be returned by list (returned only at subscribe-time)"
+    );
+    println!("   [2/4] List returns sub without secret ✓");
+
+    // Subscribe rejects empty addresses + invalid callback URL.
+    let (status_bad1, body_bad1) = sandbox
+        .admin_post("/admin/webhooks", json!({
+            "addresses": [],
+            "callback_url": "http://127.0.0.1:1/x",
+        }))
+        .await;
+    assert_eq!(status_bad1, reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(body_bad1["code"], json!(2030));
+    println!("   [3/4] Empty addresses → 400 code=2030: {body_bad1}");
+
+    let (status_bad2, body_bad2) = sandbox
+        .admin_post("/admin/webhooks", json!({
+            "addresses": ["addr1"],
+            "callback_url": "ftp://invalid",
+        }))
+        .await;
+    assert_eq!(status_bad2, reqwest::StatusCode::BAD_REQUEST);
+    println!("       Invalid callback_url → 400: {body_bad2}");
+
+    // Unsubscribe.
+    let (status_del, body_del) = sandbox
+        .admin_delete(&format!("/admin/webhooks/{sub_id}"))
+        .await;
+    assert_eq!(status_del, reqwest::StatusCode::OK);
+    println!("   [4/4] Unsubscribed: {body_del}");
+
+    let (_, list2) = sandbox.admin_get("/admin/webhooks").await;
+    assert_eq!(list2.as_array().map(|a| a.len()), Some(0));
+
+    let (status_404, body_404) = sandbox
+        .admin_delete(&format!("/admin/webhooks/{sub_id}"))
+        .await;
+    assert_eq!(status_404, reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(body_404["code"], json!(3040));
+    println!("       Re-delete → 404 code=3040 ✓");
 
     Ok(())
 }

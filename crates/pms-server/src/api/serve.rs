@@ -256,7 +256,24 @@ pub async fn serve_api(
         coord_shard_wallets: Arc::new(coord_shard_wallets),
         coord_shard_round_robin: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: Arc::new(crate::read_only::ReadOnlyMode::new()),
+        webhook_store: crate::api_fn::webhooks::WebhookStore::new(),
     };
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // WEBHOOK DELIVERY LOOP (Phase 4) — subscribes to BlockPersisted and
+    // POSTs HMAC-signed bodies to registered SaaS callbacks. Cheap when no
+    // subscriptions exist (early-exit on `store.is_empty()`).
+    // ═══════════════════════════════════════════════════════════════════════
+    if let Some(bus) = state.srv.adapter_arc().event_bus() {
+        let store = state.webhook_store.clone();
+        let ledger_id = state.ledger_id.clone();
+        let rx = bus.subscribe();
+        tokio::spawn(async move {
+            crate::api_fn::webhooks::run_delivery_loop(store, rx, ledger_id).await;
+        });
+    } else {
+        tracing::warn!(target: "webhook", "no event bus — webhook delivery disabled");
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // AUTOMATED FEE DISTRIBUTION TASK

@@ -25,3 +25,4 @@ pub mod tx_helpers;
 pub mod version;
 pub mod wallet;
 pub mod wallet_factory;
+pub mod webhooks;

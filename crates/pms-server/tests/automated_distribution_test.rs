@@ -366,6 +366,7 @@ async fn test_automated_fee_distribution() {
         coord_shard_wallets: std::sync::Arc::new(Vec::new()),
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
+        webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
     };
 
     // 8. Spawn Distributor

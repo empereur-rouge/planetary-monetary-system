@@ -111,6 +111,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         tps_tracker: Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
         contract_event_bus: None,
         read_only: Arc::new(pms_server::read_only::ReadOnlyMode::new()),
+        webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
     };
 
     // 10) Router axum
@@ -222,6 +223,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         coord_shard_wallets: std::sync::Arc::new(Vec::new()),
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
+        webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
     };
 
     // 10) Router
@@ -342,6 +344,7 @@ pub async fn make_test_ctx_with_admin(
         coord_shard_wallets: std::sync::Arc::new(Vec::new()),
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
+        webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
     };
 
     // 10) Router
