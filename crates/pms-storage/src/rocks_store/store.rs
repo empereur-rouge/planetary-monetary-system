@@ -655,6 +655,14 @@ impl RocksStore {
         Ok(())
     }
 
+    /// Approximate current tip count (atomic — no DB hit, no Vec clone).
+    /// Maintained inline by `add_tip` / `remove_tip` / batch atomic-append.
+    /// Read by SaaS watchers via `GET /v1/dag/status`.
+    pub fn tip_count_estimate(&self) -> usize {
+        self.tip_count_estimate
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Load frozen addresses from RocksDB into the in-memory DashSet.
     /// Called once at bootstrap. After this, `is_frozen()` never hits RocksDB.
     pub fn load_frozen_cache(&self) -> anyhow::Result<()> {

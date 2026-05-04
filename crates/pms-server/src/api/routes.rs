@@ -9,7 +9,7 @@ use crate::admin::{
     admin_reindex_activity_items, admin_rocksdb_stats, admin_update_config,
 };
 use crate::api_fn::activity::{get_wallet_activity, stream_wallet_activity};
-use crate::api_fn::blocks::{get_block_by_id, submit_block};
+use crate::api_fn::blocks::{blocks_range, get_block_by_id, submit_block};
 use crate::api_fn::bridge::{
     admin_bridge_disable, admin_bridge_enable, admin_bridge_transfer, bridge_status,
     list_bridge_links,
@@ -25,7 +25,9 @@ use crate::api_fn::contracts::{
 use crate::api_fn::coordinator::get_coordinator_info;
 use crate::api_fn::gas_pool::{admin_gas_pool_deposit, admin_gas_pool_withdraw, get_gas_pool};
 use crate::api_fn::version::get_version;
-use crate::api_fn::dag::get_tips;
+use crate::api_fn::dag::{get_dag_status, get_tips};
+use crate::api_fn::estimate_fee::estimate_fee;
+use crate::api_fn::transaction_lookup::get_transaction_by_block_id;
 use crate::api_fn::history::{get_encrypted_history, get_plain_history, get_wallet_history};
 use crate::api_fn::ledger::{
     admin_create_ledger, admin_get_ledger, admin_list_ledgers, list_ledgers,
@@ -124,8 +126,12 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
 
     let dag_routes = Router::new()
         .route("/v1/dag/tips", post(get_tips))
+        .route("/v1/dag/status", get(get_dag_status))
         .route("/v1/config", get(crate::api_fn::config::get_config))
-        .route("/v1/blocks/{id}", get(get_block_by_id));
+        .route("/v1/blocks/{id}", get(get_block_by_id))
+        .route("/v1/blocks/range", get(blocks_range))
+        .route("/v1/transaction/{block_id}", get(get_transaction_by_block_id))
+        .route("/v1/estimate-fee", post(estimate_fee));
 
     // NFT read endpoints (lookup, owner list, transfer prepare, utxos)
     let nft_read = Router::new()

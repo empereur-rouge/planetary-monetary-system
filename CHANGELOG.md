@@ -7,14 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.8.0] - Unreleased — Cross-chain replay protection (BREAKING) + HD wallet (BIP32)
+## [0.8.0] - Unreleased — Cross-chain replay protection (BREAKING) + HD wallet (BIP32) + Payment-rail RPC
 
 ### Why
 Intégration PMS comme rail de paiement dans un SaaS streaming white-label.
 - **Phase 1 (sécurité)** : `Transaction::signing_message()` ne hashait que `(inputs, outputs, fee)`, sans aucun lien avec le réseau. Une TX signée sur testnet était valide bit-pour-bit sur mainnet → cross-chain replay trivial. Blocker pour des dépôts à garanties bancaires.
 - **Phase 2 (HD wallet)** : la plateforme doit pouvoir émettre une adresse de dépôt par utilisateur (potentiellement millions) sans stocker N clés privées. Standard BIP32/BIP39/BIP44 attendu par la plupart des SDK et hardware wallets.
+- **Phase 3 (RPC)** : la SaaS a besoin de 4 endpoints qui n'existaient pas — un snapshot DAG monotone (équivalent `get_block_height` linéaire), une estimation de fee découplée du `prepare_tx`, un lookup de TX unifié (`{from, to, amount, fee, depth, is_finalized}` au lieu du raw block JSON), et un scan de range pour rattraper après un crash watcher.
 
-Faire les deux maintenant, avant lancement mainnet, évite une migration chaotique plus tard.
+Faire les trois maintenant, avant lancement mainnet, évite une migration chaotique plus tard.
+
+### Phase 3 — Payment-rail RPC endpoints
+
+#### Added
+- **`GET /v1/dag/status`** ([crates/pms-server/src/api_fn/dag.rs](crates/pms-server/src/api_fn/dag.rs)) : snapshot SaaS-friendly du DAG — `{tip_count, last_milestone, total_blocks, latest_block_ts_ms, network_id, api_version, dag_version}`. Curseur monotone via `total_blocks` + `latest_block_ts_ms` pour détecter de l'activité sans poller un endpoint plus lourd.
+- **`POST /v1/estimate-fee`** ([crates/pms-server/src/api_fn/estimate_fee.rs](crates/pms-server/src/api_fn/estimate_fee.rs)) : pure compute (pas de UTXO selection), retourne `{fee, transfer_fee, total, fee_breakdown}` pour `{amount, asset_id?}`. Réutilise `FeePolicy::compute_fee` + `evaluate_transfer` (smart contract OnTransfer fees). Permet à la UI d'afficher le total exact AVANT que l'utilisateur signe.
+- **`GET /v1/transaction/{block_id}`** ([crates/pms-server/src/api_fn/transaction_lookup.rs](crates/pms-server/src/api_fn/transaction_lookup.rs)) : lookup unifié — décode le payload, résout le `from` via les UTXOs parents, calcule `is_finalized + depth`, retourne `{tx_hash, block_id, from, to, amount, asset_id, fee, timestamp_ms, is_finalized, depth, status, inputs, outputs}`. Supporte `TxUtxo` (plain), `Mint`, `Reward` ; renvoie 403 code=1010 pour les payloads chiffrés en pointant vers `GET /v1/wallet/{address}/activity` (qui decrypt avec la clé du destinataire). 404 code=3040 pour block_id inconnu.
+- **`GET /v1/blocks/range?after_ts=&after_id=&limit=`** ([crates/pms-server/src/api_fn/blocks.rs](crates/pms-server/src/api_fn/blocks.rs)) : scan paginé par timestamp via le CF `by_time` existant, le plus récent en premier. Curseur exclusif `(ts_ms, id, has_more)` — relance le call avec `after_ts` / `after_id` du curseur jusqu'à ce que `next_cursor` soit `None`. `limit` borné à 1000 (défaut 100). Idempotent : la même requête deux fois retourne les mêmes blocks (pour reprise après crash watcher).
+
+#### Changed
+- **`NetDagAdapter` trait étendu** ([crates/pms-interface/src/net_adapter.rs](crates/pms-interface/src/net_adapter.rs)) avec 3 méthodes par défaut (no-op fallback) :
+  - `async fn count_descendants(&self, block_id: &str, max_count: usize) -> usize`
+  - `async fn is_finalized(&self, block_id: &str) -> bool`
+  - `async fn last_milestone(&self) -> Option<String>`
+  Implémentées dans `CoreAdapter` ([crates/pms-core/src/net_adapter/mod.rs](crates/pms-core/src/net_adapter/mod.rs)) en délégant à `self.dag.*` (sync sous le capot).
+
+#### Bumped
+- **`API_VERSION`** : `10` → `11` (4 nouveaux endpoints).
+- *Workspace, DAG_VERSION, protocol_version inchangés en Phase 3.*
+
+#### Tests sandbox (4 ajoutés, tous passants)
+Run avec `cargo test --release -p pms-server --test dag_sandbox -- --ignored --nocapture --test-threads=1 <test_name>`.
+- `test_dag_status_endpoint` — snapshot vide (genesis seul) → `total_blocks=1` ; après 3 mints → `total_blocks=4`, `latest_block_ts_ms` set, `api_version=11`, `dag_version="2.0.0"`, `network_id="pms-e2e-test"`.
+- `test_estimate_fee_endpoint` — 100 PMS → `fee="3.0000001"`, `total=amount+fee+transfer_fee`. Amount négatif → 400 code=2020. Amount malformé → 400 code=2020.
+- `test_transaction_lookup_endpoint` — Mint block lookup retourne tous les champs (`from=null`, `to=recipient`, `amount=42`, `inputs=[]`, `outputs=[1]`). TxUtxo chiffré → 403 code=1010 avec redirect vers `/v1/wallet/{addr}/activity`. block_id inconnu → 404 code=3040.
+- `test_blocks_range_endpoint` — page 1 (limit=3) retourne 3 blocks + curseur, idempotent à travers 2 calls. Page 2 via curseur retourne des blocks **disjoints** de page 1 (curseur exclusif).
+
+---
 
 ### Phase 2 — HD wallet (BIP32 / BIP39 / BIP44)
 

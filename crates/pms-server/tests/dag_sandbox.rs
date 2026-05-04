@@ -162,6 +162,20 @@ impl Sandbox {
         (status, json)
     }
 
+    /// GET on a public (unauthenticated) endpoint.
+    #[allow(dead_code)]
+    async fn public_get(&self, path: &str) -> (reqwest::StatusCode, Value) {
+        let resp = self
+            .client
+            .get(format!("{}{}", self.base_url, path))
+            .send()
+            .await
+            .expect("HTTP GET failed");
+        let status = resp.status();
+        let json = resp.json::<Value>().await.unwrap_or(json!({}));
+        (status, json)
+    }
+
     // ── High-level operations ────────────────────────────────────────
 
     /// Create a custom ledger (eden) via the admin API.
@@ -4913,5 +4927,268 @@ async fn test_api_error_codes_on_auth_failure() -> Result<()> {
     println!("   ║  Wrong token      → 401 code=1002 ✓                      ║");
     println!("   ║  Public messages  → vague, no info leak ✓                ║");
     println!("   ╚══════════════════════════════════════════════════════════╝");
+    Ok(())
+}
+
+// ============================================================================
+// PHASE 3 — Payment-rail RPC endpoints
+// ============================================================================
+//
+// `GET /v1/dag/status`, `POST /v1/estimate-fee`, `GET /v1/transaction/{id}`,
+// `GET /v1/blocks/range`. Validate the SaaS payment-rail integration
+// surface: a watcher can poll the status, look up TX details, scan a time
+// range to recover after a crash, and estimate fees before signing.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_dag_status_endpoint() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // Boot snapshot — empty (only genesis).
+    let (status, body0) = sandbox.public_get("/v1/dag/status").await;
+    assert_eq!(status, reqwest::StatusCode::OK, "expected 200, got {status}");
+    println!("   [1/3] Boot dag/status: {body0}");
+
+    // Required fields present.
+    assert!(body0["network_id"].is_string());
+    assert!(body0["api_version"].as_u64().unwrap_or(0) >= 11);
+    assert!(body0["dag_version"].is_string());
+    let initial_total = body0["total_blocks"].as_u64().unwrap_or(0);
+    println!(
+        "      network_id={} api_version={} dag_version={} total_blocks={}",
+        body0["network_id"], body0["api_version"], body0["dag_version"], initial_total
+    );
+
+    // Generate some blocks via faucet mint (each mint = 1 block).
+    let user = Wallet::generate();
+    let user_addr = user.get_address("8e");
+    for _ in 0..3 {
+        sandbox.faucet_mint(None, &user_addr, "1.0").await?;
+    }
+    sleep(Duration::from_millis(300)).await;
+
+    let (status, body1) = sandbox.public_get("/v1/dag/status").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let total_after = body1["total_blocks"].as_u64().unwrap_or(0);
+    println!(
+        "   [2/3] After 3 faucet mints: total_blocks={} (was {}) latest_block_ts_ms={:?}",
+        total_after, initial_total, body1["latest_block_ts_ms"]
+    );
+    assert!(
+        total_after >= initial_total + 3,
+        "total_blocks must grow after mints"
+    );
+    assert!(
+        body1["latest_block_ts_ms"].as_i64().is_some(),
+        "latest_block_ts_ms must be set after activity"
+    );
+
+    println!("   [3/3] dag/status reflects new activity ✓");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_estimate_fee_endpoint() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // Estimate the fee for a 100 PMS transfer on main.
+    let (status, body) = sandbox
+        .post(None, "/v1/estimate-fee", json!({ "amount": "100" }))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "expected 200, got {status} body={body}");
+    println!("   [1/3] estimate-fee for 100 PMS: {body}");
+
+    let fee = body["fee"]
+        .as_str()
+        .and_then(|s| Decimal::from_str(s).ok())
+        .unwrap_or(Decimal::ZERO);
+    let transfer_fee = body["transfer_fee"]
+        .as_str()
+        .and_then(|s| Decimal::from_str(s).ok())
+        .unwrap_or(Decimal::ZERO);
+    let total = body["total"]
+        .as_str()
+        .and_then(|s| Decimal::from_str(s).ok())
+        .unwrap_or(Decimal::ZERO);
+    assert!(fee >= Decimal::ZERO, "fee must be non-negative");
+    assert!(transfer_fee >= Decimal::ZERO, "transfer_fee must be non-negative");
+    assert_eq!(
+        total,
+        Decimal::from(100) + fee + transfer_fee,
+        "total must equal amount + fee + transfer_fee"
+    );
+
+    // Negative amount must be rejected.
+    let (status_neg, body_neg) = sandbox
+        .post(None, "/v1/estimate-fee", json!({ "amount": "-1" }))
+        .await;
+    assert_eq!(
+        status_neg,
+        reqwest::StatusCode::BAD_REQUEST,
+        "negative amount must 400, got {status_neg}"
+    );
+    println!("   [2/3] Negative amount rejected: {body_neg}");
+
+    // Malformed amount must be rejected.
+    let (status_bad, body_bad) = sandbox
+        .post(None, "/v1/estimate-fee", json!({ "amount": "not-a-number" }))
+        .await;
+    assert_eq!(
+        status_bad,
+        reqwest::StatusCode::BAD_REQUEST,
+        "malformed amount must 400, got {status_bad}"
+    );
+    println!("   [3/3] Malformed amount rejected: {body_bad}");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_transaction_lookup_endpoint() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // Three flows the watcher cares about:
+    //   (A) Mint block (faucet drop = a deposit from SaaS PoV) → public, lookup full detail
+    //   (B) Encrypted TxUtxo (real user transfer) → 403 with pointer to /v1/wallet/.../activity
+    //   (C) Unknown block id → 404 code=3040
+    let recipient = Wallet::generate().get_address("8e");
+
+    // ── (A) Mint lookup ───────────────────────────────────────────────────
+    let mint_block_id = sandbox.faucet_mint(None, &recipient, "42").await?;
+    sleep(Duration::from_millis(200)).await;
+
+    let path = format!("/v1/transaction/{}", mint_block_id);
+    let (status, body) = sandbox.public_get(&path).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "expected 200 for mint lookup, got {status} body={body}"
+    );
+    println!("   [1/3] Mint lookup body: {body}");
+
+    assert_eq!(body["block_id"].as_str(), Some(mint_block_id.as_str()));
+    assert_eq!(
+        body["from"], json!(null),
+        "Mint blocks have no inputs → `from` must be null"
+    );
+    assert_eq!(
+        body["to"].as_str(),
+        Some(recipient.as_str()),
+        "`to` must be the mint output address"
+    );
+    assert_eq!(body["amount"].as_str(), Some("42"));
+    assert_eq!(body["fee"].as_str(), Some("0"));
+    assert_eq!(body["inputs"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(body["outputs"].as_array().map(|a| a.len()), Some(1));
+    assert!(body["timestamp_ms"].as_i64().is_some());
+    assert!(
+        ["pending", "confirmed", "finalized"]
+            .contains(&body["status"].as_str().unwrap_or("?"))
+    );
+    println!(
+        "      Mint resolved → status={} depth={} is_finalized={}",
+        body["status"], body["depth"], body["is_finalized"]
+    );
+
+    // ── (B) Encrypted TxUtxo → 403 with clear redirect message ──────────
+    let user = Wallet::generate();
+    let user_addr = user.get_address("8e");
+    let user_sk = user.private_key_b64.clone();
+    sandbox.faucet_mint(None, &user_addr, "1000").await?;
+    sleep(Duration::from_millis(200)).await;
+    let send_resp = sandbox
+        .send_simple(None, &user_sk, &recipient, "42")
+        .await?;
+    let enc_block_id = send_resp["block_id"].as_str().unwrap().to_string();
+
+    let (status_enc, body_enc) = sandbox
+        .public_get(&format!("/v1/transaction/{}", enc_block_id))
+        .await;
+    assert_eq!(status_enc, reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(body_enc["code"], json!(1010));
+    println!(
+        "   [2/3] Encrypted TxUtxo → 403 code=1010 with clear redirect: {}",
+        body_enc["message"]
+    );
+
+    // ── (C) Unknown block id → 404 code=3040 ────────────────────────────
+    let (status_404, body_404) = sandbox
+        .public_get("/v1/transaction/0000000000000000000000000000000000000000000000000000000000000000")
+        .await;
+    assert_eq!(status_404, reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(body_404["code"], json!(3040));
+    println!("   [3/3] Unknown id → 404 code=3040: {body_404}");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_blocks_range_endpoint() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // Create a known number of blocks via faucet mint.
+    let user_addr = Wallet::generate().get_address("8e");
+    for _ in 0..5 {
+        sandbox.faucet_mint(None, &user_addr, "1.0").await?;
+    }
+    sleep(Duration::from_millis(400)).await;
+
+    // First page (most recent first).
+    let (status, body) = sandbox.public_get("/v1/blocks/range?limit=3").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let blocks = body["blocks"].as_array().expect("blocks array");
+    println!(
+        "   [1/3] Page 1: {} blocks, next_cursor={}",
+        blocks.len(),
+        body["next_cursor"]
+    );
+    assert_eq!(blocks.len(), 3, "limit=3 must return 3 blocks");
+    for b in blocks {
+        assert!(b["id"].is_string());
+        assert!(b["ts_ms"].as_i64().is_some());
+    }
+
+    let cursor = body["next_cursor"].clone();
+    assert!(
+        cursor.is_object(),
+        "next_cursor must be present after a full page"
+    );
+    let after_ts = cursor["ts_ms"].as_i64().expect("cursor ts_ms");
+    let after_id = cursor["id"].as_str().expect("cursor id").to_string();
+
+    // Idempotency: re-running the SAME first-page query yields identical
+    // blocks (the watcher must be able to retry safely).
+    let (_, body_replay) = sandbox.public_get("/v1/blocks/range?limit=3").await;
+    let replay_ids: Vec<&str> = body_replay["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|b| b["id"].as_str())
+        .collect();
+    let first_ids: Vec<&str> = blocks.iter().filter_map(|b| b["id"].as_str()).collect();
+    assert_eq!(first_ids, replay_ids, "page must be idempotent across calls");
+    println!("   [2/3] Page 1 idempotent across two calls ✓");
+
+    // Second page using the cursor — must return strictly older blocks
+    // (no overlap with page 1).
+    let path = format!(
+        "/v1/blocks/range?limit=10&after_ts={}&after_id={}",
+        after_ts, after_id
+    );
+    let (status2, body2) = sandbox.public_get(&path).await;
+    assert_eq!(status2, reqwest::StatusCode::OK);
+    let page2 = body2["blocks"].as_array().expect("blocks array");
+    println!("   [3/3] Page 2 from cursor: {} blocks", page2.len());
+    let page2_ids: std::collections::HashSet<&str> =
+        page2.iter().filter_map(|b| b["id"].as_str()).collect();
+    let page1_ids: std::collections::HashSet<&str> = first_ids.into_iter().collect();
+    assert!(
+        page2_ids.is_disjoint(&page1_ids),
+        "page 1 and page 2 must not overlap (cursor is exclusive)"
+    );
+
     Ok(())
 }

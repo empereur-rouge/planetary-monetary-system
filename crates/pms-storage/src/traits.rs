@@ -67,6 +67,16 @@ pub trait DagStorage: Send + Sync {
         self.block_count().await
     }
 
+    /// Approximate current tip count (atomic counter, O(1)). Default impl
+    /// falls back to the exact `top_tips` length — concrete implementations
+    /// should override for perf when an inline counter exists.
+    async fn tip_count_estimate(&self) -> usize {
+        self.top_tips(usize::MAX)
+            .await
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
     async fn export_json(&self) -> Result<String>;
     async fn export_namespace(&self) -> Result<String>;
     async fn import_json(&self, dump: &str) -> Result<()>;

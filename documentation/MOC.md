@@ -37,6 +37,7 @@ updated: 2026-05-04
 | [[utxo-system]] | UTXO shardé, LRU cache, balance tracking, supply cache |
 | [[wallet-encryption]] | Wallets (BIP39, Ed25519, X25519), encryption (ChaCha20-Poly1305) |
 | [[hd-wallet-bip32]] | Dérivation BIP32/BIP39/BIP44 — N adresses de dépôt depuis un seul master seed (SaaS payment rail) |
+| [[payment-rail-integration]] | 4 endpoints REST conçus pour intégration SaaS : dag/status, estimate-fee, transaction lookup, blocks/range |
 | [[token-system]] | Tokens custom multi-asset, Amount (8 décimales), FeePolicy |
 | [[block-payloads]] | 17 types de payload (PlainPayload), chiffrement X25519+AES-256-GCM |
 
@@ -104,7 +105,7 @@ Voir le dossier [[api/README|documentation/api/]] pour la référence complète 
 | Schema DB | `crates/pms-storage/src/migrations.rs` → `CURRENT_VER` | `10` |
 | DAG Protocol | `crates/pms-storage/src/migrations.rs` → `DAG_VERSION` | `2.0.0` |
 | P2P Protocol | `etc/config/config.*.toml` → `protocol_version` | `2` |
-| API | `crates/pms-server/src/api_fn/version.rs` → `API_VERSION` | `10` |
+| API | `crates/pms-server/src/api_fn/version.rs` → `API_VERSION` | `11` |
 
 Voir [[../../CHANGELOG|CHANGELOG.md]] pour l'historique complet des versions.
 
