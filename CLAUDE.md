@@ -82,6 +82,39 @@ Les valeurs RocksDB DOIVENT être adaptées à la RAM du VPS. Avec 67 CFs (2 led
 - Les images Docker sont **cross-compilées localement** (linux/amd64 via buildx) puis transférées au VPS.
 - Le deploy script sauvegarde/restaure automatiquement les clés VPS-specific (coordinator, treasury, signer) dans la config.
 
+### Pre-deploy build check (OBLIGATOIRE)
+
+Avant tout `deploy-testnet.sh` / `deploy-mainnet.sh` / `upgrade-*.sh` :
+
+```bash
+CARGO_TARGET_DIR=/tmp/dag-pms-target cargo build --release --bin bin
+```
+
+`cargo check --workspace --lib` (et `--workspace --tests`) ne couvrent PAS `bin/src/main.rs` (le binaire principal qui construit `AppState`). Une feature qui ajoute un champ à `AppState` peut compiler vert via lib mais casser le bin. Le deploy script lance alors le cross-compile Docker (~15 min) avant de découvrir le bug, et toute opération destructive en amont (wipe testnet) est perdue.
+
+Pareil pour `--bin pms-gateway` si la modif touche le gateway (pas dans le lib path). Cas réel : v0.8.0 — `webhook_store` ajouté à AppState a passé `cargo check --workspace --lib` mais `bin/src/main.rs` était cassé. Smoke catch avant deploy a évité un wipe testnet pour rien.
+
+### DAG_VERSION major bump — procédure de wipe
+
+Quand `DAG_VERSION` passe en MAJOR (ex: `1.x.y → 2.0.0`), l'engine refuse de démarrer sur la DB existante (migration manuelle obligatoire). **`scripts/deploy-testnet.sh --yes` ne wipe PAS** — son défaut sur "Clean Reset" est `N` pour protéger les opérateurs humains. Sans wipe, l'engine crash-loop silencieusement après le deploy "réussi".
+
+Deux procédures correctes :
+
+**(A) Wipe manuel + deploy non-interactif** (recommandé pour automation/CI) :
+```bash
+ssh -i ~/.ssh/pms_vps pms@<IP> \
+  'cd /opt/pms && PMS_ADMIN_TOKEN=$(cat etc/pms/admin_token) \
+   docker compose -f docker-compose.testnet.yml down -v --remove-orphans'
+IMAGE_VERSION=v0.8.0 scripts/deploy-testnet.sh --yes <IP>
+```
+
+**(B) Deploy interactif** (humain en charge) — répondre `Y` au prompt "Clean Reset (delete ALL testnet data/volumes)?" :
+```bash
+IMAGE_VERSION=v0.8.0 scripts/deploy-testnet.sh <IP>   # sans --yes
+```
+
+⚠️ Le wipe est **destructif et irréversible** : RocksDB data + Caddy certs (re-générés au boot, ~30s) + Prometheus history (~30j de métriques perdues). Backup les coordinator/treasury keys avant si besoin (`/Volumes/Crutial X9 .../pms-key/pms-testnet-*.json` est censé déjà l'avoir).
+
 ### Opérations courantes (sur le VPS)
 ```bash
 # Logs
@@ -236,6 +269,18 @@ Mêmes invariants que testnet (compose.yaml symlink, no stale containers, --remo
 - Branching : `main` (stable), `feature/<nom>`, `fix/<nom>`. Merger dans `main` quand terminé.
 - Commits atomiques avec messages clairs : description brève + contexte (1-2 phrases). Référencer les issues quand applicable.
 - Utiliser `gh` CLI pour les opérations GitHub.
+
+### Multi-phase features — un commit par phase logique
+
+Quand un changement passe par plusieurs phases distinctes (ex: implémenter la sécurité, puis l'API, puis la persistance), pousser **N commits atomiques** sur la feature branch, pas un mega-commit final :
+
+- Chaque commit doit compiler + ses tests doivent passer.
+- Chaque commit a son propre message + section dans le CHANGELOG.
+- `/simplify` est lancé entre chaque phase, pas juste à la fin.
+- Bisect / revert / cherry-pick deviennent possibles à granularité phase.
+- Une phase peut être suspendue sans perdre le travail des précédentes (testnet déjà déployé sur la phase N-1).
+
+Le mega-commit final est acceptable seulement pour les changements vraiment indivisibles (refactor de signature de fonction qui touche tout le repo en un coup).
 
 ## Tests
 
@@ -407,6 +452,27 @@ Quand tu touches un handler qui retourne encore `anyhow::Error` ou un `(StatusCo
 5. Ajouter un test sandbox qui assert `body["code"] == NNNN` pour au moins un chemin d'erreur du handler migré.
 
 **Ordre prioritaire de migration** (high-value financial / crypto paths) : `wallet_send_simple` → `wallet_send_tx` → `prepare_tx` → `nft_mint`/`nft_burn` → `admin_mint_token`/`admin_create_token` → `submit_block` → `compliance/{freeze,seize,reverse}`. Voir la roadmap dans [error-codes.md](documentation/api/error-codes.md) pour les codes attendus par handler.
+
+### AppState field additions — audit obligatoire de tous les call sites
+
+Quand tu ajoutes un champ à `AppState` (`crates/pms-server/src/api/state.rs`), audite TOUS les sites qui le construisent par field-init :
+
+```bash
+grep -rn "AppState {" crates/ tools/ bin/
+```
+
+Sites attendus aujourd'hui :
+- `crates/pms-server/src/api/serve.rs` (production)
+- `bin/src/main.rs` (internal API path)
+- `crates/pms-testkit/src/app.rs` (3 helpers de test)
+- `crates/pms-server/tests/dag_sandbox.rs` (2 sites — single + cluster)
+- `crates/pms-server/tests/{automated_distribution_test,local_bench,history_separation_test}.rs`
+
+Le compilateur attrape via `cargo check --workspace --tests`, mais **`bin/main.rs` ne tombe que via `cargo build --bin bin`** (cf. règle pre-deploy dans `## VPS Testnet`). Inclure le patch des N sites dans le **même commit** que l'ajout du champ — laisser un seul site cassé bloquera le commit suivant.
+
+Cas réel : v0.8.0 — `webhook_store: WebhookStore` ajouté à AppState. 8 fichiers à patcher. Le smoke pre-deploy a attrapé `bin/main.rs` qui avait été oublié.
+
+Alternative à long terme : refactor `AppState` en builder pattern. Pour l'instant, cohabite avec le field-init.
 
 ## Versioning
 
