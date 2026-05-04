@@ -317,3 +317,85 @@ pub async fn get_block_by_id(
 
     Ok(Json(wb))
 }
+
+/// Block summary returned by `GET /v1/blocks/range` — minimal fields the
+/// SaaS watcher needs to identify newly-relevant blocks. The watcher uses
+/// `id` to pull the full TX detail via `GET /v1/transaction/{id}` only for
+/// blocks whose payload hints at a deposit address it monitors.
+#[derive(serde::Serialize, Debug)]
+pub struct BlockRangeItem {
+    pub id: String,
+    pub ts_ms: i64,
+}
+
+#[derive(serde::Serialize, Debug)]
+pub struct BlocksRangeResponse {
+    pub blocks: Vec<BlockRangeItem>,
+    /// `(ts, id, has_more)` of the last item returned. Pass `ts` as
+    /// `after_ts` and `id` as `after_id` on the next call to paginate.
+    /// `None` when there are no more blocks.
+    pub next_cursor: Option<NextCursor>,
+}
+
+#[derive(serde::Serialize, Debug)]
+pub struct NextCursor {
+    pub ts_ms: i64,
+    pub id: String,
+    pub has_more: bool,
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+pub struct BlocksRangeQuery {
+    /// Resume cursor: timestamp of the last block from the previous page.
+    pub after_ts: Option<i64>,
+    /// Resume cursor: id of the last block from the previous page.
+    pub after_id: Option<String>,
+    /// Page size. Capped to `1000` to bound response size; default `100`.
+    pub limit: Option<usize>,
+}
+
+const DEFAULT_RANGE_LIMIT: usize = 100;
+const MAX_RANGE_LIMIT: usize = 1000;
+
+/// `GET /v1/blocks/range` — paginated scan of blocks ordered by timestamp,
+/// most-recent first. Lets a SaaS watcher rattraper après un crash : repeat
+/// the call with the previous response's `next_cursor.ts_ms` / `.id` until
+/// `next_cursor` is `None` or `has_more` is `false`.
+pub async fn blocks_range(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<BlocksRangeQuery>,
+) -> Result<Json<BlocksRangeResponse>, (StatusCode, String)> {
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_RANGE_LIMIT)
+        .clamp(1, MAX_RANGE_LIMIT);
+
+    let (ids, cursor) = st
+        .store
+        .recent_ids_by_time(q.after_ts, q.after_id, limit)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let ts_map = st
+        .store
+        .ts_for_ids(&ids)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let blocks = ids
+        .iter()
+        .map(|id| BlockRangeItem {
+            id: id.clone(),
+            ts_ms: ts_map.get(id).copied().unwrap_or(0),
+        })
+        .collect();
+
+    Ok(Json(BlocksRangeResponse {
+        blocks,
+        next_cursor: cursor.map(|(ts, id, has_more)| NextCursor {
+            ts_ms: ts,
+            id,
+            has_more,
+        }),
+    }))
+}

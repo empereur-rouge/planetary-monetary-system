@@ -179,6 +179,59 @@ pub struct OwnershipTransferData {
     pub reason: String,
 }
 
+impl PayloadEnvelope {
+    /// True iff the payload is wrapped in (or itself wraps) an encrypted
+    /// envelope the server cannot decrypt. Used by webhook delivery and
+    /// the multi-address SSE to flag events whose detail the server can't
+    /// surface — the SaaS must use the per-wallet activity stream
+    /// (which has the recipient X25519 key) for full detail.
+    pub fn is_encrypted(&self) -> bool {
+        matches!(
+            self,
+            PayloadEnvelope::Encrypted(_)
+                | PayloadEnvelope::Plain(PlainPayload::EncryptedReward { .. })
+        )
+    }
+}
+
+impl PlainPayload {
+    /// Returns the outputs created by this payload, in the same order as
+    /// they're indexed when forming `OutputId.index`. Used by every site
+    /// that needs to resolve a UTXO to its `(address, amount, asset_id)` —
+    /// `transaction_lookup`, UTXO indexer at persist time, balance scanner.
+    /// Returns `None` for payload variants that create no UTXOs (Milestone,
+    /// ConfigUpdate, ContractRegister, …).
+    ///
+    /// **Reward** : `fee_outputs` come first, then `reward_outputs` —
+    /// matches how `persist_block` builds the `UtxoDelta`. Don't reorder
+    /// without auditing every caller (UTXO indexing, lookup, balance).
+    ///
+    /// **Seize / Reverse** : returned even though they're coordinator-only
+    /// — payment-rail watchers may need to display compliance reversals.
+    pub fn outputs(&self) -> Option<Vec<TxOutput>> {
+        match self {
+            PlainPayload::TxUtxo(t) => Some(t.outputs.clone()),
+            PlainPayload::Mint { outputs } => Some(outputs.clone()),
+            PlainPayload::Reward {
+                fee_outputs,
+                reward_outputs,
+                ..
+            } => {
+                let mut all = fee_outputs.clone();
+                all.extend(reward_outputs.clone());
+                Some(all)
+            }
+            PlainPayload::BridgeMint { outputs, .. } => Some(outputs.clone()),
+            PlainPayload::Seize { outputs, .. } => Some(outputs.clone()),
+            PlainPayload::Reverse { outputs, .. } => Some(outputs.clone()),
+            // No UTXO creation: Genesis, Milestone, ConfigUpdate, EncryptedReward,
+            // TokenCreate, BridgeLock, Freeze, Unfreeze, ContractRegister,
+            // ContractUpdate, LedgerOwnershipTransfer, CoordinatorKeyRotate, Nft.
+            _ => None,
+        }
+    }
+}
+
 /// Métadonnées d'un token enregistré dans le DAG.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenMetadata {

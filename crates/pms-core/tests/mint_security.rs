@@ -29,6 +29,7 @@ fn make_policy_with_coordinator(coord_key: Option<&str>) -> ValidatePolicy {
         platform_fee_ratio: Decimal::ZERO,
         coordinator_public_key: coord_key.map(String::from),
         enforce_single_writer: true,
+        network_id: String::new(),
     }
 }
 

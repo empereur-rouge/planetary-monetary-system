@@ -40,7 +40,7 @@ max_open_files = 4096            # FD limit (ulimit=65536 in docker-compose)
 [network]
 mode = "testnet"
 network_id = "pms-testnet-v1"
-protocol_version = 1
+protocol_version = 2
 
 [address]
 hrp = "8e"

@@ -275,7 +275,7 @@ pub async fn send_tx_with_split_fee(
     };
 
     // Sign
-    let msg = tx.signing_message().unwrap();
+    let msg = tx.signing_message(NETWORK_ID).unwrap();
     let sig = sender.sign(&msg).unwrap();
     tx.unlocks.push(Unlock {
         pubkey_hex: sender.encoded_public_key(),
@@ -367,7 +367,7 @@ pub async fn send_tx(
     };
 
     // Sign
-    let msg = tx.signing_message().unwrap();
+    let msg = tx.signing_message(NETWORK_ID).unwrap();
     let sig = sender.sign(&msg).unwrap();
     tx.unlocks.push(Unlock {
         pubkey_hex: sender.encoded_public_key(),

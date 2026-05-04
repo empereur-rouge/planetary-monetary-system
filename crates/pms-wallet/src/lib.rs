@@ -8,6 +8,7 @@
 extern crate core;
 
 mod backends;
+pub mod hd;
 mod helpers;
 pub mod history;
 pub mod key_encryption;

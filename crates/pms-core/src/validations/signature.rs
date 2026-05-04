@@ -5,7 +5,12 @@ use rayon::prelude::*;
 
 /// Vérifie toutes les signatures d'une transaction en PARALLÈLE.
 /// Utilise rayon pour distribuer la vérification sur tous les cœurs CPU.
-pub fn verify_tx_signatures(tx: &Transaction) -> Result<(), ValidationError> {
+///
+/// `network_id` doit être le `network_id` de la chaîne courante. La signature
+/// est calculée sur un message qui inclut `network_id` — toute TX signée pour
+/// un autre réseau (testnet vs mainnet) sera rejetée ici (cross-chain replay
+/// protection).
+pub fn verify_tx_signatures(tx: &Transaction, network_id: &str) -> Result<(), ValidationError> {
     if tx.inputs.len() != tx.unlocks.len() {
         return Err(ValidationError::InvalidSignature(
             "inputs/unlocks mismatch".into(),
@@ -14,7 +19,7 @@ pub fn verify_tx_signatures(tx: &Transaction) -> Result<(), ValidationError> {
 
     // 1. Compute signing message once (shared across all verifications)
     let msg_hex = tx
-        .signing_message()
+        .signing_message(network_id)
         .map_err(|_| ValidationError::Other("Serialization in signing_message failed"))?;
     let msg_bytes = msg_hex.as_bytes();
 

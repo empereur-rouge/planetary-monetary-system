@@ -229,6 +229,13 @@ impl DagStorage for RocksStore {
         Ok(count as u64)
     }
 
+    /// O(1) tip count from the inline atomic counter — maintained by
+    /// `add_tip` / `remove_tip` / batch atomic-append. Used by SaaS
+    /// watchers polling `GET /v1/dag/status`.
+    async fn tip_count_estimate(&self) -> usize {
+        Self::tip_count_estimate(self)
+    }
+
     /// O(1) approximate count via RocksDB metadata property.
     /// Falls back to full scan on failure.
     async fn block_count_estimate(&self) -> Result<u64> {

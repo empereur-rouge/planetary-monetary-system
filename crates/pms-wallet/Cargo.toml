@@ -11,6 +11,10 @@ hex = "0.4.3"
 k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
 serde = { version = "1.0.219", features = ["derive"] }
 bip39 = { version = "2.2.0", features = ["rand_core"] }
+# BIP32 hierarchical deterministic key derivation (secp256k1). Used by
+# `pms_wallet::hd` to derive N child wallets from a single master seed —
+# pattern documented for SaaS deposit-address generation.
+bip32 = { version = "0.5", default-features = false, features = ["secp256k1", "alloc"] }
 serde_json = "1.0.141"
 pms-token = { path = "../pms-token" }
 pms-types-transaction = { path = "../pms-types-transaction" }

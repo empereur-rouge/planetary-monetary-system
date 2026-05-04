@@ -127,6 +127,10 @@ pub struct AppState {
     /// distribution / inflation mint tasks pause. Reads always continue.
     /// Shared `Arc` so every cloned `AppState` sees the same flag.
     pub read_only: Arc<crate::read_only::ReadOnlyMode>,
+    /// In-memory webhook subscription store (Phase 4). Subscribers are
+    /// rebuilt on every restart — see `crate::api_fn::webhooks` for the
+    /// rationale and the persistence roadmap.
+    pub webhook_store: crate::api_fn::webhooks::WebhookStore,
 }
 
 impl AppState {

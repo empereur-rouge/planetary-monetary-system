@@ -373,6 +373,10 @@ async fn main() -> Result<()> {
             // (it's the gateway-only path) but we keep the field in
             // sync with the type so the struct literal compiles.
             read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
+            // Webhooks (Phase 4) — internal API path doesn't expose
+            // /admin/webhooks but the field must be present. Empty store
+            // is harmless: no subscriptions = no deliveries.
+            webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
         };
 
         eprintln!("🔧 Launching Internal API at {}", addr);

@@ -88,6 +88,22 @@ where
         self.do_get_blocks_by_ids(ids).await
     }
 
+    async fn tip_count_estimate(&self) -> usize {
+        self.store.tip_count_estimate().await
+    }
+
+    async fn count_descendants(&self, block_id: &str, max_count: usize) -> usize {
+        self.dag.count_descendants(block_id, max_count)
+    }
+
+    async fn is_finalized(&self, block_id: &str) -> bool {
+        self.dag.is_final(block_id)
+    }
+
+    async fn last_milestone(&self) -> Option<String> {
+        self.dag.finality.read().last_milestone.clone()
+    }
+
     fn min_pow_leading_zero_bits(&self) -> u8 {
         self.policy.min_pow_leading_zero_bits
     }

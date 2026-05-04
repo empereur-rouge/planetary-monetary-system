@@ -21,7 +21,7 @@ pub const CURRENT_VER: i64 = 10;
 /// - MAJOR : changement incompatible (refus de démarrer, migration manuelle requise)
 /// - MINOR : nouvelles fonctionnalités backward-compatible (migration auto)
 /// - PATCH : correctifs (migration auto)
-pub const DAG_VERSION: &str = "1.2.0";
+pub const DAG_VERSION: &str = "2.0.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

@@ -629,7 +629,7 @@ pub async fn prepare_tx(
     // 8) Calculer le hash à signer
     //    Le client signera ce hash avec sa clé privée ECDSA
     // ════════════════════════════════════════════════════════════════════════
-    let tx_hash = match unsigned_tx.signing_message() {
+    let tx_hash = match unsigned_tx.signing_message(&state.settings.network.network_id) {
         Ok(h) => h,
         Err(e) => {
             return (

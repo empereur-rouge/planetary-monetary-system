@@ -407,7 +407,7 @@ async fn e2e_scenario_2_transaction_fees() -> Result<()> {
             unlocks: vec![],
         };
 
-        let msg_hex = tx.signing_message()?;
+        let msg_hex = tx.signing_message("pms-test")?;
         let sig_b64 = sender.sign(&msg_hex)?;
         tx.unlocks.push(Unlock {
             pubkey_hex: sender.encoded_public_key(),
@@ -790,7 +790,7 @@ async fn e2e_scenario_3_history() -> Result<()> {
         };
 
         // Sign
-        let msg = tx.signing_message().unwrap();
+        let msg = tx.signing_message("pms-test").unwrap();
         // let msg_bytes = hex::decode(&msg).expect("Invalid signing message hex");
         let sig_b64 = sender.sign(&msg).unwrap(); // Use sign() interface directly
         tx.unlocks = vec![Unlock {
@@ -1016,7 +1016,7 @@ async fn e2e_scenario_4_double_spend() -> Result<()> {
             unlocks: vec![],
         };
 
-        let msg = tx.signing_message().unwrap();
+        let msg = tx.signing_message("pms-test").unwrap();
         let sig_b64 = sender.sign(&msg).unwrap();
 
         let mut signed_tx = tx;

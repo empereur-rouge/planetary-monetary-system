@@ -548,7 +548,7 @@ pub async fn wallet_send_simple(
         unlocks: vec![],
     };
 
-    let tx_hash = match unsigned_tx.signing_message() {
+    let tx_hash = match unsigned_tx.signing_message(&state.settings.network.network_id) {
         Ok(h) => h,
         Err(e) => {
             return (

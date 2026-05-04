@@ -7,6 +7,162 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.0] - Unreleased — Cross-chain replay protection (BREAKING) + HD wallet (BIP32) + Payment-rail RPC + Watcher API + producer-signaled read-only
+
+### Phase 5 — Producer-signaled read-only mode (close the sub-5s saturation gap)
+
+#### Why
+Diagnostic 2026-05-04 (24 h check, v0.7.30 in prod) :
+- 6728 producer-side `persist_tx.send().await` waits ≥ 500 ms over 24 h (p50 642 ms, p95 1.4 s, p99 3.6 s, max 6.3 s).
+- **0 read-only auto-arms** despite the 4-watermark resource guard being wired in v0.7.27.
+- Cause: the 5 s sampling cadence of `spawn_resource_guard_task` polls `adapter.persist_queue_depth()` as a point-in-time observation. Bursts that saturate the channel for less than the sampling interval (which is most of them — p99 wait was 3.6 s, well under 5 s) clear before the next sample reads them. The channel went `0 → full → 0` between two ticks ⇒ invisible to the watcher, but every saturation made one or more producers wait.
+
+#### Fixed
+- **Producer-side accumulator** (`pms_core::back_pressure`): the persist pipeline calls `record_event(elapsed_ms)` whenever a `send().await` waited ≥ 500 ms. A process-global atomic counter + `max_elapsed_ms` accumulator survives until the next `drain()` call. Zero allocations, zero locks, zero contention — just two `AtomicU64`s touched per back-pressure event.
+- **Resource guard folds the producer signal into `persist_pressure`**: every 5 s tick now drains the accumulator and treats `count ≥ 3 OR max_elapsed_ms ≥ 1000` as an additional `PersistQueue` pressure source. Either threshold alone or together arms read-only via the existing 1-tick fast-arm (5 s) → 60 s min-arm-duration → 30 s disarm-after-clear pipeline. Same wire format (`code: 1020`, `reason: "persist_queue"`), same backward compat.
+- **New Prometheus metric**: `pms_persist_back_pressure_events_total` counter increments inline with `record_event`. Pair with `pms_persist_queue_depth` to spot the divergence between point-in-time observation and producer-observed wait time. Expected post-fix behavior: counter still increments (signal SOURCE), but each event triggers a fast-arm of `pms_engine_read_only` so downstream clients see clean 503s instead of waiting up to 6 s on `send().await`.
+
+#### Files
+- `crates/pms-core/src/back_pressure.rs` — new module (~80 lines), atomic counter + drain + unit test for round-trip semantics.
+- `crates/pms-core/src/lib.rs` — register `pub mod back_pressure;` (alphabetical order, before `background_activity`).
+- `crates/pms-core/src/metrics.rs` — new `PERSIST_BACK_PRESSURE_EVENTS` `IntCounter`.
+- `crates/pms-core/src/net_adapter/persist.rs` — call `record_event(elapsed_ms)` immediately after the existing back-pressure log line in the producer's `Ok(())` branch.
+- `crates/pms-server/src/api/tasks.rs` — `spawn_resource_guard_task` drains the accumulator each tick, folds into `persist_pressure` alongside the queue-depth check.
+
+#### Limit
+- Threshold tuning is conservative (`≥ 3 events OR ≥ 1000 ms`). Real burst patterns may show more or fewer events at the saturation boundary — observe `pms_persist_back_pressure_events_total` rate post-deploy to refine. If sustained 0-event-per-tick load somehow produces a 800 ms isolated wait every few minutes (e.g. one-off OS scheduler hiccup), it won't trigger arming. That's the right trade-off for testnet; mainnet may want stricter.
+- Auto-disarm path unchanged (60 s min-arm + 30 s under-threshold). Producer signal only contributes to the arm decision; the watcher's hysteresis state machine remains the single source of truth for transitions.
+
+
+
+### Why
+Intégration PMS comme rail de paiement dans un SaaS streaming white-label.
+- **Phase 1 (sécurité)** : `Transaction::signing_message()` ne hashait que `(inputs, outputs, fee)`, sans aucun lien avec le réseau. Une TX signée sur testnet était valide bit-pour-bit sur mainnet → cross-chain replay trivial. Blocker pour des dépôts à garanties bancaires.
+- **Phase 2 (HD wallet)** : la plateforme doit pouvoir émettre une adresse de dépôt par utilisateur (potentiellement millions) sans stocker N clés privées. Standard BIP32/BIP39/BIP44 attendu par la plupart des SDK et hardware wallets.
+- **Phase 3 (RPC)** : la SaaS a besoin de 4 endpoints qui n'existaient pas — un snapshot DAG monotone (équivalent `get_block_height` linéaire), une estimation de fee découplée du `prepare_tx`, un lookup de TX unifié (`{from, to, amount, fee, depth, is_finalized}` au lieu du raw block JSON), et un scan de range pour rattraper après un crash watcher.
+- **Phase 4 (watcher API)** : les SaaS qui surveillent des millions d'adresses ne peuvent pas tenir N connexions SSE (une par user). Multi-address SSE = un seul stream qui filtre N adresses. Webhook subscription = pour les SaaS serverless (Lambda, Cloud Functions) qui ne peuvent pas garder un stream ouvert.
+
+Faire les quatre maintenant, avant lancement mainnet, évite une migration chaotique plus tard.
+
+### Phase 4 — Watcher API (multi-address SSE + webhooks)
+
+#### Added
+- **`GET /v1/activity/stream?addresses=a,b,c`** ([crates/pms-server/src/api_fn/activity/stream.rs](crates/pms-server/src/api_fn/activity/stream.rs)) : single SSE stream qui filtre N adresses (capé à `MAX_ADDRESSES_PER_STREAM = 1000`). Chaque event matchant émet un `ActivityItem` avec un champ `address` injecté dans le payload pour permettre au SaaS de router vers le user record sans re-parser. Encrypted payloads → événement `encrypted` générique avec l'adresse matchée (pas de décryptage côté serveur). >1000 adresses → 400.
+- **Webhook subscription** ([crates/pms-server/src/api_fn/webhooks.rs](crates/pms-server/src/api_fn/webhooks.rs)) — module complet :
+  - `POST /admin/webhooks` : crée une subscription `{addresses, callback_url, secret?}`. Si `secret` omis, le serveur génère 32 bytes aléatoires. Retour : `{subscription_id, secret, addresses_count}` — le secret n'est exposé qu'**une fois**, le SaaS doit le persister.
+  - `GET /admin/webhooks` : liste les subscriptions. Le secret est `#[serde(skip_serializing)]` — jamais re-exposé après création.
+  - `DELETE /admin/webhooks/{id}` : unsubscribe.
+  - **Storage in-memory** (`DashMap`) — perdu au restart. Le SaaS ré-enregistre via heartbeat. Persistance en Phase 4.5 si demande réelle (évite un CF + migration RocksDB pour cette release).
+  - Limites : `MAX_ADDRESSES_PER_SUBSCRIPTION = 1000`, `MAX_SUBSCRIPTIONS = 10_000`.
+- **Background delivery worker** ([crates/pms-server/src/api_fn/webhooks.rs::run_delivery_loop](crates/pms-server/src/api_fn/webhooks.rs)) : subscribe au `pms_event::PmsEvent::BlockPersisted` du bus, intersecte les `involved_addresses` avec chaque subscription, POST signé HMAC-SHA256 vers chaque `callback_url`. Headers `X-PMS-Signature`, `X-PMS-Subscription-Id`, `X-PMS-Delivery-Id`, `X-PMS-Delivery-Attempt`. Body : `{subscription_id, block_id, address, ts_ms, encrypted, ledger_id}`. Retry exponentiel max 5 tentatives (1, 2, 4, 8, 16 s — total worst-case ~31s avant abandon avec `tracing::error!` + counter `failed_count`). Spawn-per-delivery pour qu'un callback lent ne bloque pas la pump.
+- **`AppState.webhook_store`** ([crates/pms-server/src/api/state.rs](crates/pms-server/src/api/state.rs)) : nouveau champ partagé. Initialisé en `serve.rs` + delivery loop spawnée si `event_bus` disponible.
+
+#### Changed
+- **Bumped** `API_VERSION` : `11` → `12` (multi-SSE route + 3 webhook routes).
+
+#### Tests
+- **Unit tests** dans `crates/pms-server/src/api_fn/webhooks.rs` (run via `cargo test -p pms-server --lib api_fn::webhooks`) :
+  - `hmac_signature_is_deterministic_and_distinguishes_inputs` — same secret + body → same sig (64 hex chars), différent secret/body → différente. Vital pour que le SaaS reproduise la signature dans n'importe quelle lib crypto.
+  - `store_matching_returns_intersection_per_subscription` — l'intersection adresses-event × adresses-subscription est correcte (bug = revenue lost OU privacy leak).
+- **Sandbox tests** ([crates/pms-server/tests/dag_sandbox.rs](crates/pms-server/tests/dag_sandbox.rs)) — run avec `cargo test --release -p pms-server --test dag_sandbox -- --ignored --nocapture --test-threads=1 <test_name>` :
+  - `test_multi_address_sse_filters_correctly` — connect SSE pour 2 adresses, mint à A/C/B, reçoit exactement 2 events (pas l'unwatched). 1001 adresses → 400.
+  - `test_webhook_subscribe_list_unsubscribe_roundtrip` — CRUD complet : subscribe (CREATED + secret returned), list (sans secret), bad request → 400 code=2030, delete (200), re-delete → 404 code=3040.
+
+#### Dépendances ajoutées (pms-server)
+- `hmac = "0.12"` (RustCrypto, compatible avec sha2 0.10 déjà présent)
+- `reqwest = "0.12"` (était dans dev-dependencies, déplacée en runtime pour le delivery worker)
+
+---
+
+### Phase 3 — Payment-rail RPC endpoints
+
+#### Added
+- **`GET /v1/dag/status`** ([crates/pms-server/src/api_fn/dag.rs](crates/pms-server/src/api_fn/dag.rs)) : snapshot SaaS-friendly du DAG — `{tip_count, last_milestone, total_blocks, latest_block_ts_ms, network_id, api_version, dag_version}`. Curseur monotone via `total_blocks` + `latest_block_ts_ms` pour détecter de l'activité sans poller un endpoint plus lourd.
+- **`POST /v1/estimate-fee`** ([crates/pms-server/src/api_fn/estimate_fee.rs](crates/pms-server/src/api_fn/estimate_fee.rs)) : pure compute (pas de UTXO selection), retourne `{fee, transfer_fee, total, fee_breakdown}` pour `{amount, asset_id?}`. Réutilise `FeePolicy::compute_fee` + `evaluate_transfer` (smart contract OnTransfer fees). Permet à la UI d'afficher le total exact AVANT que l'utilisateur signe.
+- **`GET /v1/transaction/{block_id}`** ([crates/pms-server/src/api_fn/transaction_lookup.rs](crates/pms-server/src/api_fn/transaction_lookup.rs)) : lookup unifié — décode le payload, résout le `from` via les UTXOs parents, calcule `is_finalized + depth`, retourne `{tx_hash, block_id, from, to, amount, asset_id, fee, timestamp_ms, is_finalized, depth, status, inputs, outputs}`. Supporte `TxUtxo` (plain), `Mint`, `Reward` ; renvoie 403 code=1010 pour les payloads chiffrés en pointant vers `GET /v1/wallet/{address}/activity` (qui decrypt avec la clé du destinataire). 404 code=3040 pour block_id inconnu.
+- **`GET /v1/blocks/range?after_ts=&after_id=&limit=`** ([crates/pms-server/src/api_fn/blocks.rs](crates/pms-server/src/api_fn/blocks.rs)) : scan paginé par timestamp via le CF `by_time` existant, le plus récent en premier. Curseur exclusif `(ts_ms, id, has_more)` — relance le call avec `after_ts` / `after_id` du curseur jusqu'à ce que `next_cursor` soit `None`. `limit` borné à 1000 (défaut 100). Idempotent : la même requête deux fois retourne les mêmes blocks (pour reprise après crash watcher).
+
+#### Changed
+- **`NetDagAdapter` trait étendu** ([crates/pms-interface/src/net_adapter.rs](crates/pms-interface/src/net_adapter.rs)) avec 3 méthodes par défaut (no-op fallback) :
+  - `async fn count_descendants(&self, block_id: &str, max_count: usize) -> usize`
+  - `async fn is_finalized(&self, block_id: &str) -> bool`
+  - `async fn last_milestone(&self) -> Option<String>`
+  Implémentées dans `CoreAdapter` ([crates/pms-core/src/net_adapter/mod.rs](crates/pms-core/src/net_adapter/mod.rs)) en délégant à `self.dag.*` (sync sous le capot).
+
+#### Bumped
+- **`API_VERSION`** : `10` → `11` (4 nouveaux endpoints).
+- *Workspace, DAG_VERSION, protocol_version inchangés en Phase 3.*
+
+#### Tests sandbox (4 ajoutés, tous passants)
+Run avec `cargo test --release -p pms-server --test dag_sandbox -- --ignored --nocapture --test-threads=1 <test_name>`.
+- `test_dag_status_endpoint` — snapshot vide (genesis seul) → `total_blocks=1` ; après 3 mints → `total_blocks=4`, `latest_block_ts_ms` set, `api_version=11`, `dag_version="2.0.0"`, `network_id="pms-e2e-test"`.
+- `test_estimate_fee_endpoint` — 100 PMS → `fee="3.0000001"`, `total=amount+fee+transfer_fee`. Amount négatif → 400 code=2020. Amount malformé → 400 code=2020.
+- `test_transaction_lookup_endpoint` — Mint block lookup retourne tous les champs (`from=null`, `to=recipient`, `amount=42`, `inputs=[]`, `outputs=[1]`). TxUtxo chiffré → 403 code=1010 avec redirect vers `/v1/wallet/{addr}/activity`. block_id inconnu → 404 code=3040.
+- `test_blocks_range_endpoint` — page 1 (limit=3) retourne 3 blocks + curseur, idempotent à travers 2 calls. Page 2 via curseur retourne des blocks **disjoints** de page 1 (curseur exclusif).
+
+---
+
+### Phase 2 — HD wallet (BIP32 / BIP39 / BIP44)
+
+#### Added
+- **`pms_wallet::hd` module** ([crates/pms-wallet/src/hd.rs](crates/pms-wallet/src/hd.rs)) : dérivation BIP32 secp256k1 + BIP39 mnemonic + BIP44 path. API : `master_xprv_from_mnemonic`, `master_xprv_from_seed`, `derive_child_wallet`, `derive_child_wallet_at_index`, `pms_bip44_path`. Chaque wallet enfant est un `Wallet` complet (secp256k1 + X25519 dérivés cohérents).
+- **`PMS_COIN_TYPE = 0x7FFF_FFFF`** : SLIP-44 coin type temporaire (range "private use") en attendant l'enregistrement officiel. Path BIP44 par défaut : `m/44'/2147483647'/{account}'/0/{index}`.
+- **Tests** ([crates/pms-wallet/tests/hd_derivation_test.rs](crates/pms-wallet/tests/hd_derivation_test.rs), 7 tests) : déterminisme (re-dérivation reproduit l'octet pour octet), 1000 adresses uniques, multi-tenant (`account` différent → adresses disjointes), BIP39 passphrase protection, signing avec network_id Phase 1, chemins arbitraires, gestion d'erreurs.
+- **Fiche Obsidian** [[hd-wallet-bip32]] : pattern d'usage SaaS, limitations watch-only, migration future SLIP-44.
+
+#### Limitations actuelles (documentées)
+- **Pas de mode "vrai watch-only"** (xpub-only sans master en RAM). Raison : l'adresse PMS bind deux pubkeys (secp + X25519), et le X25519 est dérivé de la *privée* secp via HKDF — un xpub seul ne peut pas le reconstruire. Phase 2.5 envisagée : (a) dérivation parallèle SLIP-0010 pour X25519, ou (b) adresses "deposit-only" sans X25519. Le pattern actuel "master chiffré at-rest, déchiffré à la demande" couvre 95% du bénéfice cold/hot.
+- **SLIP-44 non enregistré** : migration nécessaire au moment de l'enregistrement officiel (ré-dérivation des adresses utilisateurs).
+- **Pas de plugin hardware wallet** Ledger/Trezor (Phase ultérieure, dédiée).
+
+#### Dépendance
+- `bip32 = "0.5"` (RustCrypto) ajoutée à `crates/pms-wallet/Cargo.toml`. Features : `secp256k1`, `alloc`. Pas de `default-features` pour rester no_std-friendly côté bip32.
+
+---
+
+### Phase 1 — Cross-chain replay protection (BREAKING)
+
+#### Why
+`Transaction::signing_message()` ne hashait que `(inputs, outputs, fee)`, sans aucun lien avec le réseau. Une TX signée sur testnet était valide bit-pour-bit sur mainnet (mêmes UTXOs côté attaquant, même clé coordinateur) → cross-chain replay trivial. Le SaaS ayant besoin de garanties bancaires sur les dépôts, ce trou est un blocker. Faire le fix maintenant, avant lancement mainnet, évite une migration chaotique plus tard.
+
+#### Changed (BREAKING)
+- **`Transaction::signing_message(network_id: &str)`** — l'API prend désormais un `network_id` qui est inclus dans le message canonique signé. Le verifier hashe avec le `network_id` de la chaîne courante ; toute TX signée pour un autre réseau est rejetée comme `InvalidSignature("signature mismatch …")`. Aucune addition au wire format (la protection est intrinsèque au signing) — l'attaquant ne peut même pas prétendre signer pour un réseau X.
+- **`ValidatePolicy.network_id: String`** ajouté. Plumb depuis `Settings.network.network_id` via `from_settings(&ValidationSettings, network_id: &str)` et `try_from_global_config()`.
+- **`verify_tx_signatures(tx, network_id)`** prend désormais le `network_id` courant.
+- **SDK TS local** (`sdk/src/client.ts`) : `txCanonical` inclut maintenant `network_id: this.config.networkId` en première position du JSON canonique — synchro stricte avec le struct Rust `Canon`.
+
+#### Bumped
+- **Workspace** : `0.7.30` → `0.8.0` (breaking change protocole)
+- **`DAG_VERSION`** : `1.2.0` → `2.0.0` (major bump — refus de démarrer sur DB pré-existant, **wipe testnet obligatoire**)
+- **`API_VERSION`** : `9` → `10` (handlers de signing exigent network_id matching)
+- **`protocol_version`** P2P : `1` → `2` dans configs dev/testnet/mainnet
+- *`CURRENT_VER` schema RocksDB inchangé (10) — pas de nouveau CF en Phases 1-2*
+
+#### Tests
+- `crates/pms-core/tests/tx_validation.rs::reject_tx_signed_for_different_network` — TX signée `pms-testnet-v1` rejetée par verifier `pms-mainnet-v1` (sortie : `signature mismatch input 0`). Sanity check : la même TX re-signée pour mainnet est acceptée.
+- `accept_tx_signed_for_matching_network` — TX signée `pms-testnet-v1` acceptée par verifier `pms-testnet-v1` (preuve que le binding ne casse pas le happy path).
+
+#### Décisions actées (non implémentées)
+- **DER hex unification SDK ↔ Rust** : skipped. Le SDK convertit déjà hex → base64 avant l'envoi (`sdk/src/client.ts:540-542`), le wire format reste base64. Switcher en hex ferait grossir la signature sur le fil (140 chars vs 96 base64) — régression nette pour zéro bénéfice opérationnel.
+- **`InvalidNetworkId` ApiError variant** : skipped. La protection est intrinsèque au hash signé — un network_id différent ne peut PAS être signalé comme tel par le verifier (ce serait précisément ce qu'on veut empêcher : que l'attaquant déclare son network_id côté wire). Le retour `SignatureMismatch` (4001) existant est sémantiquement correct.
+
+---
+
+### Migration / déploiement (Phase 1+2)
+- **Wipe testnet obligatoire** : `DAG_VERSION` major bump → l'engine refusera de démarrer sur la DB existante. Procédure : arrêter la stack, `docker volume rm rocksdb_testnet_data`, redéployer avec `IMAGE_VERSION=v0.8.0 scripts/deploy-testnet.sh --yes`.
+- **SDKs externes** doivent être mis à jour pour inclure `network_id` dans le canonical signing — sans ça, toutes leurs TX sortantes seront rejetées en `4001 SignatureMismatch`.
+- **HD wallet** rétrocompatible : les wallets existants (créés via `Wallet::from_seed` / `Wallet::from_mnemonic`) continuent à fonctionner. La nouvelle API `pms_wallet::hd::*` est purement additive.
+
+### Hors scope (Phases suivantes)
+- Phase 2.5 : mode watch-only complet (xpub-only, master jamais en RAM) — exige redesign d'adresse pour soit dérivation parallèle SLIP-0010 X25519, soit format "deposit-only" sans X25519
+- Phase 3 : `GET /v1/transaction/{tx_hash}`, `POST /v1/estimate-fee`, `GET /v1/dag/status`, `GET /v1/blocks/range`
+- Phase 4 : multi-address SSE, webhook subscription
+- SLIP-44 registration officiel
+- Plugin hardware wallet (Ledger / Trezor)
+- Voir `/Users/erwan.ngma/.claude/plans/je-veux-pouvoir-faire-jazzy-crayon.md` pour le plan complet.
+
+---
+
 ## [0.7.30] - 2026-05-02 — RocksDB drain rate visibility (histograms) + 4× batch amortization
 
 ### Why

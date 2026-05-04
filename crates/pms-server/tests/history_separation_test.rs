@@ -78,6 +78,7 @@ async fn history_separation_test() -> anyhow::Result<()> {
         coord_shard_wallets: std::sync::Arc::new(Vec::new()),
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
+        webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
     };
 
     // 4) Insert Blocks manually into Store (to bypass validation/mining for speed)

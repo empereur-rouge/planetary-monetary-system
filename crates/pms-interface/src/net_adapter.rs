@@ -92,6 +92,35 @@ pub trait NetDagAdapter: Send + Sync {
     async fn get_block(&self, id: &str) -> Result<Option<WireBlock>>;
     async fn recent_ids(&self, limit: usize) -> Result<Vec<String>>;
     async fn get_blocks_by_ids(&self, ids: &[String]) -> Result<Vec<WireBlock>>;
+
+    /// Approximate number of current DAG tips. Read from an atomic counter
+    /// (no Vec clone, no BFS) — used by `GET /v1/dag/status` polled by SaaS
+    /// watchers. Default impl falls back to `top_tips(usize::MAX).len()`.
+    async fn tip_count_estimate(&self) -> usize {
+        self.top_tips(usize::MAX).await.map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Number of distinct descendants of `block_id` in the RAM DAG, capped at
+    /// `max_count` so a popular block doesn't BFS the whole graph. The SaaS
+    /// payment rail uses this as the "confirmations" equivalent for DAG
+    /// finality tiers (cf. `GET /v1/transaction/{id}`).
+    /// Default impl returns 0 — concrete adapters MUST override.
+    async fn count_descendants(&self, _block_id: &str, _max_count: usize) -> usize {
+        0
+    }
+
+    /// True iff the block has been marked finalized by the consensus layer
+    /// (k-depth confirmation reached or coordinator milestone). Default impl
+    /// returns `false` for adapters that don't track finality.
+    async fn is_finalized(&self, _block_id: &str) -> bool {
+        false
+    }
+
+    /// Most recent milestone block id (coordinator-signed checkpoint), if any.
+    /// Default impl returns `None`.
+    async fn last_milestone(&self) -> Option<String> {
+        None
+    }
     /// [DEPRECATED] PoW is disabled for Private DAG. Returns 0.
     /// Kept for API compatibility, will be removed in a future version.
     fn min_pow_leading_zero_bits(&self) -> u8;

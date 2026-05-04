@@ -315,7 +315,7 @@ pub async fn action_send_tokens(
 
     // 7) Signature de la Tx UTXO (niveau “transaction”)
     {
-        let msg = tx.signing_message()?;
+        let msg = tx.signing_message(&settings.network.network_id)?;
         let sig_b64 = w
             .sign(&msg)
             .map_err(|_| anyhow::anyhow!("Failed to sign transaction"))?;
@@ -422,7 +422,7 @@ pub async fn action_send_tokens_headless(
 
     // 5) Sign Transaction
     {
-        let msg = tx.signing_message()?;
+        let msg = tx.signing_message(&settings.network.network_id)?;
         let sig_b64 = w
             .sign(&msg)
             .map_err(|_| anyhow::anyhow!("Failed to sign"))?;

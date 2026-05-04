@@ -116,7 +116,7 @@ pub async fn spawn_node_generic_rocks_with_seed(
     let dag = Arc::new(ConcurrentDag::bootstrap_from_store::<RocksStore>(&*store).await?);
 
     // 3) Adapter + serveur
-    let mut policy = ValidatePolicy::from_settings(&settings.validation);
+    let mut policy = ValidatePolicy::from_settings(&settings.validation, &settings.network.network_id);
     policy.enforce_parent_existence = enforce_parents;
     eprintln!(
         "[TEST] spawn_rocks: enforce_parents={} policy.enforce={}",
