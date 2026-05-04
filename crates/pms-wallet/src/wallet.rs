@@ -319,17 +319,16 @@ impl Wallet {
         &self.x25519_pub_hex
     }
 
-    /// Crée un wallet depuis une clé privée hexadécimale (64 chars).
-    /// Ne génère pas de mnémonique.
-    pub fn from_hex(priv_hex: &str) -> Result<Self, String> {
-        let priv_bytes = hex::decode(priv_hex).map_err(|e| format!("Invalid hex: {}", e))?;
+    /// Crée un wallet depuis 32 octets de clé privée ECDSA bruts.
+    /// Source unique de la construction Wallet (secp + X25519 dérivé via HKDF).
+    /// Préférer cet entry point quand on a déjà des bytes en main (BIP32, HSM,
+    /// node.key.enc) — évite un roundtrip hex inutile.
+    pub fn from_priv_bytes(priv_bytes: &[u8]) -> Result<Self, String> {
         if priv_bytes.len() != 32 {
             return Err(format!("Expected 32 bytes, got {}", priv_bytes.len()));
         }
-
-        let priv_b64 = STANDARD.encode(&priv_bytes);
-
-        let signing_key = k256::ecdsa::SigningKey::from_slice(&priv_bytes)
+        let priv_b64 = STANDARD.encode(priv_bytes);
+        let signing_key = k256::ecdsa::SigningKey::from_slice(priv_bytes)
             .map_err(|e| format!("Invalid ECDSA private key: {}", e))?;
         let verify_key = signing_key.verifying_key();
         let pub_hex = hex::encode(verify_key.to_encoded_point(false).as_bytes());
@@ -340,13 +339,18 @@ impl Wallet {
             x25519_pub_hex: String::new(),
             mnemonic_words: None,
         };
-
         let (_sk, pk) = w
             .derive_x25519_pair_from_private_key_b64()
             .ok_or_else(|| "x25519 derivation failed from private key".to_string())?;
         w.x25519_pub_hex = pk;
-
         Ok(w)
+    }
+
+    /// Crée un wallet depuis une clé privée hexadécimale (64 chars).
+    /// Wrapper sur [`Wallet::from_priv_bytes`].
+    pub fn from_hex(priv_hex: &str) -> Result<Self, String> {
+        let priv_bytes = hex::decode(priv_hex).map_err(|e| format!("Invalid hex: {}", e))?;
+        Self::from_priv_bytes(&priv_bytes)
     }
 }
 

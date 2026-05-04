@@ -7,40 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.8.0] - Unreleased — Cross-chain replay protection (BREAKING)
+## [0.8.0] - Unreleased — Cross-chain replay protection (BREAKING) + HD wallet (BIP32)
 
 ### Why
-Audit du protocole en vue de l'intégration PMS comme rail de paiement dans un SaaS streaming white-label : `Transaction::signing_message()` ne hashait que `(inputs, outputs, fee)`, sans aucun lien avec le réseau. Une TX signée sur testnet était valide bit-pour-bit sur mainnet (mêmes UTXOs côté attaquant, même clé coordinateur) → cross-chain replay trivial. Le SaaS ayant besoin de garanties bancaires sur les dépôts, ce trou est un blocker. Faire le fix maintenant, avant lancement mainnet, évite une migration chaotique plus tard.
+Intégration PMS comme rail de paiement dans un SaaS streaming white-label.
+- **Phase 1 (sécurité)** : `Transaction::signing_message()` ne hashait que `(inputs, outputs, fee)`, sans aucun lien avec le réseau. Une TX signée sur testnet était valide bit-pour-bit sur mainnet → cross-chain replay trivial. Blocker pour des dépôts à garanties bancaires.
+- **Phase 2 (HD wallet)** : la plateforme doit pouvoir émettre une adresse de dépôt par utilisateur (potentiellement millions) sans stocker N clés privées. Standard BIP32/BIP39/BIP44 attendu par la plupart des SDK et hardware wallets.
 
-### Changed (BREAKING)
+Faire les deux maintenant, avant lancement mainnet, évite une migration chaotique plus tard.
+
+### Phase 2 — HD wallet (BIP32 / BIP39 / BIP44)
+
+#### Added
+- **`pms_wallet::hd` module** ([crates/pms-wallet/src/hd.rs](crates/pms-wallet/src/hd.rs)) : dérivation BIP32 secp256k1 + BIP39 mnemonic + BIP44 path. API : `master_xprv_from_mnemonic`, `master_xprv_from_seed`, `derive_child_wallet`, `derive_child_wallet_at_index`, `pms_bip44_path`. Chaque wallet enfant est un `Wallet` complet (secp256k1 + X25519 dérivés cohérents).
+- **`PMS_COIN_TYPE = 0x7FFF_FFFF`** : SLIP-44 coin type temporaire (range "private use") en attendant l'enregistrement officiel. Path BIP44 par défaut : `m/44'/2147483647'/{account}'/0/{index}`.
+- **Tests** ([crates/pms-wallet/tests/hd_derivation_test.rs](crates/pms-wallet/tests/hd_derivation_test.rs), 7 tests) : déterminisme (re-dérivation reproduit l'octet pour octet), 1000 adresses uniques, multi-tenant (`account` différent → adresses disjointes), BIP39 passphrase protection, signing avec network_id Phase 1, chemins arbitraires, gestion d'erreurs.
+- **Fiche Obsidian** [[hd-wallet-bip32]] : pattern d'usage SaaS, limitations watch-only, migration future SLIP-44.
+
+#### Limitations actuelles (documentées)
+- **Pas de mode "vrai watch-only"** (xpub-only sans master en RAM). Raison : l'adresse PMS bind deux pubkeys (secp + X25519), et le X25519 est dérivé de la *privée* secp via HKDF — un xpub seul ne peut pas le reconstruire. Phase 2.5 envisagée : (a) dérivation parallèle SLIP-0010 pour X25519, ou (b) adresses "deposit-only" sans X25519. Le pattern actuel "master chiffré at-rest, déchiffré à la demande" couvre 95% du bénéfice cold/hot.
+- **SLIP-44 non enregistré** : migration nécessaire au moment de l'enregistrement officiel (ré-dérivation des adresses utilisateurs).
+- **Pas de plugin hardware wallet** Ledger/Trezor (Phase ultérieure, dédiée).
+
+#### Dépendance
+- `bip32 = "0.5"` (RustCrypto) ajoutée à `crates/pms-wallet/Cargo.toml`. Features : `secp256k1`, `alloc`. Pas de `default-features` pour rester no_std-friendly côté bip32.
+
+---
+
+### Phase 1 — Cross-chain replay protection (BREAKING)
+
+#### Why
+`Transaction::signing_message()` ne hashait que `(inputs, outputs, fee)`, sans aucun lien avec le réseau. Une TX signée sur testnet était valide bit-pour-bit sur mainnet (mêmes UTXOs côté attaquant, même clé coordinateur) → cross-chain replay trivial. Le SaaS ayant besoin de garanties bancaires sur les dépôts, ce trou est un blocker. Faire le fix maintenant, avant lancement mainnet, évite une migration chaotique plus tard.
+
+#### Changed (BREAKING)
 - **`Transaction::signing_message(network_id: &str)`** — l'API prend désormais un `network_id` qui est inclus dans le message canonique signé. Le verifier hashe avec le `network_id` de la chaîne courante ; toute TX signée pour un autre réseau est rejetée comme `InvalidSignature("signature mismatch …")`. Aucune addition au wire format (la protection est intrinsèque au signing) — l'attaquant ne peut même pas prétendre signer pour un réseau X.
 - **`ValidatePolicy.network_id: String`** ajouté. Plumb depuis `Settings.network.network_id` via `from_settings(&ValidationSettings, network_id: &str)` et `try_from_global_config()`.
 - **`verify_tx_signatures(tx, network_id)`** prend désormais le `network_id` courant.
 - **SDK TS local** (`sdk/src/client.ts`) : `txCanonical` inclut maintenant `network_id: this.config.networkId` en première position du JSON canonique — synchro stricte avec le struct Rust `Canon`.
 
-### Bumped
+#### Bumped
 - **Workspace** : `0.7.30` → `0.8.0` (breaking change protocole)
 - **`DAG_VERSION`** : `1.2.0` → `2.0.0` (major bump — refus de démarrer sur DB pré-existant, **wipe testnet obligatoire**)
 - **`API_VERSION`** : `9` → `10` (handlers de signing exigent network_id matching)
 - **`protocol_version`** P2P : `1` → `2` dans configs dev/testnet/mainnet
-- *`CURRENT_VER` schema RocksDB inchangé (10) — pas de nouveau CF en Phase 1*
+- *`CURRENT_VER` schema RocksDB inchangé (10) — pas de nouveau CF en Phases 1-2*
 
-### Tests
+#### Tests
 - `crates/pms-core/tests/tx_validation.rs::reject_tx_signed_for_different_network` — TX signée `pms-testnet-v1` rejetée par verifier `pms-mainnet-v1` (sortie : `signature mismatch input 0`). Sanity check : la même TX re-signée pour mainnet est acceptée.
 - `accept_tx_signed_for_matching_network` — TX signée `pms-testnet-v1` acceptée par verifier `pms-testnet-v1` (preuve que le binding ne casse pas le happy path).
 
-### Décisions actées (non implémentées)
+#### Décisions actées (non implémentées)
 - **DER hex unification SDK ↔ Rust** : skipped. Le SDK convertit déjà hex → base64 avant l'envoi (`sdk/src/client.ts:540-542`), le wire format reste base64. Switcher en hex ferait grossir la signature sur le fil (140 chars vs 96 base64) — régression nette pour zéro bénéfice opérationnel.
 - **`InvalidNetworkId` ApiError variant** : skipped. La protection est intrinsèque au hash signé — un network_id différent ne peut PAS être signalé comme tel par le verifier (ce serait précisément ce qu'on veut empêcher : que l'attaquant déclare son network_id côté wire). Le retour `SignatureMismatch` (4001) existant est sémantiquement correct.
 
-### Migration / déploiement
+---
+
+### Migration / déploiement (Phase 1+2)
 - **Wipe testnet obligatoire** : `DAG_VERSION` major bump → l'engine refusera de démarrer sur la DB existante. Procédure : arrêter la stack, `docker volume rm rocksdb_testnet_data`, redéployer avec `IMAGE_VERSION=v0.8.0 scripts/deploy-testnet.sh --yes`.
 - **SDKs externes** doivent être mis à jour pour inclure `network_id` dans le canonical signing — sans ça, toutes leurs TX sortantes seront rejetées en `4001 SignatureMismatch`.
+- **HD wallet** rétrocompatible : les wallets existants (créés via `Wallet::from_seed` / `Wallet::from_mnemonic`) continuent à fonctionner. La nouvelle API `pms_wallet::hd::*` est purement additive.
 
 ### Hors scope (Phases suivantes)
-- Phase 2 : BIP32 + xpub watch-only (HD wallet)
+- Phase 2.5 : mode watch-only complet (xpub-only, master jamais en RAM) — exige redesign d'adresse pour soit dérivation parallèle SLIP-0010 X25519, soit format "deposit-only" sans X25519
 - Phase 3 : `GET /v1/transaction/{tx_hash}`, `POST /v1/estimate-fee`, `GET /v1/dag/status`, `GET /v1/blocks/range`
 - Phase 4 : multi-address SSE, webhook subscription
+- SLIP-44 registration officiel
+- Plugin hardware wallet (Ledger / Trezor)
 - Voir `/Users/erwan.ngma/.claude/plans/je-veux-pouvoir-faire-jazzy-crayon.md` pour le plan complet.
 
 ---
