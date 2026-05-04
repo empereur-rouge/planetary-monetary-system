@@ -12,6 +12,7 @@
 #![allow(clippy::module_inception)]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::single_match)]
+pub mod back_pressure;
 pub mod background_activity;
 pub mod background_persist;
 mod block_builder;

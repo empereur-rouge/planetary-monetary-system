@@ -124,6 +124,31 @@ pub static PERSIST_CONSUMER_BLOCKS: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Number of producer-side `persist_tx.send().await` calls that waited
+/// ≥ 500 ms before completing — i.e. the persist channel was full and
+/// the producer was back-pressured (v0.8.0).
+///
+/// Pair this with `pms_persist_queue_depth` to detect bursts that
+/// saturate the channel for less than the 5 s sampling cadence:
+/// the depth gauge will show 0 across two consecutive samples but
+/// this counter will increment for every block that hit the wall in
+/// between. The resource guard task in pms-server consumes the
+/// process-global accumulator (see [`crate::back_pressure`]) on its
+/// own tick and arms read-only mode proactively.
+///
+/// Testnet 2026-05-04 baseline: 6728 events in 24 h before the
+/// producer-signal was wired into the resource guard. Expectation
+/// post-fix: this counter still increments (signal SOURCE), but
+/// each event triggers a fast-arm of `pms_engine_read_only` so
+/// downstream clients see clean 503s instead of waiting up to 6 s.
+pub static PERSIST_BACK_PRESSURE_EVENTS: Lazy<IntCounter> = Lazy::new(|| {
+    prometheus::register_int_counter!(
+        "pms_persist_back_pressure_events_total",
+        "Producer-side persist_tx.send().await calls that waited >= 500ms (channel saturation)"
+    )
+    .unwrap()
+});
+
 /// Distribution of consumer batch sizes (v0.7.30). Cumulative counters
 /// (`PERSIST_CONSUMER_BLOCKS / PERSIST_CONSUMER_BATCHES`) only give us
 /// the **average** batch size. Under bursty load the distribution

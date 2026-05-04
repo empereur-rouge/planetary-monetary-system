@@ -1182,12 +1182,21 @@ where
                             Ok(()) => {
                                 let elapsed = send_start.elapsed();
                                 if elapsed >= std::time::Duration::from_millis(500) {
+                                    let elapsed_ms = elapsed.as_millis() as u64;
                                     tracing::warn!(
                                         target = "pms_persist",
                                         block_id = %block_id,
-                                        elapsed_ms = elapsed.as_millis() as u64,
+                                        elapsed_ms,
                                         "persist_tx.send was back-pressured",
                                     );
+                                    // v0.8.0: signal the resource guard
+                                    // (pms-server side) so it arms read-only
+                                    // mode proactively. Without this, the
+                                    // 5 s queue-depth sampler misses sub-5s
+                                    // saturations entirely — testnet
+                                    // 2026-05-04 logged 6728 of these in
+                                    // 24 h with 0 read-only auto-arms.
+                                    crate::back_pressure::record_event(elapsed_ms);
                                 }
                                 break;
                             }

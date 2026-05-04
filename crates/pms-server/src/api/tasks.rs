@@ -727,7 +727,35 @@ pub fn spawn_resource_guard_task(state: AppState) {
             // block their HTTP handlers for seconds-to-minutes;
             // shedding load via 503 across the whole engine keeps
             // the SDK happy and gives the consumer headroom.
-            let persist_pressure = check_persist_saturated(&state, persist_queue_critical_pct);
+            //
+            // **Two signals fold into `persist_pressure`** :
+            //
+            //   - point-in-time: `adapter.persist_queue_depth() ≥ threshold_pct`
+            //     captures sustained saturation observable at sample time.
+            //
+            //   - producer-side observation (v0.8.0): drain the
+            //     back-pressure accumulator from `pms_core::back_pressure`.
+            //     Producers calling `send().await` that waited ≥ 500 ms
+            //     have already incremented this counter — even if the
+            //     channel cleared before the next sample tick. Threshold:
+            //     ≥ 3 events OR max ≥ 1000 ms in the last 5 s, both
+            //     conservative enough to skip isolated 600 ms blips
+            //     while catching real burst patterns. Testnet 2026-05-04
+            //     showed 6728 events / 24 h with sub-5 s saturation
+            //     windows — 100 % missed by the queue-depth sampler
+            //     alone.
+            let depth_pressure = check_persist_saturated(&state, persist_queue_critical_pct);
+            let (bp_count, bp_max_ms) = pms_core::back_pressure::drain();
+            let producer_signal_pressure = bp_count >= 3 || bp_max_ms >= 1000;
+            if producer_signal_pressure {
+                tracing::info!(
+                    target = "read_only_guard",
+                    bp_count,
+                    bp_max_ms,
+                    "Producer-side back-pressure observed — folding into PersistQueue pressure"
+                );
+            }
+            let persist_pressure = depth_pressure || producer_signal_pressure;
 
             // ─── 5. Decide ──────────────────────────────────────────
             let any_pressure =

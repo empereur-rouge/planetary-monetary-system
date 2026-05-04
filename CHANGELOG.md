@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.8.0] - Unreleased — Cross-chain replay protection (BREAKING) + HD wallet (BIP32) + Payment-rail RPC + Watcher API
+## [0.8.0] - Unreleased — Cross-chain replay protection (BREAKING) + HD wallet (BIP32) + Payment-rail RPC + Watcher API + producer-signaled read-only
+
+### Phase 5 — Producer-signaled read-only mode (close the sub-5s saturation gap)
+
+#### Why
+Diagnostic 2026-05-04 (24 h check, v0.7.30 in prod) :
+- 6728 producer-side `persist_tx.send().await` waits ≥ 500 ms over 24 h (p50 642 ms, p95 1.4 s, p99 3.6 s, max 6.3 s).
+- **0 read-only auto-arms** despite the 4-watermark resource guard being wired in v0.7.27.
+- Cause: the 5 s sampling cadence of `spawn_resource_guard_task` polls `adapter.persist_queue_depth()` as a point-in-time observation. Bursts that saturate the channel for less than the sampling interval (which is most of them — p99 wait was 3.6 s, well under 5 s) clear before the next sample reads them. The channel went `0 → full → 0` between two ticks ⇒ invisible to the watcher, but every saturation made one or more producers wait.
+
+#### Fixed
+- **Producer-side accumulator** (`pms_core::back_pressure`): the persist pipeline calls `record_event(elapsed_ms)` whenever a `send().await` waited ≥ 500 ms. A process-global atomic counter + `max_elapsed_ms` accumulator survives until the next `drain()` call. Zero allocations, zero locks, zero contention — just two `AtomicU64`s touched per back-pressure event.
+- **Resource guard folds the producer signal into `persist_pressure`**: every 5 s tick now drains the accumulator and treats `count ≥ 3 OR max_elapsed_ms ≥ 1000` as an additional `PersistQueue` pressure source. Either threshold alone or together arms read-only via the existing 1-tick fast-arm (5 s) → 60 s min-arm-duration → 30 s disarm-after-clear pipeline. Same wire format (`code: 1020`, `reason: "persist_queue"`), same backward compat.
+- **New Prometheus metric**: `pms_persist_back_pressure_events_total` counter increments inline with `record_event`. Pair with `pms_persist_queue_depth` to spot the divergence between point-in-time observation and producer-observed wait time. Expected post-fix behavior: counter still increments (signal SOURCE), but each event triggers a fast-arm of `pms_engine_read_only` so downstream clients see clean 503s instead of waiting up to 6 s on `send().await`.
+
+#### Files
+- `crates/pms-core/src/back_pressure.rs` — new module (~80 lines), atomic counter + drain + unit test for round-trip semantics.
+- `crates/pms-core/src/lib.rs` — register `pub mod back_pressure;` (alphabetical order, before `background_activity`).
+- `crates/pms-core/src/metrics.rs` — new `PERSIST_BACK_PRESSURE_EVENTS` `IntCounter`.
+- `crates/pms-core/src/net_adapter/persist.rs` — call `record_event(elapsed_ms)` immediately after the existing back-pressure log line in the producer's `Ok(())` branch.
+- `crates/pms-server/src/api/tasks.rs` — `spawn_resource_guard_task` drains the accumulator each tick, folds into `persist_pressure` alongside the queue-depth check.
+
+#### Limit
+- Threshold tuning is conservative (`≥ 3 events OR ≥ 1000 ms`). Real burst patterns may show more or fewer events at the saturation boundary — observe `pms_persist_back_pressure_events_total` rate post-deploy to refine. If sustained 0-event-per-tick load somehow produces a 800 ms isolated wait every few minutes (e.g. one-off OS scheduler hiccup), it won't trigger arming. That's the right trade-off for testnet; mainnet may want stricter.
+- Auto-disarm path unchanged (60 s min-arm + 30 s under-threshold). Producer signal only contributes to the arm decision; the watcher's hysteresis state machine remains the single source of truth for transitions.
+
+
 
 ### Why
 Intégration PMS comme rail de paiement dans un SaaS streaming white-label.
