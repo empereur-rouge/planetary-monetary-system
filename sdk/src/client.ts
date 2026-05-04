@@ -529,9 +529,11 @@ export class PmsClient {
             }
         }));
 
-        // 5. Créer le message de signature de transaction (pour unlocks)
-        // Le message est un hash du contenu canonique de la transaction
+        // 5. Hash canonique signé pour les unlocks. network_id empêche le replay
+        // cross-chain. DOIT matcher pms-types-transaction::Canon exactement (ordre
+        // des champs, sérialisation) — sinon les signatures seront rejetées.
         const txCanonical = {
+            network_id: this.config.networkId,
             inputs: inputs,
             outputs: outputs,
             fee: formatAmount(fee),

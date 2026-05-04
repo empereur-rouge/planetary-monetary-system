@@ -38,14 +38,20 @@ pub struct Unlock {
 }
 
 impl Transaction {
-    pub fn signing_message(&self) -> anyhow::Result<String> {
+    /// Canonical signing message — bound to a specific `network_id` to prevent
+    /// cross-chain replay (a TX signed for testnet must not validate on mainnet).
+    /// Returns the SHA-256 of the canonical JSON `{network_id, inputs, outputs, fee}`,
+    /// hex-encoded.
+    pub fn signing_message(&self, network_id: &str) -> anyhow::Result<String> {
         #[derive(Serialize)]
         struct Canon<'a> {
+            network_id: &'a str,
             inputs: &'a [crate::TxInput],
             outputs: &'a [crate::TxOutput],
             fee: &'a str,
         }
         let canon = Canon {
+            network_id,
             inputs: &self.inputs,
             outputs: &self.outputs,
             fee: &self.fee,

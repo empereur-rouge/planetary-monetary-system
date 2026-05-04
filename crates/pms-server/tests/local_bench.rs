@@ -485,6 +485,7 @@ async fn local_bench() -> Result<()> {
             let fee_addr = admin_addr.clone();
             let counter = progress_counter.clone();
             let failed_counter = progress_failed.clone();
+            let network_id_for_worker = network_id.clone();
 
             tokio::spawn(async move {
                 run_worker(
@@ -497,6 +498,7 @@ async fn local_bench() -> Result<()> {
                     id,
                     counter,
                     failed_counter,
+                    network_id_for_worker,
                 )
                 .await
             })
@@ -630,6 +632,7 @@ async fn run_worker(
     worker_id: usize,
     progress_counter: Arc<AtomicUsize>,
     progress_failed: Arc<AtomicUsize>,
+    network_id: String,
 ) -> (usize, usize) {
     let payment = rust_decimal::Decimal::from_str(PAYMENT_AMOUNT).unwrap();
     let fee = rust_decimal::Decimal::from_str(FEE_AMOUNT).unwrap();
@@ -653,6 +656,7 @@ async fn run_worker(
             FEE_AMOUNT,
             &sender_addr,
             &change.to_string(),
+            &network_id,
         )
         .await
         {
@@ -783,7 +787,7 @@ async fn send_tx(
         unlocks: vec![],
     };
 
-    let msg = tx.signing_message().unwrap();
+    let msg = tx.signing_message(network_id).unwrap();
     let sig_b64 = sender.sign(&msg).unwrap();
     tx.unlocks = vec![Unlock {
         pubkey_hex: sender.encoded_public_key(),
@@ -846,6 +850,7 @@ async fn send_tx_fast(
     fee_amount: &str,
     change_addr: &str,
     change_amount: &str,
+    network_id: &str,
 ) -> Result<(String, u32)> {
     let mut outputs = vec![TxOutput {
         address: recipient_addr.to_string(),
@@ -881,7 +886,7 @@ async fn send_tx_fast(
         unlocks: vec![],
     };
 
-    let msg = tx.signing_message().unwrap();
+    let msg = tx.signing_message(network_id).unwrap();
     let sig_b64 = sender.sign(&msg).unwrap();
     tx.unlocks = vec![Unlock {
         pubkey_hex: sender.encoded_public_key(),

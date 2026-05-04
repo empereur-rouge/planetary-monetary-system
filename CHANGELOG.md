@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.0] - Unreleased — Cross-chain replay protection (BREAKING)
+
+### Why
+Audit du protocole en vue de l'intégration PMS comme rail de paiement dans un SaaS streaming white-label : `Transaction::signing_message()` ne hashait que `(inputs, outputs, fee)`, sans aucun lien avec le réseau. Une TX signée sur testnet était valide bit-pour-bit sur mainnet (mêmes UTXOs côté attaquant, même clé coordinateur) → cross-chain replay trivial. Le SaaS ayant besoin de garanties bancaires sur les dépôts, ce trou est un blocker. Faire le fix maintenant, avant lancement mainnet, évite une migration chaotique plus tard.
+
+### Changed (BREAKING)
+- **`Transaction::signing_message(network_id: &str)`** — l'API prend désormais un `network_id` qui est inclus dans le message canonique signé. Le verifier hashe avec le `network_id` de la chaîne courante ; toute TX signée pour un autre réseau est rejetée comme `InvalidSignature("signature mismatch …")`. Aucune addition au wire format (la protection est intrinsèque au signing) — l'attaquant ne peut même pas prétendre signer pour un réseau X.
+- **`ValidatePolicy.network_id: String`** ajouté. Plumb depuis `Settings.network.network_id` via `from_settings(&ValidationSettings, network_id: &str)` et `try_from_global_config()`.
+- **`verify_tx_signatures(tx, network_id)`** prend désormais le `network_id` courant.
+- **SDK TS local** (`sdk/src/client.ts`) : `txCanonical` inclut maintenant `network_id: this.config.networkId` en première position du JSON canonique — synchro stricte avec le struct Rust `Canon`.
+
+### Bumped
+- **Workspace** : `0.7.30` → `0.8.0` (breaking change protocole)
+- **`DAG_VERSION`** : `1.2.0` → `2.0.0` (major bump — refus de démarrer sur DB pré-existant, **wipe testnet obligatoire**)
+- **`API_VERSION`** : `9` → `10` (handlers de signing exigent network_id matching)
+- **`protocol_version`** P2P : `1` → `2` dans configs dev/testnet/mainnet
+- *`CURRENT_VER` schema RocksDB inchangé (10) — pas de nouveau CF en Phase 1*
+
+### Tests
+- `crates/pms-core/tests/tx_validation.rs::reject_tx_signed_for_different_network` — TX signée `pms-testnet-v1` rejetée par verifier `pms-mainnet-v1` (sortie : `signature mismatch input 0`). Sanity check : la même TX re-signée pour mainnet est acceptée.
+- `accept_tx_signed_for_matching_network` — TX signée `pms-testnet-v1` acceptée par verifier `pms-testnet-v1` (preuve que le binding ne casse pas le happy path).
+
+### Décisions actées (non implémentées)
+- **DER hex unification SDK ↔ Rust** : skipped. Le SDK convertit déjà hex → base64 avant l'envoi (`sdk/src/client.ts:540-542`), le wire format reste base64. Switcher en hex ferait grossir la signature sur le fil (140 chars vs 96 base64) — régression nette pour zéro bénéfice opérationnel.
+- **`InvalidNetworkId` ApiError variant** : skipped. La protection est intrinsèque au hash signé — un network_id différent ne peut PAS être signalé comme tel par le verifier (ce serait précisément ce qu'on veut empêcher : que l'attaquant déclare son network_id côté wire). Le retour `SignatureMismatch` (4001) existant est sémantiquement correct.
+
+### Migration / déploiement
+- **Wipe testnet obligatoire** : `DAG_VERSION` major bump → l'engine refusera de démarrer sur la DB existante. Procédure : arrêter la stack, `docker volume rm rocksdb_testnet_data`, redéployer avec `IMAGE_VERSION=v0.8.0 scripts/deploy-testnet.sh --yes`.
+- **SDKs externes** doivent être mis à jour pour inclure `network_id` dans le canonical signing — sans ça, toutes leurs TX sortantes seront rejetées en `4001 SignatureMismatch`.
+
+### Hors scope (Phases suivantes)
+- Phase 2 : BIP32 + xpub watch-only (HD wallet)
+- Phase 3 : `GET /v1/transaction/{tx_hash}`, `POST /v1/estimate-fee`, `GET /v1/dag/status`, `GET /v1/blocks/range`
+- Phase 4 : multi-address SSE, webhook subscription
+- Voir `/Users/erwan.ngma/.claude/plans/je-veux-pouvoir-faire-jazzy-crayon.md` pour le plan complet.
+
+---
+
 ## [0.7.30] - 2026-05-02 — RocksDB drain rate visibility (histograms) + 4× batch amortization
 
 ### Why

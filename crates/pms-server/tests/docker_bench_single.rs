@@ -875,7 +875,7 @@ async fn send_tx(
     };
 
     // Signer la transaction
-    let msg = tx.signing_message().unwrap();
+    let msg = tx.signing_message("pms-mainnet").unwrap();
     let sig_b64 = sender.sign(&msg).unwrap();
     tx.unlocks = vec![Unlock {
         pubkey_hex: sender.encoded_public_key(),
@@ -986,7 +986,7 @@ async fn send_tx_fast(
         unlocks: vec![],
     };
 
-    let msg = tx.signing_message().unwrap();
+    let msg = tx.signing_message("pms-mainnet").unwrap();
     let sig_b64 = sender.sign(&msg).unwrap();
     tx.unlocks = vec![Unlock {
         pubkey_hex: sender.encoded_public_key(),

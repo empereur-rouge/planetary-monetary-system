@@ -47,6 +47,7 @@ fn mvp_encrypt_decrypt_confidential_type_only() {
         PlainPayload::ContractRegister(_) => println!("Type = ContractRegister"),
         PlainPayload::ContractUpdate { .. } => println!("Type = ContractUpdate"),
         PlainPayload::LedgerOwnershipTransfer { .. } => println!("Type = LedgerOwnershipTransfer"),
+        PlainPayload::CoordinatorKeyRotate { .. } => println!("Type = CoordinatorKeyRotate"),
     }
 
     // Vérif : bien du bon type

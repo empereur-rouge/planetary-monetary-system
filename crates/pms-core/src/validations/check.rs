@@ -45,6 +45,11 @@ pub struct ValidatePolicy {
     pub platform_fee_ratio: Decimal,
     pub coordinator_public_key: Option<String>,
     pub enforce_single_writer: bool,
+
+    /// Network identifier ("pms-mainnet-v1" / "pms-testnet-v1" / "pms-dev").
+    /// Bound to every TX signing message — prevents cross-chain replay.
+    /// A TX signed for one network is rejected on any other network.
+    pub network_id: String,
 }
 
 impl Default for ValidatePolicy {
@@ -68,12 +73,13 @@ impl Default for ValidatePolicy {
             platform_fee_ratio: Decimal::ZERO,
             coordinator_public_key: None,
             enforce_single_writer: true,
+            network_id: String::new(),
         }
     }
 }
 
 impl ValidatePolicy {
-    pub fn from_settings(v: &ValidationSettings) -> Self {
+    pub fn from_settings(v: &ValidationSettings, network_id: &str) -> Self {
         Self {
             max_payload_bytes: v.max_payload_bytes,
             min_parents_after_boot: v.min_parents_after_boot,
@@ -93,6 +99,7 @@ impl ValidatePolicy {
             platform_fee_ratio: Decimal::ZERO,
             coordinator_public_key: v.coordinator_public_key.clone(),
             enforce_single_writer: v.enforce_single_writer,
+            network_id: network_id.to_string(),
         }
     }
 
@@ -101,7 +108,7 @@ impl ValidatePolicy {
     pub fn try_from_global_config() -> Result<Self, ValidationError> {
         let settings = load_config()
             .map_err(|e| ValidationError::ConfigError(format!("failed to load config: {e}")))?;
-        let mut p = Self::from_settings(&settings.validation);
+        let mut p = Self::from_settings(&settings.validation, &settings.network.network_id);
 
         // Logic for Platform Address Security via Signed Config
         // We use the same Coordinator Key (Master Key) for config signing
@@ -322,7 +329,7 @@ pub fn validate_block(
                 // (MVP) : autres règles mint ici si besoin
             }
             PlainPayload::TxUtxo(tx) => {
-                verify_tx_signatures(tx)?;
+                verify_tx_signatures(tx, &policy.network_id)?;
                 validate_fee_recipient_output(tx, policy)?;
                 tx_amounts_valid(tx, policy)?; // basique sur chaînes décimales
 

@@ -1,8 +1,8 @@
 ---
 tags: [feature, security]
 created: 2025-12-15
-updated: 2026-03-21
-version: v0.6.0
+updated: 2026-05-04
+version: v0.8.0
 ---
 
 # Validation & Consensus Rules
@@ -13,9 +13,9 @@ Le systeme de validation du PMS Engine constitue le rempart de securite fondamen
 
 L'architecture repose sur un **pipeline de validation en deux phases** :
 
-1. **Phase Wire-Level** (`net_adapter.rs`) : validation du bloc reseau brut (`WireBlock`) -- identite reseau, signature cryptographique, Single Writer enforcement, taille payload, parents uniques, NFT/Mint/Config/Compliance.
+1. **Phase Wire-Level** (`net_adapter.rs`) : validation du bloc reseau brut (`WireBlock`) -- identite reseau, signature cryptographique du bloc, Single Writer enforcement, taille payload, parents uniques, NFT/Mint/Config/Compliance.
 
-2. **Phase DAG-Level** (`check.rs` / `validate_block()`) : validation semantique contre l'etat du DAG -- anti-cycle, nombre de parents, regles par type de payload (UTXO, montants, fees, Coordinator-only).
+2. **Phase DAG-Level** (`check.rs` / `validate_block()`) : validation semantique contre l'etat du DAG -- anti-cycle, nombre de parents, regles par type de payload (UTXO, montants, fees, Coordinator-only). **La verification des signatures de TX UTXO inclut le `network_id` de la chaine** -- une TX signee pour un autre reseau (testnet vs mainnet) est rejetee comme `InvalidSignature` (cross-chain replay protection, v0.8.0).
 
 Le consensus repose sur un **Single Writer Protocol** : en mode production (Mainnet/Testnet), seul le Coordinator (cle publique hardcodee dans `pms-consensus`) peut creer des blocs. La finalite est determinee par les **Milestones** (checkpoints signes par le Coordinator) et/ou par la **k-depth finality** (nombre de descendants confirmant un bloc).
 
@@ -249,11 +249,13 @@ if is_mainnet_key || is_testnet_key {
 
 Pipeline de validation complet, dans l'ordre :
 
-1. **Verification des signatures** (`verify_tx_signatures()` dans `signature.rs`) :
+1. **Verification des signatures** (`verify_tx_signatures(tx, network_id)` dans `signature.rs`) :
    - `inputs.len() == unlocks.len()` (correspondance 1:1).
-   - Message canonique calcule via `tx.signing_message()`.
+   - Message canonique calcule via `tx.signing_message(network_id)` -- le `network_id` provient de `policy.network_id` (lui-meme issu de `Settings.network.network_id`).
+   - **Cross-chain replay protection (v0.8.0)** : le `network_id` est inclus dans le JSON canonique signe `{network_id, inputs, outputs, fee}`. Une TX signee pour un autre reseau (ex: testnet) est rejetee comme `InvalidSignature("signature mismatch input N")` puisque le hash recompute differe. La protection est intrinseque au signing -- aucun champ `network_id` n'est ajoute au wire format, ce qui empeche un attaquant de declarer son network_id de signature.
    - Chaque unlock : decode pubkey hex -> SEC1 VerifyingKey, decode signature base64 -> DER Signature, verifie ECDSA.
    - **Optimisation hybride** : sequentiel pour < 4 inputs (overhead rayon), parallele via `rayon::par_iter` pour >= 4 inputs.
+   - Tests : `crates/pms-core/tests/tx_validation.rs::reject_tx_signed_for_different_network`.
 
 2. **Fee recipient** (`validate_fee_recipient_output()` dans `fees.rs`) :
    - Si `platform_address` est configuree avec un `platform_fee_ratio > 0` : verifie que les outputs contiennent une part suffisante vers la plateforme.

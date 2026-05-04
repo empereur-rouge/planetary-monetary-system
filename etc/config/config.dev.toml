@@ -6,7 +6,7 @@ tip_limit = 256
 [network]
 mode = "dev"  # "dev" | "testnet" | "mainnet"
 network_id = "pms-dev"
-protocol_version = 1
+protocol_version = 2
 
 [address]
 hrp = "8e"

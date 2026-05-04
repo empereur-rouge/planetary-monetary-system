@@ -188,7 +188,10 @@ where
             // choice for back-to-back rotations: mint is the most
             // sensitive authority, so we narrow it the moment the new
             // key is announced.
-            let policy = ValidatePolicy::from_settings(&self.settings.validation);
+            let policy = ValidatePolicy::from_settings(
+                &self.settings.validation,
+                &self.settings.network.network_id,
+            );
             let mut policy = policy;
             // Resolve the bootstrap pk — same logic as before — and let
             // the rotation cache override it with the latest rotated-to
