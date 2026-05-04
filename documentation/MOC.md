@@ -92,6 +92,12 @@ Voir le dossier [[api/README|documentation/api/]] pour la référence complète 
 | [History](api/history.md) | Historique |
 | [Error Codes](api/error-codes.md) | Grille stable des codes d'erreur numériques + catégorisation public/privé |
 
+## Guides (intégration)
+
+| Fiche | Description |
+|-------|-------------|
+| [[guides/payment-integration]] | Comment accepter des paiements PMS (ou custom token) dans ton SaaS — HD wallet, watcher, payout, sécurité, checklist production |
+
 ## Runbooks (opérations)
 
 | Fiche | Description |
