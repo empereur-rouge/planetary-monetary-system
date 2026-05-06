@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.1] - Unreleased — Phase 5.1 producer-signal anti-flap
+
+### Fixed
+- **Read-only flap loop** (testnet 2026-05-06, v0.8.0 deployed): engine cycled in/out of read-only every 60–65 s with `reason: "persist_queue"` despite a sustained load of only ~1 blk/s and queue depth = 0 between flaps. 6.1 M `pms_read_only_rejections_total{reason="persist_queue"}` accumulated in hours. Cause: Phase 5 producer-signal threshold was too sensitive — `bp_count >= 3 || bp_max_ms >= 1000` per single 5 s tick, fast-armed (1 tick). At each disarm window, the simulator's pent-up requests rushed the channel, briefly saturated it (channel cleared by the next tick → depth 0), accumulated 3+ events in 5 s, and re-armed immediately. Phase 5 was correctly catching real saturation but couldn't distinguish a 5 s microburst from sustained pressure.
+- **Phase 5.1 fix**: producer signal is now multi-tick. Per-tick threshold raised to `bp_count >= 5 || bp_max_ms >= 2000`, and the signal must persist across 2 consecutive ticks (10 s of sustained back-pressure) before it folds into `persist_pressure`. `producer_signal_consecutive` counter tracks consecutive-tick state; resets to 0 on any below-threshold tick. The depth-based sampler (`adapter.persist_queue_depth() ≥ threshold_pct`) keeps its existing 1-tick fast-arm — sample-time saturation IS sustained by definition. This filters microbursts while still catching the sub-5 s saturation Phase 5 was originally designed to detect.
+
+### Files
+- `crates/pms-server/src/api/tasks.rs` — `spawn_resource_guard_task`: new `producer_signal_consecutive` state, raised per-tick threshold, multi-tick gating before `producer_signal_pressure` flips true.
+- `Cargo.toml` — workspace version `0.8.0` → `0.8.1`.
+
+### Limit
+- Threshold values (`bp_count >= 5 || bp_max_ms >= 2000`, 2 ticks) tuned conservatively for current testnet load profile. Observe `pms_persist_back_pressure_events_total` and read-only arm count post-deploy to confirm flap is fixed without losing legitimate burst detection. If sustained 4 events/tick load produces no arm but later causes 503-on-send().await, drop threshold to `bp_count >= 3` while keeping the 2-tick gate.
+
+---
+
 ## [0.8.0] - Unreleased — Cross-chain replay protection (BREAKING) + HD wallet (BIP32) + Payment-rail RPC + Watcher API + producer-signaled read-only
 
 ### Phase 5 — Producer-signaled read-only mode (close the sub-5s saturation gap)

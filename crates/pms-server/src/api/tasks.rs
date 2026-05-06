@@ -679,6 +679,16 @@ pub fn spawn_resource_guard_task(state: AppState) {
 
         let mut over_count: u32 = 0;
         let mut under_count: u32 = 0;
+        // Producer-side back-pressure must be observed across 2 consecutive
+        // ticks (10 s of sustained signal) before it folds into
+        // `persist_pressure`. v0.8.0 Phase 5 originally fast-armed on a
+        // single tick of `bp_count >= 3`, which triggered a flap loop:
+        // every disarm window the simulator's pent-up requests rushed the
+        // channel, accumulated 3+ events in 5 s, and re-armed immediately
+        // (testnet 2026-05-06 — engine read-only ~92 % of the time at
+        // 1 blk/s sustained, queue depth 0). Requiring 2 ticks filters
+        // microbursts (≤ 10 s) while still catching real saturation.
+        let mut producer_signal_consecutive: u32 = 0;
         // When the watcher arms (auto), record the wall-clock instant
         // so we can enforce `min_arm_duration` before allowing an
         // auto-disarm. Without this floor, a memtable burst that
@@ -737,24 +747,31 @@ pub fn spawn_resource_guard_task(state: AppState) {
             //     back-pressure accumulator from `pms_core::back_pressure`.
             //     Producers calling `send().await` that waited ≥ 500 ms
             //     have already incremented this counter — even if the
-            //     channel cleared before the next sample tick. Threshold:
-            //     ≥ 3 events OR max ≥ 1000 ms in the last 5 s, both
-            //     conservative enough to skip isolated 600 ms blips
-            //     while catching real burst patterns. Testnet 2026-05-04
-            //     showed 6728 events / 24 h with sub-5 s saturation
-            //     windows — 100 % missed by the queue-depth sampler
-            //     alone.
+            //     channel cleared before the next sample tick. v0.8.1:
+            //     per-tick threshold raised to `bp_count >= 5 ||
+            //     bp_max_ms >= 2000`, AND the signal must persist across
+            //     2 consecutive ticks (10 s of sustained back-pressure)
+            //     before it folds into `persist_pressure`. Together these
+            //     filter the disarm-window microbursts that caused the
+            //     v0.8.0 flap loop (testnet 2026-05-06) while still
+            //     catching the real sub-5 s saturation patterns the
+            //     queue-depth sampler misses.
             let depth_pressure = check_persist_saturated(&state, persist_queue_critical_pct);
             let (bp_count, bp_max_ms) = pms_core::back_pressure::drain();
-            let producer_signal_pressure = bp_count >= 3 || bp_max_ms >= 1000;
-            if producer_signal_pressure {
+            let tick_signal = bp_count >= 5 || bp_max_ms >= 2000;
+            if tick_signal {
+                producer_signal_consecutive = producer_signal_consecutive.saturating_add(1);
                 tracing::info!(
                     target = "read_only_guard",
                     bp_count,
                     bp_max_ms,
-                    "Producer-side back-pressure observed — folding into PersistQueue pressure"
+                    consecutive = producer_signal_consecutive,
+                    "Producer-side back-pressure tick observed"
                 );
+            } else {
+                producer_signal_consecutive = 0;
             }
+            let producer_signal_pressure = producer_signal_consecutive >= 2;
             let persist_pressure = depth_pressure || producer_signal_pressure;
 
             // ─── 5. Decide ──────────────────────────────────────────
