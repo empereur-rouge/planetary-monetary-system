@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.2] - Unreleased — Phase 5.2 stall-only producer-signal
+
+### Fixed
+- **Phase 5 producer-signal still too noisy** (testnet 25h diagnostic 2026-05-08, v0.8.1 deployed): engine was read-only ~50 % of the time despite the consumer keeping up perfectly with the producer. Hard data over 25h: 5,713,926 blocks produced, 5,713,926 blocks consumed (exactly equal — zero backlog ever accumulated), 0 entries in `pms_persist_stall_seconds_total` (the ≥1 s stall counter never incremented), consumer batch p99 duration 1.87 ms, consumer total CPU 0.035 %. The system was nominal. But `pms_persist_back_pressure_events_total` showed 240,013 events / 25h = 5.5 events/tick avg — *exactly* at the v0.8.1 threshold (`bp_count >= 5`). Any 2 consecutive ticks slightly above the noise floor armed read-only, so 87 ARMs / 24h with 8.3M `pms_read_only_rejections_total{reason="persist_queue"}` accumulated while the engine was healthy.
+- **Phase 5.2 fix**: drop the count-based path. Tick signal is now `bp_max_ms >= 1000` only — i.e. at least one producer in the last 5 s window had a `send().await` wait ≥ 1 s. The 2-tick gate is preserved (10 s sustained). Brief 500-999 ms waits under concurrent producers are normal load-shedding by the bounded channel and don't warrant 503ing every write; a ≥1 s wait means the channel was genuinely full long enough that subsequent producers would queue behind it. This aligns the producer-signal trigger with `pms_persist_stall_seconds_total`'s definition (the warn-interval that fires on ≥1 s waits), giving a single coherent saturation threshold across the metrics surface.
+
+### Files
+- `crates/pms-server/src/api/tasks.rs` — `tick_signal` simplified to `bp_max_ms >= 1000`; comments updated with the testnet diagnostic + rationale chain (v0.8.0 → v0.8.1 → v0.8.2).
+- `Cargo.toml` — workspace version `0.8.1` → `0.8.2`.
+
+### Limit
+- The 2-tick gate (10 s of sustained ≥1 s waits) remains conservative vs the queue-depth sampler's 1-tick fast-arm (5 s) — the depth path catches sample-time saturation immediately. Producer-signal is now an additive, lower-frequency confirmation rather than a primary trigger. If a sustained ≥1 s stall pattern *should* fast-arm in some future workload, drop the gate to 1 tick — but observing testnet first will quantify if it's needed.
+
+---
+
 ## [0.8.1] - Unreleased — Phase 5.1 producer-signal anti-flap
 
 ### Fixed

@@ -686,8 +686,12 @@ pub fn spawn_resource_guard_task(state: AppState) {
         // every disarm window the simulator's pent-up requests rushed the
         // channel, accumulated 3+ events in 5 s, and re-armed immediately
         // (testnet 2026-05-06 — engine read-only ~92 % of the time at
-        // 1 blk/s sustained, queue depth 0). Requiring 2 ticks filters
-        // microbursts (≤ 10 s) while still catching real saturation.
+        // 1 blk/s sustained, queue depth 0). v0.8.1 raised to ≥5 events
+        // or ≥2000 ms with 2-tick gate — still noisy under concurrent
+        // load (testnet 25h diagnostic 2026-05-08 showed 5.5 events/tick
+        // avg ⇒ ~50 % read-only uptime while engine was healthy).
+        // v0.8.2: drop the count signal; arm only on `bp_max_ms ≥ 1000`
+        // (real stall), still 2-tick gated.
         let mut producer_signal_consecutive: u32 = 0;
         // When the watcher arms (auto), record the wall-clock instant
         // so we can enforce `min_arm_duration` before allowing an
@@ -747,18 +751,30 @@ pub fn spawn_resource_guard_task(state: AppState) {
             //     back-pressure accumulator from `pms_core::back_pressure`.
             //     Producers calling `send().await` that waited ≥ 500 ms
             //     have already incremented this counter — even if the
-            //     channel cleared before the next sample tick. v0.8.1:
-            //     per-tick threshold raised to `bp_count >= 5 ||
-            //     bp_max_ms >= 2000`, AND the signal must persist across
-            //     2 consecutive ticks (10 s of sustained back-pressure)
-            //     before it folds into `persist_pressure`. Together these
-            //     filter the disarm-window microbursts that caused the
-            //     v0.8.0 flap loop (testnet 2026-05-06) while still
-            //     catching the real sub-5 s saturation patterns the
-            //     queue-depth sampler misses.
+            //     channel cleared before the next sample tick.
+            //
+            //     v0.8.1 raised the threshold to (≥5 events OR ≥2000ms)
+            //     across 2 consecutive ticks, but testnet 25h diagnostic
+            //     2026-05-08 showed the count signal is intrinsically
+            //     noisy under concurrent producers (240k events / 25h ≈
+            //     5.5 events/tick avg) — *exactly* at the threshold,
+            //     yielding ~50% read-only uptime while the engine was
+            //     producing 26 blk/s with producer == consumer rate
+            //     and 0 actual stalls (`pms_persist_stall_seconds_total`
+            //     never incremented).
+            //
+            //     v0.8.2: drop the count-based path entirely. The genuine
+            //     saturation signal is "max wait ≥ 1 s in the last 5 s
+            //     window". Brief 500-999 ms waits under concurrency are
+            //     normal load-shedding via the bounded channel and don't
+            //     warrant rejecting writes; only a producer that actually
+            //     stalled past 1 s indicates the channel was full long
+            //     enough that more producers would wait too. 2-tick
+            //     gating preserved — 10 s of sustained ≥1 s waits is the
+            //     real ARM trigger.
             let depth_pressure = check_persist_saturated(&state, persist_queue_critical_pct);
             let (bp_count, bp_max_ms) = pms_core::back_pressure::drain();
-            let tick_signal = bp_count >= 5 || bp_max_ms >= 2000;
+            let tick_signal = bp_max_ms >= 1000;
             if tick_signal {
                 producer_signal_consecutive = producer_signal_consecutive.saturating_add(1);
                 tracing::info!(
@@ -766,7 +782,7 @@ pub fn spawn_resource_guard_task(state: AppState) {
                     bp_count,
                     bp_max_ms,
                     consecutive = producer_signal_consecutive,
-                    "Producer-side back-pressure tick observed"
+                    "Producer-side ≥1s stall tick observed"
                 );
             } else {
                 producer_signal_consecutive = 0;
