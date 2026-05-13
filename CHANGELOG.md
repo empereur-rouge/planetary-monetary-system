@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.3] - Unreleased — jemalloc / THP fragmentation control
+
+### Fixed
+- **Slow memory bloat over multi-day uptime** (testnet 4-day diagnostic 2026-05-13, v0.8.2): engine anon RSS climbed from ~5.5 GiB at boot to ~8.5 GiB over 4 days while producer == consumer (no leak in the persist pipeline) and the in-RAM DAG was bounded by `max_dag_blocks = 10000`. Memory profile breakdown via `GET /admin/memory-profile` revealed **4.58 GiB of anon_thp** — Transparent Huge Pages that jemalloc had requested in 2 MB chunks during burst allocations and never returned to the kernel under the default decay timers. As cgroup RSS approached the 14 GiB limit, kernel direct-reclaim contention slowed the tokio scheduler enough that the persist consumer task ran intermittently slow → producers experienced ≥ 1 s `send().await` waits → Phase 5.2 armed read-only every ~2 min (cumulative 3.7 M `pms_read_only_rejections_total{reason="memory"}` + 15.8 M `{reason="persist_queue"}` over 4 d). A manual restart freed **2.9 GiB instantly** (8.48 → 5.58 GiB), confirming the root cause was THP fragmentation, not a leak.
+- **`MALLOC_CONF` environment variable** added to both `docker-compose.testnet.yml` and `docker-compose.mainnet.yml`:
+  ```
+  background_thread:true,dirty_decay_ms:30000,muzzy_decay_ms:30000,metadata_thp:auto
+  ```
+  - `background_thread:true` enables jemalloc's purge worker — pages get released to the OS without waiting for a synchronous allocation call to trigger the decay path.
+  - `dirty_decay_ms:30000` / `muzzy_decay_ms:30000` force jemalloc to return dirty/muzzy pages within 30 s instead of the default 10 s muzzy + indefinite hold under sustained allocation pressure.
+  - `metadata_thp:auto` keeps THP for jemalloc's internal metadata (small, hot) but pushes user allocations onto 4 KB pages, eliminating the half-empty-2 MB-page bloat pattern observed on testnet.
+- Expected effect: stable anon RSS at ~5–6 GiB indefinitely under steady-state load, with sawtooth drops every 30 s instead of monotonic climb until OOM-adjacent. Eliminates the "memory-pressure-induces-Phase-5-flap" cascade entirely.
+
+### Files
+- `docker-compose.testnet.yml` — `MALLOC_CONF` env var on the engine service.
+- `docker-compose.mainnet.yml` — same.
+- `Cargo.toml` — workspace version `0.8.2` → `0.8.3`. No Rust code changes; only the deployment env var (jemalloc reads `MALLOC_CONF` at startup).
+
+### Verification plan
+1. Deploy v0.8.3 to testnet via `upgrade-testnet.sh`.
+2. Sample `GET /admin/memory-profile` at +1 h, +6 h, +24 h, +4 d and verify `anon_thp` stays flat (no monotonic climb).
+3. Compare ARM count over 96 h vs v0.8.2 baseline. Expected: 0 ARMs (vs 27 on day 4 of v0.8.2).
+4. Compare `pms_read_only_rejections_total{reason="memory"}` rate. Expected: 0 (vs 3.76 M / 4 d on v0.8.2).
+
+### Limit
+- THP fragmentation is a runtime allocator behavior — the fix is env-only (no Rust code change). If the workload changes substantially (e.g. very different burst pattern, much larger working set), the 30 s decay timer may need re-tuning. Watch `anon_thp` from the memory profile endpoint as the canary.
+- If memory continues to grow despite this fix, the leak is in the application (not the allocator) — next step would be a heap profile via `tikv-jemalloc-ctl` or `jeprof`.
+
+---
+
 ## [0.8.2] - Unreleased — Phase 5.2 stall-only producer-signal
 
 ### Fixed

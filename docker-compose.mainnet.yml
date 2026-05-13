@@ -58,6 +58,11 @@ services:
       # pour AES-GCM-decrypt node.key.enc au boot. Vide / unset = clé
       # plain (acceptable en démarrage, à durcir avant >100 users réels).
       PMS_COORDINATOR_KEY_PASSPHRASE: "${PMS_COORDINATOR_KEY_PASSPHRASE:-}"
+      # v0.8.3: jemalloc + THP fragmentation tuning. Voir docker-compose.testnet.yml
+      # pour le détail du diagnostic (4d uptime → 4.58 GiB anon_thp accumulés,
+      # restart libère ~3 GiB instantanément). En mainnet le pattern est
+      # identique : workload allocation-heavy long-running sur jemalloc.
+      MALLOC_CONF: "background_thread:true,dirty_decay_ms:30000,muzzy_decay_ms:30000,metadata_thp:auto"
     command: ["--config", "/home/pms/config/config.mainnet.toml"]
     volumes:
       - ./etc/config:/home/pms/config:rw

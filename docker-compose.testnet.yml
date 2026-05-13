@@ -48,6 +48,23 @@ services:
       # vault — never commit. Empty / unset is fine when the deployment
       # uses the legacy plain `node.key`.
       PMS_COORDINATOR_KEY_PASSPHRASE: "${PMS_COORDINATOR_KEY_PASSPHRASE:-}"
+      # v0.8.3: tame jemalloc + THP fragmentation. Diagnostic 2026-05-13
+      # (4d uptime, v0.8.2) showed 4.58 GiB of anon_thp holding memory
+      # the workload no longer needed — engine RSS climbed 5.5 → 8.5 GiB
+      # over 4 days while producer == consumer (no leak), forcing read-
+      # only flap as RSS approached the 14 GiB cgroup limit. Restart
+      # freed 2.9 GiB instantly, confirming THP fragmentation.
+      #
+      #   - background_thread:true    — run jemalloc's purge worker so
+      #     pages get released without waiting for a sync call.
+      #   - dirty_decay_ms:30000      — return dirty (recently freed)
+      #     pages to the OS after 30 s instead of jemalloc's default
+      #     10 s muzzy + indefinite hold under load.
+      #   - muzzy_decay_ms:30000      — same for muzzy pages.
+      #   - metadata_thp:auto         — keep THP for jemalloc metadata
+      #     only (small, hot); user allocations use 4K pages so the
+      #     half-empty 2 MB huge pages we saw can't accumulate.
+      MALLOC_CONF: "background_thread:true,dirty_decay_ms:30000,muzzy_decay_ms:30000,metadata_thp:auto"
     command: ["--config", "/home/pms/config/config.testnet.toml"]
     volumes:
       - ./etc/config:/home/pms/config:rw
