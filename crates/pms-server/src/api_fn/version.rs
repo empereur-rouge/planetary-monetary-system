@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 use crate::api::AppState;
 
 /// Version de l'API REST — à incrémenter à chaque modification des routes/formats.
-pub const API_VERSION: u32 = 12;
+/// v13 (audit sécurité v0.9.0) : `POST /v1/wallet/tx/send` exige des unlocks
+/// valides (401 sinon) et la conservation par asset ; `POST /submit/block`
+/// rejette les tx sans autorisation de dépense et les block ids non canoniques.
+pub const API_VERSION: u32 = 13;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]

@@ -23,18 +23,33 @@ pub fn verify_tx_signatures(tx: &Transaction, network_id: &str) -> Result<(), Va
         .map_err(|_| ValidationError::Other("Serialization in signing_message failed"))?;
     let msg_bytes = msg_hex.as_bytes();
 
-    // 2. Hybrid verification strategy
+    // Fast path : 1 seul unlock (cas dominant) — zéro allocation.
+    if tx.unlocks.len() == 1 {
+        return verify_single_signature(msg_bytes, &tx.unlocks[0], 0);
+    }
+
+    // 2. Dedupe identical unlocks before the expensive ECDSA verify.
+    // Single-owner wallets (SDK included) repeat the SAME (pubkey, signature)
+    // pair once per input — verifying it once is sufficient and N× cheaper.
+    let mut seen = std::collections::HashSet::new();
+    let unique_unlocks: Vec<(usize, &pms_types::Unlock)> = tx
+        .unlocks
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| seen.insert((u.pubkey_hex.as_str(), u.signature_b64.as_str())))
+        .collect();
+
+    // 3. Hybrid verification strategy
     // Parallelism has overhead. For small transaction (1-3 inputs), sequential is faster.
     // Benchmark showed 4400 TPS (seq) vs 3300 TPS (par) for 1-input txs.
-    if tx.unlocks.len() < 4 {
-        for (i, unlock) in tx.unlocks.iter().enumerate() {
-            verify_single_signature(msg_bytes, unlock, i)?;
+    if unique_unlocks.len() < 4 {
+        for (i, unlock) in &unique_unlocks {
+            verify_single_signature(msg_bytes, unlock, *i)?;
         }
     } else {
-        tx.unlocks
+        unique_unlocks
             .par_iter()
-            .enumerate()
-            .try_for_each(|(i, unlock)| verify_single_signature(msg_bytes, unlock, i))?;
+            .try_for_each(|(i, unlock)| verify_single_signature(msg_bytes, unlock, *i))?;
     }
 
     Ok(())

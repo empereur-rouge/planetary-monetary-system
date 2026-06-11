@@ -16,19 +16,19 @@ pub fn resolve_admin_token(spec: &str) -> Option<String> {
 
 /// Comparaison constant-time pour éviter les timing attacks.
 /// Retourne true si les deux chaînes sont identiques.
+///
+/// AUDIT M-8 (v0.9.0) : l'ancienne version branchait sur l'égalité des
+/// longueurs et exécutait un `ct_eq` factice dont le coût dépendait de la
+/// longueur — un attaquant mesurant le timing pouvait en déduire la longueur
+/// du token admin. On compare désormais les digests SHA-256 des deux côtés :
+/// taille fixe 32 octets, aucune branche dépendante du secret. Le coût de
+/// hachage de `a` ne dépend que de l'entrée de l'attaquant (information qu'il
+/// possède déjà) et celui de `b` est constant pour un token donné.
 fn constant_time_compare(a: &str, b: &str) -> bool {
-    // Si les longueurs diffèrent, on compare quand même en temps constant
-    // pour ne pas révéler d'information sur la longueur
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-
-    if a_bytes.len() != b_bytes.len() {
-        // Compare avec lui-même pour maintenir le temps constant
-        let _ = a_bytes.ct_eq(a_bytes);
-        return false;
-    }
-
-    a_bytes.ct_eq(b_bytes).into()
+    use sha2::{Digest, Sha256};
+    let ha = Sha256::digest(a.as_bytes());
+    let hb = Sha256::digest(b.as_bytes());
+    ha.ct_eq(&hb).into()
 }
 
 /// Vérifie si la requête est autorisée en tant qu'admin.
@@ -65,4 +65,38 @@ pub fn is_admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_compare;
+
+    #[test]
+    fn equal_tokens_match() {
+        println!("compare('secret-token', 'secret-token')");
+        assert!(constant_time_compare("secret-token", "secret-token"));
+    }
+
+    #[test]
+    fn different_tokens_reject() {
+        println!("compare('secret-token', 'secret-tokeX')");
+        assert!(!constant_time_compare("secret-token", "secret-tokeX"));
+    }
+
+    #[test]
+    fn different_lengths_reject() {
+        // Cas M-8 : longueurs différentes — doit rejeter sans branche
+        // dépendante de la longueur du secret (digests SHA-256 fixes).
+        println!("compare('short', 'a-much-longer-admin-token-value')");
+        assert!(!constant_time_compare(
+            "short",
+            "a-much-longer-admin-token-value"
+        ));
+    }
+
+    #[test]
+    fn empty_vs_nonempty_reject() {
+        assert!(!constant_time_compare("", "token"));
+        assert!(constant_time_compare("", ""));
+    }
 }

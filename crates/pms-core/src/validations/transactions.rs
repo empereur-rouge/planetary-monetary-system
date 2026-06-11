@@ -1,7 +1,10 @@
 use crate::Dag;
 use crate::validations::amount::{amount_parse_non_neg_dec, amount_parse_pos_dec};
+use crate::validations::check::ValidatePolicy;
+use crate::validations::ownership::unlock_matches_address;
+use crate::validations::signature::verify_tx_signatures;
 use pms_errors::ValidationError;
-use pms_types::{PayloadEnvelope, PlainPayload, Transaction, TxInput};
+use pms_types::{PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 
@@ -56,43 +59,58 @@ pub fn utxo_sufficient_funds(dag: &Dag, tx: &Transaction) -> Result<(), Validati
     Ok(())
 }
 
-/// Validation ASYNC sans lock global DAG, utilisant le ShardedUtxoSet.
-/// Vérifie:
-/// 1. Pas de doublons internes (inputs).
-/// 2. Existence des inputs dans l'UTXO set (anti-double-spend + input exists).
-/// 3. Conservation par asset : sum(inputs[asset]) == sum(outputs[asset]) pour chaque asset.
-pub async fn validate_transaction_async(
+/// Récupère le `TxOutput` de chaque input depuis le ShardedUtxoSet, dans
+/// l'ordre des inputs, en rejetant :
+/// - les doublons internes (même outpoint référencé deux fois) ;
+/// - les inputs absents de l'UTXO set (déjà dépensés ou inexistants).
+async fn fetch_input_outputs(
     utxos: &crate::utxo::ShardedUtxoSet,
     tx: &Transaction,
-) -> Result<(), ValidationError> {
-    // 1. Doublons internes
+) -> Result<Vec<TxOutput>, ValidationError> {
     let mut seen = HashSet::new();
+    let mut fetched = Vec::with_capacity(tx.inputs.len());
     for inp in &tx.inputs {
         let key = (inp.out.txid.clone(), inp.out.index);
         if !seen.insert(key) {
             return Err(ValidationError::DoubleSpend);
         }
-    }
-
-    // 2. Grouper les inputs par asset_id
-    let mut inputs_by_asset: HashMap<Option<String>, Decimal> = HashMap::new();
-    for inp in &tx.inputs {
-        let output_opt = utxos.get(&inp.out).await;
-        match output_opt {
-            Some(out) => {
-                let amount = amount_parse_pos_dec(&out.amount)?;
-                *inputs_by_asset
-                    .entry(out.asset_id.clone())
-                    .or_insert(Decimal::ZERO) += amount;
-            }
+        match utxos.get(&inp.out).await {
+            Some(out) => fetched.push(out),
             None => {
                 tracing::warn!("Input missing: {:?}", inp.out);
                 return Err(ValidationError::MissingInput);
             }
         }
     }
+    Ok(fetched)
+}
 
-    // 3. Grouper les outputs par asset_id
+/// Conservation stricte par asset : `sum(inputs[asset]) == sum(outputs[asset])`
+/// pour chaque asset, et aucun output ne crée un asset sans input correspondant.
+///
+/// C'est la règle de conservation CANONIQUE du protocole (audit M-7) : le fee
+/// déclaré dans `tx.fee` est purement informatif — la valeur des frais doit
+/// être portée par un output explicite vers une adresse de frais, sinon la
+/// conservation échoue. Aucun surplus n'est jamais brûlé implicitement.
+///
+/// `input_outputs` = les `TxOutput` dépensés, dans l'ordre des inputs
+/// (typiquement fetchés depuis l'UTXO set par l'appelant). Public : réutilisé
+/// par les handlers qui valident une tx AVANT chiffrement du payload
+/// (`wallet_send_tx`), là où le hot path ne voit que le ciphertext.
+pub fn check_asset_conservation(
+    tx: &Transaction,
+    input_outputs: &[TxOutput],
+) -> Result<(), ValidationError> {
+    // Grouper les inputs par asset_id
+    let mut inputs_by_asset: HashMap<Option<String>, Decimal> = HashMap::new();
+    for out in input_outputs {
+        let amount = amount_parse_pos_dec(&out.amount)?;
+        *inputs_by_asset
+            .entry(out.asset_id.clone())
+            .or_insert(Decimal::ZERO) += amount;
+    }
+
+    // Grouper les outputs par asset_id
     let mut outputs_by_asset: HashMap<Option<String>, Decimal> = HashMap::new();
     for o in &tx.outputs {
         let amount = amount_parse_pos_dec(&o.amount)?;
@@ -101,7 +119,7 @@ pub async fn validate_transaction_async(
             .or_insert(Decimal::ZERO) += amount;
     }
 
-    // 4. Vérifier la conservation par asset
+    // Conservation par asset
     for (asset_id, in_sum) in &inputs_by_asset {
         let out_sum = outputs_by_asset
             .get(asset_id)
@@ -122,7 +140,7 @@ pub async fn validate_transaction_async(
         }
     }
 
-    // 5. Vérifier qu'aucun output ne crée un asset sans input correspondant
+    // Aucun output ne crée un asset sans input correspondant
     for (asset_id, _) in &outputs_by_asset {
         if !inputs_by_asset.contains_key(asset_id) {
             tracing::warn!("Output creates asset without input: {:?}", asset_id);
@@ -135,6 +153,88 @@ pub async fn validate_transaction_async(
     }
 
     Ok(())
+}
+
+/// Validation ASYNC sans lock global DAG, utilisant le ShardedUtxoSet.
+/// Vérifie:
+/// 1. Pas de doublons internes (inputs).
+/// 2. Existence des inputs dans l'UTXO set (anti-double-spend + input exists).
+/// 3. Conservation par asset : sum(inputs[asset]) == sum(outputs[asset]) pour chaque asset.
+///
+/// ⚠️ Ne vérifie NI les signatures NI l'ownership des inputs — pour le hot
+/// path de production, utiliser [`validate_transaction_full`] qui couvre
+/// l'autorisation complète (audit C-1/C-2).
+pub async fn validate_transaction_async(
+    utxos: &crate::utxo::ShardedUtxoSet,
+    tx: &Transaction,
+) -> Result<(), ValidationError> {
+    let input_outputs = fetch_input_outputs(utxos, tx).await?;
+    check_asset_conservation(tx, &input_outputs)
+}
+
+/// Validation COMPLÈTE d'une `TxUtxo` pour le hot path de production
+/// (audit C-1 + C-2 + M-7). Ordre des checks, du moins cher au plus cher :
+///
+/// 1. **Appariement** : `inputs.len() == unlocks.len()` — chaque input[i] est
+///    autorisé par unlock[i] (correspondance positionnelle).
+/// 2. **Fee sanity (M-7)** : `tx.fee` parse en décimal non-négatif et
+///    `<= policy.max_fee_per_tx`. Le fee est déclaratif — la conservation
+///    stricte (étape 5) garantit qu'il correspond à un output explicite.
+/// 3. **Signatures (C-2)** : chaque unlock porte une signature ECDSA valide
+///    du message canonique `{network_id, inputs, outputs, fee}` (anti-replay
+///    cross-chain inclus).
+/// 4. **Ownership (C-1)** : pour chaque input, la pubkey de l'unlock apparié
+///    dérive bien l'adresse propriétaire de l'UTXO dépensé
+///    ([`unlock_matches_address`]). Sans ce binding, n'importe quelle
+///    signature valide permettrait de dépenser les fonds d'autrui.
+/// 5. **Existence + double-spend + conservation par asset** (règle canonique).
+///
+/// Retourne les `TxOutput` des inputs (dans l'ordre) pour que l'appelant
+/// puisse réutiliser les adresses sans re-fetch (ex: compliance freeze check).
+pub async fn validate_transaction_full(
+    utxos: &crate::utxo::ShardedUtxoSet,
+    tx: &Transaction,
+    policy: &ValidatePolicy,
+) -> Result<Vec<TxOutput>, ValidationError> {
+    // 1. Appariement input[i] ↔ unlock[i]
+    if tx.inputs.len() != tx.unlocks.len() {
+        return Err(ValidationError::InvalidSignature(format!(
+            "inputs/unlocks count mismatch: {} inputs, {} unlocks",
+            tx.inputs.len(),
+            tx.unlocks.len()
+        )));
+    }
+
+    // 2. Fee sanity (M-7) — non-négatif et borné
+    let fee = amount_parse_non_neg_dec(&tx.fee)?;
+    if fee > policy.max_fee_per_tx {
+        return Err(ValidationError::FeeTooHigh {
+            fee: fee.to_string(),
+            max: policy.max_fee_per_tx.to_string(),
+        });
+    }
+
+    // 3. Signatures de transaction (C-2)
+    verify_tx_signatures(tx, &policy.network_id)?;
+
+    // 4+5. Existence des inputs, puis binding ownership et conservation
+    let input_outputs = fetch_input_outputs(utxos, tx).await?;
+
+    for (i, out) in input_outputs.iter().enumerate() {
+        if !unlock_matches_address(&tx.unlocks[i].pubkey_hex, &out.address) {
+            tracing::warn!(
+                "🚫 Ownership mismatch: input {} (utxo {}:{}) is not owned by unlock pubkey",
+                i,
+                tx.inputs[i].out.txid,
+                tx.inputs[i].out.index
+            );
+            return Err(ValidationError::OwnershipMismatch { input_index: i });
+        }
+    }
+
+    check_asset_conservation(tx, &input_outputs)?;
+
+    Ok(input_outputs)
 }
 
 /// Validation ASYNC des inputs d'un BridgeLock.

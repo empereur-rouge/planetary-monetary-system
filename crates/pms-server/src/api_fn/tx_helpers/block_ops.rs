@@ -2,7 +2,7 @@ use crate::api::AppState;
 use pms_config::Settings;
 use pms_interface::NetDagAdapter;
 use pms_storage::{DagStorage, PutResult};
-use pms_types::{Block, OutputId, TxInput, TxOutput};
+use pms_types::{Block, OutputId, TxInput, TxOutput, Unlock};
 use pms_types_payload::PayloadEnvelope;
 use pms_utils::{check_pow_leading_zero_bits, compute_block_id};
 use pms_wallet::SignerBackend;
@@ -10,6 +10,19 @@ use pms_wallet::Wallet;
 use pms_wallet::signing_wire::canonical_wireblock_message;
 use pms_wire::{WireBlock, WireMeta};
 use std::sync::Arc;
+
+/// Construit N unlocks identiques — un par input, comme l'exige
+/// l'appariement positionnel `input[i] ↔ unlock[i]` de
+/// `validate_transaction_full` (audit C-1) — pour une transaction dont tous
+/// les inputs appartiennent au même signataire (send-simple, consolidation).
+pub fn replicate_unlocks(pubkey_hex: &str, signature_b64: &str, input_count: usize) -> Vec<Unlock> {
+    (0..input_count)
+        .map(|_| Unlock {
+            pubkey_hex: pubkey_hex.to_string(),
+            signature_b64: signature_b64.to_string(),
+        })
+        .collect()
+}
 
 /// Select parent blocks for a new block.
 /// Uses top_tips, falls back to recent_ids(1), enforces single_writer.

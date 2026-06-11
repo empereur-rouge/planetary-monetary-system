@@ -263,36 +263,6 @@ fn verify_config_signature(address: &str, sig_hex: &str, pk_hex: &str) -> bool {
     verify_key.verify(address.as_bytes(), &sig).is_ok()
 }
 
-/// Vérifie que le bloc est signé par le Coordinator.
-/// Utilisé pour les payloads Coordinator-only (Compliance, Config, etc.).
-fn require_coordinator_signature(
-    b: &Block,
-    policy: &ValidatePolicy,
-    action_name: &str,
-) -> Result<(), ValidationError> {
-    if let Some(coord_pk) = &policy.coordinator_public_key {
-        if let Some(spk) = &b.signer_pk {
-            if spk != coord_pk {
-                return Err(ValidationError::InvalidSignature(format!(
-                    "{} signed by unauthorized key: {}. Expected Coordinator: {}",
-                    action_name, spk, coord_pk
-                )));
-            }
-        } else {
-            return Err(ValidationError::InvalidSignature(format!(
-                "{} block must be signed by Coordinator",
-                action_name
-            )));
-        }
-    } else {
-        return Err(ValidationError::InvalidSignature(format!(
-            "{} not enabled (no coordinator_public_key configured)",
-            action_name
-        )));
-    }
-    Ok(())
-}
-
 /// Point d'entrée UNIQUE.
 /// - Ordonne du moins cher → plus cher.
 /// - Court-circuite dès qu'une règle échoue.
@@ -319,7 +289,15 @@ pub fn validate_block(
     no_cycle(b, policy)?;
     parent_count(dag, b, policy)?;
 
-    // 3) Sémantique par type de payload (si visible)
+    // 3) Autorité par type de payload (coordinator-only) — règles partagées
+    //    avec le hot path via validations::authority (audit C-2 extension).
+    crate::validations::authority::validate_payload_authority(
+        b.signer_pk.as_deref(),
+        b.payload.as_ref(),
+        policy,
+    )?;
+
+    // 4) Sémantique par type de payload (si visible)
     match &b.payload {
         None => { /* MVP: bloc sans payload = OK si structure ok */ }
         Some(PayloadEnvelope::Plain(pp)) => match pp {
@@ -333,39 +311,18 @@ pub fn validate_block(
                 validate_fee_recipient_output(tx, policy)?;
                 tx_amounts_valid(tx, policy)?; // basique sur chaînes décimales
 
-                // CHECK UTXO (sauf si fait en async par net_adapter)
+                // CHECK UTXO legacy (chemin sync RAM DAG — dag.rs / tests).
+                //
+                // AUDIT H-3 (v0.9.0): le hot path de production
+                // (`do_persist_block_internal`) exécute désormais
+                // `validate_transaction_full` (signatures + ownership +
+                // double-spend + conservation) INCONDITIONNELLEMENT, que ce
+                // flag soit true ou false. `skip_utxo_checks=true` signifie
+                // seulement « la validation UTXO est portée par le chemin
+                // async » — il ne désactive plus aucun contrôle en prod.
                 if !policy.skip_utxo_checks {
                     utxo_no_double_spend(dag, tx)?;
                     utxo_sufficient_funds(dag, tx)?;
-                } else {
-                    tracing::error!(
-                        "SECURITY AUDIT: skip_utxo_checks=true — UTXO double-spend detection BYPASSED. \
-                         This flag must be false in production."
-                    );
-                }
-            }
-            PlainPayload::Milestone {
-                approved: _,
-                distribute_node_rewards: _,
-            } => {
-                // Milestone Validation
-                if let Some(coord_pk) = &policy.coordinator_public_key {
-                    if let Some(spk) = &b.signer_pk {
-                        if spk != coord_pk {
-                            return Err(ValidationError::InvalidSignature(format!(
-                                "Milestone signed by unauthorized key: {}. Expected: {}",
-                                spk, coord_pk
-                            )));
-                        }
-                    } else {
-                        return Err(ValidationError::InvalidSignature(
-                            "Milestone block must be signed".into(),
-                        ));
-                    }
-                } else {
-                    return Err(ValidationError::Other(
-                        "Milestones not enabled (no coordinator_public_key)",
-                    ));
                 }
             }
             PlainPayload::Nft(_action) => {
@@ -390,262 +347,24 @@ pub fn validate_block(
                     ));
                 }
             }
-            PlainPayload::ConfigUpdate(_update) => {
-                // ConfigUpdate : seulement le Coordinator peut modifier la config
-                if let Some(coord_pk) = &policy.coordinator_public_key {
-                    if let Some(spk) = &b.signer_pk {
-                        if spk != coord_pk {
-                            return Err(ValidationError::InvalidSignature(format!(
-                                "ConfigUpdate signed by unauthorized key: {}. Expected: {}",
-                                spk, coord_pk
-                            )));
-                        }
-                    } else {
-                        return Err(ValidationError::InvalidSignature(
-                            "ConfigUpdate block must be signed".into(),
-                        ));
-                    }
-                } else {
-                    return Err(ValidationError::Other(
-                        "ConfigUpdate not enabled (no coordinator_public_key)",
-                    ));
-                }
-            }
-            PlainPayload::Reward { .. } => {
-                // SECURITY: Only Coordinator can create Reward blocks
-                // This prevents malicious nodes from minting tokens via fake rewards
-                if let Some(coord_pk) = &policy.coordinator_public_key {
-                    if let Some(spk) = &b.signer_pk {
-                        if spk != coord_pk {
-                            return Err(ValidationError::InvalidSignature(format!(
-                                "Reward signed by unauthorized key: {}. Expected Coordinator: {}",
-                                spk, coord_pk
-                            )));
-                        }
-                    } else {
-                        return Err(ValidationError::InvalidSignature(
-                            "Reward block must be signed by Coordinator".into(),
-                        ));
-                    }
-                } else {
-                    return Err(ValidationError::Other(
-                        "Reward not enabled (no coordinator_public_key configured)",
-                    ));
-                }
-            }
-            PlainPayload::EncryptedReward { .. } => {
-                // SECURITY: Same rules as Reward - only Coordinator can create
-                // EncryptedReward contains encrypted outputs for privacy
-                if let Some(coord_pk) = &policy.coordinator_public_key {
-                    if let Some(spk) = &b.signer_pk {
-                        if spk != coord_pk {
-                            return Err(ValidationError::InvalidSignature(format!(
-                                "EncryptedReward signed by unauthorized key: {}. Expected Coordinator: {}",
-                                spk, coord_pk
-                            )));
-                        }
-                    } else {
-                        return Err(ValidationError::InvalidSignature(
-                            "EncryptedReward block must be signed by Coordinator".into(),
-                        ));
-                    }
-                } else {
-                    return Err(ValidationError::Other(
-                        "EncryptedReward not enabled (no coordinator_public_key configured)",
-                    ));
-                }
-            }
-            PlainPayload::TokenCreate(_) => {
-                // SECURITY: Only Coordinator can register new tokens
-                if let Some(coord_pk) = &policy.coordinator_public_key {
-                    if let Some(spk) = &b.signer_pk {
-                        if spk != coord_pk {
-                            return Err(ValidationError::InvalidSignature(format!(
-                                "TokenCreate signed by unauthorized key: {}. Expected Coordinator: {}",
-                                spk, coord_pk
-                            )));
-                        }
-                    } else {
-                        return Err(ValidationError::InvalidSignature(
-                            "TokenCreate block must be signed by Coordinator".into(),
-                        ));
-                    }
-                } else {
-                    return Err(ValidationError::Other(
-                        "TokenCreate not enabled (no coordinator_public_key configured)",
-                    ));
-                }
-            }
-            PlainPayload::BridgeLock {
-                inputs,
-                dest_ledger_id,
-                dest_address,
-                ..
-            } => {
-                // SECURITY: Only Coordinator can create BridgeLock blocks
-                if let Some(coord_pk) = &policy.coordinator_public_key {
-                    if let Some(spk) = &b.signer_pk {
-                        if spk != coord_pk {
-                            return Err(ValidationError::InvalidSignature(format!(
-                                "BridgeLock signed by unauthorized key: {}. Expected Coordinator: {}",
-                                spk, coord_pk
-                            )));
-                        }
-                    } else {
-                        return Err(ValidationError::InvalidSignature(
-                            "BridgeLock block must be signed by Coordinator".into(),
-                        ));
-                    }
-                } else {
-                    return Err(ValidationError::Other(
-                        "BridgeLock not enabled (no coordinator_public_key configured)",
-                    ));
-                }
-                if inputs.is_empty() {
-                    return Err(ValidationError::Other(
-                        "BridgeLock: at least one input required",
-                    ));
-                }
-                if dest_ledger_id.is_empty() || dest_address.is_empty() {
-                    return Err(ValidationError::Other(
-                        "BridgeLock: dest_ledger_id and dest_address required",
-                    ));
-                }
-            }
-            PlainPayload::BridgeMint {
-                outputs,
-                lock_block_id,
-                source_ledger_id,
-            } => {
-                // SECURITY: Only Coordinator can create BridgeMint blocks
-                if let Some(coord_pk) = &policy.coordinator_public_key {
-                    if let Some(spk) = &b.signer_pk {
-                        if spk != coord_pk {
-                            return Err(ValidationError::InvalidSignature(format!(
-                                "BridgeMint signed by unauthorized key: {}. Expected Coordinator: {}",
-                                spk, coord_pk
-                            )));
-                        }
-                    } else {
-                        return Err(ValidationError::InvalidSignature(
-                            "BridgeMint block must be signed by Coordinator".into(),
-                        ));
-                    }
-                } else {
-                    return Err(ValidationError::Other(
-                        "BridgeMint not enabled (no coordinator_public_key configured)",
-                    ));
-                }
-                if outputs.is_empty() {
-                    return Err(ValidationError::Other(
-                        "BridgeMint: at least one output required",
-                    ));
-                }
-                if lock_block_id.is_empty() || source_ledger_id.is_empty() {
-                    return Err(ValidationError::Other(
-                        "BridgeMint: lock_block_id and source_ledger_id required",
-                    ));
-                }
-            }
-            PlainPayload::Freeze { address, .. } => {
-                require_coordinator_signature(b, policy, "Freeze")?;
-                if address.trim().is_empty() {
-                    return Err(ValidationError::Other("Freeze: address cannot be empty"));
-                }
-            }
-            PlainPayload::Unfreeze {
-                address,
-                freeze_block_id,
-                ..
-            } => {
-                require_coordinator_signature(b, policy, "Unfreeze")?;
-                if address.trim().is_empty() || freeze_block_id.trim().is_empty() {
-                    return Err(ValidationError::Other(
-                        "Unfreeze: address and freeze_block_id required",
-                    ));
-                }
-            }
-            PlainPayload::Seize {
-                inputs,
-                outputs,
-                from_address,
-                ..
-            } => {
-                require_coordinator_signature(b, policy, "Seize")?;
-                if inputs.is_empty() || outputs.is_empty() {
-                    return Err(ValidationError::Other("Seize: inputs and outputs required"));
-                }
-                if from_address.trim().is_empty() {
-                    return Err(ValidationError::Other(
-                        "Seize: from_address cannot be empty",
-                    ));
-                }
-            }
-            PlainPayload::Reverse {
-                original_block_id,
-                inputs,
-                outputs,
-                ..
-            } => {
-                require_coordinator_signature(b, policy, "Reverse")?;
-                if original_block_id.trim().is_empty() || inputs.is_empty() || outputs.is_empty() {
-                    return Err(ValidationError::Other(
-                        "Reverse: original_block_id, inputs and outputs required",
-                    ));
-                }
-            }
-            PlainPayload::ContractRegister(contract) => {
-                require_coordinator_signature(b, policy, "ContractRegister")?;
-                if contract.contract_id.trim().is_empty() {
-                    return Err(ValidationError::Other(
-                        "ContractRegister: contract_id cannot be empty",
-                    ));
-                }
-                if contract.name.trim().is_empty() {
-                    return Err(ValidationError::Other(
-                        "ContractRegister: name cannot be empty",
-                    ));
-                }
-                if contract.actions.is_empty() {
-                    return Err(ValidationError::Other(
-                        "ContractRegister: at least one action required",
-                    ));
-                }
-            }
-            PlainPayload::ContractUpdate { contract_id, .. } => {
-                require_coordinator_signature(b, policy, "ContractUpdate")?;
-                if contract_id.trim().is_empty() {
-                    return Err(ValidationError::Other(
-                        "ContractUpdate: contract_id cannot be empty",
-                    ));
-                }
-            }
-            PlainPayload::LedgerOwnershipTransfer { ledger_id, .. } => {
-                require_coordinator_signature(b, policy, "LedgerOwnershipTransfer")?;
-                if ledger_id.trim().is_empty() {
-                    return Err(ValidationError::Other(
-                        "LedgerOwnershipTransfer: ledger_id cannot be empty",
-                    ));
-                }
-            }
-            PlainPayload::CoordinatorKeyRotate { old_pk, new_pk, .. } => {
-                // Coordinator-only rotation. The signature check itself
-                // is enforced upstream in `do_persist_block_internal`
-                // (must be signed by the *current* coordinator key — a
-                // strict subset of the bootstrap rule). Here we only
-                // assert structural sanity.
-                require_coordinator_signature(b, policy, "CoordinatorKeyRotate")?;
-                if old_pk.trim().is_empty() || new_pk.trim().is_empty() {
-                    return Err(ValidationError::Other(
-                        "CoordinatorKeyRotate: old_pk and new_pk must be non-empty",
-                    ));
-                }
-                if old_pk.trim() == new_pk.trim() {
-                    return Err(ValidationError::Other(
-                        "CoordinatorKeyRotate: old_pk and new_pk must differ",
-                    ));
-                }
-            }
+            // Payloads coordinator-only : autorité + structure déjà vérifiées
+            // à l'étape 3 par `validate_payload_authority` (règles partagées
+            // avec le hot path — audit C-2 extension, v0.9.0).
+            PlainPayload::Milestone { .. }
+            | PlainPayload::ConfigUpdate(_)
+            | PlainPayload::Reward { .. }
+            | PlainPayload::EncryptedReward { .. }
+            | PlainPayload::TokenCreate(_)
+            | PlainPayload::BridgeLock { .. }
+            | PlainPayload::BridgeMint { .. }
+            | PlainPayload::Freeze { .. }
+            | PlainPayload::Unfreeze { .. }
+            | PlainPayload::Seize { .. }
+            | PlainPayload::Reverse { .. }
+            | PlainPayload::ContractRegister(_)
+            | PlainPayload::ContractUpdate { .. }
+            | PlainPayload::LedgerOwnershipTransfer { .. }
+            | PlainPayload::CoordinatorKeyRotate { .. } => {}
         },
         Some(PayloadEnvelope::Encrypted(_ep)) => {
             // MVP privé : on ne peut pas valider le contenu → on se limite à la structure.

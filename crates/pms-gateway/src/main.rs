@@ -5,7 +5,7 @@ use http::header::{AUTHORIZATION, CONTENT_TYPE};
 use http::{HeaderValue, Method};
 use std::sync::Arc;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::PeerIpKeyExtractor;
+use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_governor::GovernorLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -149,7 +149,13 @@ async fn main() -> Result<()> {
         GovernorConfigBuilder::default()
             .per_nanosecond(period_ns)
             .burst_size(settings.burst_size)
-            .key_extractor(PeerIpKeyExtractor)
+            // AUDIT M-9 (v0.9.0): SmartIpKeyExtractor lit X-Forwarded-For /
+            // X-Real-IP avant de retomber sur l'IP du peer TCP. Derrière
+            // Caddy (qui ajoute X-Forwarded-For par défaut), PeerIpKeyExtractor
+            // voyait l'IP du proxy pour TOUS les clients → rate limit global
+            // partagé, contournable et DoS-able entre utilisateurs légitimes.
+            // Aligné sur l'engine (routes.rs) qui utilise déjà SmartIpKeyExtractor.
+            .key_extractor(SmartIpKeyExtractor)
             .finish()
             .unwrap(),
     );

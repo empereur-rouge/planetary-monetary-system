@@ -90,6 +90,12 @@ pub enum ValidationError {
     #[error("token already exists: {0}")]
     TokenAlreadyExists(String),
 
+    // Ownership (audit C-1) — l'unlock ne correspond pas au propriétaire de
+    // l'UTXO dépensé. Message volontairement vague (anti-enumeration) : pas
+    // d'adresse ni de pubkey exposée.
+    #[error("unlock {input_index} does not authorize spending the referenced output")]
+    OwnershipMismatch { input_index: usize },
+
     // Compliance
     #[error("address is frozen: {0}")]
     AddressFrozen(String),

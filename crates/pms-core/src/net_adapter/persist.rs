@@ -6,7 +6,6 @@
 
 use super::helpers::plain_payload_type_str;
 use crate::crypto::crypto::verify_block_signature;
-use crate::validations::check::ValidatePolicy;
 use crate::validations::mint::validate_mint_security;
 use crate::validations::nft::validate_nft_action;
 use crate::validations::policy::validate_mint_policy;
@@ -74,6 +73,21 @@ where
             );
         }
 
+        // AUDIT v0.9.0: l'autorité par payload (authority.rs, mint, NFT) suit
+        // la clé coordinator COURANTE — un `CoordinatorKeyRotate` transfère
+        // immédiatement l'autorité à new_pk (les anciennes clés en grace
+        // window peuvent encore signer des blocs ordinaires via le
+        // single-writer gate, mais plus exercer d'autorité). Appliqué une
+        // seule fois ici sur la policy déjà clonée, pas de re-clone par bloc.
+        if let Some(current_pk) = self
+            .key_rotation_state
+            .read()
+            .current_pk()
+            .map(|s| s.to_string())
+        {
+            policy.coordinator_public_key = Some(current_pk);
+        }
+
         let policy = &policy;
 
         // ============================================================
@@ -120,21 +134,23 @@ where
             .key_rotation_state
             .read()
             .accepted_signer_keys(now_ms_for_signers);
+        // AUDIT H-4 (v0.9.0): posture FAIL-CLOSED. Avant, un active set vide
+        // (clé bootstrap absente, état de rotation corrompu) SAUTAIT le
+        // contrôle — n'importe quel bloc auto-signé était accepté. Désormais,
+        // en Testnet/Mainnet, active set vide ⇒ rejet de TOUS les blocs
+        // jusqu'à correction de la config. Seul le mode Dev pur (aucune clé
+        // coordinator configurée, par design) reste permissif.
         if policy.enforce_single_writer {
-            if !accepted_signer_keys.is_empty() {
-                let signer = wb.signer_pk_hex.trim().to_string();
-                if !accepted_signer_keys.contains(&signer) {
-                    tracing::warn!(
-                        "🚫 Single Writer violation: block {} signed by {} not in active set ({} keys)",
-                        &wb.id[..16.min(wb.id.len())],
-                        &wb.signer_pk_hex,
-                        accepted_signer_keys.len()
-                    );
-                    return Ok(PutResult::Rejected(format!(
-                        "single_writer: signer {} is not in the active coordinator key set",
-                        &wb.signer_pk_hex
-                    )));
-                }
+            let is_dev_mode = matches!(self.settings.network.mode, pms_config::NetworkMode::Dev);
+            if let Err(reason) =
+                single_writer_gate(&accepted_signer_keys, &wb.signer_pk_hex, is_dev_mode)
+            {
+                tracing::warn!(
+                    "🚫 Single Writer violation: block {} — {}",
+                    &wb.id[..16.min(wb.id.len())],
+                    reason
+                );
+                return Ok(PutResult::Rejected(format!("single_writer: {reason}")));
             }
         }
 
@@ -166,6 +182,52 @@ where
             Some(s) => Some(serde_json::from_str::<PayloadEnvelope>(s)?),
         };
 
+        // 1.v) INTÉGRITÉ DE L'ID DE BLOC (audit M-6, v0.9.0)
+        //
+        // L'id sert de clé d'idempotence/déduplication (AlreadyExists) et de
+        // référence parent. Avant ce check, un producteur autorisé pouvait
+        // forger un id arbitraire (collision volontaire pour masquer/évincer
+        // un bloc, ou id ne correspondant pas au contenu). On recalcule l'id
+        // depuis le contenu canonique — parents + nonce + en-tête d'enveloppe
+        // (commitment SHA-256 du payload) — et on rejette tout mismatch.
+        // Indépendant du formatting JSON du client : le payload est
+        // re-sérialisé sous forme canonique serde avant hachage.
+        {
+            let expected_id = pms_utils::compute_block_id(&wb.parents, &payload, wb.nonce);
+            if wb.id != expected_id {
+                tracing::warn!(
+                    "🚫 Block id mismatch: declared {} != computed {} (signer {})",
+                    &wb.id[..16.min(wb.id.len())],
+                    &expected_id[..16],
+                    &wb.signer_pk_hex[..16.min(wb.signer_pk_hex.len())]
+                );
+                return Ok(PutResult::Rejected(
+                    "block id does not match canonical content hash".to_string(),
+                ));
+            }
+        }
+
+        // 1.w) AUTORITÉ PAR TYPE DE PAYLOAD (audit C-2 extension, v0.9.0)
+        //
+        // Les checks coordinator-only (Milestone, ConfigUpdate, Reward,
+        // TokenCreate, Bridge*, Freeze/Seize/Reverse, Contract*, etc.)
+        // vivaient dans le validate_block legacy, retiré du hot path —
+        // ils n'étaient donc plus appliqués qu'à travers l'enforcement
+        // single-writer. On les ré-applique ICI, AVANT tout apply d'état.
+        // La policy porte déjà la clé COURANTE (override rotation en tête
+        // de fonction).
+        if let Err(e) = crate::validations::authority::validate_payload_authority(
+            Some(wb.signer_pk_hex.as_str()),
+            payload.as_ref(),
+            policy,
+        ) {
+            tracing::warn!(
+                "🚫 Payload authority violation on block {}: {e}",
+                &wb.id[..16.min(wb.id.len())]
+            );
+            return Ok(PutResult::Rejected(format!("payload authority: {e}")));
+        }
+
         // 1.x) Politique de mint (PlainPayload::Mint seulement)
         //
         // - Plain + Mint = visible -> on peut appliquer les regles de montant et d'admin.
@@ -188,40 +250,11 @@ where
             // choice for back-to-back rotations: mint is the most
             // sensitive authority, so we narrow it the moment the new
             // key is announced.
-            let policy = ValidatePolicy::from_settings(
-                &self.settings.validation,
-                &self.settings.network.network_id,
-            );
-            let mut policy = policy;
-            // Resolve the bootstrap pk — same logic as before — and let
-            // the rotation cache override it with the latest rotated-to
-            // key when one exists.
-            if let Some(ref custom_key) = self.settings.validation.coordinator_public_key {
-                policy.coordinator_public_key = Some(custom_key.clone());
-            } else {
-                match self.settings.network.mode {
-                    pms_config::NetworkMode::Mainnet => {
-                        policy.coordinator_public_key =
-                            Some(pms_config::COORDINATOR_PUBLIC_KEY_MAINNET.to_string());
-                    }
-                    pms_config::NetworkMode::Testnet => {
-                        policy.coordinator_public_key =
-                            Some(pms_config::COORDINATOR_PUBLIC_KEY_TESTNET.to_string());
-                    }
-                    pms_config::NetworkMode::Dev => {
-                        policy.coordinator_public_key = None;
-                    }
-                }
-            }
-            if let Some(current_pk) = self
-                .key_rotation_state
-                .read()
-                .current_pk()
-                .map(|s| s.to_string())
-            {
-                policy.coordinator_public_key = Some(current_pk);
-            }
-            if let Err(e) = validate_mint_security(wb, &policy) {
+            //
+            // v0.9.0: réutilise `policy` (clé bootstrap résolue par
+            // ValidatePolicy::from_global_config + override rotation appliqué
+            // en tête de fonction) — même sémantique, sans re-dérivation.
+            if let Err(e) = validate_mint_security(wb, policy) {
                 tracing::warn!(
                     "🚫 Unauthorized mint attempt blocked: {} from signer {}",
                     wb.id,
@@ -612,47 +645,39 @@ where
         let t_parents = t_parents_start.elapsed();
 
         // 4.new) Validation UTXO Async (Sharding Phase 4)
-        // Evite le lock DAG global si active dans la policy.
+        //
+        // AUDIT C-1/C-2/H-3 (v0.9.0): la validation est INCONDITIONNELLE —
+        // elle ne dépend plus de `policy.skip_utxo_checks` (ce flag ne pilote
+        // plus que le chemin sync legacy de `validate_block`). Le hot path
+        // vérifie désormais l'AUTORISATION complète de la dépense :
+        //   - signatures de transaction (unlocks) sur le message canonique
+        //     `{network_id, inputs, outputs, fee}` (C-2),
+        //   - binding pubkey ↔ adresse propriétaire de chaque UTXO dépensé (C-1),
+        //   - appariement strict input[i] ↔ unlock[i],
+        //   - fee sanity + conservation stricte par asset (M-7),
+        //   - existence des inputs + anti double-spend.
         let t_utxo_val_start = std::time::Instant::now();
-        if policy.skip_utxo_checks {
-            if let Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) = &block.payload {
-                use crate::validations::transactions::validate_transaction_async;
-                if let Err(e) = validate_transaction_async(&self.utxos, tx).await {
+        if let Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) = &block.payload {
+            use crate::validations::transactions::validate_transaction_full;
+            let tx_input_outputs = match validate_transaction_full(&self.utxos, tx, policy).await
+            {
+                Ok(outs) => outs,
+                Err(e) => {
                     return Ok(PutResult::Rejected(format!("utxo validation failed: {e}")));
                 }
-            }
-            if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock {
-                inputs,
-                amount,
-                asset_id,
-                ..
-            })) = &block.payload
-            {
-                use crate::validations::transactions::validate_bridge_lock_async;
-                if let Err(e) =
-                    validate_bridge_lock_async(&self.utxos, inputs, amount, asset_id).await
-                {
+            };
+
+            // 4.compliance) Freeze check: reject transactions involving frozen
+            // addresses. Reuses the input outputs fetched during validation
+            // (no second ShardedUtxoSet lookup).
+            for out in &tx_input_outputs {
+                if self.store.is_frozen(&out.address).unwrap_or(false) {
                     return Ok(PutResult::Rejected(format!(
-                        "bridge lock utxo validation failed: {e}"
+                        "compliance: sender address is frozen: {}",
+                        out.address
                     )));
                 }
             }
-        }
-
-        // 4.compliance) Freeze check: reject transactions involving frozen addresses
-        if let Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) = &block.payload {
-            // Check sender addresses (input owners)
-            for inp in &tx.inputs {
-                if let Some(out) = self.utxos.get(&inp.out).await {
-                    if self.store.is_frozen(&out.address).unwrap_or(false) {
-                        return Ok(PutResult::Rejected(format!(
-                            "compliance: sender address is frozen: {}",
-                            out.address
-                        )));
-                    }
-                }
-            }
-            // Check recipient addresses
             for out in &tx.outputs {
                 if self.store.is_frozen(&out.address).unwrap_or(false) {
                     return Ok(PutResult::Rejected(format!(
@@ -660,6 +685,21 @@ where
                         out.address
                     )));
                 }
+            }
+        }
+        if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock {
+            inputs,
+            amount,
+            asset_id,
+            ..
+        })) = &block.payload
+        {
+            use crate::validations::transactions::validate_bridge_lock_async;
+            if let Err(e) = validate_bridge_lock_async(&self.utxos, inputs, amount, asset_id).await
+            {
+                return Ok(PutResult::Rejected(format!(
+                    "bridge lock utxo validation failed: {e}"
+                )));
             }
         }
         if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock { inputs, .. })) =
@@ -1321,5 +1361,93 @@ where
         }
 
         Ok(PutResult::Inserted)
+    }
+}
+
+/// Décision single-writer FAIL-CLOSED (audit H-4, v0.9.0).
+///
+/// Appelée quand `policy.enforce_single_writer == true` :
+/// - **Active set non vide** : le signataire du bloc doit en faire partie.
+/// - **Active set vide** : refus de TOUS les blocs en Testnet/Mainnet
+///   (config corrompue ou clé bootstrap absente — on ne doit jamais ouvrir
+///   l'écriture à n'importe quel auto-signataire) ; toléré en mode Dev pur
+///   uniquement (aucune clé coordinator configurée, par design), avec warn.
+///
+/// Fonction pure pour rester unit-testable sans monter un CoreAdapter.
+fn single_writer_gate(
+    accepted_signer_keys: &std::collections::HashSet<String>,
+    signer_pk_hex: &str,
+    is_dev_mode: bool,
+) -> Result<(), String> {
+    if accepted_signer_keys.is_empty() {
+        if is_dev_mode {
+            tracing::warn!(
+                "single_writer: empty active key set in Dev mode — enforcement skipped (fail-open by design in Dev only)"
+            );
+            return Ok(());
+        }
+        tracing::error!(
+            "🚨 single_writer FAIL-CLOSED: enforce_single_writer=true but the active \
+             coordinator key set is EMPTY (missing bootstrap key or corrupted rotation \
+             state). Refusing all blocks until the configuration is fixed."
+        );
+        return Err(
+            "no active coordinator key configured — all blocks refused (fail-closed)".to_string(),
+        );
+    }
+    let signer = signer_pk_hex.trim().to_string();
+    if !accepted_signer_keys.contains(&signer) {
+        return Err(format!(
+            "signer {signer} is not in the active coordinator key set ({} keys)",
+            accepted_signer_keys.len()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod single_writer_tests {
+    use super::single_writer_gate;
+    use std::collections::HashSet;
+
+    fn set(keys: &[&str]) -> HashSet<String> {
+        keys.iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_active_set_rejects_everything_in_prod() {
+        let r = single_writer_gate(&set(&[]), "04anykey", false);
+        println!("empty set / prod: {r:?}");
+        let err = r.expect_err("must fail closed");
+        assert!(err.contains("fail-closed"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_active_set_tolerated_in_dev() {
+        let r = single_writer_gate(&set(&[]), "04anykey", true);
+        println!("empty set / dev: {r:?}");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn signer_in_active_set_accepted() {
+        let r = single_writer_gate(&set(&["04coord"]), "04coord", false);
+        println!("signer in set: {r:?}");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn signer_outside_active_set_rejected_even_in_dev() {
+        // Dès qu'un active set existe, il s'applique aussi en Dev.
+        let r = single_writer_gate(&set(&["04coord"]), "04attacker", true);
+        println!("foreign signer / dev: {r:?}");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn signer_whitespace_trimmed() {
+        let r = single_writer_gate(&set(&["04coord"]), "  04coord  ", false);
+        println!("trimmed signer: {r:?}");
+        assert!(r.is_ok());
     }
 }

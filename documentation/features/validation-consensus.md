@@ -1,8 +1,8 @@
 ---
 tags: [feature, security]
 created: 2025-12-15
-updated: 2026-05-04
-version: v0.8.0
+updated: 2026-06-11
+version: v0.9.0
 ---
 
 # Validation & Consensus Rules
@@ -11,11 +11,30 @@ version: v0.8.0
 
 Le systeme de validation du PMS Engine constitue le rempart de securite fondamental du reseau. Il garantit que chaque bloc insere dans le DAG respecte un ensemble strict de regles structurelles, cryptographiques, economiques et de conformite.
 
+> **v0.9.0 — Remédiation audit sécurité (2026-06-11).** Le hot path de
+> production (`do_persist_block_internal`) exécute désormais lui-même TOUTE
+> l'autorisation, inconditionnellement :
+> - **C-1/C-2** : `validate_transaction_full()` vérifie les signatures des
+>   `unlocks` ET le binding ownership (la pubkey de `unlock[i]` doit dériver
+>   l'adresse propriétaire de l'UTXO dépensé par `input[i]`) — dépenser
+>   l'UTXO d'autrui est rejeté (`OwnershipMismatch`).
+> - **C-2 ext.** : l'autorité coordinator-only par type de payload est
+>   centralisée dans `validations/authority.rs`, appelée par le hot path ET
+>   le legacy `validate_block` (avant : hot path sans aucun check signataire
+>   pour ConfigUpdate/Freeze/Reward/etc.).
+> - **H-3** : la validation UTXO ne dépend plus de `skip_utxo_checks`.
+> - **H-4** : single-writer **fail-closed** — active set vide ⇒ rejet de
+>   tous les blocs (sauf mode Dev pur).
+> - **M-6** : le block id est recalculé depuis le contenu canonique à
+>   l'ingestion ; tout mismatch est rejeté.
+> - **M-7** : conservation stricte PAR ASSET + sanity du champ `fee`
+>   (non-négatif, ≤ `max_fee_per_tx`) — règle canonique unique.
+
 L'architecture repose sur un **pipeline de validation en deux phases** :
 
-1. **Phase Wire-Level** (`net_adapter.rs`) : validation du bloc reseau brut (`WireBlock`) -- identite reseau, signature cryptographique du bloc, Single Writer enforcement, taille payload, parents uniques, NFT/Mint/Config/Compliance.
+1. **Phase Wire-Level** (`net_adapter/persist.rs`) : validation du bloc reseau brut (`WireBlock`) -- identite reseau, signature cryptographique du bloc, Single Writer enforcement (fail-closed), intégrité du block id (M-6), autorité par payload (authority.rs), taille payload, parents uniques, NFT/Mint/Config/Compliance, et **autorisation complète des TxUtxo** (`validate_transaction_full`).
 
-2. **Phase DAG-Level** (`check.rs` / `validate_block()`) : validation semantique contre l'etat du DAG -- anti-cycle, nombre de parents, regles par type de payload (UTXO, montants, fees, Coordinator-only). **La verification des signatures de TX UTXO inclut le `network_id` de la chaine** -- une TX signee pour un autre reseau (testnet vs mainnet) est rejetee comme `InvalidSignature` (cross-chain replay protection, v0.8.0).
+2. **Phase DAG-Level** (`check.rs` / `validate_block()`, chemin legacy dag.rs/tests) : validation semantique contre l'etat du DAG -- anti-cycle, nombre de parents, regles par type de payload. **La verification des signatures de TX UTXO inclut le `network_id` de la chaine** -- une TX signee pour un autre reseau (testnet vs mainnet) est rejetee comme `InvalidSignature` (cross-chain replay protection, v0.8.0).
 
 Le consensus repose sur un **Single Writer Protocol** : en mode production (Mainnet/Testnet), seul le Coordinator (cle publique hardcodee dans `pms-consensus`) peut creer des blocs. La finalite est determinee par les **Milestones** (checkpoints signes par le Coordinator) et/ou par la **k-depth finality** (nombre de descendants confirmant un bloc).
 
@@ -49,14 +68,23 @@ WireBlock recu du reseau
 |       --> ECDSA secp256k1 / SHA-256    |
 |                                        |
 |  1.e) Single Writer Enforcement       |
-|       --> signer == coordinator_pk     |
-|       (si enforce_single_writer=true)  |
+|       --> single_writer_gate()         |
+|       FAIL-CLOSED: active set vide ->  |
+|       rejet (sauf Dev pur) [H-4]       |
 |                                        |
 |  2.b) Taille payload brut (anti-spam) |
 |       --> payload_json.len() <= max    |
 |                                        |
 |  2.c) Deserialisation PayloadEnvelope |
 |       --> JSON -> Plain/Encrypted      |
+|                                        |
+|  1.v) Integrite du block id [M-6]     |
+|       --> id == compute_block_id()     |
+|       (hash canonique du contenu)      |
+|                                        |
+|  1.w) Autorite par payload [C-2 ext]  |
+|       --> validate_payload_authority() |
+|       (authority.rs, rotation-aware)   |
 |                                        |
 |  1.x) Politique de Mint               |
 |       --> validate_mint_policy()       |
@@ -91,12 +119,20 @@ WireBlock recu du reseau
 |  4.a) Parents existent (RAM + RocksDB)|
 |       --> contains_block() || store    |
 |                                        |
-|  4.new) Validation UTXO Async         |
-|       --> validate_transaction_async() |
-|       --> ShardedUtxoSet               |
+|  4.new) AUTORISATION TXUTXO COMPLETE  |
+|       --> validate_transaction_full()  |
+|       INCONDITIONNEL [C-1/C-2/H-3/M-7]:|
+|       - inputs.len == unlocks.len      |
+|       - fee sanity (>=0, <= max)       |
+|       - verify_tx_signatures()         |
+|       - ownership binding par input    |
+|         (unlock_matches_address)       |
+|       - existence + anti double-spend  |
+|       - conservation par asset         |
 |                                        |
 |  4.compliance) Freeze check           |
 |       --> is_frozen() sur sender/recip |
+|       (reutilise les outputs fetches)  |
 |                                        |
 +========================================+
          |
@@ -247,7 +283,29 @@ if is_mainnet_key || is_testnet_key {
 
 ### TxUtxo (Transaction UTXO)
 
-Pipeline de validation complet, dans l'ordre :
+**Production (hot path, v0.9.0)** : `validate_transaction_full()` dans
+`transactions.rs` — exécutée INCONDITIONNELLEMENT par
+`do_persist_block_internal` pour tout payload `Plain(TxUtxo)`. Ordre :
+
+1. **Appariement** : `inputs.len() == unlocks.len()` — `unlock[i]` autorise `input[i]`.
+2. **Fee sanity (M-7)** : `tx.fee` décimal non-négatif et `<= max_fee_per_tx`.
+   Le fee est déclaratif — sa valeur doit être un output explicite (sinon la
+   conservation échoue). Aucun surplus n'est brûlé implicitement.
+3. **Signatures (C-2)** : `verify_tx_signatures()` sur le message canonique
+   `{network_id, inputs, outputs, fee}` ; déduplication des unlocks
+   identiques avant l'ECDSA (wallets mono-clé).
+4. **Ownership (C-1)** : pour chaque input, `unlock_matches_address(pubkey,
+   utxo.address)` (`ownership.rs`) — supporte adresse pubkey hex brute (SDK)
+   et bech32m (`SHA256(pubkey)[..20] || x25519`). Échec ⇒ `OwnershipMismatch`.
+5. **Existence + double-spend + conservation stricte par asset**.
+6. La fonction retourne les `TxOutput` des inputs — réutilisés par le freeze
+   check compliance sans second lookup.
+
+**Chemin chiffré** : `wallet_send_tx` (`POST /v1/wallet/tx/send`) applique
+les MÊMES checks (appariement, signatures, ownership, conservation par asset)
+sur le plaintext AVANT chiffrement — le hot path ne voit que le ciphertext.
+
+**Legacy (`validate_block`, dag.rs/tests)** — pipeline historique, dans l'ordre :
 
 1. **Verification des signatures** (`verify_tx_signatures(tx, network_id)` dans `signature.rs`) :
    - `inputs.len() == unlocks.len()` (correspondance 1:1).
@@ -428,24 +486,24 @@ La cle Coordinator utilisee pour la validation est resolue dans cet ordre de pri
 
 ### Payloads Coordinator-Only
 
-Les payloads suivants requierent la signature du Coordinator. La verification est effectuee par `require_coordinator_signature()` (helper generique) ou inline dans `validate_block()` :
+**v0.9.0** : les règles d'autorité par type de payload sont centralisées dans
+`validations/authority.rs::validate_payload_authority()`, appelée par les
+DEUX chemins — le hot path (`do_persist_block_internal`, étape 1.w, AVANT
+tout apply d'état, avec la clé courante rotation-aware) et le legacy
+`validate_block()` (étape 3). Elles ne peuvent plus diverger.
 
-| Payload | Verification |
-|---------|-------------|
-| `Milestone` | inline dans `validate_block()` |
-| `ConfigUpdate` | inline dans `validate_block()` |
-| `Reward` | inline dans `validate_block()` |
-| `EncryptedReward` | inline dans `validate_block()` |
-| `TokenCreate` | inline dans `validate_block()` |
-| `BridgeLock` | inline dans `validate_block()` |
-| `BridgeMint` | inline dans `validate_block()` |
-| `Freeze` | `require_coordinator_signature()` |
-| `Unfreeze` | `require_coordinator_signature()` |
-| `Seize` | `require_coordinator_signature()` |
-| `Reverse` | `require_coordinator_signature()` |
-| `ContractRegister` | `require_coordinator_signature()` |
-| `ContractUpdate` | `require_coordinator_signature()` |
-| `Mint` | `validate_mint_security()` (dans `net_adapter/persist.rs`) |
+Payloads couverts (autorité Coordinator + structure minimale) : `Milestone`,
+`ConfigUpdate`, `Reward`, `EncryptedReward`, `TokenCreate`, `BridgeLock`,
+`BridgeMint`, `Freeze`, `Unfreeze`, `Seize`, `Reverse`, `ContractRegister`,
+`ContractUpdate`, `LedgerOwnershipTransfer`, `CoordinatorKeyRotate`.
+
+Hors périmètre (validation dédiée) : `Mint` → `validate_mint_security()`
+(réutilise la même policy rotation-aware), `TxUtxo` →
+`validate_transaction_full()`, `Nft` → `validate_nft_action()`, `Genesis`.
+
+En mode Dev pur (aucune clé coordinator configurée), l'enforcement est sauté
+avec un warn — en Testnet/Mainnet la clé est toujours présente (constantes
+hardcodées), ce chemin n'existe pas en production.
 
 ### Verification cryptographique des blocs
 
@@ -499,11 +557,13 @@ Apres validation, les effets sont appliques en RAM via `apply_block_mem()` dans 
 | Fichier | Role |
 |---------|------|
 | `crates/pms-core/src/validations/mod.rs` | Module racine des validations |
-| `crates/pms-core/src/validations/check.rs` | Point d'entree `validate_block()`, `ValidatePolicy`, `require_coordinator_signature()`, `verify_config_signature()` |
+| `crates/pms-core/src/validations/check.rs` | Point d'entree `validate_block()`, `ValidatePolicy`, `verify_config_signature()` |
+| `crates/pms-core/src/validations/authority.rs` | `validate_payload_authority()` — autorité coordinator-only par payload, partagée hot path + legacy (v0.9.0) |
+| `crates/pms-core/src/validations/ownership.rs` | `unlock_matches_address()` — binding pubkey ↔ propriétaire UTXO (C-1, v0.9.0) |
 | `crates/pms-core/src/validations/policy.rs` | `validate_mint_policy()`, `check_mint_amount()` |
 | `crates/pms-core/src/validations/mint.rs` | `validate_mint_security()`, `validate_mint_security_logic()` |
-| `crates/pms-core/src/validations/transactions.rs` | `utxo_no_double_spend()`, `utxo_sufficient_funds()`, `validate_transaction_async()`, `validate_bridge_lock_async()` |
-| `crates/pms-core/src/validations/signature.rs` | `verify_tx_signatures()`, `verify_single_signature()` |
+| `crates/pms-core/src/validations/transactions.rs` | `validate_transaction_full()` (hot path v0.9.0), `validate_transaction_async()`, `check_asset_conservation()`, `utxo_no_double_spend()`, `utxo_sufficient_funds()`, `validate_bridge_lock_async()` |
+| `crates/pms-core/src/validations/signature.rs` | `verify_tx_signatures()` (dédup des unlocks identiques), `verify_single_signature()` |
 | `crates/pms-core/src/validations/fees.rs` | `validate_fee_recipient_output()` |
 | `crates/pms-core/src/validations/amount.rs` | `amount_parse_pos_dec()`, `amount_parse_non_neg_dec()`, `amounts_positive_outputs()`, `tx_amounts_valid()`, `amount_is_positive_decimal()` |
 | `crates/pms-core/src/validations/nft.rs` | `validate_nft_action()`, `NftValidationError` |
@@ -567,11 +627,35 @@ pub fn verify_tx_signatures(tx: &Transaction) -> Result<(), ValidationError>
 ```
 Verifie toutes les signatures d'une transaction. Strategie hybride : sequentiel pour < 4 inputs, parallele via rayon pour >= 4 inputs.
 
+### validate_transaction_full() (v0.9.0 — hot path)
+```rust
+pub async fn validate_transaction_full(utxos: &ShardedUtxoSet, tx: &Transaction, policy: &ValidatePolicy) -> Result<Vec<TxOutput>, ValidationError>
+```
+Autorisation COMPLÈTE d'une TxUtxo : appariement input↔unlock, fee sanity,
+signatures ECDSA (canonical avec network_id), binding ownership par input,
+existence + anti double-spend + conservation par asset. Retourne les outputs
+des inputs pour réutilisation (freeze check). Tests d'attaque :
+`crates/pms-core/tests/spend_authorization.rs`.
+
+### unlock_matches_address() (v0.9.0)
+```rust
+pub fn unlock_matches_address(pubkey_hex: &str, address: &str) -> bool
+```
+Binding C-1 : true si la pubkey ECDSA dérive l'adresse (forme brute hex ou
+bech32m `SHA256(pubkey)[..20]`).
+
+### validate_payload_authority() (v0.9.0)
+```rust
+pub fn validate_payload_authority(signer_pk: Option<&str>, payload: Option<&PayloadEnvelope>, policy: &ValidatePolicy) -> Result<(), ValidationError>
+```
+Autorité coordinator-only + structure minimale pour les 15 payloads sensibles.
+Appelée par le hot path (clé rotation-aware) et `validate_block`.
+
 ### validate_transaction_async()
 ```rust
 pub async fn validate_transaction_async(utxos: &ShardedUtxoSet, tx: &Transaction) -> Result<(), ValidationError>
 ```
-Validation UTXO lock-free via le `ShardedUtxoSet`. Verifie l'absence de doublons internes, l'existence des inputs, et la conservation par asset.
+Validation UTXO lock-free via le `ShardedUtxoSet`. Verifie l'absence de doublons internes, l'existence des inputs, et la conservation par asset. ⚠️ Ne vérifie ni signatures ni ownership — préférer `validate_transaction_full` en production.
 
 ### validate_nft_action()
 ```rust

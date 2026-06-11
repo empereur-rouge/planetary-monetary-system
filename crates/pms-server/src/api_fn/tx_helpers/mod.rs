@@ -32,6 +32,7 @@ pub use block_ops::{
     persist_and_broadcast,
     persist_and_broadcast_with_delta,
     apply_utxo_delta,
+    replicate_unlocks,
 };
 
 pub use fee_accumulation::{

@@ -13,7 +13,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use http::StatusCode;
 use pms_storage::PutResult;
-use pms_types::{Transaction, TxInput, TxOutput, Unlock};
+use pms_types::{Transaction, TxInput, TxOutput};
 use pms_types_payload::{PayloadEnvelope, PlainPayload};
 use pms_wallet::SignerBackend;
 use rust_decimal::Decimal;
@@ -209,10 +209,11 @@ pub async fn admin_consolidate_utxos(
     };
 
     let signed_tx = Transaction {
-        unlocks: vec![Unlock {
-            pubkey_hex: state.node_wallet.public_key_hex.clone(),
-            signature_b64,
-        }],
+        unlocks: tx_helpers::replicate_unlocks(
+            &state.node_wallet.public_key_hex,
+            &signature_b64,
+            unsigned_tx.inputs.len(),
+        ),
         ..unsigned_tx
     };
 

@@ -7,6 +7,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0] - Unreleased — Security audit remediation (C-1/C-2/H-3/H-4/M-6/M-7/M-8/M-9)
+
+Remédiation de l'audit de sécurité statique du 2026-06-11. Constat central de
+l'audit : la couche de signature de **transaction** (les `unlocks`) était
+inopérante — jamais vérifiée dans le hot path (C-2) et, même vérifiée, sans
+lien cryptographique avec le propriétaire de l'UTXO dépensé (C-1). La sécurité
+des fonds reposait à 100 % sur la signature de bloc du Coordinator.
+
+### Fixed
+- **fix(security/C-1+C-2)**: les transactions UTXO sont désormais pleinement
+  autorisées dans le hot path (`do_persist_block_internal`) via la nouvelle
+  `validate_transaction_full()` : appariement strict `input[i] ↔ unlock[i]`,
+  vérification ECDSA de chaque unlock sur le message canonique
+  `{network_id, inputs, outputs, fee}`, et **binding ownership** — la pubkey
+  de l'unlock doit dériver l'adresse propriétaire de l'UTXO dépensé
+  (`unlock_matches_address`, nouveau module `validations/ownership.rs`,
+  supporte les deux formes d'adresse : pubkey hex brute du SDK et bech32m
+  `SHA256(pubkey)[..20] || x25519`). Dépenser l'UTXO d'autrui avec sa propre
+  clé est maintenant rejeté (`ValidationError::OwnershipMismatch`).
+- **fix(security/C-1+C-2, encrypted path)**: `wallet_send_tx`
+  (`POST /v1/wallet/tx/send`) vérifiait l'équilibre des montants mais **ni les
+  signatures ni l'ownership** de la tx pré-signée avant de la chiffrer et
+  d'appliquer son delta UTXO — un chemin de vol parallèle contournant le hot
+  path (le ciphertext n'y est pas validable). Le handler exécute désormais
+  appariement + `verify_tx_signatures` + binding ownership + conservation
+  par asset sur le plaintext, avant chiffrement.
+- **fix(security/H-3)**: la validation UTXO du hot path est **inconditionnelle**
+  — elle ne dépend plus de `policy.skip_utxo_checks`. Ce flag ne pilote plus
+  que le chemin sync legacy de `validate_block` (dag.rs/tests) ; une policy
+  par défaut ne peut plus désactiver silencieusement les checks de production.
+- **fix(security/M-7)**: règle de conservation canonique unique — conservation
+  stricte PAR ASSET (`check_asset_conservation`, partagée hot path + handler) ;
+  le champ `tx.fee` est déclaratif (la valeur des frais doit être un output
+  explicite) mais subit un sanity check : décimal non-négatif et
+  `<= max_fee_per_tx`. Avant ce fix, `fee` n'était validé nulle part en
+  production (une tx avec `fee: "999999999"` passait), et `wallet_send_tx`
+  acceptait une conversion cross-asset (10 PMS in → 10 EDN out) car il ne
+  sommait que les totaux globaux.
+
+### Fixed (suite — phases 2 à 5)
+- **fix(security/C-2 extension)**: les checks d'autorité coordinator-only
+  (`ConfigUpdate`, `Freeze`/`Unfreeze`/`Seize`/`Reverse`, `Reward`,
+  `EncryptedReward`, `TokenCreate`, `Milestone`, `Bridge*`, `Contract*`,
+  `LedgerOwnershipTransfer`, `CoordinatorKeyRotate`) étaient appliqués par le
+  hot path **sans aucune vérification du signataire** (ils ne vivaient que
+  dans le `validate_block` legacy, retiré du hot path) — seule l'enforcement
+  single-writer les masquait. Nouveau module partagé
+  `validations/authority.rs::validate_payload_authority()`, exécuté par les
+  deux chemins AVANT tout apply d'état, avec la clé courante rotation-aware.
+  Le bloc Mint réutilise la même policy (suppression d'une re-dérivation par
+  bloc).
+- **fix(security/H-4)**: single-writer **fail-closed** — un active set de
+  clés vide (clé bootstrap absente, état de rotation corrompu) SAUTAIT le
+  contrôle et acceptait tout bloc auto-signé. Nouvelle fonction pure
+  `single_writer_gate()` : active set vide ⇒ rejet de TOUS les blocs en
+  Testnet/Mainnet ; seul le mode Dev pur reste permissif (warn). 5 tests.
+- **fix(security/M-6)**: l'id de bloc est recalculé à l'ingestion depuis le
+  contenu canonique (parents + nonce + en-tête d'enveloppe avec commitment
+  SHA-256 du payload) — tout mismatch est rejeté. Avant, l'id fourni par le
+  client était accepté tel quel alors qu'il sert de clé d'idempotence
+  (`AlreadyExists`) et de référence parent.
+- **fix(security/M-8)**: `constant_time_compare` (auth admin) compare
+  désormais les digests SHA-256 des deux côtés (32 octets fixes, aucune
+  branche dépendante du secret) — l'ancien `ct_eq` factice sur mismatch de
+  longueur fuyait la longueur du token admin par timing. 4 tests.
+- **fix(security/M-9)**: le rate limiting du gateway passe de
+  `PeerIpKeyExtractor` à `SmartIpKeyExtractor` (X-Forwarded-For/X-Real-IP) —
+  derrière Caddy, tous les clients partageaient l'IP du proxy (limite
+  globale contournable / DoS involontaire). Aligné sur l'engine.
+- **fix(tests)**: réparation de `multi_ledger_test` (cassé sur main —
+  Settings literal obsolète : champs `auto_reindex_activity_items`,
+  `strict_key_permissions`, section `health` manquants).
+
+### Changed
+- **perf(validation)**: `verify_tx_signatures` déduplique les unlocks
+  identiques avant la vérification ECDSA (les wallets mono-clé, SDK inclus,
+  répètent le même unlock N fois — une seule vérification suffit).
+- **consolidation + wallet_send_simple**: produisent un unlock PAR input
+  (appariement positionnel requis par `validate_transaction_full`) au lieu
+  d'un unlock unique pour N inputs.
+- Le freeze check compliance du hot path réutilise les outputs fetchés par la
+  validation (suppression d'un second lookup ShardedUtxoSet par input).
+
+### Tests
+- Nouveau `crates/pms-core/tests/spend_authorization.rs` (9 tests d'attaque) :
+  vol d'UTXO d'autrui rejeté, vol en input mixte rejeté (index exact), tx sans
+  unlocks rejetée, replay cross-network rejeté, fee fantôme/malformé rejeté,
+  conversion cross-asset rejetée, dépenses légitimes acceptées (adresses
+  bech32m ET pubkey brute SDK).
+- Tests unitaires `validations/ownership.rs` (5 cas, dont adresse poubelle).
+
+### Infrastructure / Versions
+- **Workspace** `0.8.3` → `0.9.0`.
+- **DAG_VERSION** `2.0.0` → `3.0.0` (MAJOR — règles de validation breaking :
+  des blocs acceptés sous 2.x sont rejetés sous 3.x ; **wipe testnet requis**
+  au deploy, cf. procédure DAG_VERSION major dans CLAUDE.md).
+- **API_VERSION** `12` → `13` (`tx/send` exige des unlocks valides, 401
+  sinon ; `submit/block` rejette les dépenses non autorisées et les ids non
+  canoniques).
+- Schéma DB (`CURRENT_VER=10`) et protocole P2P inchangés.
+
+### Vérification
+- `cargo test --release -p pms-server --test dag_sandbox -- --ignored` :
+  **22/22 verts** (send-simple, contracts, compliance, tokens, gas pool,
+  webhooks, SSE, cluster multi-engine, stress TPS) — aucun faux positif des
+  nouveaux checks sur les chemins légitimes.
+- `cargo test -p pms-core` : 49 tests lib (dont authority + ownership +
+  single_writer_gate) + 9 tests d'attaque spend_authorization + 19
+  multi_token + 4 tx_validation.
+
+### ⚠️ Breaking / coordination requise
+- **Le SDK TypeScript signe un message canonique différent**
+  (`JSON({inputs,outputs,fee})` sans `network_id`, sans le pré-hash hex Rust) :
+  ses transactions `submit/block` n'ont JAMAIS été compatibles avec
+  `Transaction::signing_message` — personne ne les vérifiait. Avec ce fix,
+  elles sont rejetées. **Le SDK doit être aligné avant tout deploy testnet.**
+- Le simulateur n'est PAS impacté (il n'utilise que `send-simple`, signé côté
+  serveur). `tools-cli` et les benchs signent déjà au format Rust.
+
+---
+
 ## [0.8.3] - Unreleased — jemalloc / THP fragmentation control
 
 ### Fixed

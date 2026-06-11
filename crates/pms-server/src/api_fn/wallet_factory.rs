@@ -8,7 +8,7 @@ use base64::engine::general_purpose::STANDARD;
 use http::StatusCode;
 use pms_contracts::engine::evaluate_transfer;
 use pms_storage::PutResult;
-use pms_types::{Transaction, TxInput, TxOutput, Unlock};
+use pms_types::{Transaction, TxInput, TxOutput};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use pms_wallet::SignerBackend;
 use pms_wallet::Wallet;
@@ -569,10 +569,11 @@ pub async fn wallet_send_simple(
     };
 
     let signed_tx = Transaction {
-        unlocks: vec![Unlock {
-            pubkey_hex: sender_wallet.public_key_hex.clone(),
-            signature_b64,
-        }],
+        unlocks: tx_helpers::replicate_unlocks(
+            &sender_wallet.public_key_hex,
+            &signature_b64,
+            unsigned_tx.inputs.len(),
+        ),
         ..unsigned_tx
     };
 

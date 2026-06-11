@@ -60,6 +60,37 @@ pub async fn wallet_send_tx(
     }
 
     // ============================================================
+    // 1.b) AUTORISATION DE DÉPENSE (audit C-1/C-2)
+    // ============================================================
+    // Ce handler chiffre le payload avant persistance : le hot path
+    // (`validate_transaction_full` dans persist_block) ne voit que le
+    // ciphertext et ne peut PAS vérifier les unlocks. La preuve
+    // d'autorisation doit donc être vérifiée ICI, sur le plaintext,
+    // avant toute application de delta UTXO :
+    //   - appariement strict input[i] ↔ unlock[i],
+    //   - signature ECDSA de chaque unlock sur le message canonique
+    //     {network_id, inputs, outputs, fee},
+    //   - binding pubkey ↔ adresse propriétaire de chaque UTXO (plus bas,
+    //     dans la boucle de fetch des inputs).
+    // Messages publics volontairement vagues (anti-enumeration).
+    if tx.inputs.len() != tx.unlocks.len() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "transaction authorization invalid" })),
+        );
+    }
+    if let Err(e) = pms_core::validations::signature::verify_tx_signatures(
+        &tx,
+        &settings.network.network_id,
+    ) {
+        tracing::warn!("wallet_send_tx: tx signature verification failed: {e}");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "transaction authorization invalid" })),
+        );
+    }
+
+    // ============================================================
     // 2) Validation des frais (Calcul strict)
     // ============================================================
     // On n'injecte PLUS rien (cela casserait la signature client).
@@ -68,27 +99,36 @@ pub async fn wallet_send_tx(
     // a) Charger la policy (Runtime Config - Dynamic)
     let (fee_policy, _ratio_dec) = tx_helpers::load_fee_policy(&state.store);
 
-    // b) STRICT: Verify Inputs == Outputs (No implicit fees)
-    //    We must fetch inputs to sum them up.
+    // b) STRICT: fetch des inputs + binding ownership (audit C-1)
     //    FIX: Use adapter RAM cache (ShardedUtxoSet) instead of store (RocksDB)
     //    to match prepareTx behavior and avoid desync with async persistence.
     let adapter = state.srv.adapter_arc();
-    let mut total_inputs = Decimal::ZERO;
-    for input in &tx.inputs {
+    let mut input_outputs: Vec<TxOutput> = Vec::with_capacity(tx.inputs.len());
+    for (i, input) in tx.inputs.iter().enumerate() {
         let output_id = pms_types::OutputId {
             txid: input.out.txid.clone(),
             index: input.out.index,
         };
         match adapter.get_utxo(&output_id).await {
             Some(u) => {
-                if let Ok(amt) = Decimal::from_str_exact(&u.amount) {
-                    total_inputs += amt;
-                } else {
+                // AUDIT C-1 : binding ownership — la pubkey de l'unlock
+                // apparié doit dériver l'adresse propriétaire de l'UTXO.
+                if !pms_core::validations::ownership::unlock_matches_address(
+                    &tx.unlocks[i].pubkey_hex,
+                    &u.address,
+                ) {
+                    tracing::warn!(
+                        "wallet_send_tx: ownership mismatch on input {} ({}:{})",
+                        i,
+                        input.out.txid,
+                        input.out.index
+                    );
                     return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "invalid decimal in stored utxo" })),
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({ "error": "transaction authorization invalid" })),
                     );
                 }
+                input_outputs.push(u);
             }
             None => {
                 return (
@@ -101,44 +141,25 @@ pub async fn wallet_send_tx(
         }
     }
 
-    let mut total_outputs = Decimal::ZERO;
-    for out in &tx.outputs {
-        if let Ok(amt) = Decimal::from_str_exact(&out.amount) {
-            total_outputs += amt;
-        } else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "invalid output amount decimal" })),
-            );
-        }
-    }
-
-    if total_inputs != total_outputs {
+    // AUDIT M-7 : conservation stricte PAR ASSET. Subsume l'ancien check
+    // global `total_inputs == total_outputs` (si chaque asset conserve son
+    // total, la somme globale est conservée) et rejette en plus les
+    // conversions cross-asset (10 PMS in → 10 EDN out) ainsi que les
+    // montants non-décimaux des deux côtés.
+    if let Err(e) =
+        pms_core::validations::transactions::check_asset_conservation(&tx, &input_outputs)
+    {
+        tracing::warn!("wallet_send_tx: asset conservation failed: {e}");
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "implicit fees invalid: total inputs must equal total outputs (including fee output)",
-                "inputs": total_inputs.to_string(),
-                "outputs": total_outputs.to_string(),
-            })),
+            Json(json!({ "error": "asset conservation invalid" })),
         );
     }
 
     // c) Identifier Sender Address pour exclure le Change
-    //    On récupère l'adresse du sender depuis le premier UTXO input.
-    //    Cela évite les problèmes de format H20 vs adresse Bech32.
-    let sender_address: Option<String> = if let Some(first_input) = tx.inputs.first() {
-        let output_id = pms_types::OutputId {
-            txid: first_input.out.txid.clone(),
-            index: first_input.out.index,
-        };
-        adapter
-            .get_utxo(&output_id)
-            .await
-            .map(|u| u.address.clone())
-    } else {
-        None
-    };
+    //    L'adresse du sender = celle du premier UTXO input (déjà fetché
+    //    et ownership-vérifié dans la boucle ci-dessus).
+    let sender_address: Option<String> = input_outputs.first().map(|u| u.address.clone());
 
     // c) Identifier les outputs de frais (vers un wallet admin ou treasury)
     //    On tolère n'importe quel admin ou treasury de la liste
