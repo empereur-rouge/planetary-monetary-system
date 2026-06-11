@@ -23,6 +23,11 @@ pub fn verify_tx_signatures(tx: &Transaction, network_id: &str) -> Result<(), Va
         .map_err(|_| ValidationError::Other("Serialization in signing_message failed"))?;
     let msg_bytes = msg_hex.as_bytes();
 
+    // Fast path : 1 seul unlock (cas dominant) — zéro allocation.
+    if tx.unlocks.len() == 1 {
+        return verify_single_signature(msg_bytes, &tx.unlocks[0], 0);
+    }
+
     // 2. Dedupe identical unlocks before the expensive ECDSA verify.
     // Single-owner wallets (SDK included) repeat the SAME (pubkey, signature)
     // pair once per input — verifying it once is sufficient and N× cheaper.

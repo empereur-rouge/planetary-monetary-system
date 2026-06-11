@@ -73,6 +73,21 @@ where
             );
         }
 
+        // AUDIT v0.9.0: l'autorité par payload (authority.rs, mint, NFT) suit
+        // la clé coordinator COURANTE — un `CoordinatorKeyRotate` transfère
+        // immédiatement l'autorité à new_pk (les anciennes clés en grace
+        // window peuvent encore signer des blocs ordinaires via le
+        // single-writer gate, mais plus exercer d'autorité). Appliqué une
+        // seule fois ici sur la policy déjà clonée, pas de re-clone par bloc.
+        if let Some(current_pk) = self
+            .key_rotation_state
+            .read()
+            .current_pk()
+            .map(|s| s.to_string())
+        {
+            policy.coordinator_public_key = Some(current_pk);
+        }
+
         let policy = &policy;
 
         // ============================================================
@@ -198,24 +213,13 @@ where
         // TokenCreate, Bridge*, Freeze/Seize/Reverse, Contract*, etc.)
         // vivaient dans le validate_block legacy, retiré du hot path —
         // ils n'étaient donc plus appliqués qu'à travers l'enforcement
-        // single-writer. On les ré-applique ICI, AVANT tout apply d'état,
-        // avec l'autorité COURANTE (rotation de clé incluse).
-        let authority_policy = {
-            let mut p = policy.clone();
-            if let Some(current_pk) = self
-                .key_rotation_state
-                .read()
-                .current_pk()
-                .map(|s| s.to_string())
-            {
-                p.coordinator_public_key = Some(current_pk);
-            }
-            p
-        };
+        // single-writer. On les ré-applique ICI, AVANT tout apply d'état.
+        // La policy porte déjà la clé COURANTE (override rotation en tête
+        // de fonction).
         if let Err(e) = crate::validations::authority::validate_payload_authority(
             Some(wb.signer_pk_hex.as_str()),
             payload.as_ref(),
-            &authority_policy,
+            policy,
         ) {
             tracing::warn!(
                 "🚫 Payload authority violation on block {}: {e}",
@@ -247,10 +251,10 @@ where
             // sensitive authority, so we narrow it the moment the new
             // key is announced.
             //
-            // v0.9.0: réutilise `authority_policy` (clé bootstrap résolue
-            // par ValidatePolicy::from_global_config + override rotation),
-            // construite à l'étape 1.w — même sémantique, sans re-dérivation.
-            if let Err(e) = validate_mint_security(wb, &authority_policy) {
+            // v0.9.0: réutilise `policy` (clé bootstrap résolue par
+            // ValidatePolicy::from_global_config + override rotation appliqué
+            // en tête de fonction) — même sémantique, sans re-dérivation.
+            if let Err(e) = validate_mint_security(wb, policy) {
                 tracing::warn!(
                     "🚫 Unauthorized mint attempt blocked: {} from signer {}",
                     wb.id,
@@ -258,7 +262,7 @@ where
                 );
                 return Ok(PutResult::Rejected(format!(
                     "mint security: {}. Key: {:?}",
-                    e, authority_policy.coordinator_public_key
+                    e, policy.coordinator_public_key
                 )));
             }
         }

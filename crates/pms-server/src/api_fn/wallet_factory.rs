@@ -8,7 +8,7 @@ use base64::engine::general_purpose::STANDARD;
 use http::StatusCode;
 use pms_contracts::engine::evaluate_transfer;
 use pms_storage::PutResult;
-use pms_types::{Transaction, TxInput, TxOutput, Unlock};
+use pms_types::{Transaction, TxInput, TxOutput};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use pms_wallet::SignerBackend;
 use pms_wallet::Wallet;
@@ -568,18 +568,12 @@ pub async fn wallet_send_simple(
         }
     };
 
-    // Un unlock PAR input (appariement positionnel input[i] ↔ unlock[i]
-    // exigé par validate_transaction_full — audit C-1). Tous identiques :
-    // les inputs sélectionnés appartiennent au même sender.
     let signed_tx = Transaction {
-        unlocks: unsigned_tx
-            .inputs
-            .iter()
-            .map(|_| Unlock {
-                pubkey_hex: sender_wallet.public_key_hex.clone(),
-                signature_b64: signature_b64.clone(),
-            })
-            .collect(),
+        unlocks: tx_helpers::replicate_unlocks(
+            &sender_wallet.public_key_hex,
+            &signature_b64,
+            unsigned_tx.inputs.len(),
+        ),
         ..unsigned_tx
     };
 

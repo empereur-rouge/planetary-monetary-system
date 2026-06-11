@@ -99,12 +99,10 @@ pub async fn wallet_send_tx(
     // a) Charger la policy (Runtime Config - Dynamic)
     let (fee_policy, _ratio_dec) = tx_helpers::load_fee_policy(&state.store);
 
-    // b) STRICT: Verify Inputs == Outputs (No implicit fees)
-    //    We must fetch inputs to sum them up.
+    // b) STRICT: fetch des inputs + binding ownership (audit C-1)
     //    FIX: Use adapter RAM cache (ShardedUtxoSet) instead of store (RocksDB)
     //    to match prepareTx behavior and avoid desync with async persistence.
     let adapter = state.srv.adapter_arc();
-    let mut total_inputs = Decimal::ZERO;
     let mut input_outputs: Vec<TxOutput> = Vec::with_capacity(tx.inputs.len());
     for (i, input) in tx.inputs.iter().enumerate() {
         let output_id = pms_types::OutputId {
@@ -130,14 +128,6 @@ pub async fn wallet_send_tx(
                         Json(json!({ "error": "transaction authorization invalid" })),
                     );
                 }
-                if let Ok(amt) = Decimal::from_str_exact(&u.amount) {
-                    total_inputs += amt;
-                } else {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "invalid decimal in stored utxo" })),
-                    );
-                }
                 input_outputs.push(u);
             }
             None => {
@@ -151,9 +141,11 @@ pub async fn wallet_send_tx(
         }
     }
 
-    // AUDIT M-7 : conservation stricte PAR ASSET (le check global
-    // total_inputs == total_outputs plus bas ne suffit pas — il laisserait
-    // passer une tx qui transforme 10 PMS en 10 EDN).
+    // AUDIT M-7 : conservation stricte PAR ASSET. Subsume l'ancien check
+    // global `total_inputs == total_outputs` (si chaque asset conserve son
+    // total, la somme globale est conservée) et rejette en plus les
+    // conversions cross-asset (10 PMS in → 10 EDN out) ainsi que les
+    // montants non-décimaux des deux côtés.
     if let Err(e) =
         pms_core::validations::transactions::check_asset_conservation(&tx, &input_outputs)
     {
@@ -161,29 +153,6 @@ pub async fn wallet_send_tx(
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "asset conservation invalid" })),
-        );
-    }
-
-    let mut total_outputs = Decimal::ZERO;
-    for out in &tx.outputs {
-        if let Ok(amt) = Decimal::from_str_exact(&out.amount) {
-            total_outputs += amt;
-        } else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "invalid output amount decimal" })),
-            );
-        }
-    }
-
-    if total_inputs != total_outputs {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "implicit fees invalid: total inputs must equal total outputs (including fee output)",
-                "inputs": total_inputs.to_string(),
-                "outputs": total_outputs.to_string(),
-            })),
         );
     }
 

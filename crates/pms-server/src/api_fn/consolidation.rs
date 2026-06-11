@@ -13,7 +13,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use http::StatusCode;
 use pms_storage::PutResult;
-use pms_types::{Transaction, TxInput, TxOutput, Unlock};
+use pms_types::{Transaction, TxInput, TxOutput};
 use pms_types_payload::{PayloadEnvelope, PlainPayload};
 use pms_wallet::SignerBackend;
 use rust_decimal::Decimal;
@@ -208,18 +208,12 @@ pub async fn admin_consolidate_utxos(
         }
     };
 
-    // Un unlock PAR input (appariement positionnel input[i] ↔ unlock[i]
-    // exigé par validate_transaction_full — audit C-1). Tous identiques :
-    // les inputs consolidés appartiennent au même wallet coordinator.
     let signed_tx = Transaction {
-        unlocks: unsigned_tx
-            .inputs
-            .iter()
-            .map(|_| Unlock {
-                pubkey_hex: state.node_wallet.public_key_hex.clone(),
-                signature_b64: signature_b64.clone(),
-            })
-            .collect(),
+        unlocks: tx_helpers::replicate_unlocks(
+            &state.node_wallet.public_key_hex,
+            &signature_b64,
+            unsigned_tx.inputs.len(),
+        ),
         ..unsigned_tx
     };
 
