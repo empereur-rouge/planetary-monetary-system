@@ -167,6 +167,31 @@ where
             Some(s) => Some(serde_json::from_str::<PayloadEnvelope>(s)?),
         };
 
+        // 1.v) INTÉGRITÉ DE L'ID DE BLOC (audit M-6, v0.9.0)
+        //
+        // L'id sert de clé d'idempotence/déduplication (AlreadyExists) et de
+        // référence parent. Avant ce check, un producteur autorisé pouvait
+        // forger un id arbitraire (collision volontaire pour masquer/évincer
+        // un bloc, ou id ne correspondant pas au contenu). On recalcule l'id
+        // depuis le contenu canonique — parents + nonce + en-tête d'enveloppe
+        // (commitment SHA-256 du payload) — et on rejette tout mismatch.
+        // Indépendant du formatting JSON du client : le payload est
+        // re-sérialisé sous forme canonique serde avant hachage.
+        {
+            let expected_id = pms_utils::compute_block_id(&wb.parents, &payload, wb.nonce);
+            if wb.id != expected_id {
+                tracing::warn!(
+                    "🚫 Block id mismatch: declared {} != computed {} (signer {})",
+                    &wb.id[..16.min(wb.id.len())],
+                    &expected_id[..16],
+                    &wb.signer_pk_hex[..16.min(wb.signer_pk_hex.len())]
+                );
+                return Ok(PutResult::Rejected(
+                    "block id does not match canonical content hash".to_string(),
+                ));
+            }
+        }
+
         // 1.w) AUTORITÉ PAR TYPE DE PAYLOAD (audit C-2 extension, v0.9.0)
         //
         // Les checks coordinator-only (Milestone, ConfigUpdate, Reward,
