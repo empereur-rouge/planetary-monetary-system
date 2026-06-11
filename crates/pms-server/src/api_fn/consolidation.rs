@@ -208,11 +208,18 @@ pub async fn admin_consolidate_utxos(
         }
     };
 
+    // Un unlock PAR input (appariement positionnel input[i] ↔ unlock[i]
+    // exigé par validate_transaction_full — audit C-1). Tous identiques :
+    // les inputs consolidés appartiennent au même wallet coordinator.
     let signed_tx = Transaction {
-        unlocks: vec![Unlock {
-            pubkey_hex: state.node_wallet.public_key_hex.clone(),
-            signature_b64,
-        }],
+        unlocks: unsigned_tx
+            .inputs
+            .iter()
+            .map(|_| Unlock {
+                pubkey_hex: state.node_wallet.public_key_hex.clone(),
+                signature_b64: signature_b64.clone(),
+            })
+            .collect(),
         ..unsigned_tx
     };
 

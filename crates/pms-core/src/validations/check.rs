@@ -333,15 +333,18 @@ pub fn validate_block(
                 validate_fee_recipient_output(tx, policy)?;
                 tx_amounts_valid(tx, policy)?; // basique sur chaînes décimales
 
-                // CHECK UTXO (sauf si fait en async par net_adapter)
+                // CHECK UTXO legacy (chemin sync RAM DAG — dag.rs / tests).
+                //
+                // AUDIT H-3 (v0.9.0): le hot path de production
+                // (`do_persist_block_internal`) exécute désormais
+                // `validate_transaction_full` (signatures + ownership +
+                // double-spend + conservation) INCONDITIONNELLEMENT, que ce
+                // flag soit true ou false. `skip_utxo_checks=true` signifie
+                // seulement « la validation UTXO est portée par le chemin
+                // async » — il ne désactive plus aucun contrôle en prod.
                 if !policy.skip_utxo_checks {
                     utxo_no_double_spend(dag, tx)?;
                     utxo_sufficient_funds(dag, tx)?;
-                } else {
-                    tracing::error!(
-                        "SECURITY AUDIT: skip_utxo_checks=true — UTXO double-spend detection BYPASSED. \
-                         This flag must be false in production."
-                    );
                 }
             }
             PlainPayload::Milestone {

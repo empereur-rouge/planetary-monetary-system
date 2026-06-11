@@ -191,7 +191,13 @@ impl<
         if settings.network.mode.is_non_prod() {
             p.min_parents_after_boot = 1;
         }
-        // Force l'utilisation du ShardedUtxoSet (Phase 4)
+        // Force l'utilisation du ShardedUtxoSet (Phase 4).
+        //
+        // AUDIT H-3 (v0.9.0): ce flag ne conditionne PLUS la validation du
+        // hot path — `do_persist_block_internal` exécute
+        // `validate_transaction_full` (signatures + ownership + conservation)
+        // inconditionnellement. Il ne pilote plus que le chemin sync legacy
+        // de `validate_block` (dag.rs / tests).
         p.skip_utxo_checks = true;
 
         // Spawn the activity writer (background task that drains a

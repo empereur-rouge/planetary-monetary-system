@@ -612,47 +612,39 @@ where
         let t_parents = t_parents_start.elapsed();
 
         // 4.new) Validation UTXO Async (Sharding Phase 4)
-        // Evite le lock DAG global si active dans la policy.
+        //
+        // AUDIT C-1/C-2/H-3 (v0.9.0): la validation est INCONDITIONNELLE —
+        // elle ne dépend plus de `policy.skip_utxo_checks` (ce flag ne pilote
+        // plus que le chemin sync legacy de `validate_block`). Le hot path
+        // vérifie désormais l'AUTORISATION complète de la dépense :
+        //   - signatures de transaction (unlocks) sur le message canonique
+        //     `{network_id, inputs, outputs, fee}` (C-2),
+        //   - binding pubkey ↔ adresse propriétaire de chaque UTXO dépensé (C-1),
+        //   - appariement strict input[i] ↔ unlock[i],
+        //   - fee sanity + conservation stricte par asset (M-7),
+        //   - existence des inputs + anti double-spend.
         let t_utxo_val_start = std::time::Instant::now();
-        if policy.skip_utxo_checks {
-            if let Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) = &block.payload {
-                use crate::validations::transactions::validate_transaction_async;
-                if let Err(e) = validate_transaction_async(&self.utxos, tx).await {
+        if let Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) = &block.payload {
+            use crate::validations::transactions::validate_transaction_full;
+            let tx_input_outputs = match validate_transaction_full(&self.utxos, tx, policy).await
+            {
+                Ok(outs) => outs,
+                Err(e) => {
                     return Ok(PutResult::Rejected(format!("utxo validation failed: {e}")));
                 }
-            }
-            if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock {
-                inputs,
-                amount,
-                asset_id,
-                ..
-            })) = &block.payload
-            {
-                use crate::validations::transactions::validate_bridge_lock_async;
-                if let Err(e) =
-                    validate_bridge_lock_async(&self.utxos, inputs, amount, asset_id).await
-                {
+            };
+
+            // 4.compliance) Freeze check: reject transactions involving frozen
+            // addresses. Reuses the input outputs fetched during validation
+            // (no second ShardedUtxoSet lookup).
+            for out in &tx_input_outputs {
+                if self.store.is_frozen(&out.address).unwrap_or(false) {
                     return Ok(PutResult::Rejected(format!(
-                        "bridge lock utxo validation failed: {e}"
+                        "compliance: sender address is frozen: {}",
+                        out.address
                     )));
                 }
             }
-        }
-
-        // 4.compliance) Freeze check: reject transactions involving frozen addresses
-        if let Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) = &block.payload {
-            // Check sender addresses (input owners)
-            for inp in &tx.inputs {
-                if let Some(out) = self.utxos.get(&inp.out).await {
-                    if self.store.is_frozen(&out.address).unwrap_or(false) {
-                        return Ok(PutResult::Rejected(format!(
-                            "compliance: sender address is frozen: {}",
-                            out.address
-                        )));
-                    }
-                }
-            }
-            // Check recipient addresses
             for out in &tx.outputs {
                 if self.store.is_frozen(&out.address).unwrap_or(false) {
                     return Ok(PutResult::Rejected(format!(
@@ -660,6 +652,21 @@ where
                         out.address
                     )));
                 }
+            }
+        }
+        if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock {
+            inputs,
+            amount,
+            asset_id,
+            ..
+        })) = &block.payload
+        {
+            use crate::validations::transactions::validate_bridge_lock_async;
+            if let Err(e) = validate_bridge_lock_async(&self.utxos, inputs, amount, asset_id).await
+            {
+                return Ok(PutResult::Rejected(format!(
+                    "bridge lock utxo validation failed: {e}"
+                )));
             }
         }
         if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock { inputs, .. })) =
