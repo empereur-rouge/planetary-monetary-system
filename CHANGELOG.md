@@ -46,6 +46,40 @@ des fonds reposait à 100 % sur la signature de bloc du Coordinator.
   acceptait une conversion cross-asset (10 PMS in → 10 EDN out) car il ne
   sommait que les totaux globaux.
 
+### Fixed (suite — phases 2 à 5)
+- **fix(security/C-2 extension)**: les checks d'autorité coordinator-only
+  (`ConfigUpdate`, `Freeze`/`Unfreeze`/`Seize`/`Reverse`, `Reward`,
+  `EncryptedReward`, `TokenCreate`, `Milestone`, `Bridge*`, `Contract*`,
+  `LedgerOwnershipTransfer`, `CoordinatorKeyRotate`) étaient appliqués par le
+  hot path **sans aucune vérification du signataire** (ils ne vivaient que
+  dans le `validate_block` legacy, retiré du hot path) — seule l'enforcement
+  single-writer les masquait. Nouveau module partagé
+  `validations/authority.rs::validate_payload_authority()`, exécuté par les
+  deux chemins AVANT tout apply d'état, avec la clé courante rotation-aware.
+  Le bloc Mint réutilise la même policy (suppression d'une re-dérivation par
+  bloc).
+- **fix(security/H-4)**: single-writer **fail-closed** — un active set de
+  clés vide (clé bootstrap absente, état de rotation corrompu) SAUTAIT le
+  contrôle et acceptait tout bloc auto-signé. Nouvelle fonction pure
+  `single_writer_gate()` : active set vide ⇒ rejet de TOUS les blocs en
+  Testnet/Mainnet ; seul le mode Dev pur reste permissif (warn). 5 tests.
+- **fix(security/M-6)**: l'id de bloc est recalculé à l'ingestion depuis le
+  contenu canonique (parents + nonce + en-tête d'enveloppe avec commitment
+  SHA-256 du payload) — tout mismatch est rejeté. Avant, l'id fourni par le
+  client était accepté tel quel alors qu'il sert de clé d'idempotence
+  (`AlreadyExists`) et de référence parent.
+- **fix(security/M-8)**: `constant_time_compare` (auth admin) compare
+  désormais les digests SHA-256 des deux côtés (32 octets fixes, aucune
+  branche dépendante du secret) — l'ancien `ct_eq` factice sur mismatch de
+  longueur fuyait la longueur du token admin par timing. 4 tests.
+- **fix(security/M-9)**: le rate limiting du gateway passe de
+  `PeerIpKeyExtractor` à `SmartIpKeyExtractor` (X-Forwarded-For/X-Real-IP) —
+  derrière Caddy, tous les clients partageaient l'IP du proxy (limite
+  globale contournable / DoS involontaire). Aligné sur l'engine.
+- **fix(tests)**: réparation de `multi_ledger_test` (cassé sur main —
+  Settings literal obsolète : champs `auto_reindex_activity_items`,
+  `strict_key_permissions`, section `health` manquants).
+
 ### Changed
 - **perf(validation)**: `verify_tx_signatures` déduplique les unlocks
   identiques avant la vérification ECDSA (les wallets mono-clé, SDK inclus,
@@ -63,6 +97,25 @@ des fonds reposait à 100 % sur la signature de bloc du Coordinator.
   conversion cross-asset rejetée, dépenses légitimes acceptées (adresses
   bech32m ET pubkey brute SDK).
 - Tests unitaires `validations/ownership.rs` (5 cas, dont adresse poubelle).
+
+### Infrastructure / Versions
+- **Workspace** `0.8.3` → `0.9.0`.
+- **DAG_VERSION** `2.0.0` → `3.0.0` (MAJOR — règles de validation breaking :
+  des blocs acceptés sous 2.x sont rejetés sous 3.x ; **wipe testnet requis**
+  au deploy, cf. procédure DAG_VERSION major dans CLAUDE.md).
+- **API_VERSION** `12` → `13` (`tx/send` exige des unlocks valides, 401
+  sinon ; `submit/block` rejette les dépenses non autorisées et les ids non
+  canoniques).
+- Schéma DB (`CURRENT_VER=10`) et protocole P2P inchangés.
+
+### Vérification
+- `cargo test --release -p pms-server --test dag_sandbox -- --ignored` :
+  **22/22 verts** (send-simple, contracts, compliance, tokens, gas pool,
+  webhooks, SSE, cluster multi-engine, stress TPS) — aucun faux positif des
+  nouveaux checks sur les chemins légitimes.
+- `cargo test -p pms-core` : 49 tests lib (dont authority + ownership +
+  single_writer_gate) + 9 tests d'attaque spend_authorization + 19
+  multi_token + 4 tx_validation.
 
 ### ⚠️ Breaking / coordination requise
 - **Le SDK TypeScript signe un message canonique différent**

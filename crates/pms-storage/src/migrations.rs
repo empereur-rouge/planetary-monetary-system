@@ -21,7 +21,13 @@ pub const CURRENT_VER: i64 = 10;
 /// - MAJOR : changement incompatible (refus de démarrer, migration manuelle requise)
 /// - MINOR : nouvelles fonctionnalités backward-compatible (migration auto)
 /// - PATCH : correctifs (migration auto)
-pub const DAG_VERSION: &str = "2.0.0";
+/// v3.0.0 (audit sécurité 2026-06-11) : règles de validation BREAKING —
+/// les unlocks de transaction sont vérifiés (signature + ownership,
+/// appariement input[i]↔unlock[i]) et le block id doit être le hash
+/// canonique du contenu. Des blocs acceptés sous 2.x (unlocks invalides,
+/// ids forgés) sont rejetés sous 3.x ; un re-sync depuis zéro peut refuser
+/// un historique 2.x → wipe testnet requis.
+pub const DAG_VERSION: &str = "3.0.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]
