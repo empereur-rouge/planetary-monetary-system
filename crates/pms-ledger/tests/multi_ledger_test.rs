@@ -20,6 +20,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
             max_open_files: 512,
+            auto_reindex_activity_items: false,
         },
         network: pms_config::Network {
             mode: pms_config::NetworkMode::Dev,
@@ -49,6 +50,8 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
         },
         secrets: pms_config::SecretSettings {
             node_identity_key_path: ".".into(),
+            node_identity_key_encrypted_path: None,
+            strict_key_permissions: false,
             admin_wallet_file: None,
         },
         validation: pms_config::ValidationSettings {
@@ -109,6 +112,10 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             cross_ledger_fee_multiplier: 2.0,
             ledger_annual_fee_pms: None,
         },
+        // Tous les champs de HealthSettings ont un default serde — un objet
+        // vide produit la config permissive par défaut.
+        health: serde_json::from_value(serde_json::json!({}))
+            .expect("default HealthSettings"),
         p2p: pms_config::P2pConfig {
             known_peers: String::new(),
             bind_addr: None,
