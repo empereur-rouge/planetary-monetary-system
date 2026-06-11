@@ -7,29 +7,47 @@
 # under a steady, production-shaped load without OOM, persist stalls,
 # bloom degradation, or RocksDB write throttle.
 #
-# TARGET LOAD (single eden ledger):
-#   - Cube mints   : 250 × 6/min          = ~25 blk/s
-#   - Cube burns   : 250 × 1/h            = ~0.07 blk/s (each batch=360 cubes)
-#   - EDN sends    : 250 × 0.6/min        = ~2.5 blk/s post-burn windows
-#   - PMS sends    : trader+active groups = ~6 blk/s
-#   - Spammers     : back-pressured       = ~25 RPS attempted
-#   - Total target : ~30-40 blk/s sustained, peak ~60 during burn windows
+# DB-LONGEVITY SLOWDOWN (v0.9.1, 2026-06-11): every `interval_ms` below
+# was multiplied by 6 (the only wall-clock knob). At the previous
+# ~30-40 blk/s the RocksDB volume filled the VPS disk in ~1 week — the
+# DAG is immutable, every tx is a block persisted forever, so disk
+# growth is linear in blocks/s and there is no on-disk pruning. ÷6
+# brings sustained production to ~5-7 blk/s → the disk now lasts
+# ~6 weeks instead of ~1, comfortably past the "≥ 1 month" target.
 #
-# This is well below the engine's measured ceiling (~10K TPS local
+# Everything else (mint_per_tick, sends_per_tick, edn_sends_per_tick,
+# target_cubes, burn_cooldown_ticks) is TICK-RELATIVE, so scaling the
+# interval keeps the exact same load SHAPE — same mint:send:burn ratio,
+# same EDN economics per burn — just stretched over 6× the wall clock.
+# The `cooldown_ticks × interval_ms > distribution_interval` invariant
+# only gets safer when the interval grows.
+#
+# TARGET LOAD (single eden ledger, post-÷6):
+#   - Cube mints   : 250 × 1/min          = ~4.2 blk/s
+#   - Cube burns   : 250 × 1/6h           = ~0.012 blk/s (each batch=360 cubes)
+#   - EDN sends    : 250 × 0.1/min        = ~0.4 blk/s post-burn windows
+#   - PMS sends    : trader+active groups = ~1 blk/s
+#   - Spammers     : back-pressured       = ~8 RPS attempted
+#   - Total target : ~5-7 blk/s sustained, peak ~10 during burn windows
+#
+# This is far below the engine's measured ceiling (~10K TPS local
 # bench, ~150 blk/s tested at 1119 agents on 4 ledgers). The slack is
 # intentional: a stability test should run with comfortable headroom
 # so any anomaly is signal, not load saturation.
 #
-# Scale up via the per-group `count` only when this baseline has run
-# clean for ≥ 24 h.
+# To fill the disk faster again (shorter run), divide the intervals
+# back down. To make it last even longer, multiply them up further.
+# Scale agent *population* via the per-group `count` only when this
+# baseline has run clean for ≥ 24 h.
 
 # ---------------------------------------------------------------------------
-# CLICKERS — main playerbase, mine 6 cubes/min on eden, no PMS sends
-# 250 agents, 10s tick → 25 mint blk/s steady, ~250 cube burns/hour
+# CLICKERS — main playerbase, mine 1 cube/min on eden, no PMS sends
+# 250 agents, 60s tick → ~4.2 mint blk/s steady, ~42 cube burns/hour
+# (each clicker fills 360 cubes in 360 ticks = 6h, then batch-burns)
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 250
-interval_ms = 10000
+interval_ms = 60000
 name_prefix = "click"
 
 [agents.behavior]
@@ -43,7 +61,7 @@ sends_per_tick = 0
 enabled = true
 game_index = 0           # eden (the only game)
 cubes_per_agent = 0
-target_cubes = 360       # burn at 360 cubes (= 1h × 6/min)
+target_cubes = 360       # burn at 360 cubes (= 6h × 1/min at 60s tick)
 mint_per_tick = 1
 cubes_remint_min = 350
 cubes_remint_max = 380
@@ -56,11 +74,11 @@ edn_sends_per_tick = 1
 # ---------------------------------------------------------------------------
 # PMS TRADERS — pure PMS economy, no game (50 agents)
 # Represents OTC / fiat-on-ramp traffic that doesn't touch the clicker.
-# 50 × 0.5 × 1 / 5 = 5 PMS tx/s
+# 50 × 0.5 × 1 / 30 = ~0.83 PMS tx/s
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 50
-interval_ms = 5000
+interval_ms = 30000
 name_prefix = "trader"
 
 [agents.behavior]
@@ -73,11 +91,12 @@ sends_per_tick = 1
 # ---------------------------------------------------------------------------
 # ACTIVE PLAYERS — mine + trade PMS (50 agents on eden)
 # Power players who do both: mine cubes AND move PMS economically.
-# Lighter cube cadence (mint_per_tick=2 → 12/min) + 2 PMS sends/tick.
+# Lighter cube cadence (mint_per_tick=2 → 2/min at 60s tick) + 2 PMS sends/tick.
+# 50 × 0.5 × 2 / 60 = ~0.83 PMS tx/s
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 50
-interval_ms = 10000
+interval_ms = 60000
 name_prefix = "active"
 
 [agents.behavior]
@@ -103,14 +122,14 @@ edn_sends_per_tick = 2
 
 # ---------------------------------------------------------------------------
 # SPAMMERS — adversarial flood, no game, fast micro-tx (5 agents)
-# 5 × 1.0 × 2 / 0.2 = 50 PMS tx/s attempted. Engine BP + gateway 500
+# 5 × 1.0 × 2 / 1.2 = ~8.3 PMS tx/s attempted. Engine BP + gateway 500
 # RPS rate-limit keep them throttled so they don't drown the legitimate
 # fleet. Reduced from 10 → 5 for the stability run; spammers stress
 # the BP path which is what we want, but more than 5 is gratuitous.
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 5
-interval_ms = 200
+interval_ms = 1200
 name_prefix = "spammer"
 
 [agents.behavior]
@@ -122,11 +141,11 @@ sends_per_tick = 2
 
 # ---------------------------------------------------------------------------
 # ADVERSARIAL — invalid sigs / over-balance / malformed / replay
-# (3 agents, 1s tick) — keeps the engine's REJECT paths warm.
+# (3 agents, 6s tick) — keeps the engine's REJECT paths warm.
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 3
-interval_ms = 1000
+interval_ms = 6000
 name_prefix = "adversarial"
 
 [agents.behavior]
@@ -135,22 +154,22 @@ attacks = ["bad_signature", "over_balance", "malformed_json", "no_auth"]
 sends_per_tick = 1
 
 # ---------------------------------------------------------------------------
-# OBSERVERS — passive read-only monitoring (3 agents, 10s tick)
+# OBSERVERS — passive read-only monitoring (3 agents, 60s tick)
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 3
-interval_ms = 10000
+interval_ms = 60000
 name_prefix = "obs"
 
 [agents.behavior]
 type = "observer"
 
 # ---------------------------------------------------------------------------
-# COORDINATOR — node bookkeeping (1 agent, 60s tick)
+# COORDINATOR — node bookkeeping (1 agent, 6min tick)
 # ---------------------------------------------------------------------------
 [[agents]]
 count = 1
-interval_ms = 60000
+interval_ms = 360000
 name_prefix = "coordinator"
 
 [agents.behavior]

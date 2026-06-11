@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.1] - Unreleased — Simulator testnet DB-longevity slowdown
+
+### Changed
+- **chore(simulator/testnet)**: tous les `interval_ms` de
+  `tools/simulator/agents_testnet.toml` ont été multipliés par 6 (click/active/obs
+  10s→60s, trader 5s→30s, spammer 200ms→1.2s, adversarial 1s→6s, coordinator
+  60s→6min). À la charge d'origine (~30-40 blk/s soutenus, dominée par le minting
+  de cubes), le DAG immuable (pas de pruning sur disque) remplissait les 480 Go du
+  VPS testnet en ~1 semaine. `interval_ms` est le seul levier wall-clock ; tous les
+  autres knobs (`mint_per_tick`, `sends_per_tick`, `edn_sends_per_tick`,
+  `target_cubes`, `burn_cooldown_ticks`) sont tick-relatifs, donc ×6 conserve la
+  *forme* exacte de la charge en l'étalant sur 6× le temps réel. Résultat : ~5-7
+  blk/s soutenus → disque plein en ~6 semaines au lieu de 1 (au-delà du plancher
+  « ≥ 1 mois »). L'invariant `cooldown_ticks × interval_ms > distribution_interval`
+  ne fait que se renforcer.
+
+### Added
+- **test(simulator)**: `testnet_slowdown_tests` dans `tools/simulator/src/config.rs`
+  — charge et parse réellement `agents_testnet.toml`, assert que chaque intervalle
+  vaut exactement 6× son baseline v0.9.0 (garde-fou anti-revert), et projette la
+  longévité disque (×6.00 → ~42 jours ≥ 1 mois). Affiche le débit calculé via
+  `println!` (run : `cargo test --release testnet_slowdown -- --nocapture`).
+
+### Infrastructure
+- **docs(simulator)**: section « Ralentissement longévité-DB » ajoutée à
+  `documentation/features/simulator.md` (frontmatter `updated`/`version` bumpés).
+
+> ⚠️ **Déploiement** : ce changement n'est actif sur le testnet qu'après
+> `scripts/upgrade-testnet.sh` (rebuild de l'image `pms-simulator:testnet` qui
+> embarque le config). L'engine/gateway ne changent pas — image identique à v0.9.0.
+
+---
+
 ## [0.9.0] - Unreleased — Security audit remediation (C-1/C-2/H-3/H-4/M-6/M-7/M-8/M-9)
 
 Remédiation de l'audit de sécurité statique du 2026-06-11. Constat central de

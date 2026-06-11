@@ -556,6 +556,164 @@ fn resolve_env(val: &mut String) {
     }
 }
 
+#[cfg(test)]
+mod testnet_slowdown_tests {
+    use super::*;
+
+    /// Pre-÷6 baseline intervals (v0.9.0, the config that filled the VPS
+    /// disk in ~1 week). Keyed by `name_prefix`. The DB-longevity slowdown
+    /// (v0.9.1) multiplied every one of these by 6.
+    const BASELINE_INTERVALS_MS: &[(&str, u64)] = &[
+        ("click", 10_000),
+        ("trader", 5_000),
+        ("active", 10_000),
+        ("spammer", 200),
+        ("adversarial", 1_000),
+        ("obs", 10_000),
+        ("coordinator", 60_000),
+    ];
+
+    /// The factor every interval was scaled by, and therefore the factor by
+    /// which on-disk RocksDB growth slows (block production is linear in
+    /// blocks/s; the DAG is immutable so there is no on-disk pruning).
+    const EXPECTED_SLOWDOWN: u64 = 6;
+
+    /// Engine-accepted block production for one agent group, in blocks/s.
+    /// Counts the two deterministic, steady-state sources only:
+    ///   * cube MINTS — `count × mint_per_tick / interval_s` (one block per
+    ///     minted cube while accumulating toward `target_cubes`),
+    ///   * PMS SENDS  — `count × sends_per_tick × send_probability / interval_s`.
+    /// Burns (one batch per agent every few hours) and Phase-2 EDN sends
+    /// (bursty, post-burn only) are intentionally excluded — they are a
+    /// small fraction of sustained load. Adversarial/observer groups produce
+    /// no accepted blocks. This is the floor the disk-fill rate is driven by.
+    fn deterministic_blk_per_s(def: &AgentDef) -> f64 {
+        let interval_s = def.interval_ms as f64 / 1000.0;
+        if interval_s <= 0.0 {
+            return 0.0;
+        }
+        let count = def.count as f64;
+
+        let mint = match &def.game {
+            Some(g) if g.enabled => count * g.mint_per_tick as f64 / interval_s,
+            _ => 0.0,
+        };
+
+        let pms = match &def.behavior {
+            AgentBehavior::Random {
+                sends_per_tick,
+                send_probability,
+                ..
+            }
+            | AgentBehavior::Coordinator {
+                sends_per_tick,
+                send_probability,
+                ..
+            } => count * *sends_per_tick as f64 * *send_probability / interval_s,
+            // Adversarial tx are rejected (no block); observers/smart-idle
+            // produce nothing deterministic here.
+            _ => 0.0,
+        };
+
+        mint + pms
+    }
+
+    fn load_testnet_agents() -> Vec<AgentDef> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/agents_testnet.toml");
+        let content = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+        let parsed: AgentFileContent = toml::from_str(&content)
+            .unwrap_or_else(|e| panic!("agents_testnet.toml failed to parse: {e}"));
+        parsed.agents
+    }
+
+    /// The testnet agent file must parse AND every group's `interval_ms`
+    /// must be exactly 6× its v0.9.0 baseline — a uniform slowdown keeps the
+    /// load SHAPE identical (all tick-relative knobs untouched) while
+    /// stretching it over 6× the wall clock. This is a regression guard: if
+    /// anyone reverts an interval, the disk-fill rate silently jumps back up.
+    #[test]
+    fn every_interval_is_six_times_baseline() {
+        let agents = load_testnet_agents();
+        assert_eq!(
+            agents.len(),
+            BASELINE_INTERVALS_MS.len(),
+            "expected {} agent groups, found {}",
+            BASELINE_INTERVALS_MS.len(),
+            agents.len()
+        );
+
+        println!("\n=== agents_testnet.toml interval audit (×{EXPECTED_SLOWDOWN} slowdown) ===");
+        for (prefix, baseline) in BASELINE_INTERVALS_MS {
+            let def = agents
+                .iter()
+                .find(|a| a.name_prefix.as_deref() == Some(prefix))
+                .unwrap_or_else(|| panic!("agent group '{prefix}' missing from config"));
+            let expected = baseline * EXPECTED_SLOWDOWN;
+            println!(
+                "  {:<12} count={:<4} interval {:>6}ms  (baseline {:>6}ms × {EXPECTED_SLOWDOWN} = {:>6}ms)  → {}",
+                prefix,
+                def.count,
+                def.interval_ms,
+                baseline,
+                expected,
+                if def.interval_ms == expected { "OK" } else { "MISMATCH" }
+            );
+            assert_eq!(
+                def.interval_ms, expected,
+                "group '{prefix}': interval_ms must be {expected} (= {baseline} × {EXPECTED_SLOWDOWN}), found {}",
+                def.interval_ms
+            );
+        }
+    }
+
+    /// Behavioral check from the operator's perspective: the chosen slowdown
+    /// factor must be large enough that the VPS disk lasts ≥ 1 month.
+    ///
+    /// Division of labour: `every_interval_is_six_times_baseline` owns "the
+    /// TOML intervals match `EXPECTED_SLOWDOWN`"; this test owns "the chosen
+    /// `EXPECTED_SLOWDOWN` is big enough". Because every interval is uniformly
+    /// ×`EXPECTED_SLOWDOWN` and `deterministic_blk_per_s` is inversely
+    /// proportional to the interval, the baseline rate is exactly
+    /// `current_total × EXPECTED_SLOWDOWN` — no per-group recompute needed
+    /// (re-deriving the ratio here would just re-prove what test 1 guards).
+    /// The real config-derived rate is still computed + printed as living
+    /// documentation and sanity-checked as non-zero.
+    #[test]
+    fn sustained_rate_gives_at_least_a_month_of_db_life() {
+        let agents = load_testnet_agents();
+
+        // Living-doc: the deterministic sustained block production the current
+        // config actually generates (cube mints + PMS sends). Non-zero guards
+        // against a degenerate all-idle config "lasting forever".
+        let current_total: f64 = agents.iter().map(deterministic_blk_per_s).sum();
+        assert!(
+            current_total > 0.0,
+            "config produces no deterministic load — parse or content error"
+        );
+
+        // The observed baseline filled the 480 GB VPS disk in ~1 week.
+        // Longevity scales inversely with block rate, so the projected horizon
+        // is ~7 days × the factor.
+        let factor = EXPECTED_SLOWDOWN as f64;
+        let baseline_total = current_total * factor;
+        const BASELINE_DAYS_TO_FILL: f64 = 7.0;
+        let implied_days = BASELINE_DAYS_TO_FILL * factor;
+
+        println!("\n=== testnet DB-longevity projection ===");
+        println!("  deterministic block rate (v0.9.0 baseline) : {baseline_total:.2} blk/s");
+        println!("  deterministic block rate (current ÷{EXPECTED_SLOWDOWN})      : {current_total:.2} blk/s");
+        println!("  slowdown factor                            : ×{factor:.2}");
+        println!("  baseline disk-fill horizon                 : ~{BASELINE_DAYS_TO_FILL:.0} days");
+        println!("  projected disk-fill horizon                : ~{implied_days:.0} days (~{:.1} weeks)", implied_days / 7.0);
+
+        assert!(
+            implied_days >= 30.0,
+            "slowdown factor ×{EXPECTED_SLOWDOWN} gives only {implied_days:.0} days — must be ≥ 1 month; raise EXPECTED_SLOWDOWN and the TOML intervals together",
+        );
+    }
+}
+
 /// Maximum number of startup attempts before giving up.
 pub const MAX_STARTUP_ATTEMPTS: u64 = 10;
 /// Base delay between startup attempts (seconds). Increases by RETRY_INCREMENT each attempt.

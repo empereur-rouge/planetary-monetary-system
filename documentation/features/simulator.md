@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-15
-updated: 2026-03-20
-version: v0.5.18
+updated: 2026-06-11
+version: v0.9.1
 ---
 
 # Simulator / Game Engine
@@ -494,6 +494,26 @@ Le script `scripts/deploy-testnet.sh` déploie le simulateur aux côtés de l'en
 - Activer le coordinator agent (wallet du nœud).
 - Désactiver le TUI (pas de terminal en Docker).
 - Exposer le dashboard web sur le port 9090.
+
+#### Ralentissement longévité-DB (v0.9.1)
+
+Le DAG est **immuable** : chaque transaction est un bloc persisté à vie dans RocksDB, sans pruning sur disque. La croissance disque est donc linéaire en blocs/s. À la charge d'origine (~30-40 blk/s soutenus, dominée par le minting de cubes), le volume RocksDB remplissait les 480 Go du VPS en **~1 semaine**.
+
+Pour viser **≥ 1 mois** de longévité, tous les `interval_ms` de [agents_testnet.toml](../../tools/simulator/agents_testnet.toml) ont été **multipliés par 6**. C'est le seul levier wall-clock : `mint_per_tick`, `sends_per_tick`, `edn_sends_per_tick`, `target_cubes` et `burn_cooldown_ticks` sont tous **tick-relatifs**, donc ×6 sur l'intervalle conserve exactement la *forme* de la charge (mêmes ratios mint:send:burn, mêmes économies EDN par burn) en l'étalant sur 6× le temps réel. L'invariant `cooldown_ticks × interval_ms > distribution_interval` ne fait que se renforcer quand l'intervalle grandit.
+
+Résultat : production soutenue ~5-7 blk/s → disque plein en **~6 semaines** au lieu de 1.
+
+| Groupe | `interval_ms` avant | `interval_ms` après (×6) |
+|--------|--------------------:|-------------------------:|
+| click | 10 000 | 60 000 |
+| trader | 5 000 | 30 000 |
+| active | 10 000 | 60 000 |
+| spammer | 200 | 1 200 |
+| adversarial | 1 000 | 6 000 |
+| obs | 10 000 | 60 000 |
+| coordinator | 60 000 | 360 000 |
+
+Tests de non-régression dans [config.rs](../../tools/simulator/src/config.rs) (`testnet_slowdown_tests`) : prouvent que chaque intervalle vaut exactement 6× son baseline et que la longévité projetée est ≥ 1 mois. Pour remplir plus vite (run court) : diviser les intervalles. Pour durer plus longtemps : les multiplier davantage.
 
 ### Gemini AI (smart agents)
 
