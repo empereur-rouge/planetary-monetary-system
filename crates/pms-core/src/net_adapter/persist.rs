@@ -119,21 +119,23 @@ where
             .key_rotation_state
             .read()
             .accepted_signer_keys(now_ms_for_signers);
+        // AUDIT H-4 (v0.9.0): posture FAIL-CLOSED. Avant, un active set vide
+        // (clé bootstrap absente, état de rotation corrompu) SAUTAIT le
+        // contrôle — n'importe quel bloc auto-signé était accepté. Désormais,
+        // en Testnet/Mainnet, active set vide ⇒ rejet de TOUS les blocs
+        // jusqu'à correction de la config. Seul le mode Dev pur (aucune clé
+        // coordinator configurée, par design) reste permissif.
         if policy.enforce_single_writer {
-            if !accepted_signer_keys.is_empty() {
-                let signer = wb.signer_pk_hex.trim().to_string();
-                if !accepted_signer_keys.contains(&signer) {
-                    tracing::warn!(
-                        "🚫 Single Writer violation: block {} signed by {} not in active set ({} keys)",
-                        &wb.id[..16.min(wb.id.len())],
-                        &wb.signer_pk_hex,
-                        accepted_signer_keys.len()
-                    );
-                    return Ok(PutResult::Rejected(format!(
-                        "single_writer: signer {} is not in the active coordinator key set",
-                        &wb.signer_pk_hex
-                    )));
-                }
+            let is_dev_mode = matches!(self.settings.network.mode, pms_config::NetworkMode::Dev);
+            if let Err(reason) =
+                single_writer_gate(&accepted_signer_keys, &wb.signer_pk_hex, is_dev_mode)
+            {
+                tracing::warn!(
+                    "🚫 Single Writer violation: block {} — {}",
+                    &wb.id[..16.min(wb.id.len())],
+                    reason
+                );
+                return Ok(PutResult::Rejected(format!("single_writer: {reason}")));
             }
         }
 
@@ -1330,5 +1332,93 @@ where
         }
 
         Ok(PutResult::Inserted)
+    }
+}
+
+/// Décision single-writer FAIL-CLOSED (audit H-4, v0.9.0).
+///
+/// Appelée quand `policy.enforce_single_writer == true` :
+/// - **Active set non vide** : le signataire du bloc doit en faire partie.
+/// - **Active set vide** : refus de TOUS les blocs en Testnet/Mainnet
+///   (config corrompue ou clé bootstrap absente — on ne doit jamais ouvrir
+///   l'écriture à n'importe quel auto-signataire) ; toléré en mode Dev pur
+///   uniquement (aucune clé coordinator configurée, par design), avec warn.
+///
+/// Fonction pure pour rester unit-testable sans monter un CoreAdapter.
+fn single_writer_gate(
+    accepted_signer_keys: &std::collections::HashSet<String>,
+    signer_pk_hex: &str,
+    is_dev_mode: bool,
+) -> Result<(), String> {
+    if accepted_signer_keys.is_empty() {
+        if is_dev_mode {
+            tracing::warn!(
+                "single_writer: empty active key set in Dev mode — enforcement skipped (fail-open by design in Dev only)"
+            );
+            return Ok(());
+        }
+        tracing::error!(
+            "🚨 single_writer FAIL-CLOSED: enforce_single_writer=true but the active \
+             coordinator key set is EMPTY (missing bootstrap key or corrupted rotation \
+             state). Refusing all blocks until the configuration is fixed."
+        );
+        return Err(
+            "no active coordinator key configured — all blocks refused (fail-closed)".to_string(),
+        );
+    }
+    let signer = signer_pk_hex.trim().to_string();
+    if !accepted_signer_keys.contains(&signer) {
+        return Err(format!(
+            "signer {signer} is not in the active coordinator key set ({} keys)",
+            accepted_signer_keys.len()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod single_writer_tests {
+    use super::single_writer_gate;
+    use std::collections::HashSet;
+
+    fn set(keys: &[&str]) -> HashSet<String> {
+        keys.iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_active_set_rejects_everything_in_prod() {
+        let r = single_writer_gate(&set(&[]), "04anykey", false);
+        println!("empty set / prod: {r:?}");
+        let err = r.expect_err("must fail closed");
+        assert!(err.contains("fail-closed"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_active_set_tolerated_in_dev() {
+        let r = single_writer_gate(&set(&[]), "04anykey", true);
+        println!("empty set / dev: {r:?}");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn signer_in_active_set_accepted() {
+        let r = single_writer_gate(&set(&["04coord"]), "04coord", false);
+        println!("signer in set: {r:?}");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn signer_outside_active_set_rejected_even_in_dev() {
+        // Dès qu'un active set existe, il s'applique aussi en Dev.
+        let r = single_writer_gate(&set(&["04coord"]), "04attacker", true);
+        println!("foreign signer / dev: {r:?}");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn signer_whitespace_trimmed() {
+        let r = single_writer_gate(&set(&["04coord"]), "  04coord  ", false);
+        println!("trimmed signer: {r:?}");
+        assert!(r.is_ok());
     }
 }
