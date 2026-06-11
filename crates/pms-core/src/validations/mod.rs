@@ -1,5 +1,6 @@
 pub mod amount;
 pub mod apply;
+pub mod authority; // Autorité coordinator-only par type de payload (audit C-2 extension)
 pub mod check;
 pub mod fees;
 mod impls;

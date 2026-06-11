@@ -6,7 +6,6 @@
 
 use super::helpers::plain_payload_type_str;
 use crate::crypto::crypto::verify_block_signature;
-use crate::validations::check::ValidatePolicy;
 use crate::validations::mint::validate_mint_security;
 use crate::validations::nft::validate_nft_action;
 use crate::validations::policy::validate_mint_policy;
@@ -166,6 +165,38 @@ where
             Some(s) => Some(serde_json::from_str::<PayloadEnvelope>(s)?),
         };
 
+        // 1.w) AUTORITÉ PAR TYPE DE PAYLOAD (audit C-2 extension, v0.9.0)
+        //
+        // Les checks coordinator-only (Milestone, ConfigUpdate, Reward,
+        // TokenCreate, Bridge*, Freeze/Seize/Reverse, Contract*, etc.)
+        // vivaient dans le validate_block legacy, retiré du hot path —
+        // ils n'étaient donc plus appliqués qu'à travers l'enforcement
+        // single-writer. On les ré-applique ICI, AVANT tout apply d'état,
+        // avec l'autorité COURANTE (rotation de clé incluse).
+        let authority_policy = {
+            let mut p = policy.clone();
+            if let Some(current_pk) = self
+                .key_rotation_state
+                .read()
+                .current_pk()
+                .map(|s| s.to_string())
+            {
+                p.coordinator_public_key = Some(current_pk);
+            }
+            p
+        };
+        if let Err(e) = crate::validations::authority::validate_payload_authority(
+            Some(wb.signer_pk_hex.as_str()),
+            payload.as_ref(),
+            &authority_policy,
+        ) {
+            tracing::warn!(
+                "🚫 Payload authority violation on block {}: {e}",
+                &wb.id[..16.min(wb.id.len())]
+            );
+            return Ok(PutResult::Rejected(format!("payload authority: {e}")));
+        }
+
         // 1.x) Politique de mint (PlainPayload::Mint seulement)
         //
         // - Plain + Mint = visible -> on peut appliquer les regles de montant et d'admin.
@@ -188,40 +219,11 @@ where
             // choice for back-to-back rotations: mint is the most
             // sensitive authority, so we narrow it the moment the new
             // key is announced.
-            let policy = ValidatePolicy::from_settings(
-                &self.settings.validation,
-                &self.settings.network.network_id,
-            );
-            let mut policy = policy;
-            // Resolve the bootstrap pk — same logic as before — and let
-            // the rotation cache override it with the latest rotated-to
-            // key when one exists.
-            if let Some(ref custom_key) = self.settings.validation.coordinator_public_key {
-                policy.coordinator_public_key = Some(custom_key.clone());
-            } else {
-                match self.settings.network.mode {
-                    pms_config::NetworkMode::Mainnet => {
-                        policy.coordinator_public_key =
-                            Some(pms_config::COORDINATOR_PUBLIC_KEY_MAINNET.to_string());
-                    }
-                    pms_config::NetworkMode::Testnet => {
-                        policy.coordinator_public_key =
-                            Some(pms_config::COORDINATOR_PUBLIC_KEY_TESTNET.to_string());
-                    }
-                    pms_config::NetworkMode::Dev => {
-                        policy.coordinator_public_key = None;
-                    }
-                }
-            }
-            if let Some(current_pk) = self
-                .key_rotation_state
-                .read()
-                .current_pk()
-                .map(|s| s.to_string())
-            {
-                policy.coordinator_public_key = Some(current_pk);
-            }
-            if let Err(e) = validate_mint_security(wb, &policy) {
+            //
+            // v0.9.0: réutilise `authority_policy` (clé bootstrap résolue
+            // par ValidatePolicy::from_global_config + override rotation),
+            // construite à l'étape 1.w — même sémantique, sans re-dérivation.
+            if let Err(e) = validate_mint_security(wb, &authority_policy) {
                 tracing::warn!(
                     "🚫 Unauthorized mint attempt blocked: {} from signer {}",
                     wb.id,
@@ -229,7 +231,7 @@ where
                 );
                 return Ok(PutResult::Rejected(format!(
                     "mint security: {}. Key: {:?}",
-                    e, policy.coordinator_public_key
+                    e, authority_policy.coordinator_public_key
                 )));
             }
         }
