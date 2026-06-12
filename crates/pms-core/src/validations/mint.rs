@@ -124,18 +124,23 @@ pub fn minted_amounts_by_custom_asset(
 /// handler `/admin/tokens/mint` les vérifiait côté API, contournable par tout
 /// producteur de bloc autorisé). Cette fonction ferme le gap dans le hot path.
 ///
-/// Pour chaque asset custom minté :
-/// 1. **Enregistrement** : l'asset doit exister dans le token registry
-///    (`TokenCreate` préalable) → sinon [`ValidationError::TokenNotRegistered`].
-/// 2. **Autorité** : `signer == metadata.mint_authority` (hex,
+/// Pour chaque asset custom minté **enregistré dans le token registry** :
+/// 1. **Autorité** : `signer == metadata.mint_authority` (hex,
 ///    case-insensitive). Le gate Coordinator de [`validate_mint_security`]
 ///    reste appliqué en amont (défense en profondeur) — ce check AJOUTE le
 ///    binding per-asset, il ne remplace pas le gate global.
-/// 3. **Granularité (2.4)** : chaque montant ne dépasse pas
+/// 2. **Granularité (2.4)** : chaque montant ne dépasse pas
 ///    `metadata.decimals` décimales (un asset `decimals=0` ne mint pas 0.5).
-/// 4. **Supply cap** : `circulating + minted <= max_supply` (si définie),
+/// 3. **Supply cap** : `circulating + minted <= max_supply` (si définie),
 ///    `circulating` venant du supply cache du `ShardedUtxoSet` (fourni par
 ///    l'appelant, déjà résolu).
+///
+/// Un asset SANS metadata (jamais de `TokenCreate`) garde le comportement
+/// historique : seul le gate Coordinator s'applique. Les refunds de contrats
+/// (ex: `edenite-cube-burn` sur le ledger eden) mintent des assets non
+/// enregistrés depuis la v0.2.0 — les rejeter casserait le flux production.
+/// L'enregistrement est donc l'OPT-IN des contraintes : un émetteur qui veut
+/// cap/authority enforced enregistre son asset via `TokenCreate`.
 ///
 /// `metadata` / `circulating` sont des maps pré-résolues par l'appelant
 /// (persist.rs fait les lookups store + supply cache async) — la fonction
@@ -150,13 +155,16 @@ pub fn validate_custom_asset_mints(
     let signer = signer_pk.trim();
 
     for (asset_id, mint_amount) in &minted {
-        // 1. Asset enregistré
+        // Asset non enregistré → comportement historique (gate Coordinator
+        // seul). Les contraintes per-asset sont opt-in via TokenCreate.
         let Some(Some(meta)) = metadata.get(asset_id) else {
-            tracing::warn!("🚫 Mint of unregistered asset blocked: {asset_id}");
-            return Err(ValidationError::TokenNotRegistered(asset_id.clone()));
+            tracing::debug!(
+                "Mint of unregistered asset {asset_id}: no TokenMetadata, per-asset constraints skipped"
+            );
+            continue;
         };
 
-        // 2. Autorité per-asset
+        // 1. Autorité per-asset
         if !signer.eq_ignore_ascii_case(meta.mint_authority.trim()) {
             tracing::error!(
                 "🚫 Unauthorized token mint: asset={asset_id}, signer={} != mint_authority",
@@ -165,7 +173,7 @@ pub fn validate_custom_asset_mints(
             return Err(ValidationError::UnauthorizedTokenMint(asset_id.clone()));
         }
 
-        // 3. Granularité : decimals de l'asset respectées par chaque output
+        // 2. Granularité : decimals de l'asset respectées par chaque output
         for out in outputs.iter().filter(|o| o.asset_id.as_deref() == Some(asset_id)) {
             let amount = Decimal::from_str(&out.amount).unwrap_or(Decimal::ZERO);
             if amount.normalize().scale() > meta.decimals as u32 {
@@ -178,7 +186,7 @@ pub fn validate_custom_asset_mints(
             }
         }
 
-        // 4. Supply cap
+        // 3. Supply cap
         if let Some(max_supply_str) = &meta.max_supply {
             let max_supply =
                 Decimal::from_str(max_supply_str).map_err(|_| ValidationError::InvalidAmount {

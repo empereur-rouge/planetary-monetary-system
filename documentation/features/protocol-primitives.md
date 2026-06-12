@@ -21,7 +21,9 @@ les UTXOs et le contrôle d'émission, validées dans le hot path
    porte `cosigners` + `preimage_hex`.
 3. **Mint contraint (2.3/2.4)** — `mint_authority`, `max_supply` et `decimals`
    de `TokenMetadata` sont enforced au niveau protocole pour chaque mint
-   d'asset custom (avant : API-only).
+   d'asset custom **enregistré** (avant : API-only). L'enregistrement
+   `TokenCreate` est l'opt-in des contraintes ; un asset sans metadata garde
+   le comportement historique (refunds de contrats type edenite-cube-burn).
 4. **Demurrage (2.5)** — `TokenMetadata.demurrage_bps_per_day` (opt-in) :
    valeur effective d'un UTXO = nominal − décote par jour plein depuis
    `created_at` (estampillé système). Conservation `out ≤ effective_in`.

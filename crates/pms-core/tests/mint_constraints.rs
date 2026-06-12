@@ -55,17 +55,20 @@ fn supply(entries: &[(&str, &str)]) -> HashMap<String, Decimal> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn mint_of_unregistered_asset_rejected() {
+fn mint_of_unregistered_asset_keeps_legacy_behavior() {
+    // Asset jamais enregistré via TokenCreate → AUCUNE contrainte per-asset
+    // (gate Coordinator seul, comportement historique). Indispensable : les
+    // refunds de contrats (edenite-cube-burn) mintent des assets non
+    // enregistrés — les rejeter casserait le flux burn→refund production.
     let outputs = mint_outputs("ghost-token", &["100"]);
     let result = validate_custom_asset_mints(
         &outputs,
-        AUTHORITY_PK,
+        OTHER_PK, // même un signataire quelconque : pas de metadata, pas de binding
         &metas(&[("ghost-token", None)]), // lookup fait, asset absent du registre
         &supply(&[]),
     );
-    println!("UNREGISTERED asset mint → {result:?}");
-    let err = format!("{:?}", result.expect_err("must reject"));
-    assert!(err.contains("TokenNotRegistered"), "got: {err}");
+    println!("UNREGISTERED asset mint (legacy) → {result:?}");
+    assert!(result.is_ok(), "unregistered asset must keep legacy behavior: {result:?}");
 }
 
 #[test]

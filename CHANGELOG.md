@@ -30,12 +30,16 @@ prérequis bloquants C-1/C-2 étaient déjà couverts par l'audit v0.9.0
   message spécifique) / `SpendConditionNotMet` (dépense, vague anti-enumeration).
   Module `pms-core/src/validations/conditions.rs`.
 - **feat(protocol) 2.3/2.4 — Mint contraint per-asset** : le hot path enforce
-  désormais `TokenMetadata` pour chaque asset custom minté — asset enregistré
-  (`TokenNotRegistered`), `signer == mint_authority` (`UnauthorizedTokenMint`,
-  en PLUS du gate Coordinator), granularité `decimals` (`InvalidAmount`),
-  `circulating + minted <= max_supply` (`MaxSupplyExceeded`, supply cache,
-  sommé multi-outputs). Avant : enforcement API-only, contournable par tout
-  producteur de bloc. Nouveau trait `pms_storage::TokenRegistryStorage`.
+  désormais `TokenMetadata` pour chaque asset custom minté ENREGISTRÉ —
+  `signer == mint_authority` (`UnauthorizedTokenMint`, en PLUS du gate
+  Coordinator), granularité `decimals` (`InvalidAmount`), `circulating +
+  minted <= max_supply` (`MaxSupplyExceeded`, supply cache, sommé
+  multi-outputs). Avant : enforcement API-only, contournable par tout
+  producteur de bloc. L'enregistrement via `TokenCreate` est l'OPT-IN des
+  contraintes : un asset sans metadata garde le comportement historique
+  (gate Coordinator seul) — indispensable pour les refunds de contrats
+  (edenite-cube-burn) qui mintent des assets non enregistrés. Nouveau trait
+  `pms_storage::TokenRegistryStorage`.
 - **feat(protocol) 2.5 — Demurrage opt-in par asset** :
   `TokenMetadata.demurrage_bps_per_day` (exposé sur `POST /admin/tokens/create`,
   validé ≤ 10000). Chaque UTXO créé est estampillé `created_at` par le SYSTÈME
