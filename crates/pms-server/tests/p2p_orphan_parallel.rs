@@ -79,14 +79,7 @@ impl pms_interface::NetDagAdapter for MockAdapter {
     ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
         Vec::new()
     }
-    async fn add_utxo(
-        &self,
-        _txid: String,
-        _index: u32,
-        _address: String,
-        _amount: String,
-        _asset_id: Option<String>,
-    ) {
+    async fn add_utxo(&self, _txid: String, _index: u32, _output: pms_types::TxOutput) {
         // Mock: no-op
     }
     async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool {

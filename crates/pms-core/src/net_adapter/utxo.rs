@@ -46,24 +46,10 @@ where
     }
 
     /// Insert a new UTXO into the sharded set.
-    pub(super) async fn do_add_utxo(
-        &self,
-        txid: String,
-        index: u32,
-        address: String,
-        amount: String,
-        asset_id: Option<String>,
-    ) {
-        self.utxos
-            .add(
-                OutputId { txid, index },
-                TxOutput {
-                    address,
-                    amount,
-                    asset_id,
-                },
-            )
-            .await;
+    /// Le `TxOutput` complet est inséré tel quel — aucun champ protocole
+    /// (asset_id, locked_until, spend_condition, …) n'est reconstruit à la main.
+    pub(super) async fn do_add_utxo(&self, txid: String, index: u32, output: TxOutput) {
+        self.utxos.add(OutputId { txid, index }, output).await;
     }
 
     /// Remove a UTXO by its output id. Returns `true` if it existed.

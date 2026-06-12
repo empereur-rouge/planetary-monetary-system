@@ -763,15 +763,7 @@ where
                 let create = outputs
                     .iter()
                     .enumerate()
-                    .map(|(i, out)| {
-                        (
-                            sb.id.clone(),
-                            i as u32,
-                            out.address.clone(),
-                            out.amount.clone(),
-                            out.asset_id.clone(),
-                        )
-                    })
+                    .map(|(i, out)| (sb.id.clone(), i as u32, out.clone()))
                     .collect();
 
                 Some(UtxoDelta {
@@ -792,15 +784,7 @@ where
                     .outputs
                     .iter()
                     .enumerate()
-                    .map(|(i, out)| {
-                        (
-                            sb.id.clone(),
-                            i as u32,
-                            out.address.clone(),
-                            out.amount.clone(),
-                            out.asset_id.clone(),
-                        )
-                    })
+                    .map(|(i, out)| (sb.id.clone(), i as u32, out.clone()))
                     .collect();
 
                 // Accumulation du pool de fees pour le Treasury
@@ -852,26 +836,28 @@ where
                 let mut create = Vec::new();
                 let mut idx = 0u32;
 
-                // Add fee distribution outputs (always PMS native)
+                // Add fee distribution outputs (always PMS native — asset_id forcé à None)
                 for out in fee_outputs {
                     create.push((
                         sb.id.clone(),
                         idx,
-                        out.address.clone(),
-                        out.amount.clone(),
-                        None,
+                        pms_types::TxOutput {
+                            asset_id: None,
+                            ..out.clone()
+                        },
                     ));
                     idx += 1;
                 }
 
-                // Add block reward outputs (always PMS native)
+                // Add block reward outputs (always PMS native — asset_id forcé à None)
                 for out in reward_outputs {
                     create.push((
                         sb.id.clone(),
                         idx,
-                        out.address.clone(),
-                        out.amount.clone(),
-                        None,
+                        pms_types::TxOutput {
+                            asset_id: None,
+                            ..out.clone()
+                        },
                     ));
                     idx += 1;
                 }
@@ -903,15 +889,7 @@ where
                 let create = outputs
                     .iter()
                     .enumerate()
-                    .map(|(i, out)| {
-                        (
-                            sb.id.clone(),
-                            i as u32,
-                            out.address.clone(),
-                            out.amount.clone(),
-                            out.asset_id.clone(),
-                        )
-                    })
+                    .map(|(i, out)| (sb.id.clone(), i as u32, out.clone()))
                     .collect();
                 Some(UtxoDelta {
                     spend: vec![],
@@ -930,15 +908,7 @@ where
                 let create = outputs
                     .iter()
                     .enumerate()
-                    .map(|(i, out)| {
-                        (
-                            sb.id.clone(),
-                            i as u32,
-                            out.address.clone(),
-                            out.amount.clone(),
-                            out.asset_id.clone(),
-                        )
-                    })
+                    .map(|(i, out)| (sb.id.clone(), i as u32, out.clone()))
                     .collect();
                 Some(UtxoDelta { spend, create })
             }
@@ -952,15 +922,7 @@ where
                 let create = outputs
                     .iter()
                     .enumerate()
-                    .map(|(i, out)| {
-                        (
-                            sb.id.clone(),
-                            i as u32,
-                            out.address.clone(),
-                            out.amount.clone(),
-                            out.asset_id.clone(),
-                        )
-                    })
+                    .map(|(i, out)| (sb.id.clone(), i as u32, out.clone()))
                     .collect();
                 Some(UtxoDelta { spend, create })
             }
@@ -990,17 +952,13 @@ where
             let creates: Vec<(pms_types::OutputId, pms_types::TxOutput)> = d
                 .create
                 .iter()
-                .map(|(txid, idx, addr, amount, asset_id)| {
+                .map(|(txid, idx, out)| {
                     (
                         pms_types::OutputId {
                             txid: txid.clone(),
                             index: *idx,
                         },
-                        pms_types::TxOutput {
-                            address: addr.clone(),
-                            amount: amount.clone(),
-                            asset_id: asset_id.clone(),
-                        },
+                        out.clone(),
                     )
                 })
                 .collect();

@@ -600,7 +600,7 @@ async fn classify_tx_fee_received_async() {
         async fn balance_by_address(&self, _address: &str) -> rust_decimal::Decimal { rust_decimal::Decimal::ZERO }
         async fn balance_by_address_and_asset(&self, _address: &str, _asset_id: Option<&str>) -> rust_decimal::Decimal { rust_decimal::Decimal::ZERO }
         async fn utxos_by_address(&self, _address: &str) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> { vec![] }
-        async fn add_utxo(&self, _txid: String, _index: u32, _address: String, _amount: String, _asset_id: Option<String>) {}
+        async fn add_utxo(&self, _txid: String, _index: u32, _output: pms_types::TxOutput) {}
         async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool { false }
         async fn get_utxo(&self, _output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
             Some(pms_types::TxOutput { address: "sender".into(), amount: "100".into(), asset_id: None })
@@ -704,14 +704,7 @@ async fn classify_tx_transfer_in_async() {
         ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
             vec![]
         }
-        async fn add_utxo(
-            &self,
-            _txid: String,
-            _index: u32,
-            _address: String,
-            _amount: String,
-            _asset_id: Option<String>,
-        ) {
+        async fn add_utxo(&self, _txid: String, _index: u32, _output: pms_types::TxOutput) {
         }
         async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool {
             false
@@ -814,14 +807,7 @@ async fn classify_tx_transfer_out_async() {
         ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
             vec![]
         }
-        async fn add_utxo(
-            &self,
-            _txid: String,
-            _index: u32,
-            _address: String,
-            _amount: String,
-            _asset_id: Option<String>,
-        ) {
+        async fn add_utxo(&self, _txid: String, _index: u32, _output: pms_types::TxOutput) {
         }
         async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool {
             false
@@ -923,14 +909,7 @@ async fn classify_tx_transfer_self_async() {
         ) -> Vec<(pms_types::OutputId, pms_types::TxOutput)> {
             vec![]
         }
-        async fn add_utxo(
-            &self,
-            _txid: String,
-            _index: u32,
-            _address: String,
-            _amount: String,
-            _asset_id: Option<String>,
-        ) {
+        async fn add_utxo(&self, _txid: String, _index: u32, _output: pms_types::TxOutput) {
         }
         async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool {
             false

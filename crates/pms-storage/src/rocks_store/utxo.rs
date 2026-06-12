@@ -1,5 +1,6 @@
 use crate::rocks_store::store::RocksStore;
 use anyhow::Result;
+use pms_types::TxOutput;
 use rocksdb::WriteBatch;
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +17,14 @@ pub struct UtxoApply {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UtxoDelta {
     pub spend: Vec<(String, u32)>, // (txid, index)
-    pub create: Vec<(String, u32, String, String, Option<String>)>, // (txid, index, address, amount, asset_id)
+    /// `(txid, index, output)` — le `TxOutput` COMPLET est transporté jusqu'à
+    /// l'écriture RocksDB. Historiquement ce champ était un tuple
+    /// `(txid, index, address, amount, asset_id)` : chaque nouveau champ
+    /// protocole ajouté à `TxOutput` (asset_id hier, `locked_until` /
+    /// `spend_condition` aujourd'hui) était silencieusement perdu au passage —
+    /// le piège documenté de la check-list « Cache UTXO RAM ». Transporter la
+    /// struct entière élimine définitivement cette classe de bug.
+    pub create: Vec<(String, u32, TxOutput)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +35,38 @@ pub struct UtxoValue {
     pub amount: String,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "ast")]
     pub asset_id: Option<String>,
+}
+
+impl UtxoValue {
+    /// Convertit la représentation stockage RocksDB en `TxOutput` protocole.
+    pub fn into_tx_output(self) -> TxOutput {
+        TxOutput {
+            address: self.address,
+            amount: self.amount,
+            asset_id: self.asset_id,
+        }
+    }
+
+    /// Sérialise un `TxOutput` sous la forme JSON compacte du CF `utxo`
+    /// (`{"addr":…,"amt":…,"ast":…}`) sans cloner les Strings.
+    ///
+    /// Point d'écriture UNIQUE du format : les deux chemins de persistance
+    /// (`append_block_atomic_with_utxo` et `append_blocks_batch`) passent ici,
+    /// donc un nouveau champ d'output ne peut pas diverger entre eux.
+    pub fn encode_output(out: &TxOutput) -> Result<Vec<u8>> {
+        #[derive(Serialize)]
+        struct OutValRef<'a> {
+            addr: &'a str,
+            amt: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            ast: Option<&'a str>,
+        }
+        Ok(serde_json::to_vec(&OutValRef {
+            addr: &out.address,
+            amt: &out.amount,
+            ast: out.asset_id.as_deref(),
+        })?)
+    }
 }
 
 impl RocksStore {

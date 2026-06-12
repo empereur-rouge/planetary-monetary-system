@@ -200,10 +200,8 @@ async fn test_freeze_blocks_outgoing_tx() {
         .add_utxo(
             "mint_block_001".into(),
             0,
-            sender_addr.into(),
-            "100.0".into(),
-            None,
-        )
+            pms_types::TxOutput::new(sender_addr, "100.0", None),
+            )
         .await;
 
     // Freeze the sender
@@ -245,10 +243,8 @@ async fn test_freeze_blocks_incoming_tx() {
         .add_utxo(
             "mint_block_002".into(),
             0,
-            sender_addr.into(),
-            "100.0".into(),
-            None,
-        )
+            pms_types::TxOutput::new(sender_addr, "100.0", None),
+            )
         .await;
 
     // Freeze the receiver
@@ -294,10 +290,8 @@ async fn test_unfreeze_restores_tx() {
         .add_utxo(
             "mint_block_003".into(),
             0,
-            sender_addr.into(),
-            "100.0".into(),
-            None,
-        )
+            pms_types::TxOutput::new(sender_addr, "100.0", None),
+            )
         .await;
 
     // Freeze sender
@@ -394,10 +388,10 @@ async fn test_shadow_balance_endpoint() {
 
     // Add UTXOs to the addresses
     adapter
-        .add_utxo("mint_001".into(), 0, addr1.into(), "200.0".into(), None)
+        .add_utxo("mint_001".into(), 0, pms_types::TxOutput::new(addr1, "200.0", None))
         .await;
     adapter
-        .add_utxo("mint_002".into(), 0, addr2.into(), "300.0".into(), None)
+        .add_utxo("mint_002".into(), 0, pms_types::TxOutput::new(addr2, "300.0", None))
         .await;
 
     // Freeze both

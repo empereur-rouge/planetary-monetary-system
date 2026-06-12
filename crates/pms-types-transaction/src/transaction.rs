@@ -25,6 +25,25 @@ pub struct TxOutput {
     pub asset_id: Option<String>,
 }
 
+impl TxOutput {
+    /// Constructeur canonique d'un output « simple » (sans champ protocole
+    /// optionnel). À préférer à la construction littérale dans les tests et
+    /// helpers : les futurs champs optionnels de `TxOutput` (time-lock,
+    /// spend condition, …) seront initialisés à `None` ici sans casser les
+    /// call sites.
+    pub fn new(
+        address: impl Into<String>,
+        amount: impl Into<String>,
+        asset_id: Option<String>,
+    ) -> Self {
+        Self {
+            address: address.into(),
+            amount: amount.into(),
+            asset_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct OutputId {
     pub txid: TxId,

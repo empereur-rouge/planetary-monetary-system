@@ -203,13 +203,7 @@ pub async fn apply_utxo_delta(
     }
     for (idx, output) in outputs.iter().enumerate() {
         adapter
-            .add_utxo(
-                block_id.to_string(),
-                idx as u32,
-                output.address.clone(),
-                output.amount.clone(),
-                output.asset_id.clone(),
-            )
+            .add_utxo(block_id.to_string(), idx as u32, output.clone())
             .await;
     }
 }

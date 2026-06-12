@@ -11,7 +11,6 @@ use crate::{DagStorage, PutResult, StoredBlock, UtxoDelta};
 use anyhow::Result;
 use pms_wire::WireBlock;
 use rocksdb::{Direction, IteratorMode};
-use serde::Serialize;
 
 use super::activity_index::iter_cf_all;
 
@@ -579,24 +578,10 @@ impl DagStorage for RocksStore {
                 batch.put_cf(&cf_utxo_spent, &key, b.id.as_bytes());
             }
 
-            // CREATES
-            for (txid, idx, addr, amt, asset_id) in &d.create {
+            // CREATES — format d'écriture unique : UtxoValue::encode_output
+            for (txid, idx, out) in &d.create {
                 let key = make_utxo_key(txid, *idx);
-
-                #[derive(Serialize)]
-                struct OutVal<'a> {
-                    addr: &'a str,
-                    amt: &'a str,
-                    #[serde(default, skip_serializing_if = "Option::is_none", rename = "ast")]
-                    asset_id: Option<&'a str>,
-                }
-
-                let val = OutVal {
-                    addr,
-                    amt,
-                    asset_id: asset_id.as_deref(),
-                };
-                let json = serde_json::to_vec(&val)?;
+                let json = crate::rocks_store::utxo::UtxoValue::encode_output(out)?;
                 batch.put_cf(&cf_utxo, &key, &json);
             }
         }
@@ -781,27 +766,9 @@ impl DagStorage for RocksStore {
                     batch.put_cf(&cf_utxo_spent, &key, b.id.as_bytes());
                 }
 
-                for (txid, idx, addr, amt, asset_id) in &d.create {
+                for (txid, idx, out) in &d.create {
                     let key = make_utxo_key(txid, *idx);
-
-                    #[derive(Serialize)]
-                    struct OutVal<'a> {
-                        addr: &'a str,
-                        amt: &'a str,
-                        #[serde(
-                            default,
-                            skip_serializing_if = "Option::is_none",
-                            rename = "ast"
-                        )]
-                        asset_id: Option<&'a str>,
-                    }
-
-                    let val = OutVal {
-                        addr,
-                        amt,
-                        asset_id: asset_id.as_deref(),
-                    };
-                    let json = serde_json::to_vec(&val)?;
+                    let json = crate::rocks_store::utxo::UtxoValue::encode_output(out)?;
                     batch.put_cf(&cf_utxo, &key, &json);
                 }
             }
