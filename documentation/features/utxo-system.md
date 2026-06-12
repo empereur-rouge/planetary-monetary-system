@@ -1,8 +1,8 @@
 ---
 tags: [feature, core, performance]
 created: 2026-01-08
-updated: 2026-03-23
-version: v0.6.7
+updated: 2026-06-13
+version: v0.11.1
 ---
 
 # UTXO System
@@ -110,6 +110,7 @@ L'`Interner` utilise un `Mutex<HashSet<Arc<str>>>` pour deduplication. La conten
 - Le `ConcurrentDag` dans `concurrent_dag.rs` maintient un `DashSet<(String, u32)>` pour la detection rapide du double-spend en RAM, complementaire au `ShardedUtxoSet`.
 - La validation async (`validate_transaction_async`) interroge le `ShardedUtxoSet` pour verifier l'existence des inputs et la conservation des montants par asset, sans lock global sur le DAG.
 - Les operations de shard lock sont ordonnees (deferred DashMap updates) dans `apply_diff` pour prevenir les deadlocks entre `shard write lock -> DashMap` et `DashMap -> shard read lock`.
+- **Idempotence du persist (v0.11.1, audit S4)** : `CoreAdapter::persist_block` deduplique le bloc (`ConcurrentDag::contains_block` -> `AlreadyExists`) **AVANT** d'appeler `apply_diff`. Re-soumettre un bloc deja persiste (re-gossip reseau, retry client, replay) ne ré-applique donc PAS son `UtxoDelta` -> pas de double-credit / inflation de supply. L'ordre inverse (apply puis dedup) etait un bug de la meme classe que le double-apply v0.7.20. Verrouille par `crates/pms-core/tests/dag_integrity.rs::duplicate_block_is_idempotent_no_double_apply` et la determinism/proof-of-reserves par `crates/pms-core/tests/replay_determinism.rs`.
 
 ## Decisions Techniques
 

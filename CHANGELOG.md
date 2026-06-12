@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.11.2] - Unreleased — Tests failover/replay/déterminisme (audit S9, proof-of-reserves)
+
+### Added
+- **test(core)** — nouveau `crates/pms-core/tests/replay_determinism.rs` (audit
+  Section 9). Verrouille l'invariant maître de preuve de réserves : **rejouer le
+  DAG depuis le store reconstruit EXACTEMENT les mêmes soldes**.
+  - `replay_from_store_reconstructs_identical_balances` : un adapter persiste
+    3 mints + 1 transfert (A dépense ses 1000 → D, fee 0), puis un second
+    adapter est reconstruit via LE VRAI chemin de redémarrage prod
+    (`ConcurrentDag::bootstrap_from_store` + `RocksStore::iter_all_utxos` →
+    `ShardedUtxoSet::add` → `rebuild_indexes`, identique à
+    `pms-ledger/src/instance.rs`). Les soldes relus du disque égalent les
+    soldes live ET des valeurs golden hardcodées — A=0 (l'UTXO dépensé ne
+    ré-apparaît PAS : no ghost), B=2500, C=777, D=1000 (transfert non perdu),
+    supply native=4277 (transfert fee 0 ⇒ supply inchangée). Attente de
+    persistance par polling (pas de `sleep` fixe) + `flush_wal` → robuste au
+    timing du background-persist sur FS externe.
+  - `same_block_sequence_is_application_deterministic` : deux adapters
+    indépendants appliquant la même séquence donnent des soldes identiques
+    (déterminisme d'application isolé, sans disque ni timing).
+- Reste de la Section 9 (crash-recovery mid-write par injection de panne ;
+  failover Coordinator multi-writer) non couvert ici — relève du niveau
+  serveur/P2P, à traiter séparément.
+
 ## [0.11.1] - Unreleased — Fix idempotence: double-apply du delta UTXO sur re-soumission (audit S4)
 
 ### Fixed
