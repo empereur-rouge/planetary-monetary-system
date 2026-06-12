@@ -281,23 +281,44 @@ where
                     }
                 };
                 if !minted.is_empty() {
+                    let now_ms_mint = now_ms_for_signers.max(0) as u64;
                     let mut metadata = std::collections::HashMap::new();
                     let mut circulating = std::collections::HashMap::new();
+                    let mut locked_collateral = std::collections::HashMap::new();
                     for asset_id in minted.keys() {
                         // NOTE fail-open assumé : une erreur RocksDB sur le
                         // lookup registry est traitée comme « non enregistré »
                         // (contraintes per-asset skippées, gate Coordinator
                         // conservé). À durcir avec la migration ApiError.
                         let meta = self.store.get_token(asset_id).unwrap_or(None);
-                        // Le supply cache n'est interrogé que si une cap
-                        // existe — validate_custom_asset_mints traite une
-                        // entrée absente comme ZERO et ne la lit pas sans cap.
-                        if meta.as_ref().is_some_and(|m| m.max_supply.is_some()) {
+                        // Le supply cache n'est interrogé que si une cap OU un
+                        // collatéral existe — validate_custom_asset_mints
+                        // traite une entrée absente comme ZERO.
+                        if meta
+                            .as_ref()
+                            .is_some_and(|m| m.max_supply.is_some() || m.collateral_address.is_some())
+                        {
                             let (supply, _count) = self
                                 .utxos
                                 .circulating_supply_by_asset(Some(asset_id))
                                 .await;
                             circulating.insert(asset_id.clone(), supply);
+                        }
+                        // Mint collatéralisé (2.3 v2) : somme des UTXOs de
+                        // réserve ENCORE time-lockés à l'adresse déclarée
+                        // (même ledger). Adresse de réserve dédiée → peu
+                        // d'UTXOs, lookup par-mint (pas le hot path tx).
+                        if let Some(m) = meta.as_ref() {
+                            if let Some(reserve_addr) = &m.collateral_address {
+                                let reserve_utxos =
+                                    self.utxos.utxos_by_address(reserve_addr).await;
+                                let locked = crate::validations::mint::sum_locked_collateral(
+                                    &reserve_utxos,
+                                    &m.collateral_asset_id,
+                                    now_ms_mint,
+                                );
+                                locked_collateral.insert(asset_id.clone(), locked);
+                            }
                         }
                         metadata.insert(asset_id.clone(), meta);
                     }
@@ -307,6 +328,7 @@ where
                         &minted,
                         &metadata,
                         &circulating,
+                        &locked_collateral,
                     ) {
                         tracing::warn!(
                             "🚫 Custom-asset mint blocked on block {}: {e}",

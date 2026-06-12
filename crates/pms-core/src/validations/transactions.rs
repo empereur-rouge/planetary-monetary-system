@@ -8,6 +8,21 @@ use pms_types::{PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput};
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 
+/// Addition `Decimal` VÉRIFIÉE — rejette proprement un overflow au lieu de
+/// paniquer.
+///
+/// Audit S2 (v0.9.9) : la somme des montants (outputs surtout, contrôlés par
+/// l'émetteur) utilisait `+`/`+=` bruts, qui PANIQUENT quand le total dépasse
+/// `Decimal::MAX` (≈ 7.92e28). Un attaquant pouvait soumettre une tx avec des
+/// outputs proches du max dont la somme déborde → panic dans la validation =
+/// DoS. On somme désormais via `checked_add`.
+#[inline]
+fn checked_sum(acc: Decimal, x: Decimal) -> Result<Decimal, ValidationError> {
+    acc.checked_add(x).ok_or(ValidationError::InvalidAmount {
+        reason: "amount sum overflow".to_string(),
+    })
+}
+
 pub fn utxo_no_double_spend(dag: &Dag, tx: &Transaction) -> Result<(), ValidationError> {
     let mut seen = HashSet::new();
     for inp in &tx.inputs {
@@ -27,9 +42,9 @@ pub fn utxo_sufficient_funds(dag: &Dag, tx: &Transaction) -> Result<(), Validati
     let fee = amount_parse_non_neg_dec(&tx.fee)?; // Fee can be zero
     let mut out_sum = Decimal::ZERO;
     for o in &tx.outputs {
-        out_sum += amount_parse_pos_dec(&o.amount)?;
+        out_sum = checked_sum(out_sum, amount_parse_pos_dec(&o.amount)?)?;
     }
-    let need = out_sum + fee;
+    let need = checked_sum(out_sum, fee)?;
 
     // Appariement input[i] ↔ unlock[i] — déjà garanti dans le flux
     // `validate_block` (verify_tx_signatures), re-vérifié ici pour que la
@@ -62,7 +77,7 @@ pub fn utxo_sufficient_funds(dag: &Dag, tx: &Transaction) -> Result<(), Validati
                 .ok_or(ValidationError::MissingOutput)?,
             _ => return Err(ValidationError::MissingOutput),
         };
-        in_sum += amount_parse_pos_dec(&prev_out.amount)?;
+        in_sum = checked_sum(in_sum, amount_parse_pos_dec(&prev_out.amount)?)?;
         prev_outs.push(prev_out.clone());
     }
 
@@ -183,18 +198,20 @@ pub fn check_asset_conservation_with_demurrage(
         } else {
             nominal
         };
-        *inputs_by_asset
+        let e = inputs_by_asset
             .entry(out.asset_id.clone())
-            .or_insert(Decimal::ZERO) += value;
+            .or_insert(Decimal::ZERO);
+        *e = checked_sum(*e, value)?;
     }
 
     // Grouper les outputs par asset_id
     let mut outputs_by_asset: HashMap<Option<String>, Decimal> = HashMap::new();
     for o in &tx.outputs {
         let amount = amount_parse_pos_dec(&o.amount)?;
-        *outputs_by_asset
+        let e = outputs_by_asset
             .entry(o.asset_id.clone())
-            .or_insert(Decimal::ZERO) += amount;
+            .or_insert(Decimal::ZERO);
+        *e = checked_sum(*e, amount)?;
     }
 
     // Conservation par asset
@@ -376,7 +393,7 @@ pub async fn validate_bridge_lock_async(
                         outputs: format!("{:?}", asset_id),
                     });
                 }
-                in_sum += amount_parse_pos_dec(&out.amount)?;
+                in_sum = checked_sum(in_sum, amount_parse_pos_dec(&out.amount)?)?;
             }
             None => {
                 tracing::warn!("BridgeLock input missing: {:?}", inp.out);

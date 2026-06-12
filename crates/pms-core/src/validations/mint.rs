@@ -111,9 +111,36 @@ pub fn minted_amounts_by_custom_asset(
                 reason: "mint output amount must be > 0".into(),
             });
         }
-        *by_asset.entry(asset.clone()).or_insert(Decimal::ZERO) += amount;
+        // checked_add : pas de panic d'overflow sur des montants near-MAX (audit S2).
+        let e = by_asset.entry(asset.clone()).or_insert(Decimal::ZERO);
+        *e = e.checked_add(amount).ok_or(ValidationError::InvalidAmount {
+            reason: "mint amount sum overflow".into(),
+        })?;
     }
     Ok(by_asset)
+}
+
+/// Somme du collatéral UTILISABLE d'une réserve : UTXOs de l'asset
+/// `collateral_asset_id` ENCORE time-lockés (`locked_until > now_ms`,
+/// protocole 2.1). Un UTXO dont le lock a expiré n'est plus du collatéral —
+/// l'émetteur peut le retirer à tout instant, il ne couvre donc plus rien.
+/// Un UTXO sans lock ne compte pas non plus (même raison).
+///
+/// `utxos` = les UTXOs détenus à l'adresse de réserve (résolus par
+/// l'appelant via `utxos_by_address`).
+pub fn sum_locked_collateral(
+    utxos: &[(pms_types::OutputId, TxOutput)],
+    collateral_asset_id: &Option<String>,
+    now_ms: u64,
+) -> Decimal {
+    utxos
+        .iter()
+        .filter(|(_, out)| {
+            out.asset_id == *collateral_asset_id
+                && out.locked_until.is_some_and(|until| until > now_ms)
+        })
+        .filter_map(|(_, out)| Decimal::from_str(&out.amount).ok())
+        .sum()
 }
 
 /// Enforcement protocole du mint d'assets custom (plan 2.3 / 2.4).
@@ -134,6 +161,13 @@ pub fn minted_amounts_by_custom_asset(
 /// 3. **Supply cap** : `circulating + minted <= max_supply` (si définie),
 ///    `circulating` venant du supply cache du `ShardedUtxoSet` (fourni par
 ///    l'appelant, déjà résolu).
+/// 4. **Collatéral (2.3 v2)** : si `collateral_address` est défini,
+///    `(circulating + minted) × collateral_ratio_bps / 10_000 <=
+///    locked_collateral[asset]` — la somme des UTXOs de réserve encore
+///    time-lockés ([`sum_locked_collateral`], résolue par l'appelant).
+///    L'invariant porte sur l'ÉMISSION TOTALE, pas sur le delta : une
+///    réserve dont les locks expirent bloque les mints suivants tant
+///    qu'elle n'est pas re-verrouillée.
 ///
 /// Un asset SANS metadata (jamais de `TokenCreate`) garde le comportement
 /// historique : seul le gate Coordinator s'applique. Les refunds de contrats
@@ -152,6 +186,7 @@ pub fn validate_custom_asset_mints(
     minted: &HashMap<String, Decimal>,
     metadata: &HashMap<String, Option<TokenMetadata>>,
     circulating: &HashMap<String, Decimal>,
+    locked_collateral: &HashMap<String, Decimal>,
 ) -> Result<(), ValidationError> {
     let signer = signer_pk.trim();
 
@@ -202,6 +237,30 @@ pub fn validate_custom_asset_mints(
                     "🚫 Max supply exceeded for {asset_id}: circulating={current} + mint={mint_amount} > max={max_supply}"
                 );
                 return Err(ValidationError::MaxSupplyExceeded(asset_id.clone()));
+            }
+        }
+
+        // 4. Mint collatéralisé (2.3 v2) : l'émission totale doit rester
+        // couverte par la réserve actuellement time-lockée.
+        if meta.collateral_address.is_some() {
+            // ratio garanti Some(>0) par validate_token_metadata au registry ;
+            // défense en profondeur : metadata forgée hors registry → 10_000.
+            let ratio = Decimal::from(meta.collateral_ratio_bps.unwrap_or(10_000));
+            let current = circulating
+                .get(asset_id)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            let required = (current + mint_amount) * ratio / Decimal::from(10_000);
+            let locked = locked_collateral
+                .get(asset_id)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            if locked < required {
+                tracing::warn!(
+                    "🚫 Insufficient collateral for {asset_id}: locked={locked} < required={required} \
+                     ((circulating={current} + mint={mint_amount}) × {ratio} bps)"
+                );
+                return Err(ValidationError::InsufficientCollateral(asset_id.clone()));
             }
         }
     }

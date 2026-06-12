@@ -13,7 +13,7 @@ use crate::api::AppState;
 /// v13 (audit sécurité v0.9.0) : `POST /v1/wallet/tx/send` exige des unlocks
 /// valides (401 sinon) et la conservation par asset ; `POST /submit/block`
 /// rejette les tx sans autorisation de dépense et les block ids non canoniques.
-pub const API_VERSION: u32 = 15;
+pub const API_VERSION: u32 = 16;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,8 +86,8 @@ mod tests {
         // Pin the LITERAL (not `API_VERSION` vs itself): any bump of API_VERSION
         // must consciously update this assertion + the CHANGELOG. The real
         // GET /v1/version handler is exercised in tests/version_endpoint.rs.
-        // v0.10.0: 14 → 15 (reserves endpoints + demurrage_bps_per_day sur
-        // /admin/tokens/create + nouveaux champs TxOutput exposés).
-        assert_eq!(parsed.api_version, 15);
+        // v0.11.0: 15 → 16 (faucet locked_until + champs collateral_* sur
+        // /admin/tokens/create — mint collatéralisé 2.3 v2).
+        assert_eq!(parsed.api_version, 16);
     }
 }

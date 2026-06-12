@@ -87,6 +87,11 @@ pub enum ValidationError {
     UnauthorizedTokenMint(String),
     #[error("token max supply exceeded: {0}")]
     MaxSupplyExceeded(String),
+    // Mint collatéralisé (protocole 2.3 v2) — la réserve time-lockée ne
+    // couvre pas l'émission demandée. Chemin admin/coordinator : le détail
+    // (asset) est exposable sans risque d'enumeration.
+    #[error("insufficient locked collateral for asset: {0}")]
+    InsufficientCollateral(String),
     #[error("token already exists: {0}")]
     TokenAlreadyExists(String),
 

@@ -94,7 +94,10 @@ fn check_mint_amount(outputs: &[TxOutput], block_id: &str) -> Result<(), Validat
             });
         }
 
-        total += v;
+        // checked_add : pas de panic d'overflow sur des montants near-MAX (audit S2).
+        total = total.checked_add(v).ok_or(ValidationError::InvalidAmount {
+            reason: "reward output sum overflow".into(),
+        })?;
     }
 
     let max_reward =

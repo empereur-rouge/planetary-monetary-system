@@ -17,8 +17,20 @@ fn validate(
     metadata: &HashMap<String, Option<Meta>>,
     circulating: &HashMap<String, Decimal>,
 ) -> Result<(), pms_errors::ValidationError> {
+    validate_with_collateral(outputs, signer, metadata, circulating, &HashMap::new())
+}
+
+/// Variante avec réserve : `locked_collateral` = somme des UTXOs de réserve
+/// encore time-lockés, par asset (comme résolue par persist.rs).
+fn validate_with_collateral(
+    outputs: &[TxOutput],
+    signer: &str,
+    metadata: &HashMap<String, Option<Meta>>,
+    circulating: &HashMap<String, Decimal>,
+    locked_collateral: &HashMap<String, Decimal>,
+) -> Result<(), pms_errors::ValidationError> {
     let minted = minted_amounts_by_custom_asset(outputs)?;
-    validate_custom_asset_mints(outputs, signer, &minted, metadata, circulating)
+    validate_custom_asset_mints(outputs, signer, &minted, metadata, circulating, locked_collateral)
 }
 use pms_types::{TokenMetadata, TxOutput};
 use rust_decimal::Decimal;
@@ -38,6 +50,19 @@ fn meta(asset_id: &str, decimals: u8, max_supply: Option<&str>) -> TokenMetadata
         creator: "8e1creator".into(),
         mint_authority: AUTHORITY_PK.into(),
         demurrage_bps_per_day: None,
+        collateral_address: None,
+        collateral_asset_id: None,
+        collateral_ratio_bps: None,
+    }
+}
+
+/// Metadata avec mint collatéralisé (réserve `8e1reserveaddr`, ratio en bps).
+fn meta_collateralized(asset_id: &str, ratio_bps: u32) -> TokenMetadata {
+    TokenMetadata {
+        collateral_address: Some("8e1reserveaddr".into()),
+        collateral_asset_id: None, // collatéral = natif
+        collateral_ratio_bps: Some(ratio_bps),
+        ..meta(asset_id, 8, None)
     }
 }
 
@@ -177,4 +202,115 @@ fn multi_output_amounts_are_summed_per_asset() {
     println!("SPLIT over-cap mint (3×400 > 1000) → {result:?}");
     let err = format!("{:?}", result.expect_err("sum must be checked, not per-output"));
     assert!(err.contains("MaxSupplyExceeded"), "got: {err}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Mint collatéralisé (protocole 2.3 v2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn collateralized_mint_within_locked_reserve_accepted() {
+    // Réserve verrouillée 1000, ratio 1:1 → mint 800 avec circulation 0 : OK
+    let outputs = mint_outputs("backed", &["800"]);
+    let result = validate_with_collateral(
+        &outputs,
+        AUTHORITY_PK,
+        &metas(&[("backed", Some(meta_collateralized("backed", 10_000)))]),
+        &supply(&[("backed", "0")]),
+        &supply(&[("backed", "1000")]), // locked collateral
+    );
+    println!("COLLATERAL 800 <= 1000 (1:1) → {result:?}");
+    assert!(result.is_ok(), "mint couvert doit passer: {result:?}");
+}
+
+#[test]
+fn collateralized_mint_exceeding_reserve_rejected() {
+    // Réserve 1000, circulation 500, mint 600 → requis 1100 > 1000 : rejet
+    let outputs = mint_outputs("backed", &["600"]);
+    let result = validate_with_collateral(
+        &outputs,
+        AUTHORITY_PK,
+        &metas(&[("backed", Some(meta_collateralized("backed", 10_000)))]),
+        &supply(&[("backed", "500")]),
+        &supply(&[("backed", "1000")]),
+    );
+    println!("COLLATERAL (500+600) > 1000 → {result:?}");
+    let err = format!("{:?}", result.expect_err("émission totale > réserve doit être rejetée"));
+    assert!(err.contains("InsufficientCollateral"), "got: {err}");
+}
+
+#[test]
+fn collateralized_mint_at_exact_coverage_accepted() {
+    // Réserve 1000, circulation 400, mint 600 → requis 1000 == 1000 : OK
+    let outputs = mint_outputs("backed", &["600"]);
+    let result = validate_with_collateral(
+        &outputs,
+        AUTHORITY_PK,
+        &metas(&[("backed", Some(meta_collateralized("backed", 10_000)))]),
+        &supply(&[("backed", "400")]),
+        &supply(&[("backed", "1000")]),
+    );
+    println!("COLLATERAL (400+600) == 1000 → {result:?}");
+    assert!(result.is_ok(), "couverture exacte doit passer: {result:?}");
+}
+
+#[test]
+fn collateral_ratio_is_applied() {
+    // Ratio 150% (15000 bps) : mint 100 exige 150 de réserve. 140 → rejet, 150 → OK.
+    let outputs = mint_outputs("over", &["100"]);
+    let metas_over = metas(&[("over", Some(meta_collateralized("over", 15_000)))]);
+
+    let rejected = validate_with_collateral(
+        &outputs, AUTHORITY_PK, &metas_over, &supply(&[]), &supply(&[("over", "140")]),
+    );
+    println!("RATIO 150%: locked 140 < 150 → {rejected:?}");
+    assert!(format!("{rejected:?}").contains("InsufficientCollateral"));
+
+    let accepted = validate_with_collateral(
+        &outputs, AUTHORITY_PK, &metas_over, &supply(&[]), &supply(&[("over", "150")]),
+    );
+    println!("RATIO 150%: locked 150 == 150 → {accepted:?}");
+    assert!(accepted.is_ok(), "{accepted:?}");
+}
+
+#[test]
+fn no_locked_collateral_blocks_any_mint() {
+    // Réserve vide (ou tous les locks expirés → somme 0) : aucun mint possible.
+    let outputs = mint_outputs("backed", &["1"]);
+    let result = validate_with_collateral(
+        &outputs,
+        AUTHORITY_PK,
+        &metas(&[("backed", Some(meta_collateralized("backed", 10_000)))]),
+        &supply(&[]),
+        &supply(&[]), // pas d'entrée = 0 verrouillé
+    );
+    println!("NO LOCKED collateral → {result:?}");
+    assert!(format!("{:?}", result.expect_err("must reject")).contains("InsufficientCollateral"));
+}
+
+#[test]
+fn sum_locked_collateral_filters_unlocked_expired_and_wrong_asset() {
+    use pms_core::validations::mint::sum_locked_collateral;
+    use pms_types::OutputId;
+    let now: u64 = 1_000_000;
+    let oid = |i: u32| OutputId { txid: "rsv".into(), index: i };
+
+    let utxos = vec![
+        // compte : natif, lock futur
+        (oid(0), TxOutput::new_locked("8e1reserveaddr", "100", None, now + 1)),
+        // ne compte pas : lock EXPIRÉ (l'émetteur peut retirer)
+        (oid(1), TxOutput::new_locked("8e1reserveaddr", "50", None, now)),
+        // ne compte pas : pas de lock du tout
+        (oid(2), TxOutput::new("8e1reserveaddr", "25", None)),
+        // ne compte pas : mauvais asset
+        (oid(3), TxOutput::new_locked("8e1reserveaddr", "999", Some("other".into()), now + 1)),
+    ];
+    let locked = sum_locked_collateral(&utxos, &None, now);
+    println!("sum_locked_collateral: {locked} (attendu 100 : exclut expiré/sans-lock/autre asset)");
+    assert_eq!(locked, Decimal::from(100));
+
+    // ciblage d'un asset de collatéral spécifique
+    let locked_other = sum_locked_collateral(&utxos, &Some("other".into()), now);
+    println!("sum pour asset 'other': {locked_other}");
+    assert_eq!(locked_other, Decimal::from(999));
 }

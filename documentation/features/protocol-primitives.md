@@ -2,7 +2,7 @@
 tags: [feature]
 created: 2026-06-12
 updated: 2026-06-12
-version: v0.10.0
+version: v0.11.0
 ---
 
 # Primitives Protocole DAG (time-lock, spend conditions, mint contraint, demurrage, réserves)
@@ -24,6 +24,11 @@ les UTXOs et le contrôle d'émission, validées dans le hot path
    d'asset custom **enregistré** (avant : API-only). L'enregistrement
    `TokenCreate` est l'opt-in des contraintes ; un asset sans metadata garde
    le comportement historique (refunds de contrats type edenite-cube-burn).
+   **Mint collatéralisé (2.3 v2, v0.11.0)** : `collateral_address` +
+   `collateral_ratio_bps` sur l'asset → chaque mint exige
+   `(circulation + minté) × ratio ≤ réserve ENCORE time-lockée` à l'adresse
+   déclarée (UTXOs au lock expiré/absent exclus). Réserve constituée via
+   `POST /admin/faucet {locked_until}` ou tout envoi d'output time-locké.
 4. **Demurrage (2.5)** — `TokenMetadata.demurrage_bps_per_day` (opt-in) :
    valeur effective d'un UTXO = nominal − décote par jour plein depuis
    `created_at` (estampillé système). Conservation `out ≤ effective_in`.
@@ -42,6 +47,8 @@ Tous les champs sont **optionnels + serde-compatibles** : aucun changement de
 | `[reserves].interval_secs` | `3600` | Intervalle entre snapshots |
 | `POST /admin/tokens/create` → `demurrage_bps_per_day` | absent | Décote/jour de l'asset (≤ 10000) |
 | `POST /admin/tokens/create` → `max_supply` | absent | Cap de supply enforced au mint |
+| `POST /admin/tokens/create` → `collateral_address` + `collateral_ratio_bps` (+ `collateral_asset_id`) | absent | Mint adossé à une réserve time-lockée (2.3 v2) |
+| `POST /admin/faucet` → `locked_until` | absent | Mint d'un UTXO time-locké (vesting / réserve) |
 
 ## Crates et Fichiers
 
@@ -70,7 +77,8 @@ Tous les champs sont **optionnels + serde-compatibles** : aucun changement de
 | `multisig_address(m, pubkeys)` | `validations/conditions.rs` | Adresse canonique `msig1` + SHA-256(policy) — ordre/casse indifférents |
 | `validate_output_conditions` | `validations/conditions.rs` | Structure des conditions à la CRÉATION (TxUtxo + Mint) |
 | `check_spend_authorization` | `validations/conditions.rs` | C-1 généralisé : PubKey/MultiSig/HashLock par input |
-| `validate_custom_asset_mints` | `validations/mint.rs` | Authority + decimals + supply cap per-asset (pure, testable) |
+| `validate_custom_asset_mints` | `validations/mint.rs` | Authority + decimals + supply cap + collatéral per-asset (pure, testable) |
+| `sum_locked_collateral` | `validations/mint.rs` | Somme des UTXOs de réserve encore time-lockés (exclut expirés/sans lock/autre asset) |
 | `effective_value` | `validations/demurrage.rs` | Valeur post-décote d'un UTXO à l'instant t |
 | `check_asset_conservation_with_demurrage` | `validations/transactions.rs` | `out ≤ effective_in` (demurrage) / `==` strict (M-7) |
 | `compute_reserves` | `api_fn/reserves.rs` | state_root + totaux par asset (itérateur RocksDB consistant) |

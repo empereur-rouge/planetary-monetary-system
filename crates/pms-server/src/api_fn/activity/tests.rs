@@ -260,6 +260,9 @@ fn classify_token_create() {
         creator: "alice".into(),
         mint_authority: "alice".into(),
         demurrage_bps_per_day: None,
+        collateral_address: None,
+        collateral_asset_id: None,
+        collateral_ratio_bps: None,
     });
     let items = classify_activity_sync(&plain, "alice");
     assert_eq!(items.len(), 1);
@@ -279,6 +282,9 @@ fn classify_token_create_not_creator() {
         creator: "alice".into(),
         mint_authority: "alice".into(),
         demurrage_bps_per_day: None,
+        collateral_address: None,
+        collateral_asset_id: None,
+        collateral_ratio_bps: None,
     });
     let items = classify_activity_sync(&plain, "bob");
     assert!(items.is_empty());
