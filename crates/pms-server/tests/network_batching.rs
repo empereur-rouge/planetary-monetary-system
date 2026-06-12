@@ -138,20 +138,14 @@ async fn make_server() -> Result<Arc<Server>> {
     // On laisse vivre le TempDir le temps du test (leak volontaire pour le test).
     std::mem::forget(temp_dir);
     let adapter: Arc<dyn NetDagAdapter> = Arc::new(MockAdapter { store });
-    // NB: `P2pConfig::default()` (Default dérivé) met `per_peer_queue_cap = 0`,
-    // ce qui fait paniquer `mpsc::channel(0)` à la connexion d'un peer. En prod
-    // la valeur vient du défaut serde (2000) — ici on la fixe explicitement.
-    let p2p = pms_config::P2pConfig {
-        per_peer_queue_cap: 2_000,
-        max_connections: 256,
-        ..Default::default()
-    };
+    // `P2pConfig::default()` reflète désormais les défauts serde (max_connections
+    // 256, per_peer_queue_cap 2000) — cf. fix v0.9.6 du footgun Default dérivé.
     Ok(Server::new(
         adapter,
         "test-network",
         1,
         Arc::new(Wallet::generate()),
-        &p2p,
+        &pms_config::P2pConfig::default(),
         None,
     ))
 }

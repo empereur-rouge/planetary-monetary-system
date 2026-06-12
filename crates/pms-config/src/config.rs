@@ -240,7 +240,7 @@ fn default_max_peer_retries() -> u32 {
 /// resource limits that control memory usage and scaling behaviour.
 /// All limit fields have safe defaults tuned for an 8 GB VPS.
 /// Increase them for vertical scaling (more RAM) or horizontal scaling (more peers).
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct P2pConfig {
     #[serde(default)]
     pub known_peers: String,
@@ -287,6 +287,31 @@ pub struct P2pConfig {
     /// Increase if peers are slow to boot. Default: 20.
     #[serde(default = "default_max_peer_retries")]
     pub max_peer_retries: u32,
+}
+
+impl Default for P2pConfig {
+    /// Délègue aux mêmes fonctions que les `#[serde(default = ...)]` pour que
+    /// `P2pConfig::default()` soit IDENTIQUE à une config chargée sans bloc
+    /// `[p2p]`. Le `Default` DÉRIVÉ mettait `max_connections` et
+    /// `per_peer_queue_cap` à 0 → le listener rejetait toute connexion (0 permis
+    /// sémaphore → "eof before hello") et `mpsc::channel(0)` paniquait. En prod
+    /// les valeurs venaient toujours du défaut serde, mais tout code construisant
+    /// `P2pConfig::default()` en mémoire (tests, Server API-only) tombait dans le
+    /// footgun.
+    fn default() -> Self {
+        Self {
+            known_peers: String::new(),
+            bind_addr: None,
+            allowed_peer_ips: Vec::new(),
+            strict_whitelist: false,
+            max_connections: default_max_connections(),
+            per_peer_queue_cap: default_per_peer_queue_cap(),
+            max_orphans: default_max_orphans(),
+            max_inflight_requests: default_max_inflight_requests(),
+            max_parent_deps: default_max_parent_deps(),
+            max_peer_retries: default_max_peer_retries(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
