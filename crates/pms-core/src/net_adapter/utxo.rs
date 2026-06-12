@@ -5,22 +5,12 @@
 //! `CoreAdapter` so the trait impl in `mod.rs` can delegate to them.
 
 use crate::CoreAdapter;
-use pms_storage::coordinator_key_store::CoordinatorKeyStorage;
-use pms_storage::{ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage};
+
 use pms_types::{OutputId, TxOutput};
 
 impl<S> CoreAdapter<S>
 where
-    S: DagStorage
-        + NftStorage
-        + ConfigStorage
-        + NodeRewardsStorage
-        + ComplianceStorage
-        + CoordinatorKeyStorage
-        + pms_storage::TokenRegistryStorage
-        + Send
-        + Sync
-        + 'static,
+    S: pms_storage::EngineStorage,
 {
     /// All unspent outputs belonging to the given address.
     pub(super) async fn do_utxos_by_address(

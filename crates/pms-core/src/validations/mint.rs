@@ -142,19 +142,20 @@ pub fn minted_amounts_by_custom_asset(
 /// L'enregistrement est donc l'OPT-IN des contraintes : un émetteur qui veut
 /// cap/authority enforced enregistre son asset via `TokenCreate`.
 ///
-/// `metadata` / `circulating` sont des maps pré-résolues par l'appelant
-/// (persist.rs fait les lookups store + supply cache async) — la fonction
-/// reste pure et testable sans RocksDB.
+/// `minted` / `metadata` / `circulating` sont des maps pré-résolues par
+/// l'appelant (`minted` via [`minted_amounts_by_custom_asset`] — persist.rs
+/// l'a déjà en main, pas de double calcul ; lookups store + supply cache
+/// async côté hot path) — la fonction reste pure et testable sans RocksDB.
 pub fn validate_custom_asset_mints(
     outputs: &[TxOutput],
     signer_pk: &str,
+    minted: &HashMap<String, Decimal>,
     metadata: &HashMap<String, Option<TokenMetadata>>,
     circulating: &HashMap<String, Decimal>,
 ) -> Result<(), ValidationError> {
-    let minted = minted_amounts_by_custom_asset(outputs)?;
     let signer = signer_pk.trim();
 
-    for (asset_id, mint_amount) in &minted {
+    for (asset_id, mint_amount) in minted {
         // Asset non enregistré → comportement historique (gate Coordinator
         // seul). Les contraintes per-asset sont opt-in via TokenCreate.
         let Some(Some(meta)) = metadata.get(asset_id) else {

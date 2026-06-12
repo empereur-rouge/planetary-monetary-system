@@ -29,10 +29,13 @@ pub fn print_block_full(b: &Block) {
     }
 }
 
+/// Horloge protocole : timestamp UNIX courant en millisecondes.
+/// Source de temps UNIQUE des règles temporelles (time-lock 2.1, demurrage
+/// 2.5, signers grace-window) — ne panique jamais (horloge pré-epoch → 0).
 pub fn ts_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

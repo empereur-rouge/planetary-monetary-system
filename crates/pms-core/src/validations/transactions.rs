@@ -31,12 +31,24 @@ pub fn utxo_sufficient_funds(dag: &Dag, tx: &Transaction) -> Result<(), Validati
     }
     let need = out_sum + fee;
 
-    // Time-lock 2.1 : même règle que le hot path (check_input_time_locks),
-    // appliquée ici input par input pour éviter une seconde résolution.
-    let now_ms = crate::utxo::current_time_ms();
+    // Appariement input[i] ↔ unlock[i] — déjà garanti dans le flux
+    // `validate_block` (verify_tx_signatures), re-vérifié ici pour que la
+    // fonction reste sûre appelée seule (sinon les conditions seraient
+    // silencieusement sautées sur les inputs sans unlock).
+    if tx.inputs.len() != tx.unlocks.len() {
+        return Err(ValidationError::InvalidSignature(format!(
+            "inputs/unlocks count mismatch: {} inputs, {} unlocks",
+            tx.inputs.len(),
+            tx.unlocks.len()
+        )));
+    }
 
+    // Résout les outputs dépensés depuis les blocs du DAG RAM, puis applique
+    // LES MÊMES helpers que le hot path (check_input_time_locks /
+    // check_spend_authorization) — la règle ne peut pas diverger.
+    let mut prev_outs: Vec<TxOutput> = Vec::with_capacity(tx.inputs.len());
     let mut in_sum = Decimal::ZERO;
-    for (i, inp) in tx.inputs.iter().enumerate() {
+    for inp in &tx.inputs {
         let Some(prev_block) = dag.blocks.get(&inp.out.txid) else {
             return Err(ValidationError::MissingInput);
         };
@@ -50,23 +62,12 @@ pub fn utxo_sufficient_funds(dag: &Dag, tx: &Transaction) -> Result<(), Validati
                 .ok_or(ValidationError::MissingOutput)?,
             _ => return Err(ValidationError::MissingOutput),
         };
-        if let Some(until) = prev_out.locked_until {
-            if now_ms < until {
-                return Err(ValidationError::OutputTimeLocked {
-                    input_index: i,
-                    until,
-                    now: now_ms,
-                });
-            }
-        }
-        // Spend conditions 2.2 (chemin legacy) — même règle que le hot path.
-        // `verify_tx_signatures` (appelé en amont par validate_block) garantit
-        // déjà l'appariement inputs/unlocks et la validité crypto.
-        if let Some(unlock) = tx.unlocks.get(i) {
-            crate::validations::conditions::check_input_spend_condition(i, prev_out, unlock)?;
-        }
         in_sum += amount_parse_pos_dec(&prev_out.amount)?;
+        prev_outs.push(prev_out.clone());
     }
+
+    check_input_time_locks(&prev_outs, crate::utxo::current_time_ms())?;
+    check_spend_authorization(&tx.unlocks, &prev_outs)?;
 
     if in_sum < need {
         return Err(ValidationError::InsufficientFunds);

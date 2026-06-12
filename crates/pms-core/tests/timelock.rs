@@ -14,7 +14,8 @@
 use pms_core::utxo::{ShardedUtxoSet, current_time_ms};
 use pms_core::validations::check::ValidatePolicy;
 use pms_core::validations::transactions::validate_transaction_full;
-use pms_types::{OutputId, Transaction, TxInput, TxOutput, Unlock};
+use pms_testkit::sign_tx_inputs;
+use pms_types::{OutputId, Transaction, TxInput, TxOutput};
 use pms_wallet::{SignerBackend, Wallet};
 
 const NETWORK_ID: &str = "pms-testnet-v1";
@@ -33,22 +34,6 @@ fn out_id(txid: &str, index: u32) -> OutputId {
     }
 }
 
-/// Signe `tx` avec `wallet`, un unlock par input (appariement positionnel).
-fn sign_tx(wallet: &Wallet, tx: &Transaction, network_id: &str) -> Transaction {
-    let msg_hex = tx.signing_message(network_id).expect("signing_message");
-    let sig = wallet.sign(&msg_hex).expect("sign");
-    Transaction {
-        inputs: tx.inputs.clone(),
-        outputs: tx.outputs.clone(),
-        fee: tx.fee.clone(),
-        unlocks: tx
-            .inputs
-            .iter()
-            .map(|_| Unlock::new(wallet.public_key_hex.clone(), sig.clone()))
-            .collect(),
-    }
-}
-
 /// Construit une dépense complète (owner → dest, montant intégral) de
 /// l'UTXO `utxo_id`, signée par `owner`.
 fn spend_all(owner: &Wallet, utxo_id: &OutputId, dest: &str, amount: &str) -> Transaction {
@@ -60,7 +45,7 @@ fn spend_all(owner: &Wallet, utxo_id: &OutputId, dest: &str, amount: &str) -> Tr
         fee: "0".into(),
         unlocks: vec![],
     };
-    sign_tx(owner, &tx, NETWORK_ID)
+    sign_tx_inputs(owner, &tx, NETWORK_ID)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

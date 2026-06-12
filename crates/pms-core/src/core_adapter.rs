@@ -6,8 +6,7 @@ use crate::{DagRef, ValidatePolicy};
 use parking_lot::RwLock;
 use pms_config::{load_config, Settings};
 use pms_event::EventBus;
-use pms_storage::coordinator_key_store::{CoordinatorKeyStorage, KeyRotationRecord};
-use pms_storage::{ComplianceStorage, DagStorage, NftStorage};
+use pms_storage::coordinator_key_store::KeyRotationRecord;
 use pms_wire::WireMeta;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -146,7 +145,7 @@ mod key_rotation_state_tests {
 /// - `store` : persistance (RocksDB, …).
 /// - `server` : lien **faible** vers le serveur réseau pour éviter un cycle Arc.
 pub struct CoreAdapter<
-    S: DagStorage + NftStorage + ComplianceStorage + CoordinatorKeyStorage + pms_storage::TokenRegistryStorage + Send + Sync + 'static,
+    S: pms_storage::EngineStorage,
 > {
     /// DAG concurrent lock-free (IOTA-like architecture)
     pub dag: Arc<ConcurrentDag>,
@@ -173,7 +172,7 @@ pub struct CoreAdapter<
 }
 
 impl<
-    S: DagStorage + NftStorage + ComplianceStorage + CoordinatorKeyStorage + pms_storage::TokenRegistryStorage + Send + Sync + 'static,
+    S: pms_storage::EngineStorage,
 > CoreAdapter<S>
 {
     /// Étape 1/2 : construit l'adapter **sans** serveur attaché.

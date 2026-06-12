@@ -215,16 +215,10 @@ pub fn spawn_reserve_snapshot_task(state: AppState) {
                 continue;
             }
 
-            match crate::api_fn::reserves::perform_reserve_snapshot(&state_reserves).await {
-                Ok(snapshot) => {
-                    tracing::info!(
-                        "🏦 Reserve snapshot anchored: {}",
-                        snapshot.get("block_id").and_then(|v| v.as_str()).unwrap_or("?")
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("❌ Reserve snapshot failed: {}", e);
-                }
+            // perform_reserve_snapshot logge déjà l'ancrage (block, root, count)
+            if let Err(e) = crate::api_fn::reserves::perform_reserve_snapshot(&state_reserves).await
+            {
+                tracing::error!("❌ Reserve snapshot failed: {}", e);
             }
         }
     });

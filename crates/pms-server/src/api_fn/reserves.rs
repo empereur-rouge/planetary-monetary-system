@@ -79,6 +79,12 @@ pub async fn compute_reserves(
             hasher.update(b"#");
             hasher.update(idx.to_be_bytes());
             hasher.update(b"|");
+            // Ré-encode la valeur (au lieu de hasher les bytes bruts du CF) :
+            // CANONICALISE volontairement — un UTXO legacy (sans champs
+            // lkd/cond/cat) hashe identique à sa ré-écriture moderne. Coût :
+            // un decode+encode JSON par UTXO, périodique (interval_secs),
+            // sur le blocking pool. Changer pour les bytes bruts changerait
+            // la définition du state_root → interdit après le 1er ancrage.
             let val_json = serde_json::to_vec(&uv).map_err(|e| format!("serialize utxo: {e}"))?;
             hasher.update(&val_json);
             hasher.update(b";");

@@ -12,14 +12,11 @@ use tokio::sync::RwLock;
 /// Nombre de shards (256 = 1 octet du hash)
 const SHARD_COUNT: usize = 256;
 
-/// Horloge du protocole : timestamp UNIX courant en millisecondes.
-/// Source de temps unique pour les règles temporelles (time-lock 2.1,
-/// demurrage 2.5) — même pattern que `now_ms_for_signers` dans `persist.rs`.
+/// Horloge du protocole (re-export pratique de [`pms_utils::ts_ms`]) :
+/// timestamp UNIX courant en millisecondes, source unique des règles
+/// temporelles (time-lock 2.1, demurrage 2.5).
 pub fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    pms_utils::ts_ms()
 }
 
 /// Cache du supply par asset_id : (total, count).
@@ -37,6 +34,10 @@ pub type UtxoFetcher = Arc<dyn Fn(&str, u32) -> Option<TxOutput> + Send + Sync>;
 /// - `Arc<str>` pour l'adresse : interné, partagé entre tous les UTXOs d'une même adresse
 /// - `Decimal` (16 bytes stack) au lieu de `String` pour le montant
 /// - `Option<Arc<str>>` pour l'asset_id : interné, None = PMS natif (0 heap)
+///
+/// `Clone` dérivé : tous les champs sont O(1) à cloner (`Arc`/Copy) — le
+/// re-push LRU clone la struct entière, aucun champ ne peut être oublié.
+#[derive(Clone)]
 struct CompactOutput {
     address: Arc<str>,
     amount: Decimal,
@@ -421,17 +422,7 @@ impl ShardedUtxoSet {
                             true, // add
                         ));
                         self.supply_add_compact(compact);
-                        if let Some(evicted) = shard.push(
-                            id.clone(),
-                            CompactOutput {
-                                address: compact.address.clone(),
-                                amount: compact.amount,
-                                asset_id: compact.asset_id.clone(),
-                                locked_until: compact.locked_until,
-                                spend_condition: compact.spend_condition.clone(),
-                                created_at: compact.created_at,
-                            },
-                        ) {
+                        if let Some(evicted) = shard.push(id.clone(), compact.clone()) {
                             evicted_entries.push(evicted);
                         }
                     }

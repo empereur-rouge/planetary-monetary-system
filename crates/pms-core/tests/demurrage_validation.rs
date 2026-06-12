@@ -11,7 +11,8 @@ use pms_core::utxo::ShardedUtxoSet;
 use pms_core::validations::check::ValidatePolicy;
 use pms_core::validations::demurrage::{DAY_MS, effective_value};
 use pms_core::validations::transactions::validate_transaction_full;
-use pms_types::{OutputId, Transaction, TxInput, TxOutput, Unlock};
+use pms_testkit::sign_tx_inputs;
+use pms_types::{OutputId, Transaction, TxInput, TxOutput};
 use pms_wallet::{SignerBackend, Wallet};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -37,21 +38,6 @@ fn rates() -> HashMap<String, u32> {
     HashMap::from([(ASSET.to_string(), BPS_PER_DAY)])
 }
 
-fn sign_tx(wallet: &Wallet, tx: &Transaction) -> Transaction {
-    let msg = tx.signing_message(NETWORK_ID).expect("signing_message");
-    let sig = wallet.sign(&msg).expect("sign");
-    Transaction {
-        inputs: tx.inputs.clone(),
-        outputs: tx.outputs.clone(),
-        fee: tx.fee.clone(),
-        unlocks: tx
-            .inputs
-            .iter()
-            .map(|_| Unlock::new(wallet.public_key_hex.clone(), sig.clone()))
-            .collect(),
-    }
-}
-
 /// Sandbox : un UTXO de 1000 MELTING créé à t=created_at pour `owner`.
 async fn setup(owner: &Wallet, created_at: u64) -> ShardedUtxoSet {
     let utxos = ShardedUtxoSet::new(0, None);
@@ -70,7 +56,7 @@ fn spend(owner: &Wallet, dest: &str, amount: &str) -> Transaction {
         fee: "0".into(),
         unlocks: vec![],
     };
-    sign_tx(owner, &tx)
+    sign_tx_inputs(owner, &tx, NETWORK_ID)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

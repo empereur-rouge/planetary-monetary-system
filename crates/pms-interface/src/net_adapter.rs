@@ -65,11 +65,9 @@ pub trait NetDagAdapter: Send + Sync {
             .map(|inp| (inp.out.txid.clone(), inp.out.index))
             .collect();
         // Demurrage 2.5 : estampille `created_at` système, comme le pipeline
-        // plain de `persist_block` (anti-antidatage).
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        // plain de `persist_block` (anti-antidatage). Horloge partagée de
+        // pms-storage (pms-utils créerait un cycle via pms-network).
+        let now_ms = pms_storage::helpers::now_ms_i64().max(0) as u64;
         let create = outputs
             .iter()
             .enumerate()

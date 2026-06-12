@@ -24,23 +24,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pms_interface::NetDagAdapter;
 use pms_storage::store::PutResult;
-use pms_storage::coordinator_key_store::CoordinatorKeyStorage;
-use pms_storage::{ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage};
+
 use pms_wire::WireBlock;
 
 #[async_trait]
 impl<S> NetDagAdapter for CoreAdapter<S>
 where
-    S: DagStorage
-        + NftStorage
-        + ConfigStorage
-        + NodeRewardsStorage
-        + ComplianceStorage
-        + CoordinatorKeyStorage
-        + pms_storage::TokenRegistryStorage
-        + Send
-        + Sync
-        + 'static,
+    S: pms_storage::EngineStorage,
 {
     async fn have_block(&self, id: &str) -> bool {
         self.do_have_block(id).await

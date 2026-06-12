@@ -5,21 +5,11 @@
 //! can delegate to them.
 
 use crate::CoreAdapter;
-use pms_storage::coordinator_key_store::CoordinatorKeyStorage;
-use pms_storage::{ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage};
+
 
 impl<S> CoreAdapter<S>
 where
-    S: DagStorage
-        + NftStorage
-        + ConfigStorage
-        + NodeRewardsStorage
-        + ComplianceStorage
-        + CoordinatorKeyStorage
-        + pms_storage::TokenRegistryStorage
-        + Send
-        + Sync
-        + 'static,
+    S: pms_storage::EngineStorage,
 {
     /// Total circulating supply of the native PMS token.
     pub(super) async fn do_circulating_supply(&self) -> (rust_decimal::Decimal, u64) {

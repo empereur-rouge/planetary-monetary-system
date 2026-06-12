@@ -153,21 +153,13 @@ pub struct UtxoFlatItem {
     pub tx_id: String,
     #[serde(rename = "outIdx")]
     pub out_idx: u32,
-    pub amount: String,
-    pub address: String,
-    /// `null` for PMS native, `"edenite"` (etc.) for custom tokens.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub asset_id: Option<String>,
-    /// Time-lock (protocole 2.1) : timestamp UNIX ms avant lequel l'UTXO est
-    /// indépensable. Absent = dépensable immédiatement.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub locked_until: Option<u64>,
-    /// Condition de déverrouillage (protocole 2.2) — absent = PubKey simple.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spend_condition: Option<pms_types::SpendCondition>,
-    /// Timestamp de création système (protocole 2.5, base du demurrage).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<u64>,
+    /// L'output complet, aplati : `address`, `amount`, `asset_id` (null = PMS
+    /// natif) + champs protocole optionnels (`locked_until`, `spend_condition`,
+    /// `created_at`). `flatten` garantit que tout futur champ de `TxOutput`
+    /// est exposé automatiquement — les SDK voient toujours les contraintes
+    /// de dépense réelles.
+    #[serde(flatten)]
+    pub output: pms_types::TxOutput,
 }
 
 #[derive(serde::Serialize)]
@@ -187,12 +179,7 @@ pub async fn get_utxos_by_address(
         .map(|(output_id, tx_output)| UtxoFlatItem {
             tx_id: output_id.txid,
             out_idx: output_id.index,
-            amount: tx_output.amount,
-            address: tx_output.address,
-            asset_id: tx_output.asset_id,
-            locked_until: tx_output.locked_until,
-            spend_condition: tx_output.spend_condition,
-            created_at: tx_output.created_at,
+            output: tx_output,
         })
         .collect();
 
