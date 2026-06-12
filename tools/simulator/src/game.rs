@@ -1009,17 +1009,19 @@ mod tests {
             rarity: CubeRarity::Basic,
         };
         let reward = attrs.edenite_reward(DEFAULT_DIVISOR);
-        // Expected: (30 * 5.0 * 1.0) / 13_700 = 150 / 13_700
-        let expected = 150.0 / DEFAULT_DIVISOR;
+        // CRITICAL (v0.9.3): pin the calibration constant. Réutiliser
+        // `150.0 / DEFAULT_DIVISOR` des deux côtés était tautologique — un
+        // changement de divisor déplaçait les deux et n'était pas attrapé. Le
+        // divisor doit matcher le contrat testnet (cf. CLAUDE.md).
+        assert_eq!(DEFAULT_DIVISOR, 13_700.0, "game calibration divisor must stay 13700");
+        // Valeur ABSOLUE attendue, indépendante du divisor : 150 / 13700.
+        let golden = 0.010_948_905_109_489_05_f64;
         println!(
-            "Reward for w=30, s=5.0, d=1.0: {:.10} EDN (expected {:.10})",
-            reward, expected
+            "Reward for w=30, s=5.0, d=1.0: {reward:.12} EDN (golden {golden:.12})"
         );
         assert!(
-            (reward - expected).abs() < 1e-18,
-            "reward {} != expected {}",
-            reward,
-            expected
+            (reward - golden).abs() < 1e-9,
+            "reward {reward} != golden {golden} (divisor calibration drift?)"
         );
     }
 
@@ -1044,6 +1046,15 @@ mod tests {
         assert_eq!(h1.len(), 16, "obfuscated key must be 16 hex chars");
         assert_eq!(h_size.len(), 16);
         assert_eq!(h_density.len(), 16);
+
+        // CRITICAL (v0.9.3): pin the EXACT documented hex keys. Determinism +
+        // distinctness + length ne suffisaient pas — un changement de
+        // ATTR_OBFUSCATION_SALT casserait silencieusement le match contrat↔NFT
+        // sur testnet (reward = 0), tout en restant déterministe/16-chars.
+        // Cf. CLAUDE.md "Edenite Cube System".
+        assert_eq!(h1, "e6c84244b96fe92d", "weight obfuscated key drifted");
+        assert_eq!(h_size, "7f41d7f9c843a618", "size obfuscated key drifted");
+        assert_eq!(h_density, "c0d4a83995fb0edb", "density obfuscated key drifted");
     }
 
     #[test]
