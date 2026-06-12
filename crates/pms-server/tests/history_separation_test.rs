@@ -8,98 +8,20 @@
 //!    tester via un `FakeStore` + une copie locale `get_encrypted_history_core`.
 
 use axum::extract::{Query, State};
-use pms_config::{ServerConfig, load_config};
-use pms_core::{ConcurrentDag, CoreAdapter};
-use pms_interface::NetDagAdapter;
 use pms_server::api::AppState;
 use pms_server::api_fn::history::{PageQ, get_encrypted_history, get_plain_history};
-use pms_server::{Server, stats::Stats};
 use pms_storage::StoredBlock;
-use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
-use pms_types::{Block, TxOutput};
+use pms_storage::rocks_store::store::RocksStore;
+use pms_types::TxOutput;
 use pms_types_payload::{AAD, EncryptedPayload, PayloadEnvelope, PlainPayload};
-use pms_utils::compute_block_id;
-use pms_wallet::Wallet;
 use pms_wire::WireMeta;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 
-/// Construit un `AppState` complet adossé à un RocksStore éphémère, et renvoie
-/// aussi le store + la meta réseau pour insérer des blocs.
+/// `AppState` complet + store + meta, via le helper testkit partagé
+/// `make_test_state` (évite de ré-écrire le literal AppState à 30 champs — il
+/// vit désormais en un seul endroit dans `pms-testkit`).
 async fn build_test_state() -> anyhow::Result<(AppState, Arc<RocksStore>, WireMeta)> {
-    let dir = tempfile::tempdir()?;
-    let db_path = dir.path().join("rocks-history");
-    let store = Arc::new(
-        RocksStore::new(
-            db_path.to_string_lossy().as_ref(),
-            256,
-            "pms:test",
-            None,
-            &RocksMemoryConfig::default(),
-        )
-        .await?,
-    );
-    // Garde le tempdir vivant pour la durée du test (process court-vécu).
-    std::mem::forget(dir);
-
-    let settings = load_config()?;
-    let meta = WireMeta::from(&settings);
-    let cfg = Arc::new(ServerConfig {
-        bind_addr: "127.0.0.1:0".into(),
-        api_addr: "127.0.0.1:0".into(),
-        tls: None,
-        api_tls_enabled: false,
-        network: settings.network.clone(),
-        auth: settings.auth.clone(),
-    });
-
-    let genesis = Block::genesis(compute_block_id);
-    let dag = Arc::new(ConcurrentDag::new_with_genesis(genesis.clone()));
-    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store.clone(), 0, None);
-    let wallet = Arc::new(Wallet::generate());
-    let server = Server::new(
-        adapter.clone(),
-        "testnet",
-        1,
-        wallet.clone(),
-        &pms_config::P2pConfig::default(),
-        None,
-    );
-    let ready = Arc::new(AtomicBool::new(true));
-    let stats = Arc::new(Stats::new());
-
-    let state = AppState {
-        srv: server,
-        _cfg: cfg,
-        _ready: ready,
-        stats,
-        store: store.clone(),
-        admin_token: None,
-        node_wallet: wallet.clone(),
-        settings: Arc::new(settings.clone()),
-        allowed_networks: vec![], // Tests: allow all IPs
-        treasury_wallets: pms_config::TreasuryWallets::empty(),
-        node_registry: pms_server::node_registry::create_registry(),
-        fee_pool: pms_server::fee_pool::create_fee_pool(),
-        fee_pool_registry: std::sync::Arc::new(pms_server::fee_pool::FeePoolRegistry::new()),
-        api_key_store: pms_server::api_keys::create_api_key_store(None).unwrap(),
-        ledger_mgr: None,
-        ledger_id: "main".into(),
-        effective_fees: std::sync::Arc::new(
-            pms_server::api_fn::tx_helpers::resolve_effective_fees(&settings.fees, None),
-        ),
-        activity_cache: std::sync::Arc::new(pms_server::api_fn::activity::ActivityCache::new(
-            1_000, 30,
-        )),
-        tps_tracker: std::sync::Arc::new(pms_economics::dynamic_fee::TpsTracker::new(60)),
-        contract_event_bus: None,
-        contract_store: store.clone(),
-        compliance_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-        coord_shard_wallets: std::sync::Arc::new(Vec::new()),
-        coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
-        webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
-    };
-    Ok((state, store, meta))
+    pms_testkit::make_test_state().await
 }
 
 /// Insère un bloc Mint (plain) avec un id donné, parenté au genesis logique.
@@ -251,15 +173,20 @@ async fn plain_history_paginates_via_cursor() -> anyhow::Result<()> {
     }
 
     println!("paginated {pages} pages, seen={seen:?}");
-    // Toutes les pages réunies → exactement les 5 blocs, sans doublon.
+    // Aucun id (le genesis persisté par make_test_state inclus) ne doit
+    // apparaître sur deux pages.
     let mut unique: Vec<String> = seen.clone();
     unique.sort();
     unique.dedup();
     assert_eq!(seen.len(), unique.len(), "no id should appear on two pages");
+
+    // Les 5 blocs P0..P4 doivent TOUS être paginés exactement une fois (le store
+    // contient aussi le bloc genesis, hors de notre jeu — on filtre nos ids).
+    let p_seen: std::collections::HashSet<String> =
+        seen.into_iter().filter(|id| id.starts_with('P')).collect();
     let expected: std::collections::HashSet<String> =
         (0..5).map(|i| format!("P{i}")).collect();
-    let got: std::collections::HashSet<String> = seen.into_iter().collect();
-    assert_eq!(got, expected, "every inserted block must be paged exactly once");
-    assert!(pages >= 3, "5 items at 2/page require at least 3 pages, got {pages}");
+    assert_eq!(p_seen, expected, "every inserted P-block must be paged exactly once");
+    assert!(pages >= 3, "5+ items at 2/page require at least 3 pages, got {pages}");
     Ok(())
 }

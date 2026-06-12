@@ -48,14 +48,35 @@ pub async fn make_test_app_with_ip_allowlist(
     build_test_router(admin_token, nets).await
 }
 
-/// Cœur partagé : construit le `AppState` + router avec un token admin et une
-/// allowlist IP donnés. Toute la plomberie store/DAG/serveur vit ici pour ne pas
-/// être dupliquée entre les helpers publics.
+/// Construit le router complet à partir d'un `AppState` (token admin + allowlist).
 async fn build_test_router(
     admin_token: Option<String>,
     allowed_networks: Vec<ipnetwork::IpNetwork>,
 ) -> anyhow::Result<axum::Router> {
+    let (state, _store, _meta, settings) = build_app_state(admin_token, allowed_networks).await?;
+    Ok(build_api_router(state, &settings))
+}
+
+/// Expose un `AppState` complet (+ store + meta) pour tester des handlers
+/// DIRECTEMENT via `State(state)` sans passer par le router HTTP. Évite que
+/// chaque test de handler ré-écrive le literal `AppState` à 30 champs (cf.
+/// CLAUDE.md « AppState field additions — audit de tous les call sites »).
+pub async fn make_test_state()
+-> anyhow::Result<(AppState, Arc<RocksStore>, pms_wire::WireMeta)> {
+    let (state, store, meta, _settings) = build_app_state(None, vec![]).await?;
+    Ok((state, store, meta))
+}
+
+/// Cœur partagé : construit le `AppState` (store/DAG/serveur) avec un token admin
+/// et une allowlist IP donnés. Retourne aussi le store, la meta réseau et les
+/// settings pour les appelants qui en ont besoin. Toute la plomberie vit ici
+/// pour ne PAS être dupliquée entre les helpers publics.
+async fn build_app_state(
+    admin_token: Option<String>,
+    allowed_networks: Vec<ipnetwork::IpNetwork>,
+) -> anyhow::Result<(AppState, Arc<RocksStore>, pms_wire::WireMeta, pms_config::Settings)> {
     let settings = load_config()?;
+    let meta = pms_wire::WireMeta::from(&settings);
 
     // 1) RocksStore temporaire
     let tmp = tempfile::tempdir()?;
@@ -116,6 +137,8 @@ async fn build_test_router(
     let stats = Arc::new(Stats::new());
 
     // 8) Token admin + allowlist : fournis par l'appelant (cf. helpers publics).
+    //    On clone le store avant qu'il ne soit déplacé dans AppState (pour le retour).
+    let store_for_return = store.clone();
 
     // 9) AppState
     let state = AppState {
@@ -150,8 +173,7 @@ async fn build_test_router(
         webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
     };
 
-    // 10) Router axum
-    Ok(build_api_router(state, &settings))
+    Ok((state, store_for_return, meta, settings))
 }
 
 pub struct TestCtx {

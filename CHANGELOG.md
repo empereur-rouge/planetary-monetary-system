@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.3] - Unreleased — Test-suite audit : faux tests éliminés, gaps critiques comblés
+
+Audit complet de la suite de tests (793 fonctions) : détection des tests qui
+passent quoi qu'il arrive, qui testent une copie du code de prod, ou dont
+l'assertion est trop molle pour attraper une régression. Aucun changement de
+comportement de prod sauf l'ajout additif d'`Amount::checked_sub`.
+
+### Added
+- **test(api)**: `crates/pms-server/tests/version_endpoint.rs` — frappe le vrai
+  `GET /v1/version` via le router et assert `api_version=14`, semver
+  `software_version`, et les champs `dag_version`/`schema_version`/
+  `protocol_version` (l'unit test ne comparait que `API_VERSION` à elle-même).
+- **test(storage)**: test de préservation de données à travers les migrations
+  (`migration.rs`) — écrit des blocs à la version N, vide les CF d'index, rejoue
+  `ensure_schema`, et prouve que les blocs survivent + que `mig_2→3`/`mig_3→4`
+  reconstruisent `by_time`/`id2ts`/`addr_activity`.
+- **test(fees)**: no-loss-on-failure de `FeePool::merge_from` (swap atomique →
+  échec persist → restauration, incl. fenêtre concurrente 160+7=167) ; split
+  treasury 65/35 + fallback treasury-vide→coordinateur + skip dust via
+  `compute_fee_outputs`.
+- **test(consensus)**: signature présente-mais-invalide (bien formée mais sur un
+  autre message) et usurpation de pubkey rejetées par `verify_block_signature` ;
+  mint non-autorisé rejeté par le gate persist (`submit_block_auth.rs`).
+- **test(crypto)**: isolation X25519 — une clé étrangère ne déchiffre pas le bloc
+  d'un autre (`history_test.rs`), avec contrôle positif du destinataire prévu.
+- **test(wallet)**: pagination via le vrai handler `get_plain_history`
+  (`history_separation_test.rs`).
+- **token**: `Amount::checked_sub` — soustraction vérifiée renvoyant `None` si le
+  résultat serait négatif (l'opérateur `Sub` brut produit un solde négatif
+  silencieux). Tests d'edge-cases ajoutés : underflow, arrondi banker's,
+  div-par-zéro (panic), overflow mul (panic), round-trip parse/format.
+- **testkit**: `make_test_app_with_ip_allowlist(admin_token, cidrs)` pour piloter
+  le vrai middleware `require_local_or_admin`.
+
+### Changed
+- **test(security)**: `ip_allowlist.rs` réécrit pour tester le VRAI middleware
+  (avant : une COPIE locale `is_ip_allowed`/`test_admin_middleware`) — assert le
+  code d'erreur (1030 IP vs 1001 token), l'ordre IP-avant-token, et le bypass
+  loopback. `network_batching.rs` réécrit avec un peer inbound réel (duplex) qui
+  collecte les `Inv` (avant : 0 assertion, `last_inv_size` jamais lu).
+  `single_writer_enforcement.rs` : test de comparaison de clé tautologique (et
+  qui affirmait l'INVERSE de la prod, case-sensitive) remplacé par un appel réel
+  à `validate_payload_authority`.
+- **test**: assertions renforcées — `wallet_balance_fast` assert la valeur 25
+  (pas `json1==json2`, qui passerait avec deux "0") ; `fee_consistency` golden
+  `0.1500001`/`0.00106489` (pas `f(x)==f(x)`) ; simulator pin
+  `DEFAULT_DIVISOR==13700` + reward golden + clés obfusquées documentées ;
+  `node_rewards_test` recentré sur les primitives de stockage (ne ré-implémente
+  plus la formule de distribution).
+- **Workspace** `0.9.2` → `0.9.3`. API_VERSION inchangé (`14` — aucune route REST
+  modifiée).
+
+### Removed
+- **test**: `block_rewards_test.rs`, `fee_treasury_test.rs` (docker `#[ignore]`,
+  0 assertion, supersédés par les tests de fee distribution du `dag_sandbox`) ;
+  `history_core.rs` (testait un `FakeStore` + une copie locale du handler, pas le
+  code de prod — remplacé par un vrai test de pagination).
+
+### Fixed
+- **test**: 3 fichiers de tests ne compilaient plus (donc jamais exécutés en CI) —
+  `bridge_test.rs`, `bridge_e2e_test.rs`, `addr_activity_test.rs` : champs de
+  config manquants (`health`, `auto_reindex_activity_items`, `AAD.binding`,
+  `SecretSettings.*`) + `protocol_version` obsolète (1 vs config 2). Réparés,
+  compilent et passent.
+
+### Known issues (pré-existant, hors scope de cette passe)
+- Plusieurs tests HTTP admin-gated (`compliance_test.rs`,
+  `activity_e2e.rs::activity_seize_*`) échouent en `401` : ils font POST vers
+  `/admin/*` sans token et le harnais configure `admin_token=None`. Le helper
+  `post_json_admin` existe (v0.9.2) mais ces fichiers utilisent leur propre
+  `post_json` sans token. À migrer dans une passe dédiée.
+
+---
+
 ## [0.9.2] - Unreleased — H-5 : wallet restore endpoints admin-gated
 
 ### Changed
