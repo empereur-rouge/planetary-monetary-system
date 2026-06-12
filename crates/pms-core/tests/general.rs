@@ -14,13 +14,17 @@ fn gen_keypair_hex() -> (String, String) {
 
 #[test]
 fn test_export_dag_json() {
-    let mut dag = Dag::new_with_genesis(Block::genesis(compute_block_id));
+    let genesis = Block::genesis(compute_block_id);
+    let genesis_id = genesis.id.clone();
+    let mut dag = Dag::new_with_genesis(genesis);
 
-    // ajoute quelques blocks bidons
-    for i in 0..3 {
+    // 3 blocs Mint, chacun avec une adresse en CLAIR dans le payload, puis
+    // CHIFFRÉ. L'export ne doit jamais laisser fuiter ces adresses.
+    let secret_addrs: Vec<String> = (0..3).map(|i| format!("SECRET_addr_{i}")).collect();
+    for addr in &secret_addrs {
         let mint_block = PlainPayload::Mint {
             outputs: vec![TxOutput {
-                address: format!("addr{i}"),
+                address: addr.clone(),
                 amount: "10.0".into(),
                 asset_id: None,
             }],
@@ -39,8 +43,56 @@ fn test_export_dag_json() {
     }
 
     let j = dag.export_json();
-    println!(
-        "=== BACKUP ===\n{}",
-        serde_json::to_string_pretty(&j).unwrap()
+    let pretty = serde_json::to_string_pretty(&j).unwrap();
+    println!("=== BACKUP ===\n{pretty}");
+
+    // 1) Le dump contient exactement 4 blocs : genesis + 3 Mint chiffrés.
+    let blocks = j["blocks"].as_array().expect("export must have a blocks array");
+    println!("exported {} blocks", blocks.len());
+    assert_eq!(blocks.len(), 4, "genesis + 3 mints expected");
+
+    // 2) Le genesis est présent par son id réel.
+    assert!(
+        blocks.iter().any(|b| b["id"] == serde_json::json!(genesis_id)),
+        "genesis block id {genesis_id} must appear in the export"
+    );
+
+    // 3) Les 3 blocs chiffrés exposent un ciphertext non vide + des destinataires,
+    //    et JAMAIS le plaintext en clair.
+    let encrypted: Vec<&serde_json::Value> = blocks
+        .iter()
+        .filter(|b| b["payload"].get("ciphertext_b64").is_some())
+        .collect();
+    assert_eq!(encrypted.len(), 3, "the 3 mint blocks must be encrypted");
+    for b in &encrypted {
+        let ct = b["payload"]["ciphertext_b64"].as_str().unwrap_or("");
+        assert!(!ct.is_empty(), "ciphertext must not be empty");
+        assert!(
+            b["payload"]["recipients"]
+                .as_array()
+                .map(|r| !r.is_empty())
+                .unwrap_or(false),
+            "encrypted payload must list at least one recipient"
+        );
+        assert!(
+            b["payload"].get("scheme").is_some(),
+            "encrypted payload must carry its scheme"
+        );
+    }
+
+    // 4) ANTI-FUITE : aucune adresse en clair ne doit survivre dans le dump.
+    for addr in &secret_addrs {
+        assert!(
+            !pretty.contains(addr.as_str()),
+            "cleartext address {addr} leaked into the encrypted DAG export"
+        );
+    }
+
+    // 5) Round-trip : le JSON exporté se re-sérialise/désérialise sans perte de blocs.
+    let reparsed: serde_json::Value = serde_json::from_str(&pretty).unwrap();
+    assert_eq!(
+        reparsed["blocks"].as_array().unwrap().len(),
+        4,
+        "round-trip must preserve all 4 blocks"
     );
 }

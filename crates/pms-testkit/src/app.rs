@@ -13,7 +13,48 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 /// Helper : crée un Router complet mais utilisé en mémoire seulement.
+///
+/// Le token admin est dérivé de la config (env `PMS_ADMIN_TOKEN_DEV`) et la
+/// liste IP est vide (toutes IP autorisées).
 pub async fn make_test_app() -> anyhow::Result<axum::Router> {
+    let settings = load_config()?;
+    let admin_token = settings
+        .auth
+        .admin_api_token
+        .as_deref()
+        .and_then(resolve_admin_token);
+    build_test_router(admin_token, vec![]).await
+}
+
+/// Variante exposant l'**allowlist IP** ET le token admin de façon explicite,
+/// pour exercer la branche allowlist du middleware `require_local_or_admin`
+/// (cf. `crates/pms-server/tests/ip_allowlist.rs`).
+///
+/// - `admin_token` : `Some(t)` → le token attendu par le middleware ; `None` →
+///   aucun token configuré (toute requête tokenisée échoue).
+/// - `allowed_cidrs` : CIDR/IP autorisés (ex: `["10.0.0.0/8"]`). Vide = tout permis.
+///   Une entrée non parsable fait échouer la construction (fail-loud en test).
+pub async fn make_test_app_with_ip_allowlist(
+    admin_token: Option<String>,
+    allowed_cidrs: &[&str],
+) -> anyhow::Result<axum::Router> {
+    let mut nets = Vec::with_capacity(allowed_cidrs.len());
+    for c in allowed_cidrs {
+        nets.push(
+            c.parse::<ipnetwork::IpNetwork>()
+                .map_err(|e| anyhow::anyhow!("invalid CIDR {c:?}: {e}"))?,
+        );
+    }
+    build_test_router(admin_token, nets).await
+}
+
+/// Cœur partagé : construit le `AppState` + router avec un token admin et une
+/// allowlist IP donnés. Toute la plomberie store/DAG/serveur vit ici pour ne pas
+/// être dupliquée entre les helpers publics.
+async fn build_test_router(
+    admin_token: Option<String>,
+    allowed_networks: Vec<ipnetwork::IpNetwork>,
+) -> anyhow::Result<axum::Router> {
     let settings = load_config()?;
 
     // 1) RocksStore temporaire
@@ -74,12 +115,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
     let ready = Arc::new(AtomicBool::new(true));
     let stats = Arc::new(Stats::new());
 
-    // 8) Token admin
-    let admin_token = settings
-        .auth
-        .admin_api_token
-        .as_deref()
-        .and_then(resolve_admin_token);
+    // 8) Token admin + allowlist : fournis par l'appelant (cf. helpers publics).
 
     // 9) AppState
     let state = AppState {
@@ -95,7 +131,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         admin_token,
         node_wallet,
         settings: Arc::new(settings.clone()),
-        allowed_networks: vec![], // Tests: allow all IPs
+        allowed_networks,
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),

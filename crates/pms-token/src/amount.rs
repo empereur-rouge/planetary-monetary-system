@@ -104,6 +104,33 @@ impl Amount {
     pub fn inner(&self) -> Decimal {
         self.0
     }
+
+    /// Soustraction vérifiée : renvoie `None` si le résultat serait négatif.
+    ///
+    /// # Pourquoi
+    /// L'opérateur `Sub` brut produit un `Amount` négatif silencieusement
+    /// (ex: `Amount(1) - Amount(5) = Amount(-4)`). Dans un moteur bancaire, une
+    /// balance négative non détectée est une sous-couverture (double-spend
+    /// implicite). Tout chemin financier qui débite une balance ou paie une fee
+    /// DOIT utiliser `checked_sub` et rejeter proprement le cas `None` plutôt
+    /// que de laisser le solde passer sous zéro.
+    ///
+    /// # Exemple
+    /// ```
+    /// use pms_token::Amount;
+    /// let balance = Amount::parse_pms("3").unwrap();
+    /// let spend = Amount::parse_pms("5").unwrap();
+    /// assert_eq!(balance.checked_sub(spend), None); // solde insuffisant
+    /// ```
+    #[inline]
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        let r = self.0 - rhs.0;
+        if r.is_sign_negative() {
+            None
+        } else {
+            Some(Self::from_decimal(r))
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -221,7 +248,12 @@ mod tests {
     #[test]
     fn test_parse_pms_too_many_decimals() {
         let e = Amount::parse_pms("1.000000001").unwrap_err();
-        matches!(e, AmountError::TooManyDecimals(8));
+        // CRITICAL: `matches!(...)` seul (v0.9.2) jetait son bool — ne vérifiait
+        // que "une erreur a eu lieu". Encapsulé dans `assert!` pour pinner la variante.
+        assert!(
+            matches!(e, AmountError::TooManyDecimals(8)),
+            "expected TooManyDecimals(8), got {e:?}"
+        );
     }
 
     #[test]
@@ -273,5 +305,81 @@ mod tests {
         let z = Amount::zero();
         assert!(z.is_zero());
         assert_eq!(z.to_string(), "0");
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Edge cases arithmétiques (audit tests v0.9.3 — E5)
+    // Comportements MESURÉS de rust_decimal, pinnés pour attraper toute
+    // régression de sémantique monétaire.
+    // ───────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn raw_sub_below_zero_wraps_to_negative_silently() {
+        // CARACTÉRISATION (comportement potentiellement dangereux) : l'opérateur
+        // `Sub` ne clampe PAS à zéro — `1 - 5 = -4`. Les balances DOIVENT utiliser
+        // `checked_sub`. Ce test échouera si la sémantique de Sub change
+        // (saturation, panic), forçant une décision explicite.
+        let one = Amount::parse_pms("1").unwrap();
+        let five = Amount::parse_pms("5").unwrap();
+        let r = one - five;
+        println!("raw 1 - 5 = {r}");
+        assert!(r.0.is_sign_negative(), "raw Sub currently allows negative");
+        assert_eq!(r.to_string(), "-4");
+    }
+
+    #[test]
+    fn checked_sub_rejects_underflow_and_allows_valid() {
+        let five = Amount::parse_pms("5").unwrap();
+        let three = Amount::parse_pms("3").unwrap();
+        println!("5.checked_sub(3) = {:?}", five.checked_sub(three));
+        println!("3.checked_sub(5) = {:?}", three.checked_sub(five));
+        assert_eq!(five.checked_sub(three), Some(Amount::parse_pms("2").unwrap()));
+        assert_eq!(three.checked_sub(five), None, "5 > 3 → insufficient → None");
+        // Bord exact : balance == débit → Some(0), pas None.
+        assert_eq!(five.checked_sub(five), Some(Amount::zero()));
+    }
+
+    #[test]
+    fn division_uses_bankers_rounding_to_8dp() {
+        // round_dp par défaut = half-to-even (banker's). Le déterminisme des fees
+        // cross-node en dépend : 0.000000005 → 0 (pair), 0.000000015 → 0.00000002.
+        let h1 = Amount::from_decimal(Decimal::from_str_exact("0.000000005").unwrap());
+        let h2 = Amount::from_decimal(Decimal::from_str_exact("0.000000015").unwrap());
+        println!("round 0.000000005={h1} ; 0.000000015={h2}");
+        assert_eq!(h1.to_string(), "0");
+        assert_eq!(h2.to_string(), "0.00000002");
+        let one = Amount::parse_pms("1").unwrap();
+        let three = Amount::parse_pms("3").unwrap();
+        println!("1 / 3 = {}", one / three);
+        assert_eq!((one / three).to_string(), "0.33333333");
+    }
+
+    #[test]
+    #[should_panic]
+    fn division_by_zero_panics() {
+        // CARACTÉRISATION : div par Amount nul panique (rust_decimal). Les chemins
+        // financiers ne doivent jamais diviser par un Amount non validé non-nul.
+        let one = Amount::parse_pms("1").unwrap();
+        let _ = one / Amount::zero();
+    }
+
+    #[test]
+    #[should_panic]
+    fn multiplication_overflow_panics() {
+        // CARACTÉRISATION : un produit dépassant Decimal::MAX panique (pas de wrap
+        // silencieux). Préférable à un wrap, mais à connaître pour les gros montants.
+        let huge = Amount(Decimal::MAX);
+        let _ = huge * Amount::parse_pms("2").unwrap();
+    }
+
+    #[test]
+    fn parse_format_roundtrip_preserves_value_not_string() {
+        // Display normalise (strip des zéros trailing) : le round-trip conserve la
+        // VALEUR, pas la chaîne exacte. "10.50000000" → "10.5" → re-parse == valeur.
+        let a = Amount::parse_pms("10.50000000").unwrap();
+        println!("'10.50000000' displays as '{a}'");
+        assert_eq!(a.to_string(), "10.5");
+        let b = Amount::parse_pms(&a.to_string()).unwrap();
+        assert_eq!(a, b, "value round-trips through parse→Display→parse");
     }
 }

@@ -7,6 +7,8 @@
 //!
 //! Voir: The Rust Programming Language, Chapitre 11 - Writing Automated Tests
 
+use pms_core::validations::authority::validate_payload_authority;
+use pms_core::validations::check::ValidatePolicy;
 use pms_core::validations::parents::enforce_single_parent;
 use pms_errors::ValidationError;
 use pms_types::{Block, PayloadEnvelope, PlainPayload};
@@ -165,48 +167,69 @@ fn test_genesis_with_parents_rejected() {
 }
 
 // ============================================================================
-// TEST 6: Signature Coordinateur (vérification logique)
+// TEST 6: Autorité Coordinateur (vrai code de prod — validate_payload_authority)
 // ============================================================================
 
-/// Vérifie que la logique de comparaison de signature fonctionne.
-/// La comparaison doit être insensible aux espaces et à la casse.
+/// Construit une policy avec une clé coordinateur donnée.
+fn policy_with_coord(pk: &str) -> ValidatePolicy {
+    let mut p = ValidatePolicy::default();
+    p.coordinator_public_key = Some(pk.to_string());
+    p
+}
+
+/// Un payload réservé au Coordinateur (Freeze) pour exercer le gate d'autorité.
+fn coordinator_only_payload() -> PayloadEnvelope {
+    PayloadEnvelope::Plain(PlainPayload::Freeze {
+        address: "8e1victimaddr".to_string(),
+        reason: "compliance test".to_string(),
+    })
+}
+
+/// Vérifie le VRAI code d'autorité coordinateur (`validate_payload_authority`),
+/// pas une ré-implémentation. La comparaison de clé est **case-insensitive**
+/// (la prod utilise `eq_ignore_ascii_case`, cf. `validations/authority.rs:36`).
+///
+/// CRITICAL: l'ancienne version de ce test (v0.9.2) comparait deux littéraux de
+/// chaîne entre eux (tautologique, n'appelait aucun code de prod) ET affirmait à
+/// tort que la comparaison était case-SENSITIVE — l'inverse du comportement réel.
+/// Un faux test qui documentait le mauvais comportement.
 #[test]
-fn test_coordinator_signature_comparison_logic() {
-    // Clé coordinateur attendue (version canonique)
-    let expected_key = "036ed4d5ad1c927fe972ef9728ac1888d237af57a488b6cbe50228fac442b5ae6b";
+fn test_coordinator_authority_is_case_insensitive() {
+    let canonical = "036ed4d5ad1c927fe972ef9728ac1888d237af57a488b6cbe50228fac442b5ae6b";
+    let same_upper = "036ED4D5AD1C927FE972EF9728AC1888D237AF57A488B6CBE50228FAC442B5AE6B";
+    let attacker = "02abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab";
 
-    // Différentes formes de la même clé
-    let same_key_upper = "036ED4D5AD1C927FE972EF9728AC1888D237AF57A488B6CBE50228FAC442B5AE6B";
-    let same_key_with_spaces =
-        "  036ed4d5ad1c927fe972ef9728ac1888d237af57a488b6cbe50228fac442b5ae6b  ";
-    let different_key = "02abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab";
+    let policy = policy_with_coord(canonical);
+    let payload = coordinator_only_payload();
 
-    // La logique de comparaison dans net_adapter.rs fait:
-    // signer_pk.trim() != expected_pk.trim()
-    //
-    // Testons cette logique ici
+    // 1. Signataire = clé canonique exacte → accepté.
+    let exact = validate_payload_authority(Some(canonical), Some(&payload), &policy);
+    println!("exact-key Freeze        → {exact:?}");
+    assert!(exact.is_ok(), "exact coordinator key must be accepted");
 
-    // Même clé (après trim) = accepté
-    assert_eq!(
-        expected_key.trim(),
-        same_key_with_spaces.trim(),
-        "Comparaison après trim doit matcher"
+    // 2. Même clé en MAJUSCULES → accepté (case-insensitive — comportement réel).
+    let upper = validate_payload_authority(Some(same_upper), Some(&payload), &policy);
+    println!("uppercase-key Freeze    → {upper:?}");
+    assert!(
+        upper.is_ok(),
+        "uppercase coordinator key MUST be accepted (prod uses eq_ignore_ascii_case)"
     );
 
-    // Clé différente = rejeté
-    assert_ne!(
-        expected_key.trim(),
-        different_key.trim(),
-        "Clés différentes ne doivent pas matcher"
+    // 3. Clé d'attaquant → rejeté avec InvalidSignature.
+    let foreign = validate_payload_authority(Some(attacker), Some(&payload), &policy);
+    println!("attacker-key Freeze     → {foreign:?}");
+    let err = format!("{:?}", foreign.expect_err("attacker key must be rejected"));
+    assert!(
+        err.contains("InvalidSignature"),
+        "attacker rejection must be InvalidSignature, got: {err}"
     );
 
-    // Note: la comparaison dans le code actuel est CASE-SENSITIVE.
-    // Si on veut la rendre case-insensitive, il faudrait modifier le code.
-    // Pour l'instant, testons le comportement actuel:
-    assert_ne!(
-        expected_key.trim(),
-        same_key_upper.trim(),
-        "Comparaison actuelle est case-sensitive (majuscules != minuscules)"
+    // 4. Bloc non signé (signer_pk = None) sur un payload coordinator-only → rejeté.
+    let unsigned = validate_payload_authority(None, Some(&payload), &policy);
+    println!("unsigned Freeze         → {unsigned:?}");
+    assert!(
+        unsigned.is_err(),
+        "coordinator-only payload without a signer must be rejected"
     );
 }
 

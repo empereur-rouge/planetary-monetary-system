@@ -124,17 +124,23 @@ async fn test_reset_pool_and_counts() -> Result<()> {
     Ok(())
 }
 
-/// Test: Calcul de distribution proportionnelle
+/// Test: les PRIMITIVES de stockage qui alimentent la distribution proportionnelle.
+///
+/// NB (v0.9.3) : l'ancienne version recalculait `pool * count / total` DANS le test
+/// puis assertait `node_a_share == 6000` — soit `f(x) == f(x)`, une tautologie qui
+/// ne testait pas le code de prod (la vraie distribution vit dans
+/// `pms-server/src/fee_distribution/{compute,distribute}.rs` et est testée par
+/// `pms-server/src/fee_distribution/tests.rs`). Ici on vérifie uniquement ce que
+/// CETTE couche fournit : l'accumulation du pool, les compteurs par nœud, et leur
+/// somme — les entrées exactes que le distributeur consomme.
 #[tokio::test]
-async fn test_distribution_calculation() -> Result<()> {
+async fn test_fee_pool_and_miner_counts_feed_distribution() -> Result<()> {
     let tr = test_rocks_store("node_rewards_dist").await?;
     let store = tr.store.clone();
 
-    // Setup:
-    // - Pool: 10000 sats
-    // - Node A: 6 blocs (60%)
-    // - Node B: 4 blocs (40%)
-    store.add_to_fee_pool(10000)?;
+    // Pool: 10000 sats ; Node A: 6 blocs ; Node B: 4 blocs.
+    store.add_to_fee_pool(4000)?;
+    store.add_to_fee_pool(6000)?; // accumulation incrémentale → doit sommer à 10000
     for _ in 0..6 {
         store.increment_node_block_count("node_a")?;
     }
@@ -145,31 +151,15 @@ async fn test_distribution_calculation() -> Result<()> {
     let pool = store.get_fee_pool()?;
     let miners = store.get_all_miners()?;
     let total_blocks: u64 = miners.iter().map(|(_, c)| *c).sum();
+    println!("pool={pool} miners={miners:?} total_blocks={total_blocks}");
 
-    assert_eq!(pool, 10000);
-    assert_eq!(total_blocks, 10);
-
-    // Calculer les parts
-    let mut distributions = Vec::new();
-    for (pk, count) in &miners {
-        let share = pool * count / total_blocks;
-        distributions.push((pk.clone(), share));
-    }
-
-    // Vérifier les parts
-    let node_a_share = distributions
-        .iter()
-        .find(|(pk, _)| pk == "node_a")
-        .unwrap()
-        .1;
-    let node_b_share = distributions
-        .iter()
-        .find(|(pk, _)| pk == "node_b")
-        .unwrap()
-        .1;
-
-    assert_eq!(node_a_share, 6000); // 60% de 10000
-    assert_eq!(node_b_share, 4000); // 40% de 10000
+    // Le pool accumule correctement (4000 + 6000).
+    assert_eq!(pool, 10000, "fee pool must accumulate added amounts");
+    // Les compteurs par nœud sont exacts et persistés.
+    assert_eq!(store.get_node_block_count("node_a")?, 6);
+    assert_eq!(store.get_node_block_count("node_b")?, 4);
+    assert_eq!(total_blocks, 10, "sum of miner counts");
+    assert_eq!(miners.len(), 2, "exactly two distinct miners tracked");
 
     Ok(())
 }

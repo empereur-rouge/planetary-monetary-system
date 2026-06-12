@@ -23,6 +23,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
             max_open_files: 512,
+            auto_reindex_activity_items: false,
         },
         network: pms_config::Network {
             mode: pms_config::NetworkMode::Dev,
@@ -53,6 +54,8 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
         secrets: pms_config::SecretSettings {
             node_identity_key_path: ".".into(),
             admin_wallet_file: None,
+            node_identity_key_encrypted_path: None,
+            strict_key_permissions: false,
         },
         validation: pms_config::ValidationSettings {
             min_pow_leading_zero_bits: 0,
@@ -124,6 +127,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             max_parent_deps: 5_000,
             max_peer_retries: 20,
         },
+        health: pms_config::HealthSettings::default(),
         ledgers: vec![
             LedgerDef {
                 id: "main".into(),

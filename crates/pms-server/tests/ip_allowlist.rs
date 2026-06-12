@@ -1,386 +1,164 @@
-// crates/pms-server/tests/ip_allowlist.rs
-//
-// Tests pour le middleware IP allowlist
-// Ces tests vérifient que:
-// 1. Localhost est toujours autorisé
-// 2. Si allowed_ips est vide, toute IP avec token valide passe
-// 3. Si allowed_ips est configuré, seules les IPs dans la liste passent
+//! Tests de l'ALLOWLIST IP du middleware admin RÉEL (`require_local_or_admin`
+//! dans `api/middleware.rs`), pilotée via le router complet de `pms_testkit`.
+//!
+//! NB (v0.9.3) : l'ancienne version de ce fichier définissait sa PROPRE fonction
+//! `is_ip_allowed` + un `test_admin_middleware` qui « mimic » le vrai middleware,
+//! et n'exerçait jamais `require_local_or_admin`. Une régression d'ordre (token
+//! vérifié avant l'IP) ou un changement de code d'erreur passait inaperçu. On
+//! teste désormais le middleware de prod via `tower::oneshot` + un `ConnectInfo`
+//! injecté, et on assert le **code d'erreur** (donc *pourquoi* la requête est
+//! rejetée, pas seulement le statut).
+//!
+//! Branches couvertes de `require_local_or_admin` :
+//! 1. loopback → bypass total (IP + token) ;
+//! 2. allowlist non vide + IP hors plage → 403 `IpNotAllowed` (code 1030), AVANT le token ;
+//! 3. IP dans la plage + pas de token → 401 `MissingAuth` (code 1001) ;
+//! 4. IP dans la plage + bon token → 200 (handler atteint).
 
-use ipnetwork::IpNetwork;
-use std::net::IpAddr;
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{Request, StatusCode};
+use std::net::SocketAddr;
+use tower::ServiceExt; // for `oneshot`
 
-/// Helper: vérifie si une IP est autorisée selon la logique du middleware
-fn is_ip_allowed(client_ip: IpAddr, allowed_networks: &[IpNetwork]) -> bool {
-    // 1. Localhost toujours autorisé
-    if client_ip.is_loopback() {
-        return true;
+const ADMIN_TOKEN: &str = "test-admin-token-ip-allowlist";
+const ALLOWED: &[&str] = &["10.0.0.0/8"];
+
+/// Construit une requête GET /admin/ping avec une IP source et un token optionnels.
+fn admin_ping_req(ip: &str, token: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder().method("GET").uri("/admin/ping");
+    if let Some(t) = token {
+        builder = builder.header("Authorization", format!("Bearer {t}"));
     }
-
-    // 2. Si allowed_networks est vide, on laisse passer (le token sera vérifié après)
-    if allowed_networks.is_empty() {
-        return true;
-    }
-
-    // 3. Sinon, vérifier si l'IP est dans la whitelist
-    allowed_networks.iter().any(|net| net.contains(client_ip))
+    let mut req = builder.body(Body::empty()).unwrap();
+    let addr: SocketAddr = format!("{ip}:9999").parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+    req
 }
 
-#[test]
-fn test_localhost_always_allowed() {
-    // Localhost IPv4
-    let localhost_v4: IpAddr = "127.0.0.1".parse().unwrap();
-    // Localhost IPv6
-    let localhost_v6: IpAddr = "::1".parse().unwrap();
-
-    // Même avec une liste restrictive, localhost passe
-    let restrictive: Vec<IpNetwork> = vec!["10.0.0.0/8".parse().unwrap()];
-
-    assert!(
-        is_ip_allowed(localhost_v4, &restrictive),
-        "localhost IPv4 should be allowed"
-    );
-    assert!(
-        is_ip_allowed(localhost_v6, &restrictive),
-        "localhost IPv6 should be allowed"
-    );
+/// Extrait le code d'erreur numérique stable du corps `{"code":NNNN,...}`.
+async fn error_code(resp: axum::response::Response) -> Option<i64> {
+    let bytes = axum::body::to_bytes(resp.into_body(), 8192).await.ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v.get("code").and_then(|c| c.as_i64())
 }
 
-#[test]
-fn test_empty_allowlist_permits_all() {
-    // Quand la liste est vide, toute IP non-localhost passe (le token sera vérifié)
-    let empty: Vec<IpNetwork> = vec![];
-
-    let random_ip: IpAddr = "203.0.113.42".parse().unwrap();
-    let private_ip: IpAddr = "192.168.1.100".parse().unwrap();
-
-    assert!(
-        is_ip_allowed(random_ip, &empty),
-        "any IP should be allowed with empty list"
-    );
-    assert!(
-        is_ip_allowed(private_ip, &empty),
-        "private IP should be allowed with empty list"
-    );
+async fn app() -> axum::Router {
+    pms_testkit::make_test_app_with_ip_allowlist(Some(ADMIN_TOKEN.to_string()), ALLOWED)
+        .await
+        .expect("test app builds")
 }
 
-#[test]
-fn test_cidr_matching() {
-    // Test avec différents CIDR
-    let allowed: Vec<IpNetwork> = vec![
-        "10.0.0.0/8".parse().unwrap(),      // Tout le réseau 10.x.x.x
-        "192.168.1.0/24".parse().unwrap(),  // 192.168.1.x
-        "203.0.113.50/32".parse().unwrap(), // Une seule IP
-    ];
-
-    // IPs dans la whitelist
-    assert!(
-        is_ip_allowed("10.0.0.1".parse().unwrap(), &allowed),
-        "10.0.0.1 in 10.0.0.0/8"
-    );
-    assert!(
-        is_ip_allowed("10.255.255.255".parse().unwrap(), &allowed),
-        "10.255.255.255 in 10.0.0.0/8"
-    );
-    assert!(
-        is_ip_allowed("192.168.1.1".parse().unwrap(), &allowed),
-        "192.168.1.1 in 192.168.1.0/24"
-    );
-    assert!(
-        is_ip_allowed("192.168.1.254".parse().unwrap(), &allowed),
-        "192.168.1.254 in 192.168.1.0/24"
-    );
-    assert!(
-        is_ip_allowed("203.0.113.50".parse().unwrap(), &allowed),
-        "exact IP match"
-    );
-
-    // IPs hors de la whitelist
-    assert!(
-        !is_ip_allowed("11.0.0.1".parse().unwrap(), &allowed),
-        "11.0.0.1 not in 10.0.0.0/8"
-    );
-    assert!(
-        !is_ip_allowed("192.168.2.1".parse().unwrap(), &allowed),
-        "192.168.2.1 not in 192.168.1.0/24"
-    );
-    assert!(
-        !is_ip_allowed("203.0.113.51".parse().unwrap(), &allowed),
-        "wrong exact IP"
-    );
-    assert!(
-        !is_ip_allowed("8.8.8.8".parse().unwrap(), &allowed),
-        "public IP not in list"
-    );
+#[tokio::test]
+async fn out_of_allowlist_ip_rejected_403_code_1030() {
+    let resp = app()
+        .await
+        .oneshot(admin_ping_req("8.8.8.8", None))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let code = error_code(resp).await;
+    println!("8.8.8.8 (out of 10/8), no token → {status} code={code:?}");
+    assert_eq!(status, StatusCode::FORBIDDEN, "out-of-allowlist IP must be 403");
+    assert_eq!(code, Some(1030), "must be IpNotAllowed (1030), not a token error");
 }
 
-#[test]
-fn test_single_ip_with_32_mask() {
-    // /32 = une seule IP exacte
-    let allowed: Vec<IpNetwork> = vec!["1.2.3.4/32".parse().unwrap()];
+#[tokio::test]
+async fn out_of_allowlist_ip_rejected_even_with_valid_token() {
+    // Ordre de vérification CRITIQUE : l'IP est filtrée AVANT le token. Une clé
+    // volée depuis une IP non autorisée doit échouer en 403, pas passer.
+    let resp = app()
+        .await
+        .oneshot(admin_ping_req("8.8.8.8", Some(ADMIN_TOKEN)))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let code = error_code(resp).await;
+    println!("8.8.8.8 + VALID token → {status} code={code:?}");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "valid token from a disallowed IP must STILL be rejected (IP checked first)"
+    );
+    assert_eq!(code, Some(1030), "rejection reason must be IP, not token");
+}
 
-    assert!(
-        is_ip_allowed("1.2.3.4".parse().unwrap(), &allowed),
-        "exact match should work"
+#[tokio::test]
+async fn in_allowlist_ip_without_token_rejected_401() {
+    let resp = app()
+        .await
+        .oneshot(admin_ping_req("10.0.0.5", None))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let code = error_code(resp).await;
+    println!("10.0.0.5 (in 10/8), no token → {status} code={code:?}");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "in-allowlist IP passes the IP gate, then fails the token gate → 401"
     );
-    assert!(
-        !is_ip_allowed("1.2.3.5".parse().unwrap(), &allowed),
-        "adjacent IP should be blocked"
-    );
-    assert!(
-        !is_ip_allowed("1.2.3.3".parse().unwrap(), &allowed),
-        "adjacent IP should be blocked"
+    assert_eq!(code, Some(1001), "must be MissingAuth (1001) — IP gate passed");
+}
+
+#[tokio::test]
+async fn in_allowlist_ip_with_valid_token_reaches_handler() {
+    let resp = app()
+        .await
+        .oneshot(admin_ping_req("10.0.0.5", Some(ADMIN_TOKEN)))
+        .await
+        .unwrap();
+    let status = resp.status();
+    println!("10.0.0.5 + valid token → {status}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "in-allowlist IP + valid token must reach the handler"
     );
 }
 
-#[test]
-fn test_ipv6_support() {
-    // Support IPv6
-    let allowed: Vec<IpNetwork> = vec![
-        "2001:db8::/32".parse().unwrap(),
-        "fe80::1/128".parse().unwrap(), // Link-local exact
-    ];
-
-    assert!(
-        is_ip_allowed("2001:db8::1".parse().unwrap(), &allowed),
-        "IPv6 in range"
-    );
-    assert!(
-        is_ip_allowed("2001:db8:abcd::1234".parse().unwrap(), &allowed),
-        "IPv6 in range"
-    );
-    assert!(
-        is_ip_allowed("fe80::1".parse().unwrap(), &allowed),
-        "exact IPv6 match"
-    );
-
-    assert!(
-        !is_ip_allowed("2001:db9::1".parse().unwrap(), &allowed),
-        "different IPv6 prefix"
-    );
-    assert!(
-        !is_ip_allowed("fe80::2".parse().unwrap(), &allowed),
-        "different link-local"
+#[tokio::test]
+async fn loopback_bypasses_allowlist_with_valid_token() {
+    // 127.0.0.1 n'est PAS dans 10.0.0.0/8 : si le bypass loopback n'existait pas,
+    // ce serait un 403. Un 200 prouve que le loopback court-circuite l'allowlist.
+    let resp = app()
+        .await
+        .oneshot(admin_ping_req("127.0.0.1", Some(ADMIN_TOKEN)))
+        .await
+        .unwrap();
+    let status = resp.status();
+    println!("127.0.0.1 (loopback, not in 10/8) + token → {status}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "loopback must bypass the IP allowlist entirely"
     );
 }
 
-#[test]
-fn test_parse_config_values() {
-    // Test que les valeurs typiques de config se parsent correctement
-    let config_values = vec![
-        "192.168.1.0/24",
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "1.2.3.4/32",
-        "203.0.113.0/24",
-        "2001:db8::/32",
-    ];
+#[tokio::test]
+async fn cidr_boundary_matching_through_real_middleware() {
+    let app = app().await;
 
-    for val in config_values {
-        let parsed: Result<IpNetwork, _> = val.parse();
-        assert!(parsed.is_ok(), "Failed to parse: {}", val);
-    }
-}
+    // Dernière IP de 10.0.0.0/8 → DANS la plage → passe l'IP gate (401 token).
+    let in_edge = app
+        .clone()
+        .oneshot(admin_ping_req("10.255.255.255", None))
+        .await
+        .unwrap();
+    let in_status = in_edge.status();
+    let in_code = error_code(in_edge).await;
+    println!("10.255.255.255 (edge in 10/8) → {in_status} code={in_code:?}");
+    assert_eq!(in_status, StatusCode::UNAUTHORIZED, "10.255.255.255 is inside 10/8");
+    assert_eq!(in_code, Some(1001));
 
-#[test]
-fn test_invalid_config_values() {
-    // Ces valeurs ne doivent pas se parser (et seront ignorées avec un warning)
-    let invalid_values = vec![
-        "not-an-ip",
-        "256.1.1.1/24",   // Invalid octet
-        "192.168.1.1/33", // Invalid mask
-        "",
-    ];
-
-    for val in invalid_values {
-        let parsed: Result<IpNetwork, _> = val.parse();
-        assert!(parsed.is_err(), "Should fail to parse: '{}'", val);
-    }
-}
-
-// ============================================================================
-// INTEGRATION TESTS - Test actual middleware behavior
-// ============================================================================
-
-#[cfg(test)]
-mod integration {
-    use super::*;
-    use axum::{
-        Router,
-        body::Body,
-        extract::{ConnectInfo, State},
-        http::{Request, StatusCode},
-        middleware,
-        response::IntoResponse,
-        routing::get,
-    };
-    use std::net::SocketAddr;
-    use tower::ServiceExt;
-
-    /// Simplified AppState for testing
-    #[derive(Clone)]
-    struct TestAppState {
-        admin_token: Option<String>,
-        allowed_networks: Vec<IpNetwork>,
-    }
-
-    /// Middleware that mimics require_local_or_admin behavior
-    async fn test_admin_middleware(
-        State(state): State<TestAppState>,
-        ConnectInfo(addr): ConnectInfo<SocketAddr>,
-        headers: axum::http::HeaderMap,
-        request: Request<Body>,
-        next: axum::middleware::Next,
-    ) -> impl IntoResponse {
-        let client_ip = addr.ip();
-
-        // 1. Always allow localhost
-        if client_ip.is_loopback() {
-            return next.run(request).await;
-        }
-
-        // 2. Check IP allowlist (if configured)
-        if !state.allowed_networks.is_empty() {
-            let ip_allowed = state
-                .allowed_networks
-                .iter()
-                .any(|net| net.contains(client_ip));
-            if !ip_allowed {
-                return (StatusCode::FORBIDDEN, "IP not allowed").into_response();
-            }
-        }
-
-        // 3. Require valid Admin Token
-        if let Some(token) = &state.admin_token {
-            if let Some(auth_header) = headers.get("Authorization") {
-                if let Ok(auth_str) = auth_header.to_str() {
-                    if auth_str == format!("Bearer {}", token) {
-                        return next.run(request).await;
-                    }
-                }
-            }
-        }
-
-        (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
-    }
-
-    /// Create test router with middleware
-    fn create_test_router(state: TestAppState) -> Router {
-        let protected = Router::new()
-            .route("/metrics", get(|| async { "metrics data" }))
-            .route("/admin/ping", get(|| async { "pong" }))
-            .route_layer(middleware::from_fn_with_state(
-                state.clone(),
-                test_admin_middleware,
-            ));
-
-        let public = Router::new().route("/livez", get(|| async { "ok" }));
-
-        Router::new()
-            .merge(protected)
-            .merge(public)
-            .with_state(state)
-    }
-
-    #[tokio::test]
-    async fn test_public_endpoints_always_accessible() {
-        // Public endpoints like /livez should always work regardless of IP restrictions
-        let state = TestAppState {
-            admin_token: Some("token".to_string()),
-            allowed_networks: vec!["10.0.0.0/8".parse().unwrap()], // Very restrictive
-        };
-
-        let app = create_test_router(state);
-
-        // /livez is public - no middleware protection
-        let req = Request::builder()
-            .uri("/livez")
-            .body(Body::empty())
-            .unwrap();
-
-        let response = app.oneshot(req).await.unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "/livez should be accessible"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_blocked_ip_simulation() {
-        // Test que la logique de blocage fonctionne correctement
-        // Cette simulation vérifie le comportement sans le routeur complet
-
-        let allowed_networks: Vec<IpNetwork> = vec![
-            "10.0.0.0/8".parse().unwrap(),
-            "192.168.1.0/24".parse().unwrap(),
-        ];
-
-        // IP autorisée
-        let allowed_ip: IpAddr = "10.50.100.200".parse().unwrap();
-        assert!(
-            is_ip_allowed(allowed_ip, &allowed_networks),
-            "10.50.100.200 should be allowed (in 10.0.0.0/8)"
-        );
-
-        // IP bloquée (pas dans la whitelist)
-        let blocked_ip: IpAddr = "203.0.113.50".parse().unwrap();
-        assert!(
-            !is_ip_allowed(blocked_ip, &allowed_networks),
-            "203.0.113.50 should be BLOCKED (not in whitelist)"
-        );
-
-        // Autre IP bloquée
-        let another_blocked: IpAddr = "8.8.8.8".parse().unwrap();
-        assert!(
-            !is_ip_allowed(another_blocked, &allowed_networks),
-            "8.8.8.8 should be BLOCKED (Google DNS not in whitelist)"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_attacker_ip_blocked_from_admin() {
-        // Scénario: Un attaquant depuis 45.33.32.1 (IP publique) essaie d'accéder à /admin
-        // Résultat attendu: 403 Forbidden
-
-        let allowed_networks: Vec<IpNetwork> = vec![
-            "192.168.0.0/16".parse().unwrap(), // Réseau privé uniquement
-        ];
-
-        let attacker_ip: IpAddr = "45.33.32.1".parse().unwrap();
-
-        // L'attaquant n'est PAS dans la whitelist
-        assert!(
-            !is_ip_allowed(attacker_ip, &allowed_networks),
-            "Attacker IP 45.33.32.1 should be BLOCKED from admin routes"
-        );
-
-        // Même avec un token valide (volé?), l'IP doit bloquer
-        // La logique du middleware vérifie l'IP AVANT le token
-        assert!(!attacker_ip.is_loopback(), "Attacker is not localhost");
-        assert!(
-            !allowed_networks.iter().any(|net| net.contains(attacker_ip)),
-            "Attacker IP not in any allowed network"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_admin_from_vpn_allowed() {
-        // Scénario: Admin légitime depuis VPN (10.8.0.100) accède à /metrics
-        // Résultat attendu: 200 OK (après vérification du token)
-
-        let allowed_networks: Vec<IpNetwork> = vec![
-            "10.8.0.0/24".parse().unwrap(),    // VPN subnet
-            "192.168.1.0/24".parse().unwrap(), // Office LAN
-        ];
-
-        let admin_vpn_ip: IpAddr = "10.8.0.100".parse().unwrap();
-
-        // L'admin depuis le VPN EST dans la whitelist
-        assert!(
-            is_ip_allowed(admin_vpn_ip, &allowed_networks),
-            "Admin from VPN (10.8.0.100) should be ALLOWED"
-        );
-
-        // Après cette vérification, le token sera vérifié par le middleware
-    }
+    // Première IP hors 10.0.0.0/8 → HORS plage → 403 IpNotAllowed.
+    let out_edge = app
+        .oneshot(admin_ping_req("11.0.0.0", None))
+        .await
+        .unwrap();
+    let out_status = out_edge.status();
+    let out_code = error_code(out_edge).await;
+    println!("11.0.0.0 (just outside 10/8) → {out_status} code={out_code:?}");
+    assert_eq!(out_status, StatusCode::FORBIDDEN, "11.0.0.0 is outside 10/8");
+    assert_eq!(out_code, Some(1030));
 }

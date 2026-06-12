@@ -600,7 +600,10 @@ async fn reindex_skips_encrypted_payloads() -> Result<()> {
     let enc_payload = pms_types_payload::EncryptedPayload {
         scheme: "x25519+aes256gcm".into(),
         key_version: 1,
-        aad: pms_types_payload::AAD { len_hint: 0 },
+        aad: pms_types_payload::AAD {
+            len_hint: 0,
+            binding: None,
+        },
         commitment: "0000".into(),
         ciphertext_b64: "AAAA".into(),
         recipients: vec![],
