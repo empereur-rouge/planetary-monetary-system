@@ -239,6 +239,14 @@ where
                 return Ok(PutResult::Rejected(format!("mint policy violated: {e}")));
             }
 
+            // Verification 1.b: Spend conditions (protocole 2.2) — un Mint
+            // peut créer des outputs time-lockés / multisig / hashlock, mais
+            // leurs conditions doivent être bien formées (adresse multisig
+            // canonique, hash SHA-256 valide, M ≤ N, etc.).
+            if let Err(e) = crate::validations::conditions::validate_output_conditions(outputs) {
+                return Ok(PutResult::Rejected(format!("mint output condition: {e}")));
+            }
+
             // Verification 2: SECURITE COORDINATEUR
             // Seul le Coordinateur peut minter (Mainnet/Testnet).
             //

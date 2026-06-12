@@ -105,6 +105,17 @@ pub enum ValidationError {
         now: u64,
     },
 
+    // Spend conditions (protocole 2.2).
+    // Côté CRÉATION d'output : condition mal formée — message spécifique OK
+    // (validation de requête, pas de fuite d'état).
+    #[error("invalid spend condition: {reason}")]
+    InvalidSpendCondition { reason: String },
+    // Côté DÉPENSE : la condition de l'UTXO n'est pas satisfaite. Message
+    // volontairement vague (anti-enumeration) : ni le type de condition ni la
+    // raison précise ne sont exposés — détails loggés via tracing.
+    #[error("unlock {input_index} does not satisfy the output spend condition")]
+    SpendConditionNotMet { input_index: usize },
+
     // Compliance
     #[error("address is frozen: {0}")]
     AddressFrozen(String),

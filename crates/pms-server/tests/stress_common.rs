@@ -253,10 +253,7 @@ pub async fn send_tx_with_split_fee(
     // Sign
     let msg = tx.signing_message(NETWORK_ID).unwrap();
     let sig = sender.sign(&msg).unwrap();
-    tx.unlocks.push(Unlock {
-        pubkey_hex: sender.encoded_public_key(),
-        signature_b64: sig,
-    });
+    tx.unlocks.push(Unlock::new(sender.encoded_public_key(), sig));
 
     // 3. Build Block
     let payload = PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx));
@@ -337,10 +334,7 @@ pub async fn send_tx(
     // Sign
     let msg = tx.signing_message(NETWORK_ID).unwrap();
     let sig = sender.sign(&msg).unwrap();
-    tx.unlocks.push(Unlock {
-        pubkey_hex: sender.encoded_public_key(),
-        signature_b64: sig,
-    });
+    tx.unlocks.push(Unlock::new(sender.encoded_public_key(), sig));
 
     // Build Block
     let payload = PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx));

@@ -83,12 +83,7 @@ async fn history_pagination_by_time_and_id_rocks() -> Result<()> {
     for i in 1..=5u64 {
         // mint ciblé
         let plain = PlainPayload::Mint {
-            outputs: vec![TxOutput {
-                address: my_addr.clone(),
-                amount: format!("{}", 100 + i),
-                asset_id: None,
-                locked_until: None,
-            }],
+            outputs: vec![TxOutput::new(my_addr.clone(), format!("{}", 100 + i), None)],
         };
         let enc = EncryptedPayload::encrypt_for_plain(&plain, &[my_xpk.clone()])
             .map_err(|e| anyhow::anyhow!("{}", e))?;

@@ -778,10 +778,7 @@ async fn send_tx(
 
     let msg = tx.signing_message(network_id).unwrap();
     let sig_b64 = sender.sign(&msg).unwrap();
-    tx.unlocks = vec![Unlock {
-        pubkey_hex: sender.encoded_public_key(),
-        signature_b64: sig_b64,
-    }];
+    tx.unlocks = vec![Unlock::new(sender.encoded_public_key(), sig_b64)];
 
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx)));
     let mut block = Block::new(parents, payload, 0, None, compute_block_id).unwrap();
@@ -865,10 +862,7 @@ async fn send_tx_fast(
 
     let msg = tx.signing_message(network_id).unwrap();
     let sig_b64 = sender.sign(&msg).unwrap();
-    tx.unlocks = vec![Unlock {
-        pubkey_hex: sender.encoded_public_key(),
-        signature_b64: sig_b64,
-    }];
+    tx.unlocks = vec![Unlock::new(sender.encoded_public_key(), sig_b64)];
 
     // Extract X25519 public keys for payload encryption
     let mut recipients_xpk = vec![];

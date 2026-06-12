@@ -33,6 +33,33 @@ pub struct TxOutput {
     /// le `signing_message` des transactions existantes est inchangé.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locked_until: Option<u64>,
+    /// Condition de déverrouillage (protocole 2.2), portée par l'output
+    /// (pattern Bitcoin scriptPubKey). `None` = [`SpendCondition::PubKey`]
+    /// (binding C-1 classique : 1 signature du propriétaire de l'adresse).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_condition: Option<SpendCondition>,
+}
+
+/// Condition de déverrouillage d'un output (protocole 2.2).
+///
+/// La condition est figée À LA CRÉATION de l'output et vit on-DAG : au moment
+/// de la dépense, le validateur lit la condition depuis l'UTXO STOCKÉ (jamais
+/// depuis les données fournies par le dépensier).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SpendCondition {
+    /// Défaut historique : une signature dont la pubkey dérive l'adresse de
+    /// l'output (audit C-1). Équivalent à `spend_condition: None`.
+    PubKey,
+    /// M-sur-N : au moins `m` signatures valides parmi `pubkeys` (secp256k1
+    /// hex). L'adresse de l'output DOIT être l'adresse multisig canonique
+    /// dérivée de la policy (voir `multisig_address` dans pms-core) — le set
+    /// de clés est donc engagé par l'adresse elle-même.
+    MultiSig { m: u8, pubkeys: Vec<String> },
+    /// Hash-lock : la dépense doit révéler `preimage` tel que
+    /// `SHA256(preimage) == hash_hex` (64 hex chars). La signature de la tx
+    /// reste obligatoire (intégrité), mais N'IMPORTE quelle clé peut signer —
+    /// le secret EST l'autorisation.
+    HashLock { hash_hex: String },
 }
 
 impl TxOutput {
@@ -51,6 +78,7 @@ impl TxOutput {
             amount: amount.into(),
             asset_id,
             locked_until: None,
+            spend_condition: None,
         }
     }
 
@@ -78,6 +106,41 @@ pub struct OutputId {
 pub struct Unlock {
     pub pubkey_hex: String,
     pub signature_b64: String,
+    /// Signatures additionnelles pour un input sous condition
+    /// [`SpendCondition::MultiSig`] : la paire principale
+    /// (`pubkey_hex`/`signature_b64`) compte comme première signature, les
+    /// cosignataires complètent jusqu'à M. Chaque cosignature porte sur le
+    /// MÊME message canonique `{network_id, inputs, outputs, fee}`.
+    ///
+    /// `Unlock` n'entre pas dans `signing_message` → ajouter des cosignatures
+    /// ne change pas le message signé (pas de cycle signature↔contenu).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cosigners: Vec<Cosigner>,
+    /// Préimage hex pour un input sous condition [`SpendCondition::HashLock`] :
+    /// `SHA256(hex::decode(preimage_hex)) == hash_hex` de la condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preimage_hex: Option<String>,
+}
+
+/// Signature additionnelle d'un cosignataire MultiSig (voir [`Unlock::cosigners`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Cosigner {
+    pub pubkey_hex: String,
+    pub signature_b64: String,
+}
+
+impl Unlock {
+    /// Constructeur canonique d'un unlock « simple » (1 signature, pas de
+    /// condition spéciale). Les champs optionnels (cosigners, preimage)
+    /// futurs/présents sont initialisés vides.
+    pub fn new(pubkey_hex: impl Into<String>, signature_b64: impl Into<String>) -> Self {
+        Self {
+            pubkey_hex: pubkey_hex.into(),
+            signature_b64: signature_b64.into(),
+            cosigners: Vec::new(),
+            preimage_hex: None,
+        }
+    }
 }
 
 impl Transaction {

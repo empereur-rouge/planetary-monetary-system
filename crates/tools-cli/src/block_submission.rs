@@ -307,10 +307,7 @@ pub async fn action_send_tokens(
         let sig_b64 = w
             .sign(&msg)
             .map_err(|_| anyhow::anyhow!("Failed to sign transaction"))?;
-        tx.unlocks = vec![Unlock {
-            pubkey_hex: w.public_key_hex.clone(),
-            signature_b64: sig_b64,
-        }];
+        tx.unlocks = vec![Unlock::new(w.public_key_hex.clone(), sig_b64)];
     }
 
     // 8) Chiffrement du payload (destinataires = nous + destinataire)
@@ -406,10 +403,7 @@ pub async fn action_send_tokens_headless(
         let sig_b64 = w
             .sign(&msg)
             .map_err(|_| anyhow::anyhow!("Failed to sign"))?;
-        tx.unlocks = vec![Unlock {
-            pubkey_hex: w.public_key_hex.clone(),
-            signature_b64: sig_b64,
-        }];
+        tx.unlocks = vec![Unlock::new(w.public_key_hex.clone(), sig_b64)];
     }
 
     // 6) Encrypt Payload

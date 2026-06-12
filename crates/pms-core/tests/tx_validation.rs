@@ -44,10 +44,7 @@ fn sign_transaction_for(wallet: &Wallet, tx: &Transaction, network_id: &str) -> 
         inputs: tx.inputs.clone(),
         outputs: tx.outputs.clone(),
         fee: tx.fee.clone(),
-        unlocks: vec![Unlock {
-            pubkey_hex: wallet.encoded_public_key(),
-            signature_b64: sig,
-        }],
+        unlocks: vec![Unlock::new(wallet.encoded_public_key(), sig)],
     }
 }
 

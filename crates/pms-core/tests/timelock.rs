@@ -44,10 +44,7 @@ fn sign_tx(wallet: &Wallet, tx: &Transaction, network_id: &str) -> Transaction {
         unlocks: tx
             .inputs
             .iter()
-            .map(|_| Unlock {
-                pubkey_hex: wallet.public_key_hex.clone(),
-                signature_b64: sig.clone(),
-            })
+            .map(|_| Unlock::new(wallet.public_key_hex.clone(), sig.clone()))
             .collect(),
     }
 }

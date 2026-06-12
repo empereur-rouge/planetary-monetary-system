@@ -2,6 +2,7 @@ pub mod amount;
 pub mod apply;
 pub mod authority; // Autorité coordinator-only par type de payload (audit C-2 extension)
 pub mod check;
+pub mod conditions; // Spend conditions des outputs : MultiSig / HashLock (protocole 2.2)
 pub mod fees;
 mod impls;
 pub mod mint; // Validation de sécurité du Minting (Coordinateur Only)

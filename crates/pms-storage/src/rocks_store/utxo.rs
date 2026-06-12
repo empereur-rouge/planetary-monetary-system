@@ -40,6 +40,9 @@ pub struct UtxoValue {
     /// désérialisent en `None` sans migration.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "lkd")]
     pub locked_until: Option<u64>,
+    /// Condition de déverrouillage (protocole 2.2) — voir `TxOutput::spend_condition`.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "cond")]
+    pub spend_condition: Option<pms_types::SpendCondition>,
 }
 
 impl UtxoValue {
@@ -50,6 +53,7 @@ impl UtxoValue {
             amount: self.amount,
             asset_id: self.asset_id,
             locked_until: self.locked_until,
+            spend_condition: self.spend_condition,
         }
     }
 
@@ -68,12 +72,15 @@ impl UtxoValue {
             ast: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             lkd: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            cond: Option<&'a pms_types::SpendCondition>,
         }
         Ok(serde_json::to_vec(&OutValRef {
             addr: &out.address,
             amt: &out.amount,
             ast: out.asset_id.as_deref(),
             lkd: out.locked_until,
+            cond: out.spend_condition.as_ref(),
         })?)
     }
 }

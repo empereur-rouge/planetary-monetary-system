@@ -111,10 +111,7 @@ async fn history_e2e_scan_decrypt_filter_by_address_rocks() -> Result<()> {
         }],
         outputs: vec![TxOutput::new(other_addr, "13", None)],
         fee: "0".into(),
-        unlocks: vec![Unlock {
-            pubkey_hex: "00".into(),
-            signature_b64: "AA==".into(),
-        }],
+        unlocks: vec![Unlock::new("00", "AA==")],
     });
     let enc_tx = EncryptedPayload::encrypt_for_plain(&tx_plain, &[my_xpk.clone()])
         .map_err(anyhow::Error::msg)?;

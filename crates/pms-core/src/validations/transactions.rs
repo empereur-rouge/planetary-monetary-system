@@ -1,7 +1,7 @@
 use crate::Dag;
 use crate::validations::amount::{amount_parse_non_neg_dec, amount_parse_pos_dec};
 use crate::validations::check::ValidatePolicy;
-use crate::validations::ownership::unlock_matches_address;
+use crate::validations::conditions::{check_spend_authorization, validate_output_conditions};
 use crate::validations::signature::verify_tx_signatures;
 use pms_errors::ValidationError;
 use pms_types::{PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput};
@@ -58,6 +58,12 @@ pub fn utxo_sufficient_funds(dag: &Dag, tx: &Transaction) -> Result<(), Validati
                     now: now_ms,
                 });
             }
+        }
+        // Spend conditions 2.2 (chemin legacy) — même règle que le hot path.
+        // `verify_tx_signatures` (appelé en amont par validate_block) garantit
+        // déjà l'appariement inputs/unlocks et la validité crypto.
+        if let Some(unlock) = tx.unlocks.get(i) {
+            crate::validations::conditions::check_input_spend_condition(i, prev_out, unlock)?;
         }
         in_sum += amount_parse_pos_dec(&prev_out.amount)?;
     }
@@ -224,13 +230,16 @@ pub async fn validate_transaction_async(
 /// 3. **Signatures (C-2)** : chaque unlock porte une signature ECDSA valide
 ///    du message canonique `{network_id, inputs, outputs, fee}` (anti-replay
 ///    cross-chain inclus).
-/// 4. **Ownership (C-1)** : pour chaque input, la pubkey de l'unlock apparié
-///    dérive bien l'adresse propriétaire de l'UTXO dépensé
-///    ([`unlock_matches_address`]). Sans ce binding, n'importe quelle
-///    signature valide permettrait de dépenser les fonds d'autrui.
-/// 5. **Time-lock (protocole 2.1)** : aucun input `locked_until` dans le
+/// 4. **Spend conditions des outputs créés (protocole 2.2)** : structure des
+///    conditions (`MultiSig` bien formée + adresse canonique, `HashLock`
+///    SHA-256) via [`validate_output_conditions`].
+/// 5. **Autorisation de dépense (C-1 généralisé)** : pour chaque input, la
+///    condition de l'UTXO STOCKÉ est satisfaite par l'unlock apparié —
+///    binding pubkey↔adresse (`PubKey`/None), quorum M-of-N (`MultiSig`),
+///    préimage (`HashLock`) — via [`check_spend_authorization`].
+/// 6. **Time-lock (protocole 2.1)** : aucun input `locked_until` dans le
 ///    futur ([`check_input_time_locks`], horloge = `now_ms`).
-/// 6. **Existence + double-spend + conservation par asset** (règle canonique).
+/// 7. **Existence + double-spend + conservation par asset** (règle canonique).
 ///
 /// `now_ms` = horloge du validateur (timestamp UNIX ms) — paramètre explicite
 /// pour la testabilité ; en production, le hot path passe le `now_ms` du
@@ -262,23 +271,17 @@ pub async fn validate_transaction_full(
         });
     }
 
-    // 3. Signatures de transaction (C-2)
+    // 3. Signatures de transaction (C-2) — principale + cosignatures MultiSig
     verify_tx_signatures(tx, &policy.network_id)?;
 
-    // 4+5. Existence des inputs, puis binding ownership et conservation
+    // 4. Structure des conditions portées par les NOUVEAUX outputs (2.2)
+    validate_output_conditions(&tx.outputs)?;
+
+    // 5+6+7. Existence des inputs, puis autorisation (C-1 généralisé :
+    // PubKey/MultiSig/HashLock), time-lock et conservation.
     let input_outputs = fetch_input_outputs(utxos, tx).await?;
 
-    for (i, out) in input_outputs.iter().enumerate() {
-        if !unlock_matches_address(&tx.unlocks[i].pubkey_hex, &out.address) {
-            tracing::warn!(
-                "🚫 Ownership mismatch: input {} (utxo {}:{}) is not owned by unlock pubkey",
-                i,
-                tx.inputs[i].out.txid,
-                tx.inputs[i].out.index
-            );
-            return Err(ValidationError::OwnershipMismatch { input_index: i });
-        }
-    }
+    check_spend_authorization(&tx.unlocks, &input_outputs)?;
 
     check_input_time_locks(&input_outputs, now_ms)?;
 

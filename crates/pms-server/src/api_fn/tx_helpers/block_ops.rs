@@ -17,10 +17,7 @@ use std::sync::Arc;
 /// les inputs appartiennent au même signataire (send-simple, consolidation).
 pub fn replicate_unlocks(pubkey_hex: &str, signature_b64: &str, input_count: usize) -> Vec<Unlock> {
     (0..input_count)
-        .map(|_| Unlock {
-            pubkey_hex: pubkey_hex.to_string(),
-            signature_b64: signature_b64.to_string(),
-        })
+        .map(|_| Unlock::new(pubkey_hex.to_string(), signature_b64.to_string()))
         .collect()
 }
 

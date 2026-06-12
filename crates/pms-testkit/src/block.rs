@@ -20,10 +20,7 @@ pub fn sign_tx_inputs(wallet: &Wallet, tx: &Transaction, network_id: &str) -> Tr
     signed.unlocks = tx
         .inputs
         .iter()
-        .map(|_| Unlock {
-            pubkey_hex: wallet.public_key_hex.clone(),
-            signature_b64: sig.clone(),
-        })
+        .map(|_| Unlock::new(wallet.public_key_hex.clone(), sig.clone()))
         .collect();
     signed
 }

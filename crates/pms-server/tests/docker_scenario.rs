@@ -393,10 +393,7 @@ async fn e2e_scenario_2_transaction_fees() -> Result<()> {
 
         let msg_hex = tx.signing_message("pms-test")?;
         let sig_b64 = sender.sign(&msg_hex)?;
-        tx.unlocks.push(Unlock {
-            pubkey_hex: sender.encoded_public_key(),
-            signature_b64: sig_b64,
-        });
+        tx.unlocks.push(Unlock::new(sender.encoded_public_key(), sig_b64));
 
         println!("DEBUG send_tx: msg_hex={}", &msg_hex[..20]);
         println!(
@@ -765,10 +762,7 @@ async fn e2e_scenario_3_history() -> Result<()> {
         let msg = tx.signing_message("pms-test").unwrap();
         // let msg_bytes = hex::decode(&msg).expect("Invalid signing message hex");
         let sig_b64 = sender.sign(&msg).unwrap(); // Use sign() interface directly
-        tx.unlocks = vec![Unlock {
-            pubkey_hex: sender.encoded_public_key(),
-            signature_b64: sig_b64,
-        }];
+        tx.unlocks = vec![Unlock::new(sender.encoded_public_key(), sig_b64)];
 
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx)));
         let mut block = Block::new(parents, payload, 0, None, compute_block_id).unwrap();
@@ -984,10 +978,7 @@ async fn e2e_scenario_4_double_spend() -> Result<()> {
         let sig_b64 = sender.sign(&msg).unwrap();
 
         let mut signed_tx = tx;
-        signed_tx.unlocks = vec![Unlock {
-            pubkey_hex: sender.encoded_public_key(),
-            signature_b64: sig_b64,
-        }];
+        signed_tx.unlocks = vec![Unlock::new(sender.encoded_public_key(), sig_b64)];
 
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(signed_tx)));
         let mut block = Block::new(parents, payload, 0, None, compute_block_id).unwrap();

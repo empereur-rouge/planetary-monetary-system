@@ -45,6 +45,10 @@ struct CompactOutput {
     /// un lock perdu ici devient invisible au validateur (piège check-list
     /// « Cache UTXO RAM »).
     locked_until: Option<u64>,
+    /// Condition de déverrouillage (protocole 2.2). Boxée + partagée en Arc :
+    /// rare en pratique (None = 8 bytes), et le clone lors de l'éviction LRU /
+    /// re-push reste O(1).
+    spend_condition: Option<Arc<pms_types::SpendCondition>>,
 }
 
 impl CompactOutput {
@@ -54,6 +58,7 @@ impl CompactOutput {
             amount: self.amount.to_string(),
             asset_id: self.asset_id.as_ref().map(|a| a.to_string()),
             locked_until: self.locked_until,
+            spend_condition: self.spend_condition.as_deref().cloned(),
         }
     }
 }
@@ -165,6 +170,7 @@ impl ShardedUtxoSet {
             amount,
             asset_id: output.asset_id.as_deref().map(|a| self.interner.intern(a)),
             locked_until: output.locked_until,
+            spend_condition: output.spend_condition.clone().map(Arc::new),
         }
     }
 
@@ -418,6 +424,7 @@ impl ShardedUtxoSet {
                                 amount: compact.amount,
                                 asset_id: compact.asset_id.clone(),
                                 locked_until: compact.locked_until,
+                                spend_condition: compact.spend_condition.clone(),
                             },
                         ) {
                             evicted_entries.push(evicted);
