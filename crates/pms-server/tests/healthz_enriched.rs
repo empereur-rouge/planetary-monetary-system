@@ -69,17 +69,20 @@ async fn healthz_returns_structured_json_with_four_checks() {
         .as_array()
         .expect("checks must be an array");
 
-    // Exactly the four checks the operator alerts on.
+    // Exactly the five checks the operator alerts on. `read_only_mode` a été
+    // ajouté avec la safety-valve read-only (v0.7.23) — le test suivait encore
+    // les 4 d'origine et était silencieusement rouge.
     let names: Vec<&str> = checks
         .iter()
         .map(|c| c["name"].as_str().unwrap_or(""))
         .collect();
     println!("check names: {names:?}");
-    assert_eq!(names.len(), 4);
+    assert_eq!(names.len(), 5, "got {names:?}");
     assert!(names.contains(&"rocksdb_writable"));
     assert!(names.contains(&"persist_queue_depth"));
     assert!(names.contains(&"last_block_age"));
     assert!(names.contains(&"disk_free_percent"));
+    assert!(names.contains(&"read_only_mode"));
 
     // Every check carries an explicit ok flag.
     for c in checks {

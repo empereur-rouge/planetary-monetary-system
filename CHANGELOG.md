@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.8] - Unreleased — `encrypted_utxo_delta_test` réhabilité (trouvé par le runner) + `sign_tx_inputs` promu au testkit
+
+Le runner v0.9.7 (`scripts/run-tests.sh`) a immédiatement fait son travail : il a
+trouvé des tests rouges manqués (même classe de rot tx v0.9.0 que les transferts
+activity).
+
+### Fixed
+- **test(server)**: `encrypted_utxo_delta_test.rs` (2) et `wallet_send_fees.rs` (3 :
+  `wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo`,
+  `wallet_send_tx_fee_is_materialized_and_zeroed_and_visible_to_admin`,
+  `wallet_send_tx_does_not_duplicate_fee_output_if_already_present`) postaient des
+  tx via `/wallet/tx/send` avec `"unlocks": []` → rejetées par la validation
+  canonique v0.9.0 ("transaction authorization invalid"). Tx désormais signées
+  (par le wallet propriétaire de l'UTXO ; dans la chaîne encrypted, TX2 signée par
+  Bob, propriétaire de l'output de TX1 dépensé).
+- **test(server)**: `healthz_enriched::healthz_returns_structured_json_with_four_checks`
+  attendait 4 checks `/healthz` alors que `read_only_mode` (safety-valve v0.7.23) en
+  a ajouté un 5e — assertion stale, silencieusement rouge. Mis à jour à 5 checks +
+  assert de `read_only_mode`.
+
+### Changed
+- **testkit**: `sign_tx_inputs(wallet, tx, network_id)` promu de helper local
+  (activity_e2e) à helper PARTAGÉ `pms_testkit::sign_tx_inputs` (dans `block.rs`).
+  `activity_e2e` l'importe désormais au lieu de le dupliquer. Tout test forgeant
+  une `TxUtxo` doit l'utiliser (cf. CLAUDE.md § Anti-faux-tests).
+- **Workspace** `0.9.7` → `0.9.8`. API_VERSION inchangé (`14`).
+
+---
+
 ## [0.9.7] - Unreleased — Garde-fous anti-régression (règles tests + runner)
 
 Pour empêcher la ré-apparition des problèmes corrigés en v0.9.3→v0.9.6 (faux

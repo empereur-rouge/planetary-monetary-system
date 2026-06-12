@@ -15,7 +15,8 @@
 //! ============================================================
 
 use pms_storage::ConfigStorage;
-use pms_testkit::{make_test_ctx_with_admin, mint_to_wallet_and_get_inputs, post_json};
+use pms_testkit::{make_test_ctx_with_admin, mint_to_wallet_and_get_inputs, post_json, sign_tx_inputs};
+use pms_types::{OutputId, Transaction, TxInput, TxOutput};
 use pms_wallet::{SignerBackend, Wallet};
 use rust_decimal::Decimal;
 use serde_json::json;
@@ -147,17 +148,25 @@ async fn encrypted_tx_updates_utxo_cache_correctly() -> anyhow::Result<()> {
     );
     eprintln!("[TEST] Fee: {}, Change: {}", fee, change);
 
+    // tx signée par Alice (propriétaire de l'UTXO) — v0.9.0 exige des unlocks valides.
+    let tx = Transaction {
+        inputs: vec![TxInput {
+            out: OutputId {
+                txid: u.id.txid.clone(),
+                index: u.id.index,
+            },
+        }],
+        outputs: vec![
+            TxOutput { address: bob_addr.clone(), amount: send_amount.to_string(), asset_id: None },
+            TxOutput { address: admin_addr.clone(), amount: fee.clone(), asset_id: None },
+            TxOutput { address: alice_addr.clone(), amount: change.clone(), asset_id: None },
+        ],
+        fee: fee.clone(),
+        unlocks: vec![],
+    };
+    let signed = sign_tx_inputs(&alice, &tx, &ctx.settings.network.network_id);
     let body = json!({
-        "tx": {
-            "inputs": [{ "out": { "txid": u.id.txid, "index": u.id.index } }],
-            "outputs": [
-                { "address": bob_addr, "amount": send_amount },
-                { "address": admin_addr, "amount": &fee },
-                { "address": alice_addr, "amount": &change }  // Change retourne vers Alice
-            ],
-            "fee": fee,
-            "unlocks": []
-        },
+        "tx": serde_json::to_value(&signed).unwrap(),
         // Encrypted: X25519 keys pour tous les participants
         "recipients_xpk": [
             alice.x25519_pub_hex.clone(),
@@ -307,17 +316,25 @@ async fn encrypted_tx_chain_works_correctly() -> anyhow::Result<()> {
     let fee1_dec = Decimal::from_str_exact(&fee1)?;
     let change1 = (input_amt - send1_dec - fee1_dec).to_string();
 
+    // TX1 signée par Alice (propriétaire de l'UTXO minté).
+    let tx1 = Transaction {
+        inputs: vec![TxInput {
+            out: OutputId {
+                txid: u.id.txid.clone(),
+                index: u.id.index,
+            },
+        }],
+        outputs: vec![
+            TxOutput { address: bob_addr.clone(), amount: send1.to_string(), asset_id: None },
+            TxOutput { address: admin_addr.clone(), amount: fee1.clone(), asset_id: None },
+            TxOutput { address: alice_addr.clone(), amount: change1.clone(), asset_id: None },
+        ],
+        fee: fee1.clone(),
+        unlocks: vec![],
+    };
+    let signed1 = sign_tx_inputs(&alice, &tx1, &ctx.settings.network.network_id);
     let body1 = json!({
-        "tx": {
-            "inputs": [{ "out": { "txid": u.id.txid, "index": u.id.index } }],
-            "outputs": [
-                { "address": bob_addr, "amount": send1 },
-                { "address": admin_addr, "amount": &fee1 },
-                { "address": alice_addr, "amount": &change1 }
-            ],
-            "fee": fee1,
-            "unlocks": []
-        },
+        "tx": serde_json::to_value(&signed1).unwrap(),
         "recipients_xpk": [
             alice.x25519_pub_hex.clone(),
             bob.x25519_pub_hex.clone()
@@ -348,18 +365,27 @@ async fn encrypted_tx_chain_works_correctly() -> anyhow::Result<()> {
     let fee2_dec = Decimal::from_str_exact(&fee2)?;
     let change2 = (bob_input_amt - send2_dec - fee2_dec).to_string();
 
+    // TX2 signée par BOB : l'input est l'output 0 de TX1 (adressé à bob_addr),
+    // donc l'unlock doit autoriser bob.
+    let tx2 = Transaction {
+        // Input: l'output index 0 de TX1 (celui vers Bob)
+        inputs: vec![TxInput {
+            out: OutputId {
+                txid: tx1_id.clone(),
+                index: 0,
+            },
+        }],
+        outputs: vec![
+            TxOutput { address: charlie_addr.clone(), amount: send2.to_string(), asset_id: None },
+            TxOutput { address: admin_addr.clone(), amount: fee2.clone(), asset_id: None },
+            TxOutput { address: bob_addr.clone(), amount: change2.clone(), asset_id: None },
+        ],
+        fee: fee2.clone(),
+        unlocks: vec![],
+    };
+    let signed2 = sign_tx_inputs(&bob, &tx2, &ctx.settings.network.network_id);
     let body2 = json!({
-        "tx": {
-            // Input: l'output index 0 de TX1 (celui vers Bob)
-            "inputs": [{ "out": { "txid": tx1_id, "index": 0 } }],
-            "outputs": [
-                { "address": charlie_addr, "amount": send2 },
-                { "address": admin_addr, "amount": &fee2 },
-                { "address": bob_addr, "amount": &change2 }
-            ],
-            "fee": fee2,
-            "unlocks": []
-        },
+        "tx": serde_json::to_value(&signed2).unwrap(),
         "recipients_xpk": [
             bob.x25519_pub_hex.clone(),
             charlie.x25519_pub_hex.clone()

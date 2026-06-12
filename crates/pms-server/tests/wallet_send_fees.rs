@@ -1,7 +1,8 @@
 use pms_storage::DagStorage;
 use pms_storage::rocks_store::store::RocksStore;
-use pms_testkit::{make_test_ctx_with_admin, mint_to_wallet_and_get_inputs, post_json};
+use pms_testkit::{make_test_ctx_with_admin, mint_to_wallet_and_get_inputs, post_json, sign_tx_inputs};
 use pms_token::fee::FeePolicy;
+use pms_types::{OutputId, Transaction, TxInput, TxOutput};
 use pms_types_payload::{PayloadEnvelope, PlainPayload};
 use pms_wallet::utxo_store::UtxoDec;
 use pms_wallet::{SignerBackend, Wallet, address_candidates};
@@ -229,17 +230,20 @@ async fn wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo() -> anyhow::
         u.id.txid, u.id.index, u.amount, fee, change
     );
 
+    // tx signée par w_from (propriétaire de l'UTXO) — v0.9.0 exige des unlocks valides.
+    let tx = Transaction {
+        inputs: vec![TxInput { out: OutputId { txid: u.id.txid.clone(), index: u.id.index } }],
+        outputs: vec![
+            TxOutput { address: to_addr.to_string(), amount: taxable_amount.to_string(), asset_id: None },
+            TxOutput { address: admin_addr.to_string(), amount: fee.to_string(), asset_id: None },
+            TxOutput { address: w_from.get_address(&hrp), amount: change.to_string(), asset_id: None },
+        ],
+        fee: fee.to_string(),
+        unlocks: vec![],
+    };
+    let signed = sign_tx_inputs(&w_from, &tx, &ctx.settings.network.network_id);
     let body = serde_json::json!({
-        "tx": {
-            "inputs": [{ "out": { "txid": u.id.txid, "index": u.id.index } }],
-            "outputs": [
-                { "address": to_addr, "amount": taxable_amount },
-                { "address": admin_addr, "amount": &fee },
-                { "address": w_from.get_address(&hrp), "amount": &change }
-            ],
-            "fee": fee,
-            "unlocks": []
-        },
+        "tx": serde_json::to_value(&signed).unwrap(),
         "recipients_xpk": [ w_to.x25519_pub_hex.clone() ]
     });
     let (status, json) = post_json(&ctx.app, "/wallet/tx/send", body).await;
@@ -358,17 +362,19 @@ async fn wallet_send_tx_fee_is_materialized_and_zeroed_and_visible_to_admin() ->
         u.id.txid, u.id.index, u.amount, fee, change
     );
 
+    let tx = Transaction {
+        inputs: vec![TxInput { out: OutputId { txid: u.id.txid.clone(), index: u.id.index } }],
+        outputs: vec![
+            TxOutput { address: to_addr.to_string(), amount: taxable_amount.to_string(), asset_id: None },
+            TxOutput { address: admin_addr.to_string(), amount: fee.to_string(), asset_id: None },
+            TxOutput { address: w_from.get_address(&hrp), amount: change.to_string(), asset_id: None },
+        ],
+        fee: fee.to_string(),
+        unlocks: vec![],
+    };
+    let signed = sign_tx_inputs(&w_from, &tx, &ctx.settings.network.network_id);
     let body = serde_json::json!({
-        "tx": {
-            "inputs": [{ "out": { "txid": u.id.txid, "index": u.id.index } }],
-            "outputs": [
-                { "address": to_addr, "amount": taxable_amount },
-                { "address": admin_addr, "amount": &fee },
-                { "address": w_from.get_address(&hrp), "amount": &change }
-            ],
-            "fee": fee,
-            "unlocks": []
-        },
+        "tx": serde_json::to_value(&signed).unwrap(),
         // IMPORTANT: on n'inclut PAS admin.xpk ici, le serveur doit l'ajouter
         "recipients_xpk": [ w_to.x25519_pub_hex.clone() ]
     });
@@ -494,17 +500,19 @@ async fn wallet_send_tx_does_not_duplicate_fee_output_if_already_present() -> an
     );
 
     // client inclut déjà l'output fee
+    let tx = Transaction {
+        inputs: vec![TxInput { out: OutputId { txid: u.id.txid.clone(), index: u.id.index } }],
+        outputs: vec![
+            TxOutput { address: to_addr.to_string(), amount: taxable_amount.to_string(), asset_id: None },
+            TxOutput { address: admin_addr.to_string(), amount: fee.to_string(), asset_id: None },
+            TxOutput { address: w_from.get_address(&hrp), amount: change.to_string(), asset_id: None },
+        ],
+        fee: fee.to_string(),
+        unlocks: vec![],
+    };
+    let signed = sign_tx_inputs(&w_from, &tx, &ctx.settings.network.network_id);
     let body = serde_json::json!({
-        "tx": {
-            "inputs": [{ "out": { "txid": u.id.txid, "index": u.id.index } }],
-            "outputs": [
-                { "address": to_addr, "amount": taxable_amount },
-                { "address": admin_addr, "amount": &fee },
-                { "address": w_from.get_address(&hrp), "amount": &change }
-            ],
-            "fee": fee,
-            "unlocks": []
-        },
+        "tx": serde_json::to_value(&signed).unwrap(),
         "recipients_xpk": [ w_to.x25519_pub_hex.clone(), admin.x25519_pub_hex.clone() ]
     });
 
