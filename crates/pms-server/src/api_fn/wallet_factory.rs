@@ -83,9 +83,20 @@ pub async fn wallet_create(
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// POST /v1/wallet/restore/mnemonic — Restaure un wallet depuis 24 mots BIP39
+// POST /admin/wallet/restore/mnemonic — Restaure un wallet depuis 24 mots BIP39
+//
+// AUDIT H-5 (v0.9.1) : custodial-by-design. Le client transmet sa mnémonique
+// (secret long-terme) dans le body et le serveur la renvoie + les clés
+// dérivées. Réservé au middleware admin (`require_local_or_admin`) — voir
+// routes.rs `admin_recovery`. La dérivation sans transmission du secret est
+// préférable côté SDK ; cet endpoint existe pour les flux custodial assumés.
+// NE JAMAIS logger le body de cette requête.
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Corps de `POST /admin/wallet/restore/mnemonic`.
+///
+/// **Secret sensible** : `mnemonic` est une phrase BIP39 long-terme. Endpoint
+/// admin-gated (audit H-5). Aucun logging du corps.
 #[derive(Debug, Deserialize)]
 pub struct RestoreMnemonicRequest {
     /// 24 mots BIP39 séparés par des espaces
@@ -144,9 +155,16 @@ pub async fn wallet_restore_mnemonic(
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// POST /v1/wallet/restore/private-key — Restaure un wallet depuis une clé privée hex
+// POST /admin/wallet/restore/private-key — Restaure un wallet depuis une clé privée hex
+//
+// AUDIT H-5 (v0.9.1) : custodial-by-design, admin-gated (voir restore/mnemonic).
+// NE JAMAIS logger le body.
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Corps de `POST /admin/wallet/restore/private-key`.
+///
+/// **Secret sensible** : `private_key_hex` est une clé privée ECDSA long-terme.
+/// Endpoint admin-gated (audit H-5). Aucun logging du corps.
 #[derive(Debug, Deserialize)]
 pub struct RestorePrivateKeyRequest {
     /// Clé privée hexadécimale (64 chars = 32 bytes)
