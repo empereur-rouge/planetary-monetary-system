@@ -560,22 +560,80 @@ fn test_concurrent_inserts_with_pruning() {
     }
     // Total: 1 + 400 = 401 blocks
 
+    // 401 < PRUNE_CHECK_INTERVAL (1000) → aucun prune amorti pendant les
+    // inserts : le DAG a bien 401 blocs ici, un seul prune explicite suit.
     dag.prune_oldest();
 
-    assert!(
-        dag.len() <= 210,
-        "concurrent DAG should prune to ~200, got {}",
+    let surviving_tips: Vec<usize> = (0..4)
+        .filter(|t| dag.contains_block(&format!("t{}_99", t)))
+        .collect();
+    println!(
+        "prune(max=200): 401 blocs -> len={} | tips survivants={:?}",
+        dag.len(),
+        surviving_tips
+    );
+
+    // Borne RAM : on retire EXACTEMENT current_len - max_blocks = 401-200 = 201
+    // blocs NON-tip -> len == 200, déterministe.
+    assert_eq!(
+        dag.len(),
+        200,
+        "prune doit borner à max_blocks en retirant 201 non-tips, got {}",
         dag.len()
     );
 
-    // All 4 branch tips must survive
-    for t in 0..4 {
-        assert!(
-            dag.contains_block(&format!("t{}_99", t)),
-            "thread {} tip must survive",
-            t
-        );
+    // Contrat « protéger tous les tips » (audit S9) : les 4 frontières de
+    // branche survivent TOUTES — 397 non-tips suffisent à couvrir les 201 à
+    // retirer, donc AUCUN tip n'est élagué, quel que soit l'entrelacement des
+    // 4 threads. (Avant le fix : `prune_oldest` élaguait un tip « ancien » par
+    // ordre d'insertion -> test flaky « thread N tip must survive ».)
+    assert_eq!(
+        surviving_tips,
+        vec![0, 1, 2, 3],
+        "les 4 tips de branche doivent TOUS survivre (non-tips suffisants)"
+    );
+}
+
+/// Edge S9 — flood de tips orphelins : quand les blocs NON-tip ne suffisent
+/// PAS à atteindre la borne, `prune_oldest` élague les tips LES PLUS ANCIENS
+/// d'abord, garde toujours >= 1 tip, et borne bien la RAM. C'est la soupape
+/// qui empêche la croissance illimitée (le scénario que protéger-tous-les-tips
+/// ne doit PAS réintroduire).
+#[test]
+fn prune_under_tip_flood_evicts_oldest_tips_keeps_recent_and_bounds_ram() {
+    let dag = ConcurrentDag::with_capacity(10);
+    dag.insert_block(make_block("g", vec![]));
+    // 50 tips attachés au genesis (aucun n'a d'enfant). genesis devient non-tip.
+    for i in 0..50 {
+        dag.insert_block(make_block(&format!("tip_{i}"), vec!["g"]));
     }
+    // 51 blocs (< 1000 -> pas de prune amorti), max=10. À retirer : 41.
+    // non-tips = 1 (genesis), tips = 50 -> budget tips = min(41-1, 50-1) = 40.
+    // On retire genesis + les 40 tips les plus anciens (tip_0..tip_39) ;
+    // survivent les 10 tips les plus récents (tip_40..tip_49).
+    dag.prune_oldest();
+
+    let survivors: Vec<usize> = (0..50)
+        .filter(|i| dag.contains_block(&format!("tip_{i}")))
+        .collect();
+    println!(
+        "tip-flood prune(max=10): 51 blocs -> len={} | genesis survit={} | tips survivants={:?}",
+        dag.len(),
+        dag.contains_block("g"),
+        survivors
+    );
+
+    // RAM bornée malgré le flood de tips.
+    assert_eq!(dag.len(), 10, "RAM doit être bornée à max_blocks sous flood, got {}", dag.len());
+    // >= 1 tip survit (continuité fee-distribution / parent-selection).
+    assert!(!survivors.is_empty(), "au moins 1 tip doit survivre sous flood");
+    // Les plus RÉCENTS survivent, les plus ANCIENS sont élagués.
+    assert_eq!(
+        survivors,
+        (40..50).collect::<Vec<_>>(),
+        "les 10 tips les plus récents survivent, les 40 plus anciens sont élagués"
+    );
+    assert!(!dag.contains_block("g"), "genesis (non-tip le plus ancien) doit être élagué en premier");
 }
 
 // ─── Edge: prune on empty / single-block DAG ───────────────────

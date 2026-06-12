@@ -1033,6 +1033,19 @@ where
         // Note: append_block_atomic_with_utxo prend Option<&UtxoDelta>
         // === ASYNC PERSISTENCE: Update RAM first, persist in background ===
 
+        // IDEMPOTENCE (audit S4) — déduplication AVANT toute mutation d'état.
+        // Un bloc déjà présent dans le DAG (re-gossip réseau, retry client,
+        // replay malveillant) ne DOIT PAS ré-appliquer son `UtxoDelta` : sinon
+        // la supply double / les UTXOs sont re-crédités à chaque re-soumission
+        // (inflation, classe du bug double-apply v0.7.20). Ce check DOIT
+        // précéder `apply_diff` ci-dessous. Le placer après (ancien ordre)
+        // appliquait le delta en RAM PUIS renvoyait AlreadyExists — masquant la
+        // double-application et faisant diverger RAM/disk (le persist disque,
+        // lui, est gated par ce même early-return, donc jamais ré-écrit).
+        if self.dag.contains_block(&sb.id) {
+            return Ok(PutResult::AlreadyExists);
+        }
+
         let t0 = std::time::Instant::now();
 
         // 5.a) UTXO RAM Update FIRST (essential for preventing double-spend)
@@ -1071,10 +1084,9 @@ where
         // ============================================================
         let t1 = std::time::Instant::now();
 
-        // Check if already exists
-        if self.dag.contains_block(&sb.id) {
-            return Ok(PutResult::AlreadyExists);
-        }
+        // Dédup déjà faite plus haut (avant `apply_diff`) pour garantir
+        // l'idempotence sans double-application du delta UTXO. À ce point le
+        // bloc est garanti absent du DAG.
 
         // Extract the block id once — reused by finality bookkeeping, the
         // EventBus emit path, and per-block log lines. Lets us `move` the
