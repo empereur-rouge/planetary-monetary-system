@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-17
-updated: 2026-03-21
-version: v0.6.0
+updated: 2026-06-13
+version: v0.11.3
 ---
 
 # DAG Pruning (Gestion Mémoire du DAG)
@@ -13,7 +13,7 @@ Le DAG Pruning est un mécanisme d'éviction FIFO (first-in-first-out) qui borne
 
 Le pruning fonctionne en **dual-layer** :
 
-1. **RAM (ConcurrentDag)** : Éviction par ordre d'insertion des blocs les plus anciens via `prune_oldest()`, déclenchée de façon amortie toutes les 1000 insertions.
+1. **RAM (ConcurrentDag)** : Éviction par ordre d'insertion des blocs les plus anciens via `prune_oldest()`, déclenchée de façon amortie toutes les 1000 insertions. **Les tips actifs (frontières de branche) sont protégés** : seuls les blocs non-tip sont élagués tant qu'ils suffisent à la borne (audit S9, v0.11.3) — les tips ne sont élagués qu'en dernier recours (flood de tips orphelins), les plus anciens d'abord, toujours ≥ 1 conservé.
 2. **RocksDB (RocksStore)** : Trim des tips excédentaires via `trim_tips()` / `maybe_trim_tips()`, amortie toutes les 64 persistances de blocs.
 
 Les blocs prunés du RAM restent dans RocksDB pour les requêtes historiques (API, export). Le pruning ne touche jamais aux `spent_outpoints` (nécessaires pour la détection de double-spend).
@@ -35,10 +35,17 @@ Le `ConcurrentDag` maintient un `VecDeque<BlockId>` (`insertion_order`) qui enre
 **Cycle de pruning (`prune_oldest`)** :
 
 ```
+Phase 0 : Budget d'élagage des tips (audit S9)
+  - non_tip_available = current_len - tips.len()
+  - tip_removal_budget = max(0, to_remove - non_tip_available)
+                         borné à tips.len() - 1  (garde toujours >= 1 tip)
+  - budget == 0 (cas nominal) => AUCUN tip n'est supprimé
+
 Phase 1 : Collecte des IDs à supprimer (sous lock du Mutex insertion_order)
   - Pop depuis le front de la deque
   - Saute les "ghost entries" (blocs déjà supprimés)
-  - Protège le dernier tip restant (push_back au lieu de supprimer)
+  - Protège TOUS les tips actifs (push_back) tant que le budget tips == 0 ;
+    n'élague des tips (les plus anciens) que si les non-tips sont insuffisants
   - Cap de sécurité : max itérations = taille de la deque
 
 Phase 2 : Suppression des DashMaps (lock-free, hors du Mutex)

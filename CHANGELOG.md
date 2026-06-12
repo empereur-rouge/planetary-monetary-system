@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.11.3] - Unreleased — Pruning DAG : protéger tous les tips actifs (audit S9, contrat durci)
+
+### Changed
+- **fix(core/prune/tips)** — `ConcurrentDag::prune_oldest`
+  ([crates/pms-core/src/concurrent_dag/pruning.rs](crates/pms-core/src/concurrent_dag/pruning.rs))
+  protège désormais **tous les tips actifs**, pas seulement le dernier. Avant :
+  l'élagage retirait les blocs les plus anciens par ordre d'insertion, tips
+  inclus (seul le tout dernier tip était épargné) — un tip de branche dont
+  l'agent concurrent avait fini sa chaîne tôt se retrouvait « ancien » et était
+  amputé du DAG RAM. Désormais les tips sont sautés (poussés en queue) tant que
+  les blocs **non-tip** suffisent à atteindre la borne `max_blocks` — le cas
+  nominal, la frontière étant une petite fraction du DAG et l'historique
+  (non-tips) vivant de toute façon sur disque. **La RAM reste bornée** : le
+  nombre de blocs retirés est inchangé (`current_len - max_blocks`), seule leur
+  identité bascule vers l'historique non-tip ancien. Soupape anti-croissance :
+  si les non-tips sont insuffisants (flood de tips orphelins d'agents morts —
+  la source historique de croissance illimitée), les **tips les plus anciens**
+  sont élagués pour combler le déficit, en gardant toujours **≥ 1** tip
+  (continuité fee-distribution / parent-selection).
+- **Dual-layer** : vérifié côté RocksDB — `trim_tips`
+  ([crates/pms-storage/src/rocks_store/maintenance.rs](crates/pms-storage/src/rocks_store/maintenance.rs))
+  garde déjà les `tip_limit` (256) tips réels les plus récents (+ nettoyage des
+  zombies, plancher ≥ 1), et `remove_tip` protège le dernier tip. Les deux
+  couches préservent donc les frontières actives avec un plancher ≥ 1 ; aucun
+  changement de code RocksDB requis (couverture existante :
+  `tips_respect_limit_with_trim_rocks`, `remove_tip_protects_last_tip_rocks`,
+  `trim_tips_always_keeps_at_least_one_rocks`).
+
+### Fixed
+- **test(core)** — `test_concurrent_inserts_with_pruning`
+  ([crates/pms-core/src/concurrent_dag/tests.rs](crates/pms-core/src/concurrent_dag/tests.rs))
+  était **flaky** (échouait ~2-5/10 runs, même isolé) : il assertait que les 4
+  tips de branche survivaient à l'élagage alors que l'ancien `prune_oldest` ne
+  protégeait que le dernier. Sous entrelacement concurrent, un thread finissant
+  tôt voyait son tip élagué → `thread N tip must survive` échouait par
+  intermittence. Découvert par l'audit (test à faux signal). Désormais
+  déterministe (12/12, 6/6 en parallèle) — `len=200`, `tips=[0,1,2,3]`. Ajout
+  d'`println!` de diagnostic (règle « show test output ») et de la borne exacte.
+
+### Added
+- **test(core)** — `prune_under_tip_flood_evicts_oldest_tips_keeps_recent_and_bounds_ram`
+  (nouveau, `concurrent_dag/tests.rs`) verrouille la soupape anti-croissance :
+  51 blocs (1 non-tip + 50 tips), `max_blocks=10` → les 40 tips les plus
+  anciens + le genesis sont élagués, les 10 plus récents survivent, RAM bornée
+  à 10, ≥ 1 tip préservé.
+
 ## [0.11.2] - Unreleased — Tests failover/replay/déterminisme (audit S9, proof-of-reserves)
 
 ### Added
