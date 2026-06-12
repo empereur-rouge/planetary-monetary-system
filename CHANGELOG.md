@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.6] - Unreleased — Fix footgun `P2pConfig::default()` (réhabilitation P2P)
+
+### Fixed
+- **fix(config/P2pConfig)**: `P2pConfig::default()` utilisait le `Default` DÉRIVÉ
+  qui mettait `max_connections = 0` et `per_peer_queue_cap = 0`. Conséquences :
+  le listener P2P rejetait TOUTE connexion (`conn_semaphore` à 0 permis →
+  connexion fermée avant le handshake → « eof before hello » côté client), et
+  `mpsc::channel(0)` paniquait à la connexion d'un peer. En production les valeurs
+  venaient du défaut serde (256 / 2000), mais tout code construisant
+  `P2pConfig::default()` en mémoire (tests P2P, `Server` API-only) tombait dans le
+  piège. `impl Default` manuel délégant désormais aux mêmes fonctions que les
+  `#[serde(default = ...)]` → cohérent avec une config chargée sans bloc `[p2p]`.
+- **test(network)**: les 4 tests de `pms-network/tests/anti_abuse.rs`
+  (`ping_pong_still_works`, `oversize_message_is_dropped_connection`,
+  `too_many_parse_errors_kicks_peer`, `rate_limit_drops_or_closes_under_burst`)
+  passent désormais (ils échouaient sur « eof before hello » à cause du footgun).
+  Toute la suite `pms-network` est verte.
+
+### Changed
+- **test(server)**: `network_batching.rs` n'a plus besoin de son contournement
+  explicite de `per_peer_queue_cap`/`max_connections` — utilise
+  `P2pConfig::default()` (maintenant correct).
+- **Workspace** `0.9.5` → `0.9.6`. API_VERSION inchangé (`14`).
+
+---
+
 ## [0.9.5] - Unreleased — Réhabilitation des tests d'activité (validation tx canonique v0.9.0)
 
 Dernière couche de la réhabilitation : les tests d'activité basés sur des
