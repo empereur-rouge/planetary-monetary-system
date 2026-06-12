@@ -7,19 +7,11 @@ use pms_types_payload::{PlainPayload, TokenMetadata};
 // ── helpers ──────────────────────────────────────────────────────
 
 fn out(addr: &str, amount: &str) -> TxOutput {
-    TxOutput {
-        address: addr.into(),
-        amount: amount.into(),
-        asset_id: None,
-    }
+    TxOutput::new(addr, amount, None)
 }
 
 fn out_asset(addr: &str, amount: &str, asset: &str) -> TxOutput {
-    TxOutput {
-        address: addr.into(),
-        amount: amount.into(),
-        asset_id: Some(asset.into()),
-    }
+    TxOutput::new(addr, amount, Some(asset.to_string()))
 }
 
 // ── parse_type_filter ────────────────────────────────────────────
@@ -603,7 +595,7 @@ async fn classify_tx_fee_received_async() {
         async fn add_utxo(&self, _txid: String, _index: u32, _output: pms_types::TxOutput) {}
         async fn remove_utxo(&self, _output_id: &pms_types::OutputId) -> bool { false }
         async fn get_utxo(&self, _output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput> {
-            Some(pms_types::TxOutput { address: "sender".into(), amount: "100".into(), asset_id: None })
+            Some(pms_types::TxOutput::new("sender", "100", None))
         }
     }
 
@@ -714,11 +706,7 @@ async fn classify_tx_transfer_in_async() {
             _output_id: &pms_types::OutputId,
         ) -> Option<pms_types::TxOutput> {
             // Return a UTXO for the sender to test sender resolution
-            Some(pms_types::TxOutput {
-                address: "sender_addr".into(),
-                amount: "100".into(),
-                asset_id: None,
-            })
+            Some(pms_types::TxOutput::new("sender_addr", "100", None))
         }
     }
 
@@ -816,11 +804,7 @@ async fn classify_tx_transfer_out_async() {
             &self,
             _output_id: &pms_types::OutputId,
         ) -> Option<pms_types::TxOutput> {
-            Some(pms_types::TxOutput {
-                address: "sender_addr".into(),
-                amount: "100".into(),
-                asset_id: None,
-            })
+            Some(pms_types::TxOutput::new("sender_addr", "100", None))
         }
     }
 
@@ -918,11 +902,7 @@ async fn classify_tx_transfer_self_async() {
             &self,
             _output_id: &pms_types::OutputId,
         ) -> Option<pms_types::TxOutput> {
-            Some(pms_types::TxOutput {
-                address: "alice".into(),
-                amount: "100".into(),
-                asset_id: None,
-            })
+            Some(pms_types::TxOutput::new("alice", "100", None))
         }
     }
 

@@ -34,11 +34,7 @@ fn make_keypair() -> (String, String) {
 
 fn sample_plain() -> PlainPayload {
     PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: "8e1recipient".into(),
-            amount: "42.00000000".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new("8e1recipient", "42.00000000", None)],
     }
 }
 

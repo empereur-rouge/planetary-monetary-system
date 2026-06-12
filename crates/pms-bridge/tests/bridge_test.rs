@@ -605,11 +605,7 @@ fn bridge_mint_payload_serialization() {
     use pms_types_transaction::TxOutput;
 
     let payload = PayloadEnvelope::Plain(PlainPayload::BridgeMint {
-        outputs: vec![TxOutput {
-            address: "8e1dest_addr".into(),
-            amount: "100.00000000".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new("8e1dest_addr", "100.00000000", None)],
         lock_block_id: "lock_abc123".into(),
         source_ledger_id: "main".into(),
     });

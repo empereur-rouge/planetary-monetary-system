@@ -77,11 +77,7 @@ pub async fn try_mint_expect_failure(
     amount: &str,
     parents: Vec<String>,
 ) -> Result<String> {
-    let output = TxOutput {
-        address: to_addr.to_string(),
-        amount: amount.to_string(),
-        asset_id: None,
-    };
+    let output = TxOutput::new(to_addr.to_string(), amount.to_string(), None);
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
         outputs: vec![output],
     }));
@@ -146,11 +142,7 @@ pub async fn mine_mint(
     amount: &str,
     parents: Vec<String>,
 ) -> Result<String> {
-    let output = TxOutput {
-        address: to_addr.to_string(),
-        amount: amount.to_string(),
-        asset_id: None,
-    };
+    let output = TxOutput::new(to_addr.to_string(), amount.to_string(), None);
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
         outputs: vec![output],
     }));
@@ -247,28 +239,12 @@ pub async fn send_tx_with_split_fee(
             },
         }],
         outputs: vec![
-            TxOutput {
-                address: to.into(),
-                amount: amount.into(),
-                asset_id: None,
-            }, // idx 0 - payment
-            TxOutput {
-                address: change_addr.into(),
-                amount: change_amount.into(),
-                asset_id: None,
-            }, // idx 1 - change
-            TxOutput {
-                address: platform_addr.into(),
-                amount: platform_part.to_string(),
-                asset_id: None,
-            }, // idx 2 - platform fee
+            TxOutput::new(to, amount, None), // idx 0 - payment
+            TxOutput::new(change_addr, change_amount, None), // idx 1 - change
+            TxOutput::new(platform_addr, platform_part.to_string(), None), // idx 2 - platform fee
             // STRICT VALIDATION: Explicitly pay miner fee to admin/coordinator
-            TxOutput {
-                // Caller `spam_transactions` passes `admin_address_ref` as `admin_addr`.
-                address: platform_addr.into(),
-                amount: miner_part.to_string(),
-                asset_id: None,
-            }, // idx 3 - miner fee (explicit)
+            // Caller `spam_transactions` passes `admin_address_ref` as `admin_addr`.
+            TxOutput::new(platform_addr, miner_part.to_string(), None), // idx 3 - miner fee (explicit)
         ],
         fee: "0".into(), // Implicit fees forbidden. Set to 0.
         unlocks: vec![],
@@ -351,16 +327,8 @@ pub async fn send_tx(
             },
         }],
         outputs: vec![
-            TxOutput {
-                address: to.into(),
-                amount: amount.into(),
-                asset_id: None,
-            }, // idx 0 - payment
-            TxOutput {
-                address: change_addr.into(),
-                amount: change_amount.into(),
-                asset_id: None,
-            }, // idx 1 - change
+            TxOutput::new(to, amount, None), // idx 0 - payment
+            TxOutput::new(change_addr, change_amount, None), // idx 1 - change
         ],
         fee: "0".into(),
         unlocks: vec![],

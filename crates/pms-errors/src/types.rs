@@ -96,6 +96,15 @@ pub enum ValidationError {
     #[error("unlock {input_index} does not authorize spending the referenced output")]
     OwnershipMismatch { input_index: usize },
 
+    // Time-lock (protocole 2.1) — l'UTXO dépensé est encore verrouillé.
+    // `until` est public par construction (il figure dans l'output on-DAG).
+    #[error("input {input_index} is time-locked until {until} (now: {now})")]
+    OutputTimeLocked {
+        input_index: usize,
+        until: u64,
+        now: u64,
+    },
+
     // Compliance
     #[error("address is frozen: {0}")]
     AddressFrozen(String),

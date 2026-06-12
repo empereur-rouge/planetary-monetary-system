@@ -659,7 +659,13 @@ where
         let t_utxo_val_start = std::time::Instant::now();
         if let Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) = &block.payload {
             use crate::validations::transactions::validate_transaction_full;
-            let tx_input_outputs = match validate_transaction_full(&self.utxos, tx, policy).await
+            let tx_input_outputs = match validate_transaction_full(
+                &self.utxos,
+                tx,
+                policy,
+                now_ms_for_signers.max(0) as u64,
+            )
+            .await
             {
                 Ok(outs) => outs,
                 Err(e) => {
@@ -1061,11 +1067,12 @@ where
                                                 txid: block_id.clone(),
                                                 index: idx as u32,
                                             };
-                                            let out = pms_types::TxOutput {
-                                                address: reward_address.clone(),
-                                                amount: amount_str,
-                                                asset_id: None, // rewards always PMS
-                                            };
+                                            // rewards always PMS native
+                                            let out = pms_types::TxOutput::new(
+                                                reward_address.clone(),
+                                                amount_str,
+                                                None,
+                                            );
 
                                             reward_utxos.push((
                                                 out_id,

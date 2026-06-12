@@ -93,20 +93,12 @@ pub async fn perform_daily_inflation_mint(state: &AppState) -> Result<Distribute
     let mut total_distributed = Decimal::ZERO;
 
     if coordinator_amount > Decimal::ZERO {
-        all_outputs.push(TxOutput {
-            address: coordinator_address.clone(),
-            amount: coordinator_amount.normalize().to_string(),
-            asset_id: None,
-        });
+        all_outputs.push(TxOutput::new(coordinator_address.clone(), coordinator_amount.normalize().to_string(), None));
         total_distributed += coordinator_amount;
     }
 
     if treasury_amount > Decimal::ZERO {
-        all_outputs.push(TxOutput {
-            address: treasury_addr.clone(),
-            amount: treasury_amount.normalize().to_string(),
-            asset_id: None,
-        });
+        all_outputs.push(TxOutput::new(treasury_addr.clone(), treasury_amount.normalize().to_string(), None));
         total_distributed += treasury_amount;
     }
 

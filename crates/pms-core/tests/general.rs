@@ -23,11 +23,7 @@ fn test_export_dag_json() {
     let secret_addrs: Vec<String> = (0..3).map(|i| format!("SECRET_addr_{i}")).collect();
     for addr in &secret_addrs {
         let mint_block = PlainPayload::Mint {
-            outputs: vec![TxOutput {
-                address: addr.clone(),
-                amount: "10.0".into(),
-                asset_id: None,
-            }],
+            outputs: vec![TxOutput::new(addr.clone(), "10.0", None)],
         };
         let pt = serde_json::to_vec(&mint_block).unwrap();
 

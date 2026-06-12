@@ -279,11 +279,7 @@ pub async fn faucet_mint(
     };
 
     // 2) Build Mint payload
-    let mint_output = TxOutput {
-        address: req.to.clone(),
-        amount: amount_dec.to_string(),
-        asset_id: None, // Native PMS
-    };
+    let mint_output = TxOutput::new(req.to.clone(), amount_dec.to_string(), None,);
 
     let mint_payload = PlainPayload::Mint {
         outputs: vec![mint_output.clone()],
@@ -502,29 +498,17 @@ pub async fn wallet_send_simple(
     let mut tx_outputs: Vec<TxOutput> = Vec::new();
 
     // Destination
-    tx_outputs.push(TxOutput {
-        address: req.to.clone(),
-        amount: amount_dec.to_string(),
-        asset_id: req.asset_id.clone(),
-    });
+    tx_outputs.push(TxOutput::new(req.to.clone(), amount_dec.to_string(), req.asset_id.clone()));
 
     // Transfer fee outputs (smart contract) — same asset as the transfer
     for fee_result in &transfer_fees {
-        tx_outputs.push(TxOutput {
-            address: fee_result.beneficiary_address.clone(),
-            amount: fee_result.fee_amount.to_string(),
-            asset_id: req.asset_id.clone(),
-        });
+        tx_outputs.push(TxOutput::new(fee_result.beneficiary_address.clone(), fee_result.fee_amount.to_string(), req.asset_id.clone()));
     }
 
     // Change
     let change = selected_sum - total_needed;
     if change > Decimal::ZERO {
-        tx_outputs.push(TxOutput {
-            address: from_address.clone(),
-            amount: change.to_string(),
-            asset_id: req.asset_id.clone(),
-        });
+        tx_outputs.push(TxOutput::new(from_address.clone(), change.to_string(), req.asset_id.clone()));
     }
 
     // Fee to admin (round-robin'd across coord shards when sharding is
@@ -540,20 +524,12 @@ pub async fn wallet_send_simple(
             }
         };
 
-        tx_outputs.push(TxOutput {
-            address: admin_addr,
-            amount: fee_dec.to_string(),
-            asset_id: None,
-        });
+        tx_outputs.push(TxOutput::new(admin_addr, fee_dec.to_string(), None));
     }
 
     // PMS change (custom token)
     if pms_change > Decimal::ZERO {
-        tx_outputs.push(TxOutput {
-            address: from_address.clone(),
-            amount: pms_change.to_string(),
-            asset_id: None,
-        });
+        tx_outputs.push(TxOutput::new(from_address.clone(), pms_change.to_string(), None));
     }
 
     // ════════════════════════════════════════════════════════════════════

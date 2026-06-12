@@ -35,6 +35,11 @@ pub struct UtxoValue {
     pub amount: String,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "ast")]
     pub asset_id: Option<String>,
+    /// Time-lock (timestamp UNIX ms) — voir `TxOutput::locked_until`.
+    /// Optionnel + serde default : les UTXOs écrits avant la v0.10.0 se
+    /// désérialisent en `None` sans migration.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "lkd")]
+    pub locked_until: Option<u64>,
 }
 
 impl UtxoValue {
@@ -44,11 +49,12 @@ impl UtxoValue {
             address: self.address,
             amount: self.amount,
             asset_id: self.asset_id,
+            locked_until: self.locked_until,
         }
     }
 
     /// Sérialise un `TxOutput` sous la forme JSON compacte du CF `utxo`
-    /// (`{"addr":…,"amt":…,"ast":…}`) sans cloner les Strings.
+    /// (`{"addr":…,"amt":…,"ast":…,"lkd":…}`) sans cloner les Strings.
     ///
     /// Point d'écriture UNIQUE du format : les deux chemins de persistance
     /// (`append_block_atomic_with_utxo` et `append_blocks_batch`) passent ici,
@@ -60,11 +66,14 @@ impl UtxoValue {
             amt: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
             ast: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            lkd: Option<u64>,
         }
         Ok(serde_json::to_vec(&OutValRef {
             addr: &out.address,
             amt: &out.amount,
             ast: out.asset_id.as_deref(),
+            lkd: out.locked_until,
         })?)
     }
 }

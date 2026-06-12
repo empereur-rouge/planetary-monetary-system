@@ -23,11 +23,7 @@ fn mined(parents: Vec<BlockId>, payload: Option<PayloadEnvelope>) -> Block {
 
 /// Construis une Mint simple vers `addr`, renvoie le bloc + (txid, index) dépensable.
 fn mint_block(addr: &str, amount: &str, parent: &str) -> (Block, OutputId) {
-    let txo = TxOutput {
-        address: addr.into(),
-        amount: amount.into(),
-        asset_id: None,
-    };
+    let txo = TxOutput::new(addr, amount, None);
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
         outputs: vec![txo],
     }));
@@ -81,11 +77,7 @@ fn accept_valid_tx() -> Result<()> {
         inputs: vec![TxInput {
             out: spendable.clone(),
         }],
-        outputs: vec![TxOutput {
-            address: "B".into(),
-            amount: "9.0".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new("B", "9.0", None)],
         fee: "1.0".into(),
         unlocks: vec![],
     };
@@ -121,11 +113,7 @@ fn reject_double_spend_intra_block() -> Result<()> {
         inputs: vec![TxInput {
             out: spendable.clone(),
         }],
-        outputs: vec![TxOutput {
-            address: wallet_addr.clone(),
-            amount: "4.5".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(wallet_addr.clone(), "4.5", None)],
         fee: "0.5".into(),
         unlocks: vec![],
     };
@@ -143,11 +131,7 @@ fn reject_double_spend_intra_block() -> Result<()> {
         inputs: vec![TxInput {
             out: spendable.clone(),
         }],
-        outputs: vec![TxOutput {
-            address: wallet_addr.clone(),
-            amount: "4.0".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(wallet_addr.clone(), "4.0", None)],
         fee: "1.0".into(),
         unlocks: vec![],
     };
@@ -191,11 +175,7 @@ fn reject_tx_signed_for_different_network() -> Result<()> {
         inputs: vec![TxInput {
             out: spendable.clone(),
         }],
-        outputs: vec![TxOutput {
-            address: "B".into(),
-            amount: "9.0".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new("B", "9.0", None)],
         fee: "1.0".into(),
         unlocks: vec![],
     };
@@ -250,11 +230,7 @@ fn accept_tx_signed_for_matching_network() -> Result<()> {
 
     let tx_unsigned = Transaction {
         inputs: vec![TxInput { out: spendable }],
-        outputs: vec![TxOutput {
-            address: "C".into(),
-            amount: "4.5".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new("C", "4.5", None)],
         fee: "0.5".into(),
         unlocks: vec![],
     };

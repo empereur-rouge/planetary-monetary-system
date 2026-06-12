@@ -576,29 +576,17 @@ pub async fn prepare_tx(
     let mut tx_outputs: Vec<TxOutput> = Vec::new();
 
     // Output destination
-    tx_outputs.push(TxOutput {
-        address: req.to.clone(),
-        amount: amount_dec.to_string(),
-        asset_id: req.asset_id.clone(),
-    });
+    tx_outputs.push(TxOutput::new(req.to.clone(), amount_dec.to_string(), req.asset_id.clone()));
 
     // Outputs frais de transfert (smart contract) — même asset que le transfert
     for fee_result in &transfer_fees {
-        tx_outputs.push(TxOutput {
-            address: fee_result.beneficiary_address.clone(),
-            amount: fee_result.fee_amount.to_string(),
-            asset_id: req.asset_id.clone(),
-        });
+        tx_outputs.push(TxOutput::new(fee_result.beneficiary_address.clone(), fee_result.fee_amount.to_string(), req.asset_id.clone()));
     }
 
     // Change (retour vers l'expéditeur) — same asset as the transfer
     let change = selected_sum - total_needed;
     if change > Decimal::ZERO {
-        tx_outputs.push(TxOutput {
-            address: req.from.clone(),
-            amount: change.to_string(),
-            asset_id: req.asset_id.clone(),
-        });
+        tx_outputs.push(TxOutput::new(req.from.clone(), change.to_string(), req.asset_id.clone()));
     }
 
     // Output frais vers admin wallet, ou shard quand sharding activé.
@@ -619,20 +607,12 @@ pub async fn prepare_tx(
             }
         };
 
-        tx_outputs.push(TxOutput {
-            address: admin_addr,
-            amount: fee_dec.to_string(),
-            asset_id: None, // fees always PMS
-        });
+        tx_outputs.push(TxOutput::new(admin_addr, fee_dec.to_string(), None,));
     }
 
     // PMS change (only for custom token transfers where we also spent PMS for fees)
     if pms_change > Decimal::ZERO {
-        tx_outputs.push(TxOutput {
-            address: req.from.clone(),
-            amount: pms_change.to_string(),
-            asset_id: None, // PMS change
-        });
+        tx_outputs.push(TxOutput::new(req.from.clone(), pms_change.to_string(), None,));
     }
 
     // ════════════════════════════════════════════════════════════════════════

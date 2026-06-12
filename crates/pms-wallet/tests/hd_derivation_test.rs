@@ -148,11 +148,7 @@ fn derived_wallet_can_sign_tx_with_network_binding() {
                 index: 0,
             },
         }],
-        outputs: vec![TxOutput {
-            address: "recipient_addr".into(),
-            amount: "10.0".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new("recipient_addr", "10.0", None)],
         fee: "0.001".into(),
         unlocks: vec![],
     };

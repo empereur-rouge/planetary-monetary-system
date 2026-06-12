@@ -143,11 +143,7 @@ pub async fn perform_fee_distribution(
         if *amount <= Decimal::ZERO {
             continue;
         }
-        all_outputs.push(TxOutput {
-            address: wallet_address.clone(),
-            amount: amount.to_string(),
-            asset_id: asset_id.clone(),
-        });
+        all_outputs.push(TxOutput::new(wallet_address.clone(), amount.to_string(), asset_id.clone()));
         // Only count PMS-native refunds towards total_distributed (for stats)
         if asset_id.is_none() {
             total_distributed += *amount;
@@ -179,11 +175,7 @@ pub async fn perform_fee_distribution(
             };
 
             if let Some(target) = treasury_wallets.first() {
-                all_outputs.push(TxOutput {
-                    address: target.clone(),
-                    amount: treasury_cut.to_string(),
-                    asset_id: None,
-                });
+                all_outputs.push(TxOutput::new(target.clone(), treasury_cut.to_string(), None));
                 total_distributed += treasury_cut;
                 node_pool_amount -= treasury_cut;
                 crate::metrics::FEES_DISTRIBUTED
@@ -267,11 +259,7 @@ pub async fn perform_fee_distribution(
             }
 
             if let Some(addr) = target_address {
-                all_outputs.push(TxOutput {
-                    address: addr.clone(),
-                    amount: share_amount.to_string(),
-                    asset_id: None,
-                });
+                all_outputs.push(TxOutput::new(addr.clone(), share_amount.to_string(), None));
                 total_distributed += share_amount;
                 crate::metrics::FEES_DISTRIBUTED
                     .with_label_values(&[state.ledger_id.as_str(), "node"])

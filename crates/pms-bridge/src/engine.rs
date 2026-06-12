@@ -282,11 +282,11 @@ impl BridgeEngine {
         }
 
         // 6) Construire et persister le BridgeMint sur le ledger destination
-        let mint_outputs = vec![TxOutput {
-            address: req.to_address.clone(),
-            amount: req.amount.clone(),
-            asset_id: req.asset_id.clone(),
-        }];
+        let mint_outputs = vec![TxOutput::new(
+            req.to_address.clone(),
+            req.amount.clone(),
+            req.asset_id.clone(),
+        )];
 
         let mint_payload = PayloadEnvelope::Plain(PlainPayload::BridgeMint {
             outputs: mint_outputs,

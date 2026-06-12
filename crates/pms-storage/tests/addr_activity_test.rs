@@ -23,21 +23,13 @@ fn sb_with_payload(id: &str, payload: PlainPayload) -> StoredBlock {
 
 fn mint_payload(addr: &str, amount: &str) -> PlainPayload {
     PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: addr.into(),
-            amount: amount.into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(addr, amount, None)],
     }
 }
 
 fn reward_payload(addr: &str) -> PlainPayload {
     PlainPayload::Reward {
-        fee_outputs: vec![TxOutput {
-            address: addr.into(),
-            amount: "1.0".into(),
-            asset_id: None,
-        }],
+        fee_outputs: vec![TxOutput::new(addr, "1.0", None)],
         reward_outputs: vec![],
         burned: "0.05".into(),
         tx_block_id: "txblk".into(),
@@ -179,16 +171,8 @@ async fn addr_activity_multi_address_in_one_block() -> Result<()> {
     // A mint block with outputs for both alice and bob
     let payload = PlainPayload::Mint {
         outputs: vec![
-            TxOutput {
-                address: "alice".into(),
-                amount: "50".into(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: "bob".into(),
-                amount: "50".into(),
-                asset_id: None,
-            },
+            TxOutput::new("alice", "50", None),
+            TxOutput::new("bob", "50", None),
         ],
     };
     let b = sb_with_payload("multi1", payload);
@@ -212,16 +196,8 @@ async fn addr_activity_multi_address_in_one_block() -> Result<()> {
 
 fn reward_payload_with_both(fee_addr: &str, reward_addr: &str) -> PlainPayload {
     PlainPayload::Reward {
-        fee_outputs: vec![TxOutput {
-            address: fee_addr.into(),
-            amount: "1.0".into(),
-            asset_id: None,
-        }],
-        reward_outputs: vec![TxOutput {
-            address: reward_addr.into(),
-            amount: "0.5".into(),
-            asset_id: None,
-        }],
+        fee_outputs: vec![TxOutput::new(fee_addr, "1.0", None)],
+        reward_outputs: vec![TxOutput::new(reward_addr, "0.5", None)],
         burned: "0.05".into(),
         tx_block_id: "txblk".into(),
     }
@@ -495,16 +471,8 @@ fn tx_payload(from_addr: &str, to_addr: &str, amount: &str) -> PlainPayload {
     PlainPayload::TxUtxo(pms_types::Transaction {
         inputs: vec![],
         outputs: vec![
-            TxOutput {
-                address: to_addr.into(),
-                amount: amount.into(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: from_addr.into(),
-                amount: "9".into(),
-                asset_id: None,
-            },
+            TxOutput::new(to_addr, amount, None),
+            TxOutput::new(from_addr, "9", None),
         ],
         fee: "1".into(),
         unlocks: vec![],

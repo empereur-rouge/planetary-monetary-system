@@ -35,11 +35,7 @@ pub async fn mint_to_wallet_and_get_inputs(
 
     // 2) Mint output vers l’adresse du wallet cible
     let to_addr = to_wallet.get_address(hrp);
-    let outputs = vec![TxOutput {
-        address: to_addr,
-        amount: amount.to_string(),
-        asset_id: None,
-    }];
+    let outputs = vec![TxOutput::new(to_addr, amount.to_string(), None)];
 
     let payload = PayloadEnvelope::Plain(PlainPayload::Mint { outputs });
 

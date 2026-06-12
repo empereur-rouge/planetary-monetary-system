@@ -23,19 +23,11 @@ fn out_id(txid: &str, index: u32) -> OutputId {
 }
 
 fn pms_output(address: &str, amount: &str) -> TxOutput {
-    TxOutput {
-        address: address.into(),
-        amount: amount.into(),
-        asset_id: None,
-    }
+    TxOutput::new(address, amount, None)
 }
 
 fn token_output(address: &str, amount: &str, asset_id: &str) -> TxOutput {
-    TxOutput {
-        address: address.into(),
-        amount: amount.into(),
-        asset_id: Some(asset_id.into()),
-    }
+    TxOutput::new(address, amount, Some(asset_id.to_string()))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -37,11 +37,7 @@ async fn test_metadata_persistence_and_supply() {
     // 1. Create a Mint block with Metadata
     let parent = genesis_block.id.clone();
 
-    let output = TxOutput {
-        address: "addr_test".to_string(),
-        amount: "100.0".to_string(),
-        asset_id: None,
-    };
+    let output = TxOutput::new("addr_test".to_string(), "100.0".to_string(), None);
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
         outputs: vec![output],
     }));
@@ -92,11 +88,7 @@ async fn test_metadata_persistence_and_supply() {
         .utxos
         .add(
             oid,
-            TxOutput {
-                address: "addr_test".into(),
-                amount: "100.0".into(),
-                asset_id: None,
-            },
+            TxOutput::new("addr_test", "100.0", None),
         )
         .await;
 

@@ -700,11 +700,7 @@ async fn mine_mint(
     network_id: &str,
     protocol_version: u16,
 ) -> Result<String> {
-    let output = TxOutput {
-        address: to_addr.to_string(),
-        amount: amount.to_string(),
-        asset_id: None,
-    };
+    let output = TxOutput::new(to_addr.to_string(), amount.to_string(), None);
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
         outputs: vec![output],
     }));
@@ -762,18 +758,10 @@ async fn send_tx(
     network_id: &str,
     protocol_version: u16,
 ) -> Result<String> {
-    let mut outputs = vec![TxOutput {
-        address: recipient_addr.to_string(),
-        amount: amount.to_string(),
-        asset_id: None,
-    }];
+    let mut outputs = vec![TxOutput::new(recipient_addr.to_string(), amount.to_string(), None)];
 
     if change_amount != "0.0" && change_amount != "0" {
-        outputs.push(TxOutput {
-            address: change_addr.to_string(),
-            amount: change_amount.to_string(),
-            asset_id: None,
-        });
+        outputs.push(TxOutput::new(change_addr.to_string(), change_amount.to_string(), None));
     }
 
     let mut tx = Transaction {
@@ -853,26 +841,14 @@ async fn send_tx_fast(
     change_amount: &str,
     network_id: &str,
 ) -> Result<(String, u32)> {
-    let mut outputs = vec![TxOutput {
-        address: recipient_addr.to_string(),
-        amount: amount.to_string(),
-        asset_id: None,
-    }];
+    let mut outputs = vec![TxOutput::new(recipient_addr.to_string(), amount.to_string(), None)];
 
     if fee_amount != "0.0" {
-        outputs.push(TxOutput {
-            address: fee_addr.to_string(),
-            amount: fee_amount.to_string(),
-            asset_id: None,
-        });
+        outputs.push(TxOutput::new(fee_addr.to_string(), fee_amount.to_string(), None));
     }
 
     if change_amount != "0.0" && change_amount != "0" {
-        outputs.push(TxOutput {
-            address: change_addr.to_string(),
-            amount: change_amount.to_string(),
-            asset_id: None,
-        });
+        outputs.push(TxOutput::new(change_addr.to_string(), change_amount.to_string(), None));
     }
 
     let mut tx = Transaction {

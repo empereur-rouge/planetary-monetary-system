@@ -13,11 +13,7 @@ fn stress_create_1000_blocks_and_check_parents() {
 
     for _i in 0..1000 {
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
-            outputs: vec![TxOutput {
-                address: "8xtest".into(),
-                amount: "10.00000000".into(),
-                asset_id: None,
-            }],
+            outputs: vec![TxOutput::new("8xtest", "10.00000000", None)],
         }));
         let _b = dag
             .add_payload_auto_parents_mined(
@@ -101,11 +97,7 @@ fn stress_create_100_encrypted_blocks_and_check_parents() {
     for i in 0..100 {
         // a) payload clair (objet applicatif)
         let mint_block = PlainPayload::Mint {
-            outputs: vec![TxOutput {
-                address: "8xtestaddr".to_string(),
-                amount: "10.00000000".to_string(),
-                asset_id: None,
-            }],
+            outputs: vec![TxOutput::new("8xtestaddr".to_string(), "10.00000000".to_string(), None)],
         };
         let pt = serde_json::to_vec(&mint_block).expect("serde mint_block");
 

@@ -47,11 +47,7 @@ pub fn build_utxo_tx_with_fee_checked(
     for p in payments {
         let a = Amount::parse(&p.amount, PMS.decimals).map_err(|_| WalletTxError::InvalidAmount)?;
         sum_out.0 += a.0;
-        outs.push(TxOutput {
-            address: p.to,
-            amount: a.to_string(),
-            asset_id: p.asset_id,
-        });
+        outs.push(TxOutput::new(p.to, a.to_string(), p.asset_id));
     }
     // compute_fee() retourne maintenant un Amount arrondi à 8 décimales
     let fee = fee_policy
@@ -59,11 +55,7 @@ pub fn build_utxo_tx_with_fee_checked(
         .map_err(|_| WalletTxError::FeeComputation)?;
 
     if !fee.is_zero() {
-        outs.push(TxOutput {
-            address: fee_recipient.to_string(),
-            amount: fee.to_string(),
-            asset_id: None,
-        });
+        outs.push(TxOutput::new(fee_recipient, fee.to_string(), None));
     }
 
     let mut sum_in = Amount::parse("0", PMS.decimals).unwrap();
@@ -83,11 +75,7 @@ pub fn build_utxo_tx_with_fee_checked(
     // Change si nécessaire
     let change = sum_in.0 - (sum_out.0 + fee.0);
     if !change.is_zero() {
-        outs.push(TxOutput {
-            address: from_address.to_string(),
-            amount: Amount(change).to_string(),
-            asset_id: None,
-        });
+        outs.push(TxOutput::new(from_address, Amount(change).to_string(), None));
     }
 
     Ok(Transaction {

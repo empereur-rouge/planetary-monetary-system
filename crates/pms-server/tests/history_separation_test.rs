@@ -33,11 +33,7 @@ async fn insert_plain_mint(
     addr: &str,
 ) -> anyhow::Result<()> {
     let payload = PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: addr.into(),
-            amount: "100".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(addr, "100", None)],
     };
     let sb = StoredBlock {
         id: id.into(),

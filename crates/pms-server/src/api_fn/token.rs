@@ -365,22 +365,14 @@ pub async fn admin_mint_token(
     };
 
     // Build Mint block
-    let mut outputs = vec![TxOutput {
-        address: req.to.clone(),
-        amount: amount_dec.to_string(),
-        asset_id: Some(req.asset_id.clone()),
-    }];
+    let mut outputs = vec![TxOutput::new(req.to.clone(), amount_dec.to_string(), Some(req.asset_id.clone()))];
 
     // Add fee output if configured (fee always in PMS native token).
     // Routes through coord shards when sharding is enabled — see
     // AppState::fee_recipient_address.
     if mint_fee_dec > Decimal::ZERO {
         if let Some(addr) = state.fee_recipient_address() {
-            outputs.push(TxOutput {
-                address: addr,
-                amount: mint_fee_dec.to_string(),
-                asset_id: None, // Fee in PMS native
-            });
+            outputs.push(TxOutput::new(addr, mint_fee_dec.to_string(), None,));
         }
     }
 

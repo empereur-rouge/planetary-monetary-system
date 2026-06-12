@@ -275,11 +275,7 @@ async fn mint_on_ledger(
     };
 
     let payload = PayloadEnvelope::Plain(PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: address.to_string(),
-            amount: amount.to_string(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(address.to_string(), amount.to_string(), None)],
     });
 
     let meta = WireMeta {

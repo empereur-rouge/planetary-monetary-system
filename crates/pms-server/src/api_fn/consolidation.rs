@@ -145,11 +145,7 @@ pub async fn admin_consolidate_utxos(
     let mut tx_outputs: Vec<TxOutput> = Vec::new();
 
     // Consolidated output back to coordinator
-    tx_outputs.push(TxOutput {
-        address: address.clone(),
-        amount: consolidation_amount.to_string(),
-        asset_id: req.asset_id.clone(),
-    });
+    tx_outputs.push(TxOutput::new(address.clone(), consolidation_amount.to_string(), req.asset_id.clone()));
 
     // Fee output to treasury/admin
     if fee_dec > Decimal::ZERO {
@@ -171,11 +167,7 @@ pub async fn admin_consolidate_utxos(
             }
         };
 
-        tx_outputs.push(TxOutput {
-            address: admin_addr,
-            amount: fee_dec.to_string(),
-            asset_id: req.asset_id.clone(), // Must match input asset for conservation
-        });
+        tx_outputs.push(TxOutput::new(admin_addr, fee_dec.to_string(), req.asset_id.clone(),));
     }
 
     // ════════════════════════════════════════════════════════════════════

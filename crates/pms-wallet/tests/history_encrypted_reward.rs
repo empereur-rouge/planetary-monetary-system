@@ -61,11 +61,7 @@ async fn test_history_encrypted_reward() -> Result<()> {
     // In pms_types_payload, EncryptedRewardOutput { encrypted: EncryptedPayload }
     // The EncryptedPayload decrypts to TxOutput.
 
-    let tx_out = TxOutput {
-        address: my_addr.clone(),
-        amount: "100".into(),
-        asset_id: None,
-    };
+    let tx_out = TxOutput::new(my_addr.clone(), "100", None);
     let pt = serde_json::to_vec(&tx_out)?;
 
     let enc_payload = EncryptedPayload::encrypt_for(

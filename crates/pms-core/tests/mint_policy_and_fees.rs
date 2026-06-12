@@ -64,11 +64,7 @@ async fn mint_policy_enforced_on_admin_vs_non_admin() -> anyhow::Result<()> {
     let meta2 = WireMeta::from(&settings2);
 
     // 4) Prépare un payload Mint simple
-    let outputs = vec![TxOutput {
-        address: "dummy-address-for-test".to_string(),
-        amount: "10".to_string(),
-        asset_id: None,
-    }];
+    let outputs = vec![TxOutput::new("dummy-address-for-test".to_string(), "10".to_string(), None)];
     let mint_payload = PayloadEnvelope::Plain(PlainPayload::Mint { outputs });
 
     // Parents = genesis
@@ -199,11 +195,7 @@ async fn dev_mode_mint_signed_by_admin_is_accepted() -> anyhow::Result<()> {
     }
 
     // 4) Prépare un payload Mint simple
-    let outputs = vec![TxOutput {
-        address: "dummy-address-for-test".to_string(),
-        amount: "10".to_string(),
-        asset_id: None,
-    }];
+    let outputs = vec![TxOutput::new("dummy-address-for-test".to_string(), "10".to_string(), None)];
     let mint_payload = PayloadEnvelope::Plain(PlainPayload::Mint { outputs });
 
     // Parents = genesis
@@ -366,11 +358,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
         metadata: None,
     };
 
-    let outputs = vec![TxOutput {
-        address: "any".into(),
-        amount: "1".into(),
-        asset_id: None,
-    }];
+    let outputs = vec![TxOutput::new("any", "1", None)];
 
     let res = validate_mint_policy(&outputs, &wb, &settings);
     match res {
@@ -516,11 +504,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_testnet() {
         metadata: None,
     };
 
-    let outputs = vec![TxOutput {
-        address: "any".into(),
-        amount: "1".into(),
-        asset_id: None,
-    }];
+    let outputs = vec![TxOutput::new("any", "1", None)];
 
     let res = validate_mint_policy(&outputs, &wb, &settings);
     match res {
@@ -673,11 +657,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_mainnet() {
         metadata: None,
     };
 
-    let outputs = vec![TxOutput {
-        address: "any".into(),
-        amount: "1".into(),
-        asset_id: None,
-    }];
+    let outputs = vec![TxOutput::new("any", "1", None)];
 
     let res = validate_mint_policy(&outputs, &wb, &settings);
     match res {
@@ -830,11 +810,7 @@ fn mint_policy_allows_empty_signer_pubkeys_in_dev() {
         metadata: None,
     };
 
-    let outputs = vec![TxOutput {
-        address: "any".into(),
-        amount: "1".into(),
-        asset_id: None,
-    }];
+    let outputs = vec![TxOutput::new("any", "1", None)];
 
     let res = validate_mint_policy(&outputs, &wb, &settings);
     assert!(

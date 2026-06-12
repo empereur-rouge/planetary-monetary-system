@@ -66,11 +66,7 @@ async fn decrypt_and_filter_by_address_rocks() -> Result<()> {
 
     // 1) Bloc Mint -> m'envoie 42
     let plain_mint = PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: my_addr.clone(),
-            amount: "42".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(my_addr.clone(), "42", None)],
     };
     let enc_mint = EncryptedPayload::encrypt_for_plain(&plain_mint, &[my_xpk.clone()])
         .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -100,11 +96,7 @@ async fn decrypt_and_filter_by_address_rocks() -> Result<()> {
                 index: 0,
             },
         }],
-        outputs: vec![TxOutput {
-            address: other_addr.into(),
-            amount: "13".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(other_addr, "13", None)],
         fee: "0".into(),
         unlocks: vec![Unlock {
             pubkey_hex: "00".into(),
@@ -179,11 +171,7 @@ async fn wrong_recipient_key_cannot_decrypt() -> Result<()> {
 
     // Mint chiffré UNIQUEMENT pour A.
     let plain_mint = PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: a_addr.clone(),
-            amount: "42".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(a_addr.clone(), "42", None)],
     };
     let enc = EncryptedPayload::encrypt_for_plain(&plain_mint, &[a_xpk])
         .map_err(|e| anyhow::anyhow!("{}", e))?;

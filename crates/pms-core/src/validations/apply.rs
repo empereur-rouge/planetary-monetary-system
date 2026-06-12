@@ -34,7 +34,7 @@ pub fn apply_block_mem<W: WriteState>(dag: &mut W, b: &Block) {
         }
         // NOTE :
         //  - Les outputs normaux sont inscrits dans le payload du bloc
-        //    (TxOutput { address, amount }).
+        //    (TxOutput { address, amount, … }).
         //  - L'output "fees" vers le SYSTEM_FEES_WALLET est un output
         //    comme les autres, ajouté au moment de la construction de
         //    la transaction.

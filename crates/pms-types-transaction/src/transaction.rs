@@ -23,6 +23,16 @@ pub struct TxOutput {
     /// None = PMS natif. Some("edenite") = token custom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_id: Option<String>,
+    /// Time-lock natif (protocole 2.1) : l'output est indépensable tant que
+    /// l'horloge du validateur n'a pas atteint ce timestamp **UNIX en
+    /// millisecondes**. `None` = dépensable immédiatement (comportement
+    /// historique).
+    ///
+    /// Rétro-compat sérialisation : `skip_serializing_if` garantit qu'un
+    /// output sans lock produit exactement le même JSON canonique qu'avant —
+    /// le `signing_message` des transactions existantes est inchangé.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locked_until: Option<u64>,
 }
 
 impl TxOutput {
@@ -40,6 +50,20 @@ impl TxOutput {
             address: address.into(),
             amount: amount.into(),
             asset_id,
+            locked_until: None,
+        }
+    }
+
+    /// Variante de [`TxOutput::new`] avec un time-lock (timestamp UNIX ms).
+    pub fn new_locked(
+        address: impl Into<String>,
+        amount: impl Into<String>,
+        asset_id: Option<String>,
+        locked_until: u64,
+    ) -> Self {
+        Self {
+            locked_until: Some(locked_until),
+            ..Self::new(address, amount, asset_id)
         }
     }
 }

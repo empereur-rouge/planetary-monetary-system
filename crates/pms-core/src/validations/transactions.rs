@@ -31,26 +31,35 @@ pub fn utxo_sufficient_funds(dag: &Dag, tx: &Transaction) -> Result<(), Validati
     }
     let need = out_sum + fee;
 
+    // Time-lock 2.1 : même règle que le hot path (check_input_time_locks),
+    // appliquée ici input par input pour éviter une seconde résolution.
+    let now_ms = crate::utxo::current_time_ms();
+
     let mut in_sum = Decimal::ZERO;
-    for inp in &tx.inputs {
+    for (i, inp) in tx.inputs.iter().enumerate() {
         let Some(prev_block) = dag.blocks.get(&inp.out.txid) else {
             return Err(ValidationError::MissingInput);
         };
-        let prev_amount = match &prev_block.payload {
+        let prev_out = match &prev_block.payload {
             Some(PayloadEnvelope::Plain(PlainPayload::Mint { outputs })) => outputs
                 .get(inp.out.index as usize)
-                .ok_or(ValidationError::MissingOutput)?
-                .amount
-                .clone(),
+                .ok_or(ValidationError::MissingOutput)?,
             Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(txp))) => txp
                 .outputs
                 .get(inp.out.index as usize)
-                .ok_or(ValidationError::MissingOutput)?
-                .amount
-                .clone(),
+                .ok_or(ValidationError::MissingOutput)?,
             _ => return Err(ValidationError::MissingOutput),
         };
-        in_sum += amount_parse_pos_dec(&prev_amount)?;
+        if let Some(until) = prev_out.locked_until {
+            if now_ms < until {
+                return Err(ValidationError::OutputTimeLocked {
+                    input_index: i,
+                    until,
+                    now: now_ms,
+                });
+            }
+        }
+        in_sum += amount_parse_pos_dec(&prev_out.amount)?;
     }
 
     if in_sum < need {
@@ -83,6 +92,38 @@ async fn fetch_input_outputs(
         }
     }
     Ok(fetched)
+}
+
+/// Time-lock natif (protocole 2.1) : rejette la dépense d'un input dont le
+/// `locked_until` (timestamp UNIX ms, porté par l'output on-DAG) est encore
+/// dans le futur par rapport à `now_ms`.
+///
+/// `input_outputs` = les `TxOutput` dépensés, dans l'ordre des inputs.
+/// Partagé entre le hot path (`validate_transaction_full`) et le chemin
+/// legacy (`utxo_sufficient_funds` via `validate_block`) pour que la règle
+/// ne puisse pas diverger entre les deux.
+pub fn check_input_time_locks(
+    input_outputs: &[TxOutput],
+    now_ms: u64,
+) -> Result<(), ValidationError> {
+    for (i, out) in input_outputs.iter().enumerate() {
+        if let Some(until) = out.locked_until {
+            if now_ms < until {
+                tracing::warn!(
+                    "🚫 Time-locked input {} spent too early: locked until {}, now {}",
+                    i,
+                    until,
+                    now_ms
+                );
+                return Err(ValidationError::OutputTimeLocked {
+                    input_index: i,
+                    until,
+                    now: now_ms,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Conservation stricte par asset : `sum(inputs[asset]) == sum(outputs[asset])`
@@ -187,7 +228,13 @@ pub async fn validate_transaction_async(
 ///    dérive bien l'adresse propriétaire de l'UTXO dépensé
 ///    ([`unlock_matches_address`]). Sans ce binding, n'importe quelle
 ///    signature valide permettrait de dépenser les fonds d'autrui.
-/// 5. **Existence + double-spend + conservation par asset** (règle canonique).
+/// 5. **Time-lock (protocole 2.1)** : aucun input `locked_until` dans le
+///    futur ([`check_input_time_locks`], horloge = `now_ms`).
+/// 6. **Existence + double-spend + conservation par asset** (règle canonique).
+///
+/// `now_ms` = horloge du validateur (timestamp UNIX ms) — paramètre explicite
+/// pour la testabilité ; en production, le hot path passe le `now_ms` du
+/// persist (même source que `now_ms_for_signers`).
 ///
 /// Retourne les `TxOutput` des inputs (dans l'ordre) pour que l'appelant
 /// puisse réutiliser les adresses sans re-fetch (ex: compliance freeze check).
@@ -195,6 +242,7 @@ pub async fn validate_transaction_full(
     utxos: &crate::utxo::ShardedUtxoSet,
     tx: &Transaction,
     policy: &ValidatePolicy,
+    now_ms: u64,
 ) -> Result<Vec<TxOutput>, ValidationError> {
     // 1. Appariement input[i] ↔ unlock[i]
     if tx.inputs.len() != tx.unlocks.len() {
@@ -231,6 +279,8 @@ pub async fn validate_transaction_full(
             return Err(ValidationError::OwnershipMismatch { input_index: i });
         }
     }
+
+    check_input_time_locks(&input_outputs, now_ms)?;
 
     check_asset_conservation(tx, &input_outputs)?;
 

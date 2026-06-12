@@ -303,11 +303,7 @@ async fn non_authorized_mint_is_rejected_by_persist() -> Result<()> {
     let addr = attacker.get_address("8e");
 
     let plain = PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: addr,
-            amount: "1000".to_string(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(addr, "1000".to_string(), None)],
     };
     let block = dag.forge_block(Some(PayloadEnvelope::Plain(plain)), 0, compute_block_id)?;
     // Signature VALIDE de l'attaquant (donc le rejet n'est PAS dû à la crypto,
@@ -359,11 +355,7 @@ async fn signed_encrypted_mint_is_accepted() -> Result<()> {
     // 1) Payload Mint clair
     let addr = wallet.get_address(&settings.address.hrp);
     let plain = PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: addr,
-            amount: "1000".to_string(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(addr, "1000".to_string(), None)],
     };
 
     // 2) Chiffrement (tes fonctions existantes)

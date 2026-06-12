@@ -17,11 +17,7 @@ pub fn test_meta_and_wallet() -> (WireMeta, Wallet) {
 pub fn mk_block(id: &str, parents: Vec<BlockId>, meta: &WireMeta) -> StoredBlock {
     // Payload clair de type Mint
     let payload = PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: "addr".into(),
-            amount: "1.0".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new("addr", "1.0", None)],
     };
 
     // On stocke un PayloadEnvelope::Plain, comme dans le chemin normal
