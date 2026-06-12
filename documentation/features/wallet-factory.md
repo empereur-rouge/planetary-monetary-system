@@ -1,7 +1,7 @@
 ---
 tags: [feature]
 created: 2026-02-13
-updated: 2026-03-20
+updated: 2026-06-12
 version: v0.5.19
 ---
 
@@ -76,8 +76,8 @@ La Wallet Factory n'a pas de section de configuration dédiée. Elle s'appuie su
 | Méthode | Path | Auth | Description |
 |---------|------|------|-------------|
 | POST | `/v1/wallet/create` | [[api-key-authentication|API Key]] | Génère un nouveau wallet ou importe depuis une clé privée hex. Body optionnel `{ "import_hex": "..." }`. Retourne adresse, clés, X25519, et mnémonique (si généré). |
-| POST | `/v1/wallet/restore/mnemonic` | [[api-key-authentication|API Key]] | Restaure un wallet depuis 24 mots BIP39. Body : `{ "mnemonic": "mot1 mot2 ... mot24" }`. |
-| POST | `/v1/wallet/restore/private-key` | [[api-key-authentication|API Key]] | Restaure un wallet depuis une clé privée ECDSA hex (64 chars). Body : `{ "private_key_hex": "a1b2..." }`. |
+| POST | `/admin/wallet/restore/mnemonic` | Admin Token | **(v0.9.1, audit H-5)** Restaure un wallet depuis 24 mots BIP39. Body : `{ "mnemonic": "mot1 mot2 ... mot24" }`. Déplacé de `/v1/wallet/restore/mnemonic` (API Key) vers admin-gated : le client transmet un secret long-terme, réservé au credential opérateur. Ancien chemin → 404. |
+| POST | `/admin/wallet/restore/private-key` | Admin Token | **(v0.9.1, audit H-5)** Restaure un wallet depuis une clé privée ECDSA hex (64 chars). Body : `{ "private_key_hex": "a1b2..." }`. Déplacé de `/v1/wallet/restore/private-key` (API Key) vers admin-gated. Ancien chemin → 404. |
 | POST | `/v1/wallet/send-simple` | [[api-key-authentication|API Key]] | Envoi custodial one-shot. Body : `{ "private_key_b64", "to", "amount", "asset_id?" }`. Retourne `{ "block_id", "fee" }` (HTTP 201). |
 | POST | `/admin/faucet` | Admin Token | Mint PMS natif (dev/testnet uniquement). Body : `{ "to", "amount" }`. Retourne `{ "block_id", "amount" }` (HTTP 201). Rejeté HTTP 403 en mode prod. |
 
@@ -140,8 +140,9 @@ La fonction utilitaire `wallet_from_b64` est réutilisée par le module [[nft-sy
 | Test | Fichier | Description |
 |------|---------|-------------|
 | `wallet_create_returns_x25519_sk` | `crates/pms-server/tests/wallet_x25519_sk.rs` | Vérifie que `/v1/wallet/create` retourne `x25519_sk_hex` valide et cohérent avec `x25519_pub_hex`. |
-| `wallet_restore_mnemonic_returns_x25519_sk` | `crates/pms-server/tests/wallet_x25519_sk.rs` | Vérifie que `/v1/wallet/restore/mnemonic` retourne les mêmes clés X25519 que la création originale. |
-| `wallet_restore_private_key_returns_x25519_sk` | `crates/pms-server/tests/wallet_x25519_sk.rs` | Vérifie que `/v1/wallet/restore/private-key` retourne les mêmes clés X25519 que la création originale. |
+| `wallet_restore_mnemonic_requires_admin` | `crates/pms-server/tests/wallet_x25519_sk.rs` | (v0.9.1) Vérifie qu'un appel remote sans token admin sur `/admin/wallet/restore/mnemonic` → 401, et que l'ancien chemin `/v1/...` → 404. |
+| `wallet_restore_mnemonic_returns_x25519_sk` | `crates/pms-server/tests/wallet_x25519_sk.rs` | Vérifie que `/admin/wallet/restore/mnemonic` (avec token admin) retourne les mêmes clés X25519 que la création originale. |
+| `wallet_restore_private_key_returns_x25519_sk` | `crates/pms-server/tests/wallet_x25519_sk.rs` | Vérifie que `/admin/wallet/restore/private-key` (avec token admin) retourne les mêmes clés X25519 que la création originale. |
 | `wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo` | `crates/pms-server/tests/wallet_send_fees.rs` | Vérifie que le serveur ajoute automatiquement la clé X25519 admin aux destinataires du chiffrement pour que l'admin puisse décrypter les frais. |
 | `wallet_balance_returns_correct_balance_from_ram` | `crates/pms-server/tests/wallet_balance_fast.rs` | Vérifie que le solde retourné par `/wallet/balance` correspond au montant minté dans le cache RAM. |
 | `wallet_balance_returns_zero_for_unknown_address` | `crates/pms-server/tests/wallet_balance_fast.rs` | Vérifie qu'une adresse inconnue retourne un solde de 0. |

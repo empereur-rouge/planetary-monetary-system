@@ -92,20 +92,23 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
     // Endpoint: /submit/block (Main ingestion) — produces blocks, write-gated
     let submit = Router::new().route("/submit/block", post(submit_block));
 
-    // Read-only wallet endpoints (balance, history, draft-tx prepare, key derivation).
+    // Read-only wallet endpoints (balance, history, draft-tx prepare, key creation).
     // None of these mutate state on the engine: prepare returns an unsigned tx,
-    // create/restore just derive keys client-side.
+    // create derives a fresh random key.
+    //
+    // AUDIT H-5 (v0.9.1): the `restore/{mnemonic,private-key}` endpoints — which
+    // accept a user's PRE-EXISTING secret in the request body and echo it back —
+    // were moved OUT of this API-key-gated read bucket into the admin router
+    // (`/admin/wallet/restore/*`, gated by `require_local_or_admin`). They are
+    // custodial-by-design key-derivation helpers; restricting them to the
+    // operator credential shrinks the surface where a long-term user secret
+    // crosses the trust boundary (TLS-terminating gateway, server logs).
     let wallet_read = Router::new()
         .route("/wallet/balance", post(wallet_balance))
         .route("/wallet/history", post(get_wallet_history))
         .route("/v1/balance", post(balance_by_address))
         .route("/v1/tx/prepare", post(prepare_tx))
-        .route("/v1/wallet/create", post(wallet_create))
-        .route("/v1/wallet/restore/mnemonic", post(wallet_restore_mnemonic))
-        .route(
-            "/v1/wallet/restore/private-key",
-            post(wallet_restore_private_key),
-        );
+        .route("/v1/wallet/create", post(wallet_create));
 
     // Write-producing wallet endpoints — gated.
     let wallet_write = Router::new()
@@ -394,6 +397,16 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     let admin_recovery = Router::new()
         .route("/admin/ping", get(admin_ping))
         .route("/admin/compact", post(admin_compact))
+        // Custodial key-derivation helpers (audit H-5, v0.9.1). No DAG block
+        // produced → admin_recovery category. They take a user's existing
+        // secret (mnemonic / private key) in the body and echo back the
+        // derived address + keys; gating them behind the operator credential
+        // keeps long-term user secrets off the API-key surface.
+        .route("/admin/wallet/restore/mnemonic", post(wallet_restore_mnemonic))
+        .route(
+            "/admin/wallet/restore/private-key",
+            post(wallet_restore_private_key),
+        )
         // Admin Config API - Hot-Swap de la RuntimeConfig (no blocks)
         .route("/admin/config", get(admin_get_config))
         .route("/admin/config", post(admin_update_config))

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.2] - Unreleased — H-5 : wallet restore endpoints admin-gated
+
+### Changed
+- **fix(security/H-5)**: les endpoints de restauration de wallet — qui
+  acceptent un secret long-terme de l'utilisateur (mnémonique BIP39 / clé
+  privée hex) dans le body et le renvoient — passent de
+  `POST /v1/wallet/restore/{mnemonic,private-key}` (gated API key) à
+  `POST /admin/wallet/restore/{mnemonic,private-key}` (gated
+  `require_local_or_admin`, catégorie `admin_recovery` — aucun bloc DAG
+  produit). Restreindre ces helpers custodial au credential opérateur réduit
+  la surface où un secret utilisateur traverse la frontière de confiance
+  (gateway qui termine le TLS, logs serveur). L'ancien chemin `/v1/...`
+  renvoie désormais 404. Doc-comments ajoutées : « NE JAMAIS logger le body ».
+- **API_VERSION** `13` → `14` (changement de route + auth).
+- **Workspace** `0.9.1` → `0.9.2`.
+
+### Tests
+- `crates/pms-server/tests/wallet_x25519_sk.rs` : nouveau
+  `wallet_restore_mnemonic_requires_admin` (appel remote sans token → 401,
+  ancien chemin → 404) ; les deux tests de dérivation X25519 migrés sur le
+  nouveau chemin + token admin. Nouveaux helpers testkit `post_json_admin`
+  et `post_json_remote` (IP source non-loopback, TEST-NET-3) pour exercer le
+  gate admin sans court-circuit loopback.
+
+### Note (non corrigé)
+- Le fond de H-5 (la dérivation custodiale sans transmettre le secret au
+  serveur) reste un choix produit : le SDK sait déjà tout dériver côté client.
+  Ces endpoints sont conservés pour les flux custodial assumés, désormais
+  réservés à l'opérateur. ⚠️ Le **dashboard Heshima**, s'il appelle restore,
+  doit envoyer le token admin sur le nouveau chemin (sinon 401/404).
+
+---
+
 ## [0.9.1] - Unreleased — Simulator testnet DB-longevity slowdown
 
 ### Changed
