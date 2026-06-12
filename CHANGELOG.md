@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.7] - Unreleased — Garde-fous anti-régression (règles tests + runner)
+
+Pour empêcher la ré-apparition des problèmes corrigés en v0.9.3→v0.9.6 (faux
+tests, tests morts non-compilants, rot après durcissement de validation, footgun
+`Default` dérivé vs serde).
+
+### Added
+- **docs(CLAUDE.md)**: section `### Anti-faux-tests` (taxonomie des 7 anti-patterns
+  bannis + vérification obligatoire « lancer isolé et montrer la sortie » + garder
+  les tests verts quand on durcit validation/auth/protocole + ne pas hand-builder
+  `Settings` + lancer par-crate).
+- **docs(CLAUDE.md)**: Critical Pattern `### Config Default — derived vs serde` :
+  toute struct config avec `#[serde(default = "fn")]` doit impl `Default`
+  MANUELLEMENT (sinon `Struct::default()` diverge → cf. footgun P2pConfig v0.9.6).
+- **tooling**: `scripts/run-tests.sh` — lance la suite crate-par-crate (PMS_CONFIG
+  posé, simulateur hors-workspace inclus), résumé PASS/FAIL, exit non-nul si échec.
+  Évite le flake I/O du `cargo test --workspace` sur FS externe. La réponse en une
+  commande à « est-ce que la suite est verte ? ».
+
+### Changed
+- **Workspace** `0.9.6` → `0.9.7`. API_VERSION inchangé (`14`).
+
+---
+
 ## [0.9.6] - Unreleased — Fix footgun `P2pConfig::default()` (réhabilitation P2P)
 
 ### Fixed
