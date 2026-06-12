@@ -32,7 +32,7 @@ max_open_files = 4096
 [network]
 mode = "mainnet"
 network_id = "pms-mainnet-v1"
-protocol_version = 2
+protocol_version = 3
 
 [address]
 hrp = "8e"
@@ -172,3 +172,11 @@ enforce_fee_recipient = false
 # environnement doit avoir SA paire de clés.
 coordinator_public_key = ""
 coordinator_x25519_public_key = ""
+
+# ── Preuve de réserves ancrée (protocole 2.6, v0.10.0) ──────────────────
+# Désactivée par défaut. Une fois activée, le coordinator ancre toutes les
+# `interval_secs` un bloc ReserveSnapshot (state_root SHA-256 du set UTXO +
+# supply par asset). Vérification : POST /admin/reserves/verify.
+[reserves]
+enabled = false
+interval_secs = 3600

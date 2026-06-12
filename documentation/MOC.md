@@ -54,6 +54,7 @@ updated: 2026-05-04
 | Fiche | Description |
 |-------|-------------|
 | [[compliance]] | Gel d'adresses, saisie de fonds, inversion de transactions |
+| [[protocol-primitives]] | Time-lock UTXO, MultiSig/HashLock, mint contraint, demurrage, preuve de réserves (v0.10.0) |
 | [[smart-contracts]] | Contrats déclaratifs (triggers: NFT burn, token burn) |
 | [[economics]] | Fee burn, gas pool, dynamic fees, storage fees, cross-ledger fee |
 | [[bridge]] | Transferts cross-ledger (lock/mint) |
