@@ -1,8 +1,8 @@
 use pms_testkit::{
     forge_signed_wire_block_for_test, get_json, make_test_ctx, make_test_ctx_with_admin,
-    mint_to_wallet_and_get_inputs, post_json, post_json_admin,
+    mint_to_wallet_and_get_inputs, post_json, post_json_admin, sign_tx_inputs,
 };
-use pms_types::{OutputId, PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput, Unlock};
+use pms_types::{OutputId, PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput};
 use pms_types_nft::{NftAction, NftMetadata};
 use pms_types_payload::TokenMetadata;
 use pms_storage::DagStorage;
@@ -78,26 +78,8 @@ fn set_admin_token_env() {
     }
 }
 
-/// Signe `tx` avec `wallet` (le propriétaire des UTXO dépensés) et remplit un
-/// `Unlock` par input. Exigé par la validation canonique v0.9.0
-/// (`validate_transaction_full`) : `unlocks.len() == inputs.len()`, la pubkey
-/// de chaque unlock doit autoriser l'adresse de l'UTXO, et la signature porte
-/// sur `tx.signing_message(network_id)`. Sans ça → "transaction authorization
-/// invalid" / "inputs/unlocks count mismatch".
-fn sign_tx_inputs(wallet: &Wallet, tx: &Transaction, network_id: &str) -> Transaction {
-    let msg = tx.signing_message(network_id).expect("signing_message");
-    let sig = wallet.sign(&msg).expect("sign");
-    let mut signed = tx.clone();
-    signed.unlocks = tx
-        .inputs
-        .iter()
-        .map(|_| Unlock {
-            pubkey_hex: wallet.public_key_hex.clone(),
-            signature_b64: sig.clone(),
-        })
-        .collect();
-    signed
-}
+// `sign_tx_inputs` est maintenant le helper partagé `pms_testkit::sign_tx_inputs`
+// (importé en tête). Tout test forgeant une TxUtxo l'utilise.
 
 fn setup_admin_ctx() -> (std::sync::Arc<Wallet>, String, String) {
     clear_admin_env_conflicts();
