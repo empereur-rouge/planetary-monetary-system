@@ -289,6 +289,33 @@ Le mega-commit final est acceptable seulement pour les changements vraiment indi
 - **CRITICAL: Show test output before validation.** Every test MUST include `println!`/`eprintln!` statements that display key values (API responses, computed results, state changes). After writing a test, run it with `cargo test <test_name> -- --nocapture` and show the full output to the user. The user validates the test based on the printed output, NOT just on whether it passes. A test that passes but produces wrong output is a bug.
 - Never remove debug prints from tests after validation — they serve as living documentation and help catch regressions.
 
+### Anti-faux-tests — règles OBLIGATOIRES (tirées de l'audit v0.9.3→v0.9.6)
+
+**Un test qui passe quoi qu'il arrive est PIRE que pas de test** (fausse confiance). Bannir ces anti-patterns — chacun a été trouvé en production dans ce repo :
+
+1. **Zéro assertion** : un test qui appelle une fonction puis `println!` (« n'a pas paniqué ») ne teste RIEN. Chaque test DOIT asserter une valeur de sortie ou un état réel.
+2. **`matches!(...)` sans `assert!`** : le booléen est jeté → seul « une erreur a eu lieu » est vérifié. Toujours `assert!(matches!(e, Variant))`.
+3. **Tester une COPIE du code de prod** : ne JAMAIS redéfinir dans le test une fonction/trait/struct/handler qui duplique la prod (ex: un `is_ip_allowed` local, un `FakeStore` + handler ré-implémenté). Appeler le VRAI code (router/adapter/handler réel via testkit). Sinon une régression de prod reste verte.
+4. **Tautologie `f(x) == f(x)`** : ne pas re-dériver l'« attendu » avec la MÊME formule que la prod (ex: reconstruire `FeePolicy::new(...)`, réutiliser `DEFAULT_DIVISOR` des deux côtés). Asserter une **valeur golden hardcodée indépendante** (fee `0.1500001`, reward `0.010948905109`, clés obfusquées documentées).
+5. **Assertion trop molle** : `assert!(res.is_ok())` sans vérifier la valeur ; `status==200` sans le body ; `json1==json2` (passe si les deux régressent à `"0"` — exactement le bug « 0 EDN »). Asserter la VALEUR exacte (montant, balance, code).
+6. **Rejet sans prouver POURQUOI** : un test « rejeté » doit asserter la RAISON (code d'erreur stable / message), sinon il peut être rejeté pour une raison non-liée (body malformé, IP, méthode). Ex: `1030` (IP) vs `1001` (token) ; « signature verification failed » (vrai vérificateur) vs court-circuit signature-vide.
+7. **Guard rendant l'assertion inatteignable** : `if status.is_success() { assert... }` — si le happy-path n'est pas atteint, 0 assertion s'exécute. Garantir le chemin OU asserter explicitement le mode d'échec.
+
+**Vérification OBLIGATOIRE après écriture/modif d'un test :**
+- Le lancer ISOLÉ (`cargo test -p <crate> --test <file> <name> -- --nocapture`) et montrer la sortie. Un test qui ne COMPILE pas ou ne s'exécute pas est invisible en CI — `bridge_test`/`bridge_e2e`/`addr_activity` sont restés morts (non-compilants → jamais exécutés) pendant des mois, ratés par une revue qui lit sans exécuter.
+- Confirmer que les assertions s'exécutent vraiment (non court-circuitées).
+
+**Garder les tests verts quand on DURCIT la validation / l'auth / le protocole :**
+- Tout durcissement (validation tx canonique `validate_transaction_full`, single-writer, autorité de mint, auth admin, `protocol_version`, schéma DB) DOIT mettre à jour, dans le MÊME commit, TOUS les tests qui forgent des blocs/tx/requêtes admin. Sinon rot silencieux (v0.9.0 a laissé des dizaines de tests rouges découverts seulement en v0.9.3+).
+- Réflexe après un tel changement : `grep` les tests qui forgent `TxUtxo`/`Mint`/`BridgeLock`/admin POST et re-signer / re-câbler. Helpers de référence : `sign_tx_inputs` (un `Unlock`/input signé sur `tx.signing_message`), `post_json_admin` + `setup_admin_ctx` (token admin), `make_test_ctx_with_admin` (node_wallet = coordinateur).
+
+**Ne PAS hand-builder `Settings`/config dans les tests :**
+- Un `pms_config::Settings { ... }` champ-par-champ casse à CHAQUE ajout de champ (`health`, `auto_reindex_activity_items`, `AAD.binding`, `SecretSettings.*` ont tué la compil de plusieurs tests → morts). Utiliser un helper testkit (`make_test_app`, `make_test_state`, `make_test_ctx*`). Si un literal complet est inévitable, terminer par `..Default::default()` et utiliser `HealthSettings::default()` pour les sous-structs.
+
+**Lancer la suite PAR CRATE, pas `cargo test --workspace` :**
+- Sur le FS externe (`/Volumes/Crutial X9 ...`) + parallélisme maximal, `--workspace` a des flakes I/O transitoires (lecture config silencieusement droppée → `missing field rocks`). `cargo test -p <crate>` est fiable. Forcer la config si besoin : `PMS_CONFIG=$(pwd)/etc/config/config.dev.toml`. Réduire `--test-threads` pour les tests P2P timing-sensibles.
+- **Outil : `bash scripts/run-tests.sh`** lance toute la suite crate-par-crate (PMS_CONFIG posé, simulateur hors-workspace inclus) et renvoie un résumé PASS/FAIL + code de sortie non-nul si un échec. C'est LA réponse à « est-ce que la suite est verte ? » — la relancer après tout changement de tests/validation. Options : `--release`, `--ignored` (sandbox/bench/docker), `-p <crate>`.
+
 ### Dual-Layer Consistency (RAM + RocksDB)
 - **CRITICAL: Tout fix appliqué sur une couche (RAM DAG) DOIT être vérifié et appliqué sur l'autre couche (RocksDB) si la même logique existe.**
   - Exemple historique : `prune_oldest()` (RAM) a été corrigé pour protéger le dernier tip (commit `9e2922f`), mais `trim_tips()` et `remove_tip()` (RocksDB) n'ont pas reçu la même protection → bug silencieux en production (frais bloqués pendant des heures).
@@ -408,6 +435,15 @@ Règles impératives tirées de bugs production. Chaque pattern documente un pi�
 - `UtxoFlatItem` DOIT inclure le champ `asset_id` — son absence cause un balance de 0 quand on filtre par asset.
 - **Fichier de référence** : `crates/pms-storage/src/rocks_store/dag_storage_impl.rs` → `persist_block()`.
 - **Bug historique (v0.5.15)** : la supply était doublée car `apply_utxo_delta()` était appelé pour les payloads plain ET dans `persist_block`.
+
+### Config `Default` — derived vs serde (footgun)
+
+**CRITICAL: Toute struct config avec des champs `#[serde(default = "fn")]` ne doit PAS dériver `#[derive(Default)]`.** Le `Default` DÉRIVÉ met chaque champ à sa valeur zéro (`usize::default()=0`, `bool=false`, `Vec=∅`), qui **DIVERGE** du défaut serde. En production la config vient de la désérialisation serde (valeurs correctes), mais tout `Struct::default()` construit EN MÉMOIRE (tests, constructeurs internes, `..Default::default()`) hérite des mauvaises valeurs — silencieusement.
+
+- **Règle** : implémenter `Default` MANUELLEMENT en déléguant aux MÊMES fonctions que les `#[serde(default = "...")]`. Pattern de référence : `impl Default for P2pConfig` et `impl Default for HealthSettings` dans `crates/pms-config/src/config.rs`.
+- **Bug historique (v0.9.6)** : `P2pConfig::default()` (dérivé) → `max_connections=0` → le listener P2P rejette TOUTE connexion (`conn_semaphore` à 0 permis → socket fermé avant handshake → « eof before hello » côté client) ; `per_peer_queue_cap=0` → `mpsc::channel(0)` panique à la connexion d'un peer. Toute la suite `pms-network` était rouge à cause de ça.
+- **Symptôme** : un `*::default()` de config qui se comporte mal (rejets, panics, valeurs à 0/vide là où la config TOML donne autre chose) → suspecter le derived-Default-vs-serde-default.
+- **Au moindre ajout** d'un champ `#[serde(default = "...")]` à une struct config : ajouter le champ AUSSI à son `impl Default` manuel (le compilateur le force si la struct ne dérive pas Default).
 
 ### State-divergence vs transient errors (client-side cache)
 
