@@ -13,8 +13,70 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 /// Helper : crée un Router complet mais utilisé en mémoire seulement.
+///
+/// Le token admin est dérivé de la config (env `PMS_ADMIN_TOKEN_DEV`) et la
+/// liste IP est vide (toutes IP autorisées).
 pub async fn make_test_app() -> anyhow::Result<axum::Router> {
     let settings = load_config()?;
+    let admin_token = settings
+        .auth
+        .admin_api_token
+        .as_deref()
+        .and_then(resolve_admin_token);
+    build_test_router(admin_token, vec![]).await
+}
+
+/// Variante exposant l'**allowlist IP** ET le token admin de façon explicite,
+/// pour exercer la branche allowlist du middleware `require_local_or_admin`
+/// (cf. `crates/pms-server/tests/ip_allowlist.rs`).
+///
+/// - `admin_token` : `Some(t)` → le token attendu par le middleware ; `None` →
+///   aucun token configuré (toute requête tokenisée échoue).
+/// - `allowed_cidrs` : CIDR/IP autorisés (ex: `["10.0.0.0/8"]`). Vide = tout permis.
+///   Une entrée non parsable fait échouer la construction (fail-loud en test).
+pub async fn make_test_app_with_ip_allowlist(
+    admin_token: Option<String>,
+    allowed_cidrs: &[&str],
+) -> anyhow::Result<axum::Router> {
+    let mut nets = Vec::with_capacity(allowed_cidrs.len());
+    for c in allowed_cidrs {
+        nets.push(
+            c.parse::<ipnetwork::IpNetwork>()
+                .map_err(|e| anyhow::anyhow!("invalid CIDR {c:?}: {e}"))?,
+        );
+    }
+    build_test_router(admin_token, nets).await
+}
+
+/// Construit le router complet à partir d'un `AppState` (token admin + allowlist).
+async fn build_test_router(
+    admin_token: Option<String>,
+    allowed_networks: Vec<ipnetwork::IpNetwork>,
+) -> anyhow::Result<axum::Router> {
+    let (state, _store, _meta, settings) = build_app_state(admin_token, allowed_networks).await?;
+    Ok(build_api_router(state, &settings))
+}
+
+/// Expose un `AppState` complet (+ store + meta) pour tester des handlers
+/// DIRECTEMENT via `State(state)` sans passer par le router HTTP. Évite que
+/// chaque test de handler ré-écrive le literal `AppState` à 30 champs (cf.
+/// CLAUDE.md « AppState field additions — audit de tous les call sites »).
+pub async fn make_test_state()
+-> anyhow::Result<(AppState, Arc<RocksStore>, pms_wire::WireMeta)> {
+    let (state, store, meta, _settings) = build_app_state(None, vec![]).await?;
+    Ok((state, store, meta))
+}
+
+/// Cœur partagé : construit le `AppState` (store/DAG/serveur) avec un token admin
+/// et une allowlist IP donnés. Retourne aussi le store, la meta réseau et les
+/// settings pour les appelants qui en ont besoin. Toute la plomberie vit ici
+/// pour ne PAS être dupliquée entre les helpers publics.
+async fn build_app_state(
+    admin_token: Option<String>,
+    allowed_networks: Vec<ipnetwork::IpNetwork>,
+) -> anyhow::Result<(AppState, Arc<RocksStore>, pms_wire::WireMeta, pms_config::Settings)> {
+    let settings = load_config()?;
+    let meta = pms_wire::WireMeta::from(&settings);
 
     // 1) RocksStore temporaire
     let tmp = tempfile::tempdir()?;
@@ -74,12 +136,9 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
     let ready = Arc::new(AtomicBool::new(true));
     let stats = Arc::new(Stats::new());
 
-    // 8) Token admin
-    let admin_token = settings
-        .auth
-        .admin_api_token
-        .as_deref()
-        .and_then(resolve_admin_token);
+    // 8) Token admin + allowlist : fournis par l'appelant (cf. helpers publics).
+    //    On clone le store avant qu'il ne soit déplacé dans AppState (pour le retour).
+    let store_for_return = store.clone();
 
     // 9) AppState
     let state = AppState {
@@ -95,7 +154,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         admin_token,
         node_wallet,
         settings: Arc::new(settings.clone()),
-        allowed_networks: vec![], // Tests: allow all IPs
+        allowed_networks,
         treasury_wallets: TreasuryWallets::empty(),
         node_registry: pms_server::node_registry::create_registry(),
         fee_pool: pms_server::fee_pool::create_fee_pool(),
@@ -114,8 +173,7 @@ pub async fn make_test_app() -> anyhow::Result<axum::Router> {
         webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
     };
 
-    // 10) Router axum
-    Ok(build_api_router(state, &settings))
+    Ok((state, store_for_return, meta, settings))
 }
 
 pub struct TestCtx {

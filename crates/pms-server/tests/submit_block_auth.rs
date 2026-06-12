@@ -187,6 +187,154 @@ async fn signed_plain_block_is_accepted() -> Result<()> {
     Ok(())
 }
 
+/// Helper : store Rocks éphémère + DAG genesis + adapter réel (policy globale).
+async fn fresh_adapter(tag: &str) -> Result<(DagRef, Arc<dyn NetDagAdapter>, WireMeta)> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join(format!("rocks-{tag}"));
+    let store = Arc::new(
+        RocksStore::new(
+            db_path.to_string_lossy().as_ref(),
+            256,
+            "pms:test",
+            None,
+            &RocksMemoryConfig::default(),
+        )
+        .await?,
+    );
+    std::mem::forget(dir); // garde le tempdir vivant pour la durée du test
+    let settings = load_config()?;
+    let meta = WireMeta::from(&settings);
+    let genesis = Block::genesis(compute_block_id);
+    let dag: DagRef = Arc::new(ConcurrentDag::new_with_genesis(genesis));
+    let adapter: Arc<dyn NetDagAdapter> = CoreAdapter::new(dag.clone(), store, 0, None);
+    Ok((dag, adapter, meta))
+}
+
+/// Test : une signature PRÉSENTE mais INVALIDE (bien formée, mais sur un autre
+/// message) doit atteindre le vérificateur crypto et être rejetée.
+///
+/// NB (v0.9.3) : tous les tests précédents envoyaient une signature VIDE, qui
+/// court-circuite `verify_block_signature` (rejet "missing signature" avant la
+/// crypto). Le vrai vérificateur n'était jamais exercé sur une signature
+/// mal-mais-présente — exactement ce qu'un attaquant enverrait.
+#[tokio::test]
+async fn tampered_block_signature_is_rejected() -> Result<()> {
+    let (dag, adapter, meta) = fresh_adapter("tampered-sig").await?;
+    let wallet = Wallet::from_seed(&[4u8; 32], None).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let block = dag.forge_block(None, 0, compute_block_id)?;
+    let mut wb = forge_signed_wire_block_for_test(
+        block.parents.clone(),
+        &meta,
+        &wallet,
+        block.nonce,
+        block.payload,
+    );
+    // Remplace par une signature BIEN FORMÉE mais portant sur un autre message :
+    // elle ne vérifiera pas contre le message canonique du bloc.
+    wb.signature_hex = wallet
+        .sign("an entirely different message")
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+    let res = adapter.persist_block(&wb).await?;
+    println!("tampered-signature persist → {res:?}");
+    match res {
+        PutResult::Rejected(reason) => {
+            let r = reason.to_lowercase();
+            assert!(
+                r.contains("signature") || r.contains("sign") || r.contains("auth"),
+                "must be rejected by the signature verifier, got: {reason}"
+            );
+        }
+        other => panic!("present-but-invalid signature must be rejected, got: {other:?}"),
+    }
+    Ok(())
+}
+
+/// Test : une signature valide mais attribuée à une AUTRE clé publique
+/// (signer_pk_hex usurpé) doit être rejetée — le vérificateur lie la signature
+/// à la clé annoncée (le message canonique inclut `signer_pk_hex`).
+#[tokio::test]
+async fn signature_with_swapped_pubkey_is_rejected() -> Result<()> {
+    let (dag, adapter, meta) = fresh_adapter("swapped-pk").await?;
+    let real_signer = Wallet::from_seed(&[5u8; 32], None).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let imposter = Wallet::from_seed(&[6u8; 32], None).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let block = dag.forge_block(None, 0, compute_block_id)?;
+    let mut wb = forge_signed_wire_block_for_test(
+        block.parents.clone(),
+        &meta,
+        &real_signer,
+        block.nonce,
+        block.payload,
+    );
+    // Usurpation : on remplace la clé publique annoncée par celle de l'imposteur.
+    // La signature (faite par real_signer) ne vérifiera pas contre imposter_pk.
+    wb.signer_pk_hex = imposter.encoded_public_key();
+
+    let res = adapter.persist_block(&wb).await?;
+    println!("swapped-pubkey persist → {res:?}");
+    match res {
+        PutResult::Rejected(reason) => {
+            let r = reason.to_lowercase();
+            assert!(
+                r.contains("signature") || r.contains("sign") || r.contains("auth"),
+                "swapped-pubkey block must be rejected by the verifier, got: {reason}"
+            );
+        }
+        other => panic!("signature/pubkey mismatch must be rejected, got: {other:?}"),
+    }
+    Ok(())
+}
+
+/// Test : un Mint PLAIN signé par une clé NON autorisée (pas dans
+/// `admin.signer_pubkeys` de la config dev) est rejeté au niveau persist_block.
+///
+/// NB (v0.9.3) : couvre le gate d'autorité de mint via le VRAI chemin persist
+/// (`validate_mint_policy` → `validate_mint_security` dans persist.rs:238-257),
+/// pas seulement les fonctions unitaires. On assert la RAISON pour prouver que
+/// le rejet vient bien du contrôle d'autorité (et non d'un montant/parent/etc.).
+#[tokio::test]
+async fn non_authorized_mint_is_rejected_by_persist() -> Result<()> {
+    let (dag, adapter, meta) = fresh_adapter("unauth-mint").await?;
+
+    // Wallet aléatoire — N'EST PAS dans admin.signer_pubkeys de config.dev.toml.
+    let attacker = Wallet::from_seed(&[42u8; 32], None).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let addr = attacker.get_address("8e");
+
+    let plain = PlainPayload::Mint {
+        outputs: vec![TxOutput {
+            address: addr,
+            amount: "1000".to_string(),
+            asset_id: None,
+        }],
+    };
+    let block = dag.forge_block(Some(PayloadEnvelope::Plain(plain)), 0, compute_block_id)?;
+    // Signature VALIDE de l'attaquant (donc le rejet n'est PAS dû à la crypto,
+    // mais bien au contrôle d'autorité de mint).
+    let wb = forge_signed_wire_block_for_test(
+        block.parents.clone(),
+        &meta,
+        &attacker,
+        block.nonce,
+        block.payload,
+    );
+
+    let res = adapter.persist_block(&wb).await?;
+    println!("non-authorized mint persist → {res:?}");
+    match res {
+        PutResult::Rejected(reason) => {
+            let r = reason.to_lowercase();
+            assert!(
+                r.contains("mint") && (r.contains("policy") || r.contains("unauthor") || r.contains("security")),
+                "rejection must come from the mint-authority gate, got: {reason}"
+            );
+        }
+        other => panic!("unauthorized mint must be rejected by persist, got: {other:?}"),
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn signed_encrypted_mint_is_accepted() -> Result<()> {
     let dir = tempfile::tempdir()?;

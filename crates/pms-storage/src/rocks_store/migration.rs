@@ -624,3 +624,171 @@ impl RocksStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod data_preservation_tests {
+    //! Audit gap E1 (v0.9.3) : avant, aucun test n'écrivait des données à une
+    //! version N, ne lançait la migration N→CURRENT_VER, et ne vérifiait que les
+    //! données survivent ET que les index reconstruits sont repeuplés. Les tests
+    //! existants ne vérifiaient que le NUMÉRO de version. Pour un moteur bancaire,
+    //! une migration qui corromprait silencieusement les balances était un trou.
+    //!
+    //! Ce test simule une vieille DB pré-index (CFs by_time/id2ts/addr_activity/
+    //! addr_type_activity vidés), redescend la version, relance `ensure_schema`,
+    //! et prouve :
+    //!   1. le CF `blocks` (source de vérité) est INTACT — aucun bloc perdu ;
+    //!   2. la version finale == CURRENT_VER ;
+    //!   3. mig_2→3 reconstruit by_time/id2ts ;
+    //!   4. mig_3→4 reconstruit addr_activity à partir des payloads des blocs.
+
+    use super::*;
+    use crate::rocks_store::store::{RocksMemoryConfig, RocksStore};
+    use pms_types::TxOutput;
+    use pms_types_payload::{PayloadEnvelope, PlainPayload};
+
+    /// Compte les entrées d'un CF (hors clé sentinelle `__init__`).
+    fn cf_entry_count(store: &RocksStore, cf_name: &str) -> usize {
+        let cf = store.cf(cf_name);
+        store
+            .db
+            .iterator_cf(&cf, rocksdb::IteratorMode::Start)
+            .filter_map(|kv| kv.ok())
+            .filter(|(k, _)| k.as_ref() != b"__init__")
+            .count()
+    }
+
+    /// Vide entièrement un CF (simule une DB antérieure aux migrations d'index).
+    fn wipe_cf(store: &RocksStore, cf_name: &str) {
+        let cf = store.cf(cf_name);
+        let keys: Vec<Vec<u8>> = store
+            .db
+            .iterator_cf(&cf, rocksdb::IteratorMode::Start)
+            .filter_map(|kv| kv.ok().map(|(k, _)| k.to_vec()))
+            .collect();
+        for k in keys {
+            store.db.delete_cf(&cf, &k).unwrap();
+        }
+    }
+
+    async fn write_mint(store: &RocksStore, id: &str, parent: &str, addr: &str, amount: &str) {
+        let payload = PlainPayload::Mint {
+            outputs: vec![TxOutput {
+                address: addr.to_string(),
+                amount: amount.to_string(),
+                asset_id: None,
+            }],
+        };
+        let sb = StoredBlock {
+            id: id.to_string(),
+            parents: vec![parent.to_string()],
+            payload_json: Some(
+                serde_json::to_string(&PayloadEnvelope::Plain(payload)).unwrap(),
+            ),
+            nonce: 0,
+            network_id: "pms:test".to_string(),
+            protocol_version: 1,
+            signer_pk_hex: String::new(),
+            signature_hex: String::new(),
+            metadata: None,
+        };
+        store.append_block_atomic(&sb).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn migration_preserves_blocks_and_rebuilds_indexes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = RocksStore::new(
+            tmp.path().to_str().unwrap(),
+            256,
+            "pms:test",
+            None,
+            &RocksMemoryConfig::default(),
+        )
+        .await
+        .unwrap();
+        store.ensure_schema().await.unwrap();
+        assert_eq!(store.get_version().await.unwrap(), CURRENT_VER);
+
+        // Écrit 5 blocs Mint vers des adresses distinctes (peuple blocks + index).
+        for i in 0..5 {
+            let parent = if i == 0 {
+                "genesis".to_string()
+            } else {
+                format!("M{}", i - 1)
+            };
+            write_mint(
+                &store,
+                &format!("M{i}"),
+                &parent,
+                &format!("8eaddr{i}"),
+                "100.0",
+            )
+            .await;
+        }
+
+        let ids_before = store.all_block_ids().await.unwrap();
+        let by_time_before = cf_entry_count(&store, "by_time");
+        let addr_before = cf_entry_count(&store, "addr_activity");
+        println!(
+            "before migration: blocks={}, by_time={}, addr_activity={}",
+            ids_before.len(),
+            by_time_before,
+            addr_before
+        );
+        assert!(ids_before.len() >= 5, "5 mints must be stored");
+        assert!(by_time_before >= 5, "write path must index by_time");
+        assert!(addr_before >= 5, "write path must index addr_activity");
+
+        // SIMULE une vieille DB pré-migration : on vide les CF d'index reconstructibles.
+        for cf in ["by_time", "id2ts", "addr_activity", "addr_type_activity"] {
+            wipe_cf(&store, cf);
+        }
+        assert_eq!(cf_entry_count(&store, "by_time"), 0, "by_time wiped");
+        assert_eq!(cf_entry_count(&store, "addr_activity"), 0, "addr_activity wiped");
+
+        // Redescend la version → ensure_schema rejoue 1→CURRENT_VER.
+        store.set_version(1).await.unwrap();
+        assert_eq!(store.get_version().await.unwrap(), 1);
+
+        // LANCE LES MIGRATIONS.
+        store.ensure_schema().await.unwrap();
+
+        // 1) Aucun bloc perdu (le CF `blocks` n'est jamais touché par une migration).
+        let ids_after = store.all_block_ids().await.unwrap();
+        println!("after migration: blocks={}", ids_after.len());
+        assert_eq!(
+            ids_after.len(),
+            ids_before.len(),
+            "migration must not lose any block"
+        );
+        for id in &ids_before {
+            let b = store.get_block(id).await.unwrap();
+            assert!(b.is_some(), "block {id} must survive migration");
+            // payload intact (toujours un Mint plain déserialisable)
+            let env: PayloadEnvelope =
+                serde_json::from_str(b.unwrap().payload_json.as_deref().unwrap()).unwrap();
+            assert!(matches!(env, PayloadEnvelope::Plain(PlainPayload::Mint { .. })));
+        }
+
+        // 2) Version remontée à CURRENT_VER.
+        assert_eq!(store.get_version().await.unwrap(), CURRENT_VER);
+
+        // 3) mig_2→3 a reconstruit by_time/id2ts depuis idx_blocks.
+        let by_time_after = cf_entry_count(&store, "by_time");
+        let id2ts_after = cf_entry_count(&store, "id2ts");
+        println!("after migration: by_time={by_time_after}, id2ts={id2ts_after}");
+        assert!(
+            by_time_after >= 5,
+            "mig_2→3 must rebuild by_time (got {by_time_after})"
+        );
+        assert!(id2ts_after >= 5, "mig_2→3 must rebuild id2ts");
+
+        // 4) mig_3→4 a reconstruit addr_activity depuis les payloads des blocs.
+        let addr_after = cf_entry_count(&store, "addr_activity");
+        println!("after migration: addr_activity={addr_after}");
+        assert!(
+            addr_after >= 5,
+            "mig_3→4 must rebuild addr_activity from block payloads (got {addr_after})"
+        );
+    }
+}

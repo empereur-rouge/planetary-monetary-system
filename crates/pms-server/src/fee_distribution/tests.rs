@@ -71,6 +71,89 @@ fn fee_distribution_n_way_split() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Treasury split end-to-end via compute_fee_outputs — audit gap E3 (v0.9.3)
+//
+// L'ancien `fee_distribution_n_way_split` testait un split 50/30/20 avec une
+// adresse explicite, mais PAS : (1) le split canonique par défaut
+// coordinator 65% / treasury 35% avec une adresse treasury configurée, (2) le
+// fallback treasury-vide → coordinator (resolve_beneficiary_address), (3) le
+// skip d'une part qui s'arrondit à 0 (dust). Ce sont des chemins money.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn treasury_coordinator_65_35_split_exact() {
+    let config = pms_config::FeeDistributionConfig::default(); // coord 6500 / treasury 3500
+    let outputs = compute_fee_outputs(
+        "100".parse().unwrap(),
+        &["8eTREASURY".into()],
+        "8eCOORD",
+        &config,
+    );
+    println!("65/35 split of 100 → {outputs:?}");
+    assert_eq!(outputs.len(), 2);
+
+    let coord = outputs
+        .iter()
+        .find(|o| o.address == "8eCOORD")
+        .expect("coordinator output present");
+    let treasury = outputs
+        .iter()
+        .find(|o| o.address == "8eTREASURY")
+        .expect("treasury output present");
+    assert_eq!(coord.amount, "65", "coordinator must receive 65% of 100");
+    assert_eq!(treasury.amount, "35", "treasury must receive 35% of 100");
+
+    // Conservation : aucune fee créée ni perdue.
+    let total: Decimal = outputs
+        .iter()
+        .map(|o| o.amount.parse::<Decimal>().unwrap())
+        .sum();
+    assert_eq!(total, Decimal::from(100), "split must conserve the total fee");
+}
+
+#[test]
+fn empty_treasury_redirects_cut_to_coordinator() {
+    // Aucune adresse treasury configurée → la part treasury (35%) DOIT être
+    // redirigée vers le coordinateur (resolve_beneficiary_address fallback),
+    // pas perdue. Les deux outputs sont alors adressés au coordinateur.
+    let config = pms_config::FeeDistributionConfig::default();
+    let outputs = compute_fee_outputs("100".parse().unwrap(), &[], "8eCOORD", &config);
+    println!("empty-treasury fallback → {outputs:?}");
+
+    assert!(
+        outputs.iter().all(|o| o.address == "8eCOORD"),
+        "with no treasury configured, every fee output must go to the coordinator"
+    );
+    let to_coord: Decimal = outputs
+        .iter()
+        .map(|o| o.amount.parse::<Decimal>().unwrap())
+        .sum();
+    assert_eq!(
+        to_coord,
+        Decimal::from(100),
+        "coordinator must absorb the full 100 (65 + redirected 35)"
+    );
+}
+
+#[test]
+fn dust_share_rounding_to_zero_is_skipped() {
+    // total_fee = 1 satoshi : coordinator 0.0000000065 → round8 = 0.00000001,
+    // treasury 0.0000000035 → round8 = 0 → l'output treasury est SAUTÉ (pas
+    // un output à 0). Évite de polluer le bloc avec des sorties nulles.
+    let config = pms_config::FeeDistributionConfig::default();
+    let outputs = compute_fee_outputs(
+        "0.00000001".parse().unwrap(),
+        &["8eTREASURY".into()],
+        "8eCOORD",
+        &config,
+    );
+    println!("dust split → {outputs:?}");
+    assert_eq!(outputs.len(), 1, "the sub-dust treasury share must be skipped");
+    assert_eq!(outputs[0].address, "8eCOORD");
+    assert_eq!(outputs[0].amount, "0.00000001");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Tests pour BlockRewardConfig
 // ═══════════════════════════════════════════════════════════════════════
 

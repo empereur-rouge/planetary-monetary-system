@@ -90,6 +90,7 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
             block_cache_size_mb: 512,
             db_write_buffer_size_mb: 512,
             max_open_files: 512,
+            auto_reindex_activity_items: false,
         },
         network: pms_config::Network {
             mode: pms_config::NetworkMode::Dev,
@@ -120,6 +121,8 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
         secrets: pms_config::SecretSettings {
             node_identity_key_path: ".".into(),
             admin_wallet_file: None,
+            node_identity_key_encrypted_path: None,
+            strict_key_permissions: false,
         },
         validation: pms_config::ValidationSettings {
             min_pow_leading_zero_bits: 0,
@@ -191,6 +194,7 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
             max_parent_deps: 5_000,
             max_peer_retries: 20,
         },
+        health: pms_config::HealthSettings::default(),
         // NOTE: Both ledgers must use "pms-dev" as network_id because
         // CoreAdapter::persist_block() validates against the global config
         // loaded from etc/config/config.dev.toml (network_id = "pms-dev").
@@ -199,7 +203,10 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
                 id: "main".into(),
                 network_id: "pms-dev".into(),
                 prefix: "main".into(),
-                protocol_version: 1,
+                // Must match the global config.dev.toml protocol_version (=2),
+                // else CoreAdapter::persist_block rejects the Mint with "wrong
+                // network_id or protocol_version" (v0.9.0 canonical validation).
+                protocol_version: 2,
                 tip_limit: Some(100),
                 fees: None,
                 validation: None,
@@ -211,7 +218,7 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
                 id: "nft".into(),
                 network_id: "pms-dev".into(),
                 prefix: "nft".into(),
-                protocol_version: 1,
+                protocol_version: 2,
                 tip_limit: Some(50),
                 fees: None,
                 validation: None,

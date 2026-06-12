@@ -355,6 +355,110 @@ mod tests {
         );
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // No-loss-on-failure (merge_from) — audit gap E2 (v0.9.3)
+    //
+    // `perform_fee_distribution` (distribute.rs) fait un SWAP atomique
+    // `snapshot = mem::replace(&mut *pool, FeePool::new())` puis, si le
+    // persist_block du Reward échoue (Rejected / Err / non-Inserted), restaure
+    // via `pool.merge_from(&snapshot)`. Sans ça, les fees swappées seraient
+    // perdues définitivement. Ces tests reproduisent cette séquence exacte.
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn merge_from_restores_every_field() {
+        let mut snapshot = FeePool::new();
+        snapshot.add_fee(Decimal::from(10), "node1");
+        snapshot.add_fee(Decimal::from(10), "node1");
+        snapshot.add_fee(Decimal::from(5), "node2");
+        snapshot.add_burn_refund("wallet_x", Decimal::from(7), None);
+        snapshot.add_burn_refund("wallet_y", Decimal::from(3), Some("edenite".into()));
+
+        let mut target = FeePool::new();
+        target.merge_from(&snapshot);
+
+        println!(
+            "merged: total_fees={}, tx_count={}, nodes={:?}, refunds={}",
+            target.total_fees,
+            target.tx_count,
+            target.node_contributions,
+            target.get_burn_refunds().len()
+        );
+        assert_eq!(target.total_fees, Decimal::from(25));
+        assert_eq!(target.tx_count, 3);
+        assert_eq!(target.node_contributions.get("node1"), Some(&2));
+        assert_eq!(target.node_contributions.get("node2"), Some(&1));
+        assert_eq!(target.get_burn_refunds().len(), 2);
+        assert!(target.has_fees());
+    }
+
+    #[test]
+    fn swap_then_failed_persist_restore_is_lossless() {
+        // Pool accumulé avant distribution.
+        let mut pool = FeePool::new();
+        pool.add_fee(Decimal::from(10), "node1");
+        pool.add_fee(Decimal::from(10), "node1");
+        pool.add_fee(Decimal::from(5), "node2");
+        pool.add_burn_refund("wallet_x", Decimal::from(7), None);
+        let pre_total = pool.total_fees;
+        let pre_tx = pool.tx_count;
+        let pre_shares = pool.calculate_shares();
+
+        // 1) SWAP atomique (cf. distribute.rs:107).
+        let snapshot = std::mem::replace(&mut pool, FeePool::new());
+        assert!(!pool.has_fees(), "pool must be empty right after the swap");
+        assert_eq!(snapshot.total_fees, pre_total);
+
+        // 2) Le persist_block du Reward ÉCHOUE (Rejected / Err) → restauration.
+        pool.merge_from(&snapshot);
+
+        // 3) Pool intégralement restauré : zéro fee perdue.
+        println!(
+            "after restore: total_fees={} (was {pre_total}), tx_count={} (was {pre_tx})",
+            pool.total_fees, pool.tx_count
+        );
+        assert_eq!(pool.total_fees, pre_total, "restored total must equal pre-swap");
+        assert_eq!(pool.tx_count, pre_tx);
+        assert_eq!(pool.node_contributions, snapshot.node_contributions);
+        assert_eq!(pool.get_burn_refunds().len(), 1);
+        assert!(pool.has_fees());
+        // Les parts recalculées après restore sont identiques à avant le swap.
+        let post_shares = pool.calculate_shares();
+        assert_eq!(pre_shares.len(), post_shares.len());
+    }
+
+    #[test]
+    fn merge_from_preserves_fees_accrued_during_distribution_window() {
+        // Scénario réaliste : entre le SWAP et l'échec du persist, de nouvelles
+        // fees arrivent sur le pool fraîchement vidé. La restauration doit ADD
+        // le snapshot par-dessus, sans écraser les fees concurrentes.
+        let mut pool = FeePool::new();
+        pool.add_fee(Decimal::from(40), "node1"); // 4 blocs node1
+        pool.add_fee(Decimal::from(40), "node1");
+        pool.add_fee(Decimal::from(40), "node1");
+        pool.add_fee(Decimal::from(40), "node1");
+        let snapshot = std::mem::replace(&mut pool, FeePool::new());
+
+        // Fee concurrente qui tombe pendant la fenêtre de distribution.
+        pool.add_fee(Decimal::from(7), "node2");
+
+        // Persist échoue → restore.
+        pool.merge_from(&snapshot);
+
+        println!(
+            "concurrent-window: total_fees={}, tx_count={}, node1={:?}, node2={:?}",
+            pool.total_fees,
+            pool.tx_count,
+            pool.node_contributions.get("node1"),
+            pool.node_contributions.get("node2")
+        );
+        // 160 (snapshot) + 7 (concurrent) = 167, AUCUNE perte.
+        assert_eq!(pool.total_fees, Decimal::from(167));
+        assert_eq!(pool.tx_count, 5); // 4 + 1
+        assert_eq!(pool.node_contributions.get("node1"), Some(&4));
+        assert_eq!(pool.node_contributions.get("node2"), Some(&1));
+    }
+
     #[tokio::test]
     async fn test_registry_all_pools() {
         let registry = FeePoolRegistry::new();

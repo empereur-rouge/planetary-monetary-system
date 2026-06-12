@@ -83,6 +83,9 @@ mod tests {
         assert_eq!(parsed.dag_version, "1.0.0");
         assert_eq!(parsed.schema_version, 5);
         assert_eq!(parsed.protocol_version, 1);
-        assert_eq!(parsed.api_version, API_VERSION);
+        // Pin the LITERAL (not `API_VERSION` vs itself): any bump of API_VERSION
+        // must consciously update this assertion + the CHANGELOG. The real
+        // GET /v1/version handler is exercised in tests/version_endpoint.rs.
+        assert_eq!(parsed.api_version, 14);
     }
 }

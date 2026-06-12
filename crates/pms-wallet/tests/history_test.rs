@@ -151,3 +151,61 @@ async fn decrypt_and_filter_by_address_rocks() -> Result<()> {
 
     Ok(())
 }
+
+/// NÉGATIF (v0.9.3) : un bloc Mint chiffré pour le wallet A ne doit PAS être
+/// déchiffrable par le wallet B (clé X25519 différente). Tous les tests
+/// d'historique chiffraient pour soi puis déchiffraient avec sa propre clé —
+/// aucun ne prouvait l'isolation cryptographique (qu'une AUTRE clé échoue).
+#[tokio::test]
+async fn wrong_recipient_key_cannot_decrypt() -> Result<()> {
+    let tr = test_rocks_store("hist-wrong-key").await?;
+    let store = tr.store.clone();
+    let settings = pms_config::load_config()?;
+    let meta = pms_wire::WireMeta::from(&settings);
+
+    // Genesis
+    let g = Block::genesis(compute_block_id);
+    let gsb = mk_sb(g.id.clone(), vec![], &g.payload.clone().unwrap_or(PayloadEnvelope::Plain(PlainPayload::Genesis)), g.nonce, &meta);
+    let _ = store.append_block_atomic(&gsb).await?;
+
+    // Wallet A (destinataire prévu) et Wallet B (intrus).
+    let a = Wallet::generate();
+    let b = Wallet::generate();
+    let a_addr = a.get_address(&settings.address.hrp);
+    let a_xpk = a.x25519_pub_hex.clone();
+    let a_sk = a.x25519_sk_hex().expect("A mnemonics");
+    let b_addr = b.get_address(&settings.address.hrp);
+    let b_sk = b.x25519_sk_hex().expect("B mnemonics");
+
+    // Mint chiffré UNIQUEMENT pour A.
+    let plain_mint = PlainPayload::Mint {
+        outputs: vec![TxOutput {
+            address: a_addr.clone(),
+            amount: "42".into(),
+            asset_id: None,
+        }],
+    };
+    let enc = EncryptedPayload::encrypt_for_plain(&plain_mint, &[a_xpk])
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let parents = vec![g.id.clone()];
+    let env = PayloadEnvelope::Encrypted(enc);
+    let id = compute_block_id(
+        &parents,
+        &serde_json::to_string(&env).ok().and_then(|s| serde_json::from_str(&s).ok()),
+        1,
+    );
+    let _ = store.append_block_atomic(&mk_sb(id, parents, &env, 1, &meta)).await?;
+
+    // B tente de déchiffrer avec SA clé → 0 bloc (isolation cryptographique).
+    let dec_b = scan_decrypt_recent_for_address(&*store, &b_sk, &b_addr, 200).await?;
+    println!("wallet B (wrong key) decrypted {} blocks", dec_b.len());
+    assert_eq!(dec_b.len(), 0, "a foreign key must NOT decrypt A's encrypted block");
+
+    // Contrôle positif : A déchiffre bien le bloc (prouve qu'il est présent et
+    // déchiffrable — donc le 0 ci-dessus vient de la crypto, pas d'une absence).
+    let dec_a = scan_decrypt_recent_for_address(&*store, &a_sk, &a_addr, 200).await?;
+    println!("wallet A (right key) decrypted {} blocks", dec_a.len());
+    assert_eq!(dec_a.len(), 1, "the intended recipient A must decrypt the block");
+
+    Ok(())
+}

@@ -132,5 +132,21 @@ async fn wallet_balance_matches_v1_balance() -> anyhow::Result<()> {
         json1["balance"], json2["balance"]
     );
 
+    // CRITICAL (v0.9.3): pin the VALUE, not just cross-endpoint equality.
+    // `json1 == json2` alone passes if BOTH endpoints regress to "0" — exactly
+    // the historical "0 EDN" bug (balance_by_address vs _and_asset). Assert the
+    // balance actually equals the minted 25 PMS.
+    let bal: rust_decimal::Decimal = json1["balance"]
+        .as_str()
+        .expect("balance must be a string")
+        .parse()
+        .expect("balance must parse as Decimal");
+    println!("wallet/balance value = {bal}");
+    assert_eq!(
+        bal,
+        rust_decimal::Decimal::from(25),
+        "balance must equal the minted 25 PMS, got {bal}"
+    );
+
     Ok(())
 }
