@@ -2,7 +2,7 @@ use pms_testkit::{
     forge_signed_wire_block_for_test, get_json, make_test_ctx, make_test_ctx_with_admin,
     mint_to_wallet_and_get_inputs, post_json, post_json_admin,
 };
-use pms_types::{OutputId, PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput};
+use pms_types::{OutputId, PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput, Unlock};
 use pms_types_nft::{NftAction, NftMetadata};
 use pms_types_payload::TokenMetadata;
 use pms_storage::DagStorage;
@@ -76,6 +76,27 @@ fn set_admin_token_env() {
     unsafe {
         std::env::set_var("PMS_ADMIN_TOKEN_DEV", ADMIN_TOKEN);
     }
+}
+
+/// Signe `tx` avec `wallet` (le propriétaire des UTXO dépensés) et remplit un
+/// `Unlock` par input. Exigé par la validation canonique v0.9.0
+/// (`validate_transaction_full`) : `unlocks.len() == inputs.len()`, la pubkey
+/// de chaque unlock doit autoriser l'adresse de l'UTXO, et la signature porte
+/// sur `tx.signing_message(network_id)`. Sans ça → "transaction authorization
+/// invalid" / "inputs/unlocks count mismatch".
+fn sign_tx_inputs(wallet: &Wallet, tx: &Transaction, network_id: &str) -> Transaction {
+    let msg = tx.signing_message(network_id).expect("signing_message");
+    let sig = wallet.sign(&msg).expect("sign");
+    let mut signed = tx.clone();
+    signed.unlocks = tx
+        .inputs
+        .iter()
+        .map(|_| Unlock {
+            pubkey_hex: wallet.public_key_hex.clone(),
+            signature_b64: sig.clone(),
+        })
+        .collect();
+    signed
 }
 
 fn setup_admin_ctx() -> (std::sync::Arc<Wallet>, String, String) {
@@ -177,17 +198,38 @@ async fn activity_transfer_in_encrypted() -> anyhow::Result<()> {
     let change = change_dec.normalize().to_string();
     println!("  Fee: {fee}, Change: {change}");
 
+    // Build + sign the tx client-side (the handler does NOT sign; v0.9.0
+    // canonical validation requires valid unlocks from the sender wallet).
+    let tx = Transaction {
+        inputs: vec![TxInput {
+            out: OutputId {
+                txid: u.id.txid.clone(),
+                index: u.id.index,
+            },
+        }],
+        outputs: vec![
+            TxOutput {
+                address: to_addr.clone(),
+                amount: taxable_amount.to_string(),
+                asset_id: None,
+            },
+            TxOutput {
+                address: admin_addr.clone(),
+                amount: fee.clone(),
+                asset_id: None,
+            },
+            TxOutput {
+                address: from_addr.clone(),
+                amount: change.clone(),
+                asset_id: None,
+            },
+        ],
+        fee: fee.clone(),
+        unlocks: vec![],
+    };
+    let signed = sign_tx_inputs(&w_from, &tx, &ctx.settings.network.network_id);
     let body = serde_json::json!({
-        "tx": {
-            "inputs": [{ "out": { "txid": u.id.txid, "index": u.id.index } }],
-            "outputs": [
-                { "address": to_addr, "amount": taxable_amount },
-                { "address": admin_addr, "amount": &fee },
-                { "address": from_addr, "amount": &change }
-            ],
-            "fee": fee,
-            "unlocks": []
-        },
+        "tx": serde_json::to_value(&signed).unwrap(),
         "recipients_xpk": [ w_to.x25519_pub_hex.clone() ]
     });
     let (status, json) = post_json(&ctx.app, "/wallet/tx/send", body).await;
@@ -324,7 +366,11 @@ async fn activity_transfer_with_change() -> anyhow::Result<()> {
         &meta,
         &ctx.node_wallet,
         2,
-        Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))),
+        Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(sign_tx_inputs(
+            &sender,
+            &tx,
+            &meta.network_id,
+        )))),
     );
     println!("  Forged TxUtxo block: {}", wb.id);
 
@@ -449,7 +495,11 @@ async fn activity_transfer_self() -> anyhow::Result<()> {
         &meta,
         &ctx.node_wallet,
         2,
-        Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))),
+        Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(sign_tx_inputs(
+            &wallet,
+            &tx,
+            &meta.network_id,
+        )))),
     );
     println!("  Forged self-transfer block: {}", wb.id);
 
@@ -847,17 +897,36 @@ async fn activity_fee_received_appears() -> anyhow::Result<()> {
     let change = change_dec.normalize().to_string();
     println!("  Fee: {fee}, Change: {change}");
 
+    let tx = Transaction {
+        inputs: vec![TxInput {
+            out: OutputId {
+                txid: u.id.txid.clone(),
+                index: u.id.index,
+            },
+        }],
+        outputs: vec![
+            TxOutput {
+                address: to_addr.clone(),
+                amount: taxable_amount.to_string(),
+                asset_id: None,
+            },
+            TxOutput {
+                address: admin_addr.clone(),
+                amount: fee.clone(),
+                asset_id: None,
+            },
+            TxOutput {
+                address: from_addr.clone(),
+                amount: change.clone(),
+                asset_id: None,
+            },
+        ],
+        fee: fee.clone(),
+        unlocks: vec![],
+    };
+    let signed = sign_tx_inputs(&w_from, &tx, &ctx.settings.network.network_id);
     let body = serde_json::json!({
-        "tx": {
-            "inputs": [{ "out": { "txid": u.id.txid, "index": u.id.index } }],
-            "outputs": [
-                { "address": to_addr, "amount": taxable_amount },
-                { "address": admin_addr, "amount": &fee },
-                { "address": from_addr, "amount": &change }
-            ],
-            "fee": fee,
-            "unlocks": []
-        },
+        "tx": serde_json::to_value(&signed).unwrap(),
         "recipients_xpk": [ w_to.x25519_pub_hex.clone() ]
     });
     let (status, json) = post_json(&ctx.app, "/wallet/tx/send", body).await;
@@ -1076,7 +1145,11 @@ async fn activity_reverse_received_appears() -> anyhow::Result<()> {
         &meta,
         &ctx.node_wallet,
         2,
-        Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))),
+        Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(sign_tx_inputs(
+            &sender,
+            &tx,
+            &meta.network_id,
+        )))),
     );
     let tx_block_id = wb.id.clone();
     println!("  Forged TxUtxo block: {tx_block_id}");
@@ -1443,7 +1516,11 @@ async fn activity_nft_use_appears() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn activity_bridge_lock_in_appears() -> anyhow::Result<()> {
-    let ctx = make_test_ctx().await?;
+    // setup_admin_ctx + _with_admin makes node_wallet the admin/coordinator
+    // (seed 7) so the mint passes (PMS_TEST_ADMIN_PUBKEY) and the coordinator-only
+    // BridgeLock is authorized.
+    let (_admin, admin_addr, admin_pubkey) = setup_admin_ctx();
+    let ctx = make_test_ctx_with_admin(vec![admin_addr], vec![admin_pubkey]).await?;
     let hrp = ctx.settings.address.hrp.as_str();
     let meta = WireMeta::from(&ctx.settings);
 

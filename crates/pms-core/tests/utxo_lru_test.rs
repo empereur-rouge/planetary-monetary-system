@@ -291,56 +291,74 @@ async fn lru_apply_diff_with_cache_miss() {
 // Test 6: utxos_by_address with mixed cached/non-cached
 // ═══════════════════════════════════════════════════════════════════════
 
+/// NB (v0.9.4) : ce test affirmait à tort que `utxos_by_address` retrouvait des
+/// UTXO ÉVINCÉS via fallback. Or `add()` retire intentionnellement les entrées
+/// évincées de l'`address_index` (design v0.6.3 — mémoire bornée pour un
+/// coordinateur à des millions d'UTXO), donc `utxos_by_address` (qui itère
+/// l'index) ne peut PAS les voir. De plus `new(256)` donne une capacité de 1
+/// par shard (`ceil(256/SHARD_COUNT=256)`), et les deux OID partagent le préfixe
+/// txid "ee" → même shard → oid1 était évincé dès l'ajout d'oid2. Réécrit pour
+/// le comportement RÉEL : (A) sans éviction, `utxos_by_address` retourne tout ;
+/// (B) le VRAI fallback est sur `get()` (cache miss → store), pas sur l'index.
 #[tokio::test]
-async fn lru_utxos_by_address_with_fallback() {
+async fn lru_utxos_by_address_and_get_fallback() {
     let oid1 = make_oid("ee", 0);
     let txo1 = make_txo("addr_G", "10.0");
     let oid2 = make_oid("ee", 1);
     let txo2 = make_txo("addr_G", "20.0");
 
-    let store = mock_store(vec![
-        (oid1.clone(), txo1.clone()),
-        (oid2.clone(), txo2.clone()),
-    ]);
+    // ── Scénario A : capacité illimitée → aucune éviction.
+    // Les deux UTXO de addr_G (même shard) restent cachés ET indexés.
+    {
+        let store = mock_store(vec![
+            (oid1.clone(), txo1.clone()),
+            (oid2.clone(), txo2.clone()),
+        ]);
+        let utxos = ShardedUtxoSet::new(0, Some(store)); // 0 = unbounded
+        utxos.add(oid1.clone(), txo1.clone()).await;
+        utxos.add(oid2.clone(), txo2.clone()).await;
 
-    let utxos = ShardedUtxoSet::new(256, Some(store));
-
-    // Add both
-    utxos.add(oid1.clone(), txo1).await;
-    utxos.add(oid2.clone(), txo2).await;
-
-    // Check both are found
-    let found = utxos.utxos_by_address("addr_G").await;
-    println!("  utxos for addr_G (before eviction): {}", found.len());
-    assert_eq!(found.len(), 2);
-
-    // Evict oid1 by filling the shard
-    for i in 2..=10 {
-        let oid = make_oid("ee", i);
-        let txo = make_txo("addr_filler", "1.0");
-        utxos.add(oid, txo).await;
+        let found = utxos.utxos_by_address("addr_G").await;
+        println!("  [A unbounded] utxos for addr_G: {}", found.len());
+        for (oid, txo) in &found {
+            println!("    {} #{} = {} PMS", txo.address, oid.index, txo.amount);
+        }
+        assert_eq!(found.len(), 2, "both same-address UTXOs must be indexed/returned");
+        let total: Decimal = found
+            .iter()
+            .map(|(_, t)| Decimal::from_str(&t.amount).unwrap())
+            .sum();
+        assert_eq!(total, Decimal::from(30), "total should be 10 + 20 = 30");
     }
 
-    // utxos_by_address should still find both (via fallback for evicted ones)
-    let found_after = utxos.utxos_by_address("addr_G").await;
-    println!(
-        "  utxos for addr_G (after eviction): {}",
-        found_after.len()
-    );
-    for (oid, txo) in &found_after {
-        println!("    {} #{} = {} PMS", txo.address, oid.index, txo.amount);
+    // ── Scénario B : capacité bornée → cap 1 par shard avec new(256).
+    // oid1 et oid2 collisionnent (préfixe "ee") : ajouter oid2 ÉVINCE oid1.
+    {
+        let store = mock_store(vec![
+            (oid1.clone(), txo1.clone()),
+            (oid2.clone(), txo2.clone()),
+        ]);
+        let utxos = ShardedUtxoSet::new(256, Some(store)); // cap_per_shard = 1
+        utxos.add(oid1.clone(), txo1.clone()).await;
+        utxos.add(oid2.clone(), txo2.clone()).await; // évince oid1 du cache + index
+
+        // VRAI fallback : get() ne consulte pas l'index — sur cache miss il va au
+        // store. oid1 évincé est donc TOUJOURS récupérable via get().
+        let got1 = utxos.get(&oid1).await;
+        println!("  [B bounded] get(oid1 evicted) → {:?}", got1.as_ref().map(|t| &t.amount));
+        assert!(got1.is_some(), "get() must fall back to the store for an evicted UTXO");
+        assert_eq!(got1.unwrap().amount, "10.0");
+
+        // En revanche utxos_by_address itère l'index, d'où oid1 a été retiré à
+        // l'éviction (design v0.6.3 mémoire bornée) → ne voit plus que oid2.
+        let by_addr = utxos.utxos_by_address("addr_G").await;
+        println!("  [B bounded] utxos_by_address(addr_G) after eviction: {}", by_addr.len());
+        assert_eq!(
+            by_addr.len(),
+            1,
+            "evicted entries are removed from address_index by design (bounded memory)"
+        );
+        assert_eq!(by_addr[0].0.index, 1, "only the non-evicted oid2 remains indexed");
     }
-
-    assert_eq!(
-        found_after.len(),
-        2,
-        "should find both UTXOs (cached + fallback)"
-    );
-
-    let total: Decimal = found_after
-        .iter()
-        .map(|(_, t)| Decimal::from_str(&t.amount).unwrap())
-        .sum();
-    assert_eq!(total, Decimal::from(30), "total should be 30");
-    println!("  PASS: utxos_by_address finds evicted UTXOs via fallback");
+    println!("  PASS: utxos_by_address (index) + get() store-fallback behave per v0.6.3 design");
 }
