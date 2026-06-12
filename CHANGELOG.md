@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.11.1] - Unreleased — Fix idempotence: double-apply du delta UTXO sur re-soumission (audit S4)
+
+### Fixed
+- **fix(core/persist/idempotence)** — `CoreAdapter::persist_block`
+  ([crates/pms-core/src/net_adapter/persist.rs](crates/pms-core/src/net_adapter/persist.rs))
+  appliquait le `UtxoDelta` (`apply_diff`) **AVANT** la déduplication
+  `contains_block → AlreadyExists`. Conséquence : re-soumettre un bloc déjà
+  présent (re-gossip réseau, retry client, replay malveillant) **ré-appliquait
+  son delta UTXO** — la supply doublait / les UTXOs étaient re-crédités à chaque
+  re-soumission, tout en renvoyant `AlreadyExists` qui MASQUAIT la mutation et
+  faisait diverger l'état RAM du disque (le persist disque, gated par le même
+  early-return, n'était lui jamais ré-écrit). Même classe que le double-apply
+  v0.7.20 (`admin_mint_token`), mais au niveau du hot path pour TOUT payload
+  plain à delta. **Fix** : le check `contains_block → AlreadyExists` est déplacé
+  AVANT `apply_diff`, en préservant l'ordre délibéré « UTXO-update-first »
+  (anti-double-spend) pour les blocs réellement nouveaux. Reproduit puis
+  verrouillé par `duplicate_block_is_idempotent_no_double_apply`
+  (`persist #1 → Inserted bal=1000 | persist #2 → AlreadyExists bal=1000`).
+  Résiduel connu : une fenêtre concurrente étroite (deux threads persistant le
+  MÊME id de bloc neuf, passant tous deux `contains_block` avant insertion)
+  reste — bornée par le gap check→insert préexistant ; sa fermeture complète
+  exige un verrou par-id ou un réordonnancement insert-avant-apply (qui
+  casserait l'ordre anti-double-spend), à traiter en hardening séparé.
+
+### Added
+- **test(core)** — nouveau `crates/pms-core/tests/dag_integrity.rs` (audit
+  Section 4, méthode red-first) : 3 invariants d'intégrité du DAG soumis au
+  VRAI chemin de persistance (`CoreAdapter::persist_block`) —
+  `block_id_not_matching_canonical_hash_rejected` (M-6 : id ≠ hash canonique
+  rejeté), `duplicate_block_is_idempotent_no_double_apply` (le test qui a
+  démasqué le double-apply ci-dessus) et
+  `block_with_unknown_parent_not_silently_applied` (parent inexistant rejeté
+  par `enforce_parent_existence`, motif de rejet asserté spécifiquement —
+  anti-faux-test rule #6).
+
 ## [0.11.0] - Unreleased — Mint adossé à une réserve collatérale (plan 2.3 v2)
 
 ### Added
