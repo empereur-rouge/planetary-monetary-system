@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.5] - Unreleased — Réhabilitation des tests d'activité (validation tx canonique v0.9.0)
+
+Dernière couche de la réhabilitation : les tests d'activité basés sur des
+transferts forgeaient des `TxUtxo` sans unlocks et étaient rejetés par la
+validation canonique v0.9.0. Tests-only (aucun changement de prod).
+
+### Fixed
+- **test(activity)**: les 6 tests transfert d'`activity_e2e.rs` passent désormais.
+  - Helper `sign_tx_inputs(wallet, tx, network_id)` : un `Unlock` par input signé
+    sur `tx.signing_message(network_id)` (exigé par `validate_transaction_full` :
+    `unlocks.len()==inputs.len()`, pubkey↔owner, signature valide).
+  - `activity_transfer_with_change` / `activity_transfer_self` /
+    `activity_reverse_received_appears` (forge directe) : tx signée par le wallet
+    propriétaire de l'UTXO avant forge. `reverse_received` dépendait du bloc
+    "original" — qui ne persistait plus faute d'unlocks.
+  - `activity_transfer_in_encrypted` / `activity_fee_received_appears` (handler
+    `/wallet/tx/send`, qui ne signe PAS côté serveur) : la tx est signée
+    côté test et les unlocks embarqués dans le body.
+  - `activity_bridge_lock_in_appears` : passe par `setup_admin_ctx` +
+    `make_test_ctx_with_admin` pour que `node_wallet` soit l'admin/coordinateur
+    (mint autorisé + BridgeLock coordinator-only autorisé).
+- **test(core)**: `utxo_lru_test::lru_utxos_by_address_with_fallback` réécrit en
+  `lru_utxos_by_address_and_get_fallback`. L'ancien supposait que
+  `utxos_by_address` retrouve les UTXO ÉVINCÉS via fallback, alors que `add()`
+  retire intentionnellement les entrées évincées de l'`address_index` (design
+  v0.6.3, mémoire bornée). Le vrai fallback est sur `get()` (cache miss → store).
+  De plus `new(256)` donne 1 UTXO/shard (les 2 OID partageaient le préfixe txid).
+  Réécrit pour tester le comportement RÉEL : (A) sans éviction → 2 UTXO ; (B) le
+  fallback `get()` retrouve un UTXO évincé, mais `utxos_by_address` ne voit plus
+  que les entrées indexées.
+
+### Changed
+- **Workspace** `0.9.4` → `0.9.5`. API_VERSION inchangé (`14`).
+
+### Known issues (couches pré-existantes restantes — hors scope)
+- Sous `cargo test --workspace` (parallélisme maximal sur FS externe), des tests
+  P2P timing-sensibles de `pms-network` (`anti_abuse.rs` : "eof before hello") et
+  des lectures de config peuvent échouer par contention I/O. Ils passent isolés
+  et sur un FS local. Mitigations : `PMS_CONFIG=$(pwd)/etc/config/config.dev.toml`
+  et/ou parallélisme réduit. `anti_abuse` (handshake P2P) échoue aussi sur `main`
+  isolé — réhabilitation P2P séparée à venir.
+
+---
+
 ## [0.9.4] - Unreleased — Réhabilitation de tests pré-existants cassés + fix robustesse config
 
 Suite de l'audit v0.9.3 : correction des tests RED découverts à l'exécution
