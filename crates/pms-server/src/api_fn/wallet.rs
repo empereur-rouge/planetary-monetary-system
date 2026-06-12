@@ -158,6 +158,16 @@ pub struct UtxoFlatItem {
     /// `null` for PMS native, `"edenite"` (etc.) for custom tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_id: Option<String>,
+    /// Time-lock (protocole 2.1) : timestamp UNIX ms avant lequel l'UTXO est
+    /// indépensable. Absent = dépensable immédiatement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locked_until: Option<u64>,
+    /// Condition de déverrouillage (protocole 2.2) — absent = PubKey simple.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_condition: Option<pms_types::SpendCondition>,
+    /// Timestamp de création système (protocole 2.5, base du demurrage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
 }
 
 #[derive(serde::Serialize)]
@@ -180,6 +190,9 @@ pub async fn get_utxos_by_address(
             amount: tx_output.amount,
             address: tx_output.address,
             asset_id: tx_output.asset_id,
+            locked_until: tx_output.locked_until,
+            spend_condition: tx_output.spend_condition,
+            created_at: tx_output.created_at,
         })
         .collect();
 
