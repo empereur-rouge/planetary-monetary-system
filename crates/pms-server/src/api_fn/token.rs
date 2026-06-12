@@ -53,6 +53,10 @@ pub struct CreateTokenRequest {
     pub decimals: u8,
     #[serde(default)]
     pub max_supply: Option<String>,
+    /// Demurrage opt-in (protocole 2.5) : décote en bps par jour plein.
+    /// Absent ou 0 = pas de demurrage.
+    #[serde(default)]
+    pub demurrage_bps_per_day: Option<u32>,
 }
 
 /// POST /admin/tokens/create — Crée un nouveau token.
@@ -123,6 +127,7 @@ pub async fn admin_create_token(
         max_supply: req.max_supply,
         creator: coordinator_pk.clone(),
         mint_authority: coordinator_pk,
+        demurrage_bps_per_day: req.demurrage_bps_per_day.filter(|bps| *bps > 0),
     };
 
     // Register in the token registry (RocksDB)

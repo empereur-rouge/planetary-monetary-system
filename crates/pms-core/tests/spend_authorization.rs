@@ -80,7 +80,7 @@ async fn attacker_cannot_spend_victim_utxo_with_own_key() {
     };
     let theft_signed = sign_tx(&attacker, &theft, NETWORK_ID);
 
-    let result = validate_transaction_full(&utxos, &theft_signed, &test_policy(), pms_core::utxo::current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &theft_signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
     println!("THEFT ATTEMPT result: {result:?}");
     let err = format!("{:?}", result.expect_err("theft MUST be rejected"));
     assert!(
@@ -115,7 +115,7 @@ async fn legit_owner_spend_is_accepted_bech32m() {
     };
     let tx_signed = sign_tx(&owner, &tx, NETWORK_ID);
 
-    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
     println!("LEGIT SPEND (bech32m) result: {result:?}");
     let fetched = result.expect("legit owner spend must be accepted");
     println!(
@@ -146,7 +146,7 @@ async fn legit_owner_spend_is_accepted_raw_pubkey_address() {
     };
     let tx_signed = sign_tx(&owner, &tx, NETWORK_ID);
 
-    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
     println!("LEGIT SPEND (raw pubkey addr) result: {result:?}");
     result.expect("raw-pubkey-address owner spend must be accepted");
 }
@@ -184,7 +184,7 @@ async fn mixed_inputs_one_foreign_utxo_rejected() {
     };
     let tx_signed = sign_tx(&attacker, &tx, NETWORK_ID);
 
-    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
     println!("MIXED-INPUT THEFT result: {result:?}");
     let err = format!("{:?}", result.expect_err("foreign input must be rejected"));
     assert!(
@@ -217,7 +217,7 @@ async fn missing_unlocks_rejected() {
         unlocks: vec![],
     };
 
-    let result = validate_transaction_full(&utxos, &tx, &test_policy(), pms_core::utxo::current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &tx, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
     println!("NO-UNLOCK TX result: {result:?}");
     let err = format!("{:?}", result.expect_err("tx without unlocks must be rejected"));
     assert!(
@@ -247,7 +247,7 @@ async fn wrong_network_signature_rejected() {
     // Signée pour mainnet, validée sur testnet → replay cross-chain rejeté.
     let tx_signed = sign_tx(&owner, &tx, "pms-mainnet-v1");
 
-    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
     println!("CROSS-NETWORK REPLAY result: {result:?}");
     let err = format!("{:?}", result.expect_err("cross-network replay must be rejected"));
     assert!(
@@ -282,7 +282,7 @@ async fn ghost_fee_above_max_rejected() {
     };
     let tx_signed = sign_tx(&owner, &tx, NETWORK_ID);
 
-    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
     println!("GHOST FEE result: {result:?}");
     let err = format!("{:?}", result.expect_err("ghost fee must be rejected"));
     assert!(err.contains("FeeTooHigh"), "expected FeeTooHigh, got: {err}");
@@ -308,7 +308,7 @@ async fn malformed_fee_rejected() {
     };
     let tx_signed = sign_tx(&owner, &tx, NETWORK_ID);
 
-    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
     println!("MALFORMED FEE result: {result:?}");
     assert!(result.is_err(), "malformed fee must be rejected");
 }
@@ -335,7 +335,7 @@ async fn cross_asset_conversion_rejected() {
     };
     let tx_signed = sign_tx(&owner, &tx, NETWORK_ID);
 
-    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &tx_signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
     println!("CROSS-ASSET CONVERSION result: {result:?}");
     let err = format!("{:?}", result.expect_err("cross-asset conversion must be rejected"));
     assert!(

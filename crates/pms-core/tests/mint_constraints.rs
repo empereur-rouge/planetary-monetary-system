@@ -25,6 +25,7 @@ fn meta(asset_id: &str, decimals: u8, max_supply: Option<&str>) -> TokenMetadata
         max_supply: max_supply.map(Into::into),
         creator: "8e1creator".into(),
         mint_authority: AUTHORITY_PK.into(),
+        demurrage_bps_per_day: None,
     }
 }
 

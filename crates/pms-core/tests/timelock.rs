@@ -88,7 +88,7 @@ async fn locked_utxo_cannot_be_spent_before_expiry() {
 
     let tx = spend_all(&owner, &out_id("locked-mint", 0), &dest, "100.0");
 
-    let result = validate_transaction_full(&utxos, &tx, &test_policy(), now).await;
+    let result = validate_transaction_full(&utxos, &tx, &test_policy(), now, &Default::default()).await;
     println!("SPEND BEFORE EXPIRY (until={until}, now={now}) → {result:?}");
     let err = format!("{:?}", result.expect_err("locked spend MUST be rejected"));
     assert!(
@@ -118,14 +118,14 @@ async fn locked_utxo_rejected_even_one_ms_before_expiry() {
     let tx = spend_all(&owner, &out_id("edge-mint", 0), &owner_addr, "5.0");
 
     // Horloge figée à `now` : now < until → rejet (boundary case).
-    let result = validate_transaction_full(&utxos, &tx, &test_policy(), now).await;
+    let result = validate_transaction_full(&utxos, &tx, &test_policy(), now, &Default::default()).await;
     println!("BOUNDARY now={now} until={until} → {result:?}");
     assert!(
         format!("{:?}", result.expect_err("must reject")).contains("OutputTimeLocked")
     );
 
     // Horloge à `until` pile : now >= until → accepté (lock inclusif borné).
-    let result_at = validate_transaction_full(&utxos, &tx, &test_policy(), until).await;
+    let result_at = validate_transaction_full(&utxos, &tx, &test_policy(), until, &Default::default()).await;
     println!("AT-EXPIRY now={until} until={until} → {result_at:?}");
     assert!(result_at.is_ok(), "spend at exact expiry must pass: {result_at:?}");
 }
@@ -155,7 +155,7 @@ async fn locked_utxo_spendable_after_expiry() {
 
     let tx = spend_all(&owner, &out_id("expired-mint", 0), &dest, "42.0");
 
-    let result = validate_transaction_full(&utxos, &tx, &test_policy(), now).await;
+    let result = validate_transaction_full(&utxos, &tx, &test_policy(), now, &Default::default()).await;
     println!("SPEND AFTER EXPIRY (until={until}, now={now}) → {result:?}");
     assert!(result.is_ok(), "expired lock must be spendable: {result:?}");
     let inputs = result.unwrap();
@@ -177,7 +177,7 @@ async fn unlocked_utxo_unaffected_by_timelock_rule() {
         .await;
 
     let tx = spend_all(&owner, &out_id("plain-mint", 0), &owner_addr, "7.0");
-    let result = validate_transaction_full(&utxos, &tx, &test_policy(), current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &tx, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("PLAIN OUTPUT spend → {result:?}");
     assert!(result.is_ok(), "no-lock output must keep legacy behavior");
 }

@@ -148,13 +148,43 @@ pub fn check_asset_conservation(
     tx: &Transaction,
     input_outputs: &[TxOutput],
 ) -> Result<(), ValidationError> {
-    // Grouper les inputs par asset_id
+    check_asset_conservation_with_demurrage(tx, input_outputs, &HashMap::new(), 0)
+}
+
+/// Conservation par asset, variante demurrage-aware (protocole 2.5).
+///
+/// `demurrage_rates` = `asset_id -> bps_per_day` pour les assets opt-in
+/// (résolu par l'appelant depuis le token registry). Pour ces assets, la
+/// valeur d'input prise en compte est la valeur **effective** après décote
+/// ([`crate::validations::demurrage::effective_value`], horloge `now_ms`) et
+/// la règle devient `sum(outputs) <= sum(effective_inputs)` — l'écart est la
+/// décote brûlée implicitement. Les assets hors map gardent la conservation
+/// STRICTE (audit M-7).
+pub fn check_asset_conservation_with_demurrage(
+    tx: &Transaction,
+    input_outputs: &[TxOutput],
+    demurrage_rates: &HashMap<String, u32>,
+    now_ms: u64,
+) -> Result<(), ValidationError> {
+    // Grouper les inputs par asset_id — valeur effective pour les assets à
+    // demurrage, nominale sinon.
     let mut inputs_by_asset: HashMap<Option<String>, Decimal> = HashMap::new();
     for out in input_outputs {
-        let amount = amount_parse_pos_dec(&out.amount)?;
+        let nominal = amount_parse_pos_dec(&out.amount)?;
+        let rate = out
+            .asset_id
+            .as_ref()
+            .and_then(|a| demurrage_rates.get(a))
+            .copied()
+            .unwrap_or(0);
+        let value = if rate > 0 {
+            crate::validations::demurrage::effective_value(nominal, out.created_at, now_ms, rate)
+        } else {
+            nominal
+        };
         *inputs_by_asset
             .entry(out.asset_id.clone())
-            .or_insert(Decimal::ZERO) += amount;
+            .or_insert(Decimal::ZERO) += value;
     }
 
     // Grouper les outputs par asset_id
@@ -172,12 +202,26 @@ pub fn check_asset_conservation(
             .get(asset_id)
             .copied()
             .unwrap_or(Decimal::ZERO);
-        if *in_sum != out_sum {
+        let has_demurrage = asset_id
+            .as_ref()
+            .and_then(|a| demurrage_rates.get(a))
+            .copied()
+            .unwrap_or(0)
+            > 0;
+        // Demurrage : la décote (et tout surplus volontaire) est brûlée —
+        // out <= effective_in. Sinon : égalité stricte (M-7).
+        let violated = if has_demurrage {
+            out_sum > *in_sum
+        } else {
+            *in_sum != out_sum
+        };
+        if violated {
             tracing::warn!(
-                "Asset balance mismatch: asset={:?}, inputs={}, outputs={}",
+                "Asset balance mismatch: asset={:?}, inputs(effective)={}, outputs={}, demurrage={}",
                 asset_id,
                 in_sum,
-                out_sum
+                out_sum,
+                has_demurrage
             );
             return Err(ValidationError::AssetBalanceMismatch {
                 asset_id: asset_id.clone(),
@@ -245,6 +289,10 @@ pub async fn validate_transaction_async(
 /// pour la testabilité ; en production, le hot path passe le `now_ms` du
 /// persist (même source que `now_ms_for_signers`).
 ///
+/// `demurrage_rates` = `asset_id -> bps_per_day` des assets opt-in présents
+/// dans la tx (résolu par l'appelant depuis le token registry ; map vide =
+/// conservation stricte pour tout, protocole 2.5).
+///
 /// Retourne les `TxOutput` des inputs (dans l'ordre) pour que l'appelant
 /// puisse réutiliser les adresses sans re-fetch (ex: compliance freeze check).
 pub async fn validate_transaction_full(
@@ -252,6 +300,7 @@ pub async fn validate_transaction_full(
     tx: &Transaction,
     policy: &ValidatePolicy,
     now_ms: u64,
+    demurrage_rates: &HashMap<String, u32>,
 ) -> Result<Vec<TxOutput>, ValidationError> {
     // 1. Appariement input[i] ↔ unlock[i]
     if tx.inputs.len() != tx.unlocks.len() {
@@ -285,7 +334,7 @@ pub async fn validate_transaction_full(
 
     check_input_time_locks(&input_outputs, now_ms)?;
 
-    check_asset_conservation(tx, &input_outputs)?;
+    check_asset_conservation_with_demurrage(tx, &input_outputs, demurrage_rates, now_ms)?;
 
     Ok(input_outputs)
 }

@@ -259,6 +259,7 @@ fn classify_token_create() {
         max_supply: None,
         creator: "alice".into(),
         mint_authority: "alice".into(),
+        demurrage_bps_per_day: None,
     });
     let items = classify_activity_sync(&plain, "alice");
     assert_eq!(items.len(), 1);
@@ -277,6 +278,7 @@ fn classify_token_create_not_creator() {
         max_supply: None,
         creator: "alice".into(),
         mint_authority: "alice".into(),
+        demurrage_bps_per_day: None,
     });
     let items = classify_activity_sync(&plain, "bob");
     assert!(items.is_empty());

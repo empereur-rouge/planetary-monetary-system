@@ -714,11 +714,31 @@ where
         let t_utxo_val_start = std::time::Instant::now();
         if let Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) = &block.payload {
             use crate::validations::transactions::validate_transaction_full;
+
+            // Demurrage 2.5 : résout les taux des assets custom touchés par
+            // la tx (les assets des inputs ⊆ assets des outputs, la
+            // conservation exigeant un output par asset d'input). Un point
+            // read RocksDB par asset distinct — négligeable vs l'ECDSA.
+            let mut demurrage_rates: std::collections::HashMap<String, u32> =
+                std::collections::HashMap::new();
+            for asset_id in tx.outputs.iter().filter_map(|o| o.asset_id.as_deref()) {
+                if !demurrage_rates.contains_key(asset_id) {
+                    if let Ok(Some(meta)) = self.store.get_token(asset_id) {
+                        if let Some(bps) = meta.demurrage_bps_per_day {
+                            if bps > 0 {
+                                demurrage_rates.insert(asset_id.to_string(), bps);
+                            }
+                        }
+                    }
+                }
+            }
+
             let tx_input_outputs = match validate_transaction_full(
                 &self.utxos,
                 tx,
                 policy,
                 now_ms_for_signers.max(0) as u64,
+                &demurrage_rates,
             )
             .await
             {
@@ -815,6 +835,17 @@ where
         // the pipeline can't see the plaintext at all (`_ => None` branch
         // below). Applying the caller's delta inside the same critical
         // section as the block insert closes the H1 race.
+        // Demurrage 2.5 : chaque UTXO créé est estampillé `created_at` par le
+        // SYSTÈME (horloge du persist) — toute valeur client est écrasée
+        // (anti-antidatage). Base du calcul de décote à la dépense.
+        let created_at_ms = now_ms_for_signers.max(0) as u64;
+        let stamp = |out: &pms_types::TxOutput| -> pms_types::TxOutput {
+            pms_types::TxOutput {
+                created_at: Some(created_at_ms),
+                ..out.clone()
+            }
+        };
+
         let delta = if let Some(d) = external_delta {
             Some(d)
         } else {
@@ -824,7 +855,7 @@ where
                 let create = outputs
                     .iter()
                     .enumerate()
-                    .map(|(i, out)| (sb.id.clone(), i as u32, out.clone()))
+                    .map(|(i, out)| (sb.id.clone(), i as u32, stamp(out)))
                     .collect();
 
                 Some(UtxoDelta {
@@ -845,7 +876,7 @@ where
                     .outputs
                     .iter()
                     .enumerate()
-                    .map(|(i, out)| (sb.id.clone(), i as u32, out.clone()))
+                    .map(|(i, out)| (sb.id.clone(), i as u32, stamp(out)))
                     .collect();
 
                 // Accumulation du pool de fees pour le Treasury
@@ -904,7 +935,7 @@ where
                         idx,
                         pms_types::TxOutput {
                             asset_id: None,
-                            ..out.clone()
+                            ..stamp(out)
                         },
                     ));
                     idx += 1;
@@ -917,7 +948,7 @@ where
                         idx,
                         pms_types::TxOutput {
                             asset_id: None,
-                            ..out.clone()
+                            ..stamp(out)
                         },
                     ));
                     idx += 1;
@@ -950,7 +981,7 @@ where
                 let create = outputs
                     .iter()
                     .enumerate()
-                    .map(|(i, out)| (sb.id.clone(), i as u32, out.clone()))
+                    .map(|(i, out)| (sb.id.clone(), i as u32, stamp(out)))
                     .collect();
                 Some(UtxoDelta {
                     spend: vec![],
@@ -969,7 +1000,7 @@ where
                 let create = outputs
                     .iter()
                     .enumerate()
-                    .map(|(i, out)| (sb.id.clone(), i as u32, out.clone()))
+                    .map(|(i, out)| (sb.id.clone(), i as u32, stamp(out)))
                     .collect();
                 Some(UtxoDelta { spend, create })
             }
@@ -983,7 +1014,7 @@ where
                 let create = outputs
                     .iter()
                     .enumerate()
-                    .map(|(i, out)| (sb.id.clone(), i as u32, out.clone()))
+                    .map(|(i, out)| (sb.id.clone(), i as u32, stamp(out)))
                     .collect();
                 Some(UtxoDelta { spend, create })
             }

@@ -250,4 +250,14 @@ pub struct TokenMetadata {
     pub creator: String,
     /// Clé publique autorisée à mint ce token
     pub mint_authority: String,
+    /// Demurrage opt-in (protocole 2.5) : décote en basis points par JOUR
+    /// PLEIN écoulé depuis la création de l'UTXO (`floor((now - created_at)
+    /// / 24h)`). `None` ou `0` = pas de demurrage (comportement historique).
+    ///
+    /// La valeur effective d'un UTXO à la dépense est
+    /// `amount - amount × bps × jours / 10_000` (plancher 0). La conservation
+    /// devient `sum(outputs) <= sum(effective_inputs)` pour cet asset — la
+    /// décote est brûlée implicitement (réduction de la supply circulante).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demurrage_bps_per_day: Option<u32>,
 }

@@ -49,6 +49,8 @@ struct CompactOutput {
     /// rare en pratique (None = 8 bytes), et le clone lors de l'éviction LRU /
     /// re-push reste O(1).
     spend_condition: Option<Arc<pms_types::SpendCondition>>,
+    /// Timestamp de création système (UNIX ms) — base du demurrage (2.5).
+    created_at: Option<u64>,
 }
 
 impl CompactOutput {
@@ -59,6 +61,7 @@ impl CompactOutput {
             asset_id: self.asset_id.as_ref().map(|a| a.to_string()),
             locked_until: self.locked_until,
             spend_condition: self.spend_condition.as_deref().cloned(),
+            created_at: self.created_at,
         }
     }
 }
@@ -171,6 +174,7 @@ impl ShardedUtxoSet {
             asset_id: output.asset_id.as_deref().map(|a| self.interner.intern(a)),
             locked_until: output.locked_until,
             spend_condition: output.spend_condition.clone().map(Arc::new),
+            created_at: output.created_at,
         }
     }
 
@@ -425,6 +429,7 @@ impl ShardedUtxoSet {
                                 asset_id: compact.asset_id.clone(),
                                 locked_until: compact.locked_until,
                                 spend_condition: compact.spend_condition.clone(),
+                                created_at: compact.created_at,
                             },
                         ) {
                             evicted_entries.push(evicted);

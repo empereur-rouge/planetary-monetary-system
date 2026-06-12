@@ -38,6 +38,16 @@ pub struct TxOutput {
     /// (binding C-1 classique : 1 signature du propriétaire de l'adresse).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend_condition: Option<SpendCondition>,
+    /// Timestamp de création de l'UTXO (UNIX ms) — **assigné par le système**
+    /// au moment du persist du bloc, base du calcul de demurrage (2.5).
+    ///
+    /// ⚠️ Toute valeur fournie par le client dans une transaction est ÉCRASÉE
+    /// par le pipeline de persistance (anti-antidatage). Les clients doivent
+    /// laisser `None` (le champ est alors absent du message signé).
+    /// `None` en lecture = UTXO pré-v0.10.0 → aucun demurrage ne court
+    /// (la décote démarre au premier mouvement post-upgrade).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
 }
 
 /// Condition de déverrouillage d'un output (protocole 2.2).
@@ -79,6 +89,7 @@ impl TxOutput {
             asset_id,
             locked_until: None,
             spend_condition: None,
+            created_at: None,
         }
     }
 

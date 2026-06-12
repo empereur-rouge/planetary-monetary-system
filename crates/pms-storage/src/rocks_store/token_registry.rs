@@ -66,6 +66,13 @@ impl RocksStore {
             anyhow::bail!("mint_authority cannot be empty");
         }
 
+        // demurrage (2.5): au plus 10_000 bps/jour (100 %/jour)
+        if let Some(bps) = metadata.demurrage_bps_per_day {
+            if bps > 10_000 {
+                anyhow::bail!("demurrage_bps_per_day must be <= 10000, got {bps}");
+            }
+        }
+
         Ok(())
     }
 

@@ -965,6 +965,7 @@ async fn activity_token_create_appears() -> anyhow::Result<()> {
         max_supply: None,
         creator: creator_addr.clone(),
         mint_authority: ctx.node_wallet.encoded_public_key(),
+        demurrage_bps_per_day: None,
     };
 
     let wb = forge_signed_wire_block_for_test(

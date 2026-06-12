@@ -64,10 +64,25 @@ pub trait NetDagAdapter: Send + Sync {
             .iter()
             .map(|inp| (inp.out.txid.clone(), inp.out.index))
             .collect();
+        // Demurrage 2.5 : estampille `created_at` système, comme le pipeline
+        // plain de `persist_block` (anti-antidatage).
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let create = outputs
             .iter()
             .enumerate()
-            .map(|(i, out)| (block_id.to_string(), i as u32, out.clone()))
+            .map(|(i, out)| {
+                (
+                    block_id.to_string(),
+                    i as u32,
+                    TxOutput {
+                        created_at: Some(now_ms),
+                        ..out.clone()
+                    },
+                )
+            })
             .collect();
         UtxoDelta { spend, create }
     }

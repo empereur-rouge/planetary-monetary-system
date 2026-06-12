@@ -33,6 +33,7 @@ fn edenite_metadata() -> TokenMetadata {
         max_supply: Some("1000000.00000000".into()),
         creator: "coordinator_pk_hex".into(),
         mint_authority: "coordinator_pk_hex".into(),
+        demurrage_bps_per_day: None,
     }
 }
 
@@ -45,6 +46,7 @@ fn gold_metadata() -> TokenMetadata {
         max_supply: None, // unlimited
         creator: "coordinator_pk_hex".into(),
         mint_authority: "coordinator_pk_hex".into(),
+        demurrage_bps_per_day: None,
     }
 }
 

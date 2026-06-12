@@ -43,6 +43,7 @@ fn multisig_output(amount: &str, m: u8, wallets: &[&Wallet]) -> TxOutput {
         asset_id: None,
         locked_until: None,
         spend_condition: Some(SpendCondition::MultiSig { m, pubkeys }),
+        created_at: None,
     }
 }
 
@@ -56,6 +57,7 @@ fn hashlock_output(address: &str, amount: &str, preimage: &[u8]) -> TxOutput {
         spend_condition: Some(SpendCondition::HashLock {
             hash_hex: hex::encode(Sha256::digest(preimage)),
         }),
+        created_at: None,
     }
 }
 
@@ -122,7 +124,7 @@ async fn multisig_2of3_with_two_signers_accepted() {
     let tx = unsigned_spend(&out_id("msig-fund", 0), &dest, "100.0");
     let signed = sign_with(&tx, &[&a, &c], None); // 2 des 3 clés
 
-    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("MULTISIG 2-of-3 (signers a+c) → {result:?}");
     assert!(result.is_ok(), "quorum 2/3 atteint doit passer: {result:?}");
 }
@@ -140,7 +142,7 @@ async fn multisig_2of3_with_single_signer_rejected() {
     let tx = unsigned_spend(&out_id("msig-fund2", 0), &dest, "50.0");
     let signed = sign_with(&tx, &[&b], None); // 1 seule signature
 
-    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("MULTISIG 2-of-3 (1 signer) → {result:?}");
     let err = format!("{:?}", result.expect_err("quorum non atteint DOIT être rejeté"));
     assert!(err.contains("SpendConditionNotMet"), "got: {err}");
@@ -160,7 +162,7 @@ async fn multisig_duplicate_cosigner_does_not_fake_quorum() {
     let tx = unsigned_spend(&out_id("msig-dup", 0), &dest, "10.0");
     let signed = sign_with(&tx, &[&a, &a], None);
 
-    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("MULTISIG quorum-stuffing (a+a pour m=2) → {result:?}");
     let err = format!("{:?}", result.expect_err("doublon ne doit pas compter 2x"));
     assert!(err.contains("SpendConditionNotMet"), "got: {err}");
@@ -180,7 +182,7 @@ async fn multisig_outsider_signature_does_not_count() {
     let tx = unsigned_spend(&out_id("msig-out", 0), &dest, "10.0");
     let signed = sign_with(&tx, &[&a, &outsider], None);
 
-    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("MULTISIG outsider cosigner → {result:?}");
     let err = format!("{:?}", result.expect_err("clé hors set ne compte pas"));
     assert!(err.contains("SpendConditionNotMet"), "got: {err}");
@@ -215,7 +217,7 @@ async fn multisig_invalid_cosignature_rejected_by_crypto_check() {
         }],
     };
 
-    let result = validate_transaction_full(&utxos, &forged, &test_policy(), current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &forged, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("MULTISIG forged cosignature → {result:?}");
     let err = format!("{:?}", result.expect_err("cosignature forgée DOIT être rejetée"));
     assert!(err.contains("InvalidSignature"), "got: {err}");
@@ -240,6 +242,7 @@ async fn multisig_output_with_wrong_address_rejected_at_creation() {
         asset_id: None,
         locked_until: None,
         spend_condition: Some(SpendCondition::MultiSig { m: 2, pubkeys }),
+        created_at: None,
     };
     let tx = Transaction {
         inputs: vec![TxInput {
@@ -251,7 +254,7 @@ async fn multisig_output_with_wrong_address_rejected_at_creation() {
     };
     let signed = sign_with(&tx, &[&owner], None);
 
-    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("MULTISIG wrong-address output → {result:?}");
     let err = format!("{:?}", result.expect_err("adresse non canonique rejetée"));
     assert!(err.contains("InvalidSpendCondition"), "got: {err}");
@@ -282,7 +285,7 @@ async fn multisig_full_lifecycle_fund_then_spend() {
         unlocks: vec![],
     };
     let fund_signed = sign_with(&fund, &[&owner], None);
-    let r1 = validate_transaction_full(&utxos, &fund_signed, &test_policy(), current_time_ms()).await;
+    let r1 = validate_transaction_full(&utxos, &fund_signed, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("FUND multisig (addr={msig_addr}) → {r1:?}");
     assert!(r1.is_ok(), "funding tx must pass: {r1:?}");
 
@@ -292,7 +295,7 @@ async fn multisig_full_lifecycle_fund_then_spend() {
     // 2) a+b dépensent le multisig
     let spend = unsigned_spend(&out_id("fund-tx", 0), &dest, "25.0");
     let spend_signed = sign_with(&spend, &[&a, &b], None);
-    let r2 = validate_transaction_full(&utxos, &spend_signed, &test_policy(), current_time_ms()).await;
+    let r2 = validate_transaction_full(&utxos, &spend_signed, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("SPEND multisig 2-of-2 → {r2:?}");
     assert!(r2.is_ok(), "quorum spend must pass: {r2:?}");
 }
@@ -318,7 +321,7 @@ async fn hashlock_correct_preimage_accepted() {
     let tx = unsigned_spend(&out_id("hl-fund", 0), &dest, "15.0");
     let signed = sign_with(&tx, &[&spender], Some(hex::encode(preimage)));
 
-    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("HASHLOCK correct preimage → {result:?}");
     assert!(result.is_ok(), "preimage correct doit passer: {result:?}");
 }
@@ -339,7 +342,7 @@ async fn hashlock_wrong_preimage_rejected() {
     let tx = unsigned_spend(&out_id("hl-fund2", 0), &dest, "15.0");
     let signed = sign_with(&tx, &[&spender], Some(hex::encode(b"wrong-guess")));
 
-    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("HASHLOCK wrong preimage → {result:?}");
     let err = format!("{:?}", result.expect_err("mauvais preimage rejeté"));
     assert!(err.contains("SpendConditionNotMet"), "got: {err}");
@@ -361,7 +364,7 @@ async fn hashlock_missing_preimage_rejected() {
     let tx = unsigned_spend(&out_id("hl-fund3", 0), &dest, "15.0");
     let signed = sign_with(&tx, &[&spender], None); // pas de preimage
 
-    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("HASHLOCK missing preimage → {result:?}");
     let err = format!("{:?}", result.expect_err("preimage absent rejeté"));
     assert!(err.contains("SpendConditionNotMet"), "got: {err}");
@@ -385,6 +388,7 @@ async fn hashlock_output_with_malformed_hash_rejected_at_creation() {
         spend_condition: Some(SpendCondition::HashLock {
             hash_hex: "not-64-hex".into(),
         }),
+        created_at: None,
     };
     let tx = Transaction {
         inputs: vec![TxInput {
@@ -396,7 +400,7 @@ async fn hashlock_output_with_malformed_hash_rejected_at_creation() {
     };
     let signed = sign_with(&tx, &[&owner], None);
 
-    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms()).await;
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), current_time_ms(), &Default::default()).await;
     println!("HASHLOCK malformed hash at creation → {result:?}");
     let err = format!("{:?}", result.expect_err("hash mal formé rejeté"));
     assert!(err.contains("InvalidSpendCondition"), "got: {err}");
@@ -424,6 +428,7 @@ async fn explicit_pubkey_condition_behaves_like_none() {
         &sign_with(&tx, &[&owner], None),
         &test_policy(),
         current_time_ms(),
+        &Default::default(),
     )
     .await;
     println!("PUBKEY explicit, owner spend → {ok:?}");
@@ -435,6 +440,7 @@ async fn explicit_pubkey_condition_behaves_like_none() {
         &sign_with(&tx, &[&attacker], None),
         &test_policy(),
         current_time_ms(),
+        &Default::default(),
     )
     .await;
     println!("PUBKEY explicit, attacker spend → {theft:?}");
