@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.11.0] - Unreleased — Mint adossé à une réserve collatérale (plan 2.3 v2)
+
+### Added
+- **feat(protocol)**: mint collatéralisé — `TokenMetadata` gagne
+  `collateral_address` (adresse de réserve, même ledger),
+  `collateral_asset_id` (None = natif) et `collateral_ratio_bps` (requis avec
+  l'adresse, validé > 0 au registry). Quand défini, le hot path enforce à
+  CHAQUE mint l'invariant CONTINU : `(circulating + minted) ×
+  ratio_bps / 10000 <= somme des UTXOs de réserve ENCORE time-lockés`
+  (`locked_until > now`, s'appuie sur le time-lock 2.1). Les UTXOs au lock
+  expiré ou sans lock ne comptent PAS (l'émetteur pourrait les retirer) ;
+  l'invariant porte sur l'émission TOTALE — pas de référence d'UTXO dans le
+  payload, donc pas de double-comptage d'une même réserve entre mints, et
+  une réserve qui expire bloque les mints suivants jusqu'au re-lock.
+  Nouvelle erreur `ValidationError::InsufficientCollateral`. Helper pur
+  `sum_locked_collateral` dans `validations/mint.rs`.
+- **feat(api)**: `POST /admin/faucet` accepte `locked_until` (timestamp UNIX
+  ms) — mint un UTXO time-locké (vesting, constitution de réserve de
+  collatéral). `POST /admin/tokens/create` accepte `collateral_address` /
+  `collateral_asset_id` / `collateral_ratio_bps`.
+- **test(core)**: 6 tests unit dans `mint_constraints.rs` (couverture
+  exacte/dépassement/ratio 150 %/réserve vide/filtrage expiré+sans-lock+
+  mauvais-asset) + sandbox e2e `test_collateralized_mint_lifecycle`
+  (réserve 1000 lockée 24h + 500 non lockés ignorés → exactement 1000
+  mintables à 1:1, over-mint et dust rejetés 422).
+
+### Changed
+- **Versions** : workspace `0.10.0` → `0.11.0` ; `DAG_VERSION` `3.1.0` →
+  `3.2.0` (règle de validation additive, auto-migrating) ; `API_VERSION`
+  `15` → `16`. P2P `protocol_version` inchangé (`3`) — champs serde
+  additifs tolérés au wire. `CURRENT_VER` schéma inchangé.
+
+---
+
 ## [0.10.0] - Unreleased — Primitives protocole DAG : time-lock, spend conditions, mint contraint, demurrage, preuve de réserves (plan §2)
 
 Implémentation complète de la section 2 du plan protocole (`plan.md`). Les

@@ -343,3 +343,162 @@ async fn cross_asset_conversion_rejected() {
         "expected AssetBalanceMismatch, got: {err}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Edge-cases de sécurité (audit invariants S1/S2 — v0.9.9)
+// Chaque test est une ATTAQUE qui DOIT être rejetée proprement (sans panic).
+// Ils verrouillent contre la régression les protections déjà en place dans
+// `validate_transaction_full`.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// S1.3 — `unlocks.len() != inputs.len()` : rejet PROPRE (pas de panic / pas
+/// d'index out-of-bounds). Ici 2 inputs mais 1 seul unlock fourni.
+#[tokio::test]
+async fn unlock_count_mismatch_rejected_no_panic() {
+    let owner = Wallet::from_seed(&[20u8; 32], None).expect("wallet");
+    let owner_addr = owner.get_address("8e");
+
+    let utxos = ShardedUtxoSet::new(0, None);
+    utxos.add(out_id("m20", 0), output(&owner_addr, "10.0", None)).await;
+    utxos.add(out_id("m20", 1), output(&owner_addr, "10.0", None)).await;
+
+    let tx = Transaction {
+        inputs: vec![
+            TxInput { out: out_id("m20", 0) },
+            TxInput { out: out_id("m20", 1) },
+        ],
+        outputs: vec![output(&owner_addr, "20.0", None)],
+        fee: "0".into(),
+        unlocks: vec![],
+    };
+    let mut signed = sign_tx(&owner, &tx, NETWORK_ID); // 2 unlocks
+    signed.unlocks.truncate(1); // ← 2 inputs, 1 unlock
+
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
+    println!("COUNT MISMATCH result: {result:?}");
+    assert!(result.is_err(), "unlocks/inputs count mismatch must be rejected");
+}
+
+/// S1.7 — payload modifié APRÈS signature : changer le montant d'un output
+/// invalide la signature (le message canonique couvre les outputs).
+#[tokio::test]
+async fn tampered_output_amount_after_signing_rejected() {
+    let owner = Wallet::from_seed(&[21u8; 32], None).expect("wallet");
+    let owner_addr = owner.get_address("8e");
+    let dest = Wallet::from_seed(&[22u8; 32], None).unwrap().get_address("8e");
+
+    let utxos = ShardedUtxoSet::new(0, None);
+    utxos.add(out_id("m21", 0), output(&owner_addr, "100.0", None)).await;
+
+    let tx = Transaction {
+        inputs: vec![TxInput { out: out_id("m21", 0) }],
+        outputs: vec![output(&dest, "100.0", None)],
+        fee: "0".into(),
+        unlocks: vec![],
+    };
+    let mut signed = sign_tx(&owner, &tx, NETWORK_ID);
+    // Attaque MITM : après signature, l'attaquant gonfle le montant.
+    signed.outputs[0].amount = "999.0".into();
+
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
+    println!("TAMPERED OUTPUT result: {result:?}");
+    assert!(result.is_err(), "post-signature output tampering must be rejected");
+}
+
+/// S1.8 — signature vide dans l'unlock : rejet propre (pas de panic au décodage).
+#[tokio::test]
+async fn empty_signature_unlock_rejected_no_panic() {
+    let owner = Wallet::from_seed(&[23u8; 32], None).expect("wallet");
+    let owner_addr = owner.get_address("8e");
+
+    let utxos = ShardedUtxoSet::new(0, None);
+    utxos.add(out_id("m23", 0), output(&owner_addr, "10.0", None)).await;
+
+    let tx = Transaction {
+        inputs: vec![TxInput { out: out_id("m23", 0) }],
+        outputs: vec![output(&owner_addr, "10.0", None)],
+        fee: "0".into(),
+        unlocks: vec![Unlock::new(owner.public_key_hex.clone(), String::new())],
+    };
+
+    let result = validate_transaction_full(&utxos, &tx, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
+    println!("EMPTY SIGNATURE result: {result:?}");
+    assert!(result.is_err(), "empty signature must be rejected");
+}
+
+/// S1.8 — pubkey malformée dans l'unlock : rejet propre (pas de panic au hex-decode).
+#[tokio::test]
+async fn malformed_pubkey_unlock_rejected_no_panic() {
+    let owner = Wallet::from_seed(&[24u8; 32], None).expect("wallet");
+    let owner_addr = owner.get_address("8e");
+
+    let utxos = ShardedUtxoSet::new(0, None);
+    utxos.add(out_id("m24", 0), output(&owner_addr, "10.0", None)).await;
+
+    let tx = Transaction {
+        inputs: vec![TxInput { out: out_id("m24", 0) }],
+        outputs: vec![output(&owner_addr, "10.0", None)],
+        fee: "0".into(),
+        unlocks: vec![Unlock::new("not-hex-pubkey-zzz".to_string(), "AAAA".to_string())],
+    };
+
+    let result = validate_transaction_full(&utxos, &tx, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
+    println!("MALFORMED PUBKEY result: {result:?}");
+    assert!(result.is_err(), "malformed pubkey must be rejected");
+}
+
+/// S2 — montant négatif en output : rejet (pas de création de valeur via signe).
+#[tokio::test]
+async fn negative_output_amount_rejected() {
+    let owner = Wallet::from_seed(&[25u8; 32], None).expect("wallet");
+    let owner_addr = owner.get_address("8e");
+    let dest = Wallet::from_seed(&[26u8; 32], None).unwrap().get_address("8e");
+
+    let utxos = ShardedUtxoSet::new(0, None);
+    utxos.add(out_id("m25", 0), output(&owner_addr, "10.0", None)).await;
+
+    // input 10 = output 15 + output -5 (somme = 10, mais un output NÉGATIF).
+    let tx = Transaction {
+        inputs: vec![TxInput { out: out_id("m25", 0) }],
+        outputs: vec![
+            output(&dest, "15.0", None),
+            output(&owner_addr, "-5.0", None),
+        ],
+        fee: "0".into(),
+        unlocks: vec![],
+    };
+    let signed = sign_tx(&owner, &tx, NETWORK_ID);
+
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
+    println!("NEGATIVE OUTPUT result: {result:?}");
+    assert!(result.is_err(), "negative output amount must be rejected");
+}
+
+/// S2 — somme des outputs qui DÉBORDE `Decimal` : rejet PROPRE (jamais de panic
+/// d'overflow → DoS). Deux outputs proches de `Decimal::MAX`.
+#[tokio::test]
+async fn output_sum_overflow_rejected_no_panic() {
+    let owner = Wallet::from_seed(&[27u8; 32], None).expect("wallet");
+    let owner_addr = owner.get_address("8e");
+
+    let utxos = ShardedUtxoSet::new(0, None);
+    utxos.add(out_id("m27", 0), output(&owner_addr, "1.0", None)).await;
+
+    // 2 × ~7.9e28 ≈ 1.58e29 > Decimal::MAX (≈7.92e28) → la somme déborde.
+    let huge = "79000000000000000000000000000";
+    let tx = Transaction {
+        inputs: vec![TxInput { out: out_id("m27", 0) }],
+        outputs: vec![
+            output(&owner_addr, huge, None),
+            output(&owner_addr, huge, None),
+        ],
+        fee: "0".into(),
+        unlocks: vec![],
+    };
+    let signed = sign_tx(&owner, &tx, NETWORK_ID);
+
+    // Doit retourner Err (déséquilibré/overflow), JAMAIS paniquer.
+    let result = validate_transaction_full(&utxos, &signed, &test_policy(), pms_core::utxo::current_time_ms(), &Default::default()).await;
+    println!("OUTPUT OVERFLOW result: {result:?}");
+    assert!(result.is_err(), "overflowing output sum must be rejected cleanly (no panic)");
+}

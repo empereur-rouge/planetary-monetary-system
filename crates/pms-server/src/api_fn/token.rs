@@ -57,6 +57,16 @@ pub struct CreateTokenRequest {
     /// Absent ou 0 = pas de demurrage.
     #[serde(default)]
     pub demurrage_bps_per_day: Option<u32>,
+    /// Mint collatéralisé (protocole 2.3 v2) : adresse de réserve (même
+    /// ledger). Exige collateral_ratio_bps.
+    #[serde(default)]
+    pub collateral_address: Option<String>,
+    /// Asset du collatéral (absent = natif du ledger).
+    #[serde(default)]
+    pub collateral_asset_id: Option<String>,
+    /// Ratio de couverture en bps (10000 = 1:1). Requis avec collateral_address.
+    #[serde(default)]
+    pub collateral_ratio_bps: Option<u32>,
 }
 
 /// POST /admin/tokens/create — Crée un nouveau token.
@@ -128,6 +138,9 @@ pub async fn admin_create_token(
         creator: coordinator_pk.clone(),
         mint_authority: coordinator_pk,
         demurrage_bps_per_day: req.demurrage_bps_per_day.filter(|bps| *bps > 0),
+        collateral_address: req.collateral_address.clone(),
+        collateral_asset_id: req.collateral_asset_id.clone(),
+        collateral_ratio_bps: req.collateral_ratio_bps,
     };
 
     // Register in the token registry (RocksDB)

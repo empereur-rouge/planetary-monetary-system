@@ -34,6 +34,9 @@ fn edenite_metadata() -> TokenMetadata {
         creator: "coordinator_pk_hex".into(),
         mint_authority: "coordinator_pk_hex".into(),
         demurrage_bps_per_day: None,
+        collateral_address: None,
+        collateral_asset_id: None,
+        collateral_ratio_bps: None,
     }
 }
 
@@ -47,6 +50,9 @@ fn gold_metadata() -> TokenMetadata {
         creator: "coordinator_pk_hex".into(),
         mint_authority: "coordinator_pk_hex".into(),
         demurrage_bps_per_day: None,
+        collateral_address: None,
+        collateral_asset_id: None,
+        collateral_ratio_bps: None,
     }
 }
 

@@ -5443,3 +5443,130 @@ async fn test_reserve_snapshot_anchor_and_verify() -> Result<()> {
     println!("\n   TEST PASSED: ReserveSnapshot anchored, exposed and verified.");
     Ok(())
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Mint collatéralisé (protocole 2.3 v2, v0.11.0)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Cycle complet : réserve time-lockée via faucet → token collatéralisé 1:1 →
+/// mint couvert OK → mint au-delà de la réserve rejeté (InsufficientCollateral)
+/// → une réserve NON lockée ne compte pas.
+#[tokio::test]
+#[ignore]
+async fn test_collateralized_mint_lifecycle() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    println!("\n╔═══════════════════════════════════════════════════════════╗");
+    println!("║  TEST: Collateralized Mint (plan 2.3 v2)                  ║");
+    println!("╚═══════════════════════════════════════════════════════════╝\n");
+
+    let reserve = pms_wallet::Wallet::from_seed(&[93u8; 32], None).expect("reserve wallet");
+    let reserve_addr = reserve.get_address("8e");
+    let user = pms_wallet::Wallet::from_seed(&[94u8; 32], None).expect("user wallet");
+    let user_addr = user.get_address("8e");
+    let now_ms = pms_core::utxo::current_time_ms();
+
+    // ── 1. Constitue la réserve : 1000 PMS time-lockés 24h via le faucet ──
+    println!("   [1/6] Locking 1000 PMS reserve (24h) at {}...", &reserve_addr[..16]);
+    let (status, resp) = sandbox
+        .admin_post(
+            "/admin/faucet",
+            json!({ "to": reserve_addr, "amount": "1000", "locked_until": now_ms + 86_400_000 }),
+        )
+        .await;
+    println!("       faucet locked: {} {:?}", status, resp);
+    anyhow::ensure!(status.is_success(), "locked faucet failed: {resp}");
+
+    // + 500 PMS NON lockés à la même adresse (ne doivent PAS compter)
+    sandbox.faucet_mint(None, &reserve_addr, "500").await?;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // ── 2. Crée le token collatéralisé 1:1 ──
+    println!("   [2/6] Creating token 'goldback' (collateral 1:1 on reserve)...");
+    let (status, resp) = sandbox
+        .admin_post(
+            "/admin/tokens/create",
+            json!({
+                "asset_id": "goldback",
+                "symbol": "GBK",
+                "name": "Gold Backed",
+                "decimals": 8,
+                "collateral_address": reserve_addr,
+                "collateral_ratio_bps": 10000
+            }),
+        )
+        .await;
+    println!("       create: {} {:?}", status, resp);
+    anyhow::ensure!(status.is_success(), "token create failed: {resp}");
+
+    // ── 3. Mint couvert : 800 <= 1000 lockés (les 500 non lockés ignorés) ──
+    println!("   [3/6] Minting 800 GBK (covered by 1000 locked)...");
+    let (status, resp) = sandbox
+        .admin_post(
+            "/admin/tokens/mint",
+            json!({ "asset_id": "goldback", "to": user_addr, "amount": "800" }),
+        )
+        .await;
+    println!("       mint 800: {} {:?}", status, resp);
+    anyhow::ensure!(status.is_success(), "covered mint must pass: {resp}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let bal = sandbox.get_asset_balance("main", &user_addr, Some("goldback")).await?;
+    println!("       user GBK balance: {bal}");
+    anyhow::ensure!(bal.to_string() == "800", "expected 800 GBK, got {bal}");
+
+    // ── 4. Mint au-delà : 800 + 300 = 1100 > 1000 lockés → rejet ──
+    println!("   [4/6] Minting 300 more (total 1100 > 1000 locked) → must fail...");
+    let (status, resp) = sandbox
+        .admin_post(
+            "/admin/tokens/mint",
+            json!({ "asset_id": "goldback", "to": user_addr, "amount": "300" }),
+        )
+        .await;
+    println!("       over-mint: {} {:?}", status, resp);
+    anyhow::ensure!(!status.is_success(), "over-collateral mint MUST be rejected");
+    let err_str = resp.to_string();
+    anyhow::ensure!(
+        err_str.contains("collateral") || err_str.contains("Collateral"),
+        "rejection must cite collateral, got: {err_str}"
+    );
+
+    // ── 5. Mint à la couverture exacte : 800 + 200 = 1000 == 1000 → OK ──
+    println!("   [5/6] Minting 200 (total 1000 == 1000 locked) → must pass...");
+    let (status, resp) = sandbox
+        .admin_post(
+            "/admin/tokens/mint",
+            json!({ "asset_id": "goldback", "to": user_addr, "amount": "200" }),
+        )
+        .await;
+    println!("       at-coverage mint: {} {:?}", status, resp);
+    anyhow::ensure!(status.is_success(), "exact coverage mint must pass: {resp}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let bal = sandbox.get_asset_balance("main", &user_addr, Some("goldback")).await?;
+    println!("       user GBK balance: {bal}");
+    anyhow::ensure!(bal.to_string() == "1000", "expected 1000 GBK, got {bal}");
+
+    // ── 6. Et plus un seul satoshi de plus ──
+    println!("   [6/6] Minting 0.00000001 more → must fail (reserve exhausted)...");
+    let (status, resp) = sandbox
+        .admin_post(
+            "/admin/tokens/mint",
+            json!({ "asset_id": "goldback", "to": user_addr, "amount": "0.00000001" }),
+        )
+        .await;
+    println!("       dust over-mint: {} {:?}", status, resp);
+    anyhow::ensure!(!status.is_success(), "any mint past coverage MUST be rejected");
+
+    println!("\n   ╔══════════════════════════════════════════════════════════╗");
+    println!("   ║  COLLATERALIZED MINT RESULTS                             ║");
+    println!("   ╠══════════════════════════════════════════════════════════╣");
+    println!("   ║  Locked reserve:           1000 PMS (24h)                ║");
+    println!("   ║  Unlocked at same addr:     500 PMS (ignored)            ║");
+    println!("   ║  Minted (1:1):             1000 GBK exactly              ║");
+    println!("   ║  Over-mint (1100):         rejected                      ║");
+    println!("   ║  Dust past coverage:       rejected                      ║");
+    println!("   ╚══════════════════════════════════════════════════════════╝");
+    println!("\n   TEST PASSED: emission can never exceed the locked reserve.");
+    Ok(())
+}

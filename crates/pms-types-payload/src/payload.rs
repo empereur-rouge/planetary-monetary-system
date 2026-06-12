@@ -283,4 +283,25 @@ pub struct TokenMetadata {
     /// décote est brûlée implicitement (réduction de la supply circulante).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub demurrage_bps_per_day: Option<u32>,
+    /// Mint collatéralisé (protocole 2.3 v2) : adresse de réserve sur le MÊME
+    /// ledger. Quand définie, tout mint de cet asset exige que
+    /// `(circulating + minted) × collateral_ratio_bps / 10_000` soit couvert
+    /// par la somme des UTXOs de `collateral_asset_id` détenus à cette
+    /// adresse ET encore time-lockés (`locked_until > now`, protocole 2.1).
+    ///
+    /// Invariant CONTINU re-vérifié à chaque mint : l'émission totale ne peut
+    /// jamais dépasser la réserve actuellement verrouillée — pas de référence
+    /// d'UTXO dans le payload, donc pas de double-comptage possible d'une
+    /// même réserve entre plusieurs mints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collateral_address: Option<String>,
+    /// Asset du collatéral (`None` = natif du ledger). Lu seulement si
+    /// `collateral_address` est défini.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collateral_asset_id: Option<String>,
+    /// Ratio de couverture en basis points (10_000 = 1:1 numérique entre
+    /// montant minté et collatéral verrouillé). OBLIGATOIRE quand
+    /// `collateral_address` est défini (validé au registry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collateral_ratio_bps: Option<u32>,
 }

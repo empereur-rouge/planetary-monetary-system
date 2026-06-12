@@ -241,6 +241,11 @@ pub struct FaucetRequest {
     pub to: String,
     /// Montant à minter (string décimale)
     pub amount: String,
+    /// Time-lock optionnel (protocole 2.1, timestamp UNIX ms) : l'UTXO minté
+    /// est indépensable avant cette échéance. Usages : vesting, constitution
+    /// d'une réserve de collatéral (mint collatéralisé 2.3 v2).
+    #[serde(default)]
+    pub locked_until: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -278,8 +283,11 @@ pub async fn faucet_mint(
         }
     };
 
-    // 2) Build Mint payload
-    let mint_output = TxOutput::new(req.to.clone(), amount_dec.to_string(), None,);
+    // 2) Build Mint payload (time-locké si demandé)
+    let mint_output = match req.locked_until {
+        Some(until) => TxOutput::new_locked(req.to.clone(), amount_dec.to_string(), None, until),
+        None => TxOutput::new(req.to.clone(), amount_dec.to_string(), None),
+    };
 
     let mint_payload = PlainPayload::Mint {
         outputs: vec![mint_output.clone()],

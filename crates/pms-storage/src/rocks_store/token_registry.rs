@@ -73,6 +73,29 @@ impl RocksStore {
             }
         }
 
+        // mint collatéralisé (2.3 v2) : cohérence des trois champs
+        match (&metadata.collateral_address, metadata.collateral_ratio_bps) {
+            (Some(addr), ratio) => {
+                if addr.trim().is_empty() {
+                    anyhow::bail!("collateral_address cannot be empty");
+                }
+                match ratio {
+                    Some(0) | None => anyhow::bail!(
+                        "collateral_ratio_bps is required (and must be > 0) when collateral_address is set"
+                    ),
+                    Some(_) => {}
+                }
+            }
+            (None, Some(_)) => {
+                anyhow::bail!("collateral_ratio_bps requires collateral_address");
+            }
+            (None, None) => {
+                if metadata.collateral_asset_id.is_some() {
+                    anyhow::bail!("collateral_asset_id requires collateral_address");
+                }
+            }
+        }
+
         Ok(())
     }
 
