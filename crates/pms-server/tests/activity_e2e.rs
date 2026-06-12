@@ -1,6 +1,6 @@
 use pms_testkit::{
     forge_signed_wire_block_for_test, get_json, make_test_ctx, make_test_ctx_with_admin,
-    mint_to_wallet_and_get_inputs, post_json,
+    mint_to_wallet_and_get_inputs, post_json, post_json_admin,
 };
 use pms_types::{OutputId, PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput};
 use pms_types_nft::{NftAction, NftMetadata};
@@ -65,8 +65,22 @@ fn clear_admin_env_conflicts() {
     }
 }
 
+/// Token admin HTTP (v0.9.3 fix). Les endpoints `/admin/*` re-vérifient
+/// `is_admin_authorized` DANS le handler (pas seulement le middleware), donc
+/// les appels admin doivent (a) configurer ce token via `PMS_ADMIN_TOKEN_DEV`
+/// AVANT make_test_ctx, et (b) l'envoyer via `post_json_admin`. Avant ce fix,
+/// `activity_seize_*` / freeze / unfreeze / reverse POSTaient sans token → 401.
+const ADMIN_TOKEN: &str = "activity-test-admin-token";
+
+fn set_admin_token_env() {
+    unsafe {
+        std::env::set_var("PMS_ADMIN_TOKEN_DEV", ADMIN_TOKEN);
+    }
+}
+
 fn setup_admin_ctx() -> (std::sync::Arc<Wallet>, String, String) {
     clear_admin_env_conflicts();
+    set_admin_token_env();
     let admin = std::sync::Arc::new(Wallet::from_seed(&[7u8; 32], None).unwrap());
     let hrp = "8e";
     let admin_addr = admin.get_address(hrp);
@@ -627,7 +641,8 @@ async fn activity_seize_and_seize_received() -> anyhow::Result<()> {
         "address": victim_addr,
         "reason": "court order",
     });
-    let (status, seize_json) = post_json(&ctx.app, "/admin/compliance/seize", seize_body).await;
+    let (status, seize_json) =
+        post_json_admin(&ctx.app, "/admin/compliance/seize", ADMIN_TOKEN, seize_body).await;
     print_api("SEIZE", status, &seize_json);
     assert!(status.is_success(), "seize failed: {status} body={seize_json}");
 
@@ -681,6 +696,7 @@ async fn activity_seize_and_seize_received() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn activity_freeze_appears() -> anyhow::Result<()> {
+    set_admin_token_env();
     let ctx = make_test_ctx().await?;
     let hrp = ctx.settings.address.hrp.as_str();
 
@@ -694,7 +710,8 @@ async fn activity_freeze_appears() -> anyhow::Result<()> {
         "address": target_addr,
         "reason": "suspicious activity",
     });
-    let (status, json) = post_json(&ctx.app, "/admin/compliance/freeze", freeze_body).await;
+    let (status, json) =
+        post_json_admin(&ctx.app, "/admin/compliance/freeze", ADMIN_TOKEN, freeze_body).await;
     print_api("FREEZE", status, &json);
     assert!(status.is_success(), "freeze failed: {status} body={json}");
 
@@ -723,6 +740,7 @@ async fn activity_freeze_appears() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn activity_unfreeze_appears() -> anyhow::Result<()> {
+    set_admin_token_env();
     let ctx = make_test_ctx().await?;
     let hrp = ctx.settings.address.hrp.as_str();
 
@@ -737,7 +755,8 @@ async fn activity_unfreeze_appears() -> anyhow::Result<()> {
         "address": target_addr,
         "reason": "investigation pending",
     });
-    let (status, freeze_json) = post_json(&ctx.app, "/admin/compliance/freeze", freeze_body).await;
+    let (status, freeze_json) =
+        post_json_admin(&ctx.app, "/admin/compliance/freeze", ADMIN_TOKEN, freeze_body).await;
     print_api("FREEZE (setup)", status, &freeze_json);
     assert!(status.is_success(), "freeze failed: {status} body={freeze_json}");
 
@@ -756,7 +775,7 @@ async fn activity_unfreeze_appears() -> anyhow::Result<()> {
         "freeze_block_id": freeze_block_id,
     });
     let (status, unfreeze_json) =
-        post_json(&ctx.app, "/admin/compliance/unfreeze", unfreeze_body).await;
+        post_json_admin(&ctx.app, "/admin/compliance/unfreeze", ADMIN_TOKEN, unfreeze_body).await;
     print_api("UNFREEZE", status, &unfreeze_json);
     assert!(status.is_success(), "unfreeze failed: {status} body={unfreeze_json}");
 
@@ -1073,7 +1092,7 @@ async fn activity_reverse_received_appears() -> anyhow::Result<()> {
         "reason": "fraudulent transaction",
     });
     let (status, reverse_json) =
-        post_json(&ctx.app, "/admin/compliance/reverse", reverse_body).await;
+        post_json_admin(&ctx.app, "/admin/compliance/reverse", ADMIN_TOKEN, reverse_body).await;
     print_api("REVERSE", status, &reverse_json);
     assert!(status.is_success(), "reverse failed: {status} body={reverse_json}");
 
@@ -1585,7 +1604,8 @@ async fn activity_type_filter_works() -> anyhow::Result<()> {
         "address": addr,
         "reason": "test filter",
     });
-    let (status, json) = post_json(&ctx.app, "/admin/compliance/freeze", freeze_body).await;
+    let (status, json) =
+        post_json_admin(&ctx.app, "/admin/compliance/freeze", ADMIN_TOKEN, freeze_body).await;
     print_api("FREEZE (setup)", status, &json);
     assert!(status.is_success());
 

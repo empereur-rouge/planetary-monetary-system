@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.4] - Unreleased — Réhabilitation de tests pré-existants cassés + fix robustesse config
+
+Suite de l'audit v0.9.3 : correction des tests RED découverts à l'exécution
+(les agents read-only les avaient ratés faute de compiler/exécuter). Inclut un
+vrai fix de robustesse prod sur le chargement de config.
+
+### Fixed
+- **fix(config)**: `load_config` canonicalise désormais le `repo_root` au lieu
+  d'utiliser un chemin absolu contenant `../..`. Certains backends (config-rs
+  sur FS externe / chemins avec espaces, ex.
+  `/Volumes/Crutial X9 .../crates/pms-config/../../etc/config`) ne résolvaient
+  pas ce chemin de façon fiable, et comme la source est `required(false)` le
+  fichier était silencieusement ignoré → `missing field rocks` →
+  **toute la suite de tests devenait flaky/rouge** par intermittence. Fallback
+  sur le chemin brut si la canonicalisation échoue. Fichier :
+  `crates/pms-config/src/settings.rs`.
+- **test(core)**: `bootstrap_from_store` forgeait des blocs à 2 parents
+  (`top_tips(2)`) → rejetés par l'enforcement single-writer durci en v0.9.0
+  ("must have exactly 1 parent"). Passé en chaîne single-parent (`top_tips(1)`),
+  qui teste tout aussi bien la recovery + children_count au bootstrap.
+- **test(compliance)**: les 6 tests HTTP admin (`/admin/compliance/{log,frozen,
+  shadow_balance}` + freeze/unfreeze) renvoyaient `401` — ils POSTaient sans
+  token alors que les handlers re-vérifient `is_admin_authorized` en interne.
+  Configurent maintenant `PMS_ADMIN_TOKEN_DEV` avant `make_test_ctx` + envoient
+  le Bearer. 14/14 verts.
+- **test(activity)**: `activity_freeze_appears` / `activity_unfreeze_appears` /
+  `activity_seize_and_seize_received` (admin-gated) idem — passent désormais.
+
+### Changed
+- **Workspace** `0.9.3` → `0.9.4`. API_VERSION inchangé (`14`).
+
+### Known issues (rot pré-existant v0.9.0, remédiation séparée à venir)
+- Les tests d'activité **basés sur des transferts** (`activity_transfer_self`,
+  `activity_transfer_with_change`, `activity_transfer_in_encrypted`,
+  `activity_fee_received_appears`, `activity_bridge_lock_in_appears`,
+  `activity_reverse_received_appears`) échouent sur la validation tx canonique
+  v0.9.0 ("transaction authorization invalid" / "inputs/unlocks count
+  mismatch") : ils forgent des tx sans unlocks valides. Réhabilitation = passe
+  dédiée (re-signer les tx de test). De même `lru_utxos_by_address_with_fallback`
+  et une non-déterminisme d'ordre/env entre tests parallèles restent à traiter.
+
+---
+
 ## [0.9.3] - Unreleased — Test-suite audit : faux tests éliminés, gaps critiques comblés
 
 Audit complet de la suite de tests (793 fonctions) : détection des tests qui
