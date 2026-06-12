@@ -23,6 +23,7 @@ pub mod nft_store;
 pub mod node_rewards;
 pub mod rocks_store;
 pub mod store;
+pub mod token_store;
 pub mod traits;
 
 pub use activity_item::*;
@@ -37,6 +38,7 @@ pub use models::*;
 pub use nft_store::*;
 pub use node_rewards::*;
 pub use store::*;
+pub use token_store::*;
 pub use traits::*;
 pub use utxo::*;
 

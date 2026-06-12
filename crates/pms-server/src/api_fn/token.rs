@@ -53,6 +53,10 @@ pub struct CreateTokenRequest {
     pub decimals: u8,
     #[serde(default)]
     pub max_supply: Option<String>,
+    /// Demurrage opt-in (protocole 2.5) : décote en bps par jour plein.
+    /// Absent ou 0 = pas de demurrage.
+    #[serde(default)]
+    pub demurrage_bps_per_day: Option<u32>,
 }
 
 /// POST /admin/tokens/create — Crée un nouveau token.
@@ -123,6 +127,7 @@ pub async fn admin_create_token(
         max_supply: req.max_supply,
         creator: coordinator_pk.clone(),
         mint_authority: coordinator_pk,
+        demurrage_bps_per_day: req.demurrage_bps_per_day.filter(|bps| *bps > 0),
     };
 
     // Register in the token registry (RocksDB)
@@ -365,22 +370,14 @@ pub async fn admin_mint_token(
     };
 
     // Build Mint block
-    let mut outputs = vec![TxOutput {
-        address: req.to.clone(),
-        amount: amount_dec.to_string(),
-        asset_id: Some(req.asset_id.clone()),
-    }];
+    let mut outputs = vec![TxOutput::new(req.to.clone(), amount_dec.to_string(), Some(req.asset_id.clone()))];
 
     // Add fee output if configured (fee always in PMS native token).
     // Routes through coord shards when sharding is enabled — see
     // AppState::fee_recipient_address.
     if mint_fee_dec > Decimal::ZERO {
         if let Some(addr) = state.fee_recipient_address() {
-            outputs.push(TxOutput {
-                address: addr,
-                amount: mint_fee_dec.to_string(),
-                asset_id: None, // Fee in PMS native
-            });
+            outputs.push(TxOutput::new(addr, mint_fee_dec.to_string(), None,));
         }
     }
 

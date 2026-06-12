@@ -304,12 +304,16 @@ pub fn validate_block(
             PlainPayload::Genesis => genesis_rules(dag, b)?,
             PlainPayload::Mint { outputs } => {
                 amounts_positive_outputs(outputs)?;
-                // (MVP) : autres règles mint ici si besoin
+                // Protocole 2.2 : les conditions portées par des outputs
+                // mintés doivent être bien formées (même règle que TxUtxo).
+                crate::validations::conditions::validate_output_conditions(outputs)?;
             }
             PlainPayload::TxUtxo(tx) => {
                 verify_tx_signatures(tx, &policy.network_id)?;
                 validate_fee_recipient_output(tx, policy)?;
                 tx_amounts_valid(tx, policy)?; // basique sur chaînes décimales
+                // Protocole 2.2 : structure des conditions des nouveaux outputs.
+                crate::validations::conditions::validate_output_conditions(&tx.outputs)?;
 
                 // CHECK UTXO legacy (chemin sync RAM DAG — dag.rs / tests).
                 //
@@ -364,7 +368,8 @@ pub fn validate_block(
             | PlainPayload::ContractRegister(_)
             | PlainPayload::ContractUpdate { .. }
             | PlainPayload::LedgerOwnershipTransfer { .. }
-            | PlainPayload::CoordinatorKeyRotate { .. } => {}
+            | PlainPayload::CoordinatorKeyRotate { .. }
+            | PlainPayload::ReserveSnapshot { .. } => {}
         },
         Some(PayloadEnvelope::Encrypted(_ep)) => {
             // MVP privé : on ne peut pas valider le contenu → on se limite à la structure.

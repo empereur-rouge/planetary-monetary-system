@@ -96,6 +96,26 @@ pub enum ValidationError {
     #[error("unlock {input_index} does not authorize spending the referenced output")]
     OwnershipMismatch { input_index: usize },
 
+    // Time-lock (protocole 2.1) — l'UTXO dépensé est encore verrouillé.
+    // `until` est public par construction (il figure dans l'output on-DAG).
+    #[error("input {input_index} is time-locked until {until} (now: {now})")]
+    OutputTimeLocked {
+        input_index: usize,
+        until: u64,
+        now: u64,
+    },
+
+    // Spend conditions (protocole 2.2).
+    // Côté CRÉATION d'output : condition mal formée — message spécifique OK
+    // (validation de requête, pas de fuite d'état).
+    #[error("invalid spend condition: {reason}")]
+    InvalidSpendCondition { reason: String },
+    // Côté DÉPENSE : la condition de l'UTXO n'est pas satisfaite. Message
+    // volontairement vague (anti-enumeration) : ni le type de condition ni la
+    // raison précise ne sont exposés — détails loggés via tracing.
+    #[error("unlock {input_index} does not satisfy the output spend condition")]
+    SpendConditionNotMet { input_index: usize },
+
     // Compliance
     #[error("address is frozen: {0}")]
     AddressFrozen(String),

@@ -190,21 +190,9 @@ async fn activity_transfer_in_encrypted() -> anyhow::Result<()> {
             },
         }],
         outputs: vec![
-            TxOutput {
-                address: to_addr.clone(),
-                amount: taxable_amount.to_string(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: admin_addr.clone(),
-                amount: fee.clone(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: from_addr.clone(),
-                amount: change.clone(),
-                asset_id: None,
-            },
+            TxOutput::new(to_addr.clone(), taxable_amount.to_string(), None),
+            TxOutput::new(admin_addr.clone(), fee.clone(), None),
+            TxOutput::new(from_addr.clone(), change.clone(), None),
         ],
         fee: fee.clone(),
         unlocks: vec![],
@@ -322,21 +310,9 @@ async fn activity_transfer_with_change() -> anyhow::Result<()> {
             },
         }],
         outputs: vec![
-            TxOutput {
-                address: receiver_addr.clone(),
-                amount: "5.00".to_string(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: sender_addr.clone(),
-                amount: "4.50".to_string(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: admin_addr.clone(),
-                amount: "0.50".to_string(),
-                asset_id: None,
-            },
+            TxOutput::new(receiver_addr.clone(), "5.00".to_string(), None),
+            TxOutput::new(sender_addr.clone(), "4.50".to_string(), None),
+            TxOutput::new(admin_addr.clone(), "0.50".to_string(), None),
         ],
         fee: "0.50".to_string(),
         unlocks: vec![],
@@ -456,16 +432,8 @@ async fn activity_transfer_self() -> anyhow::Result<()> {
             },
         }],
         outputs: vec![
-            TxOutput {
-                address: addr.clone(),
-                amount: "9.50".to_string(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: admin_addr.clone(),
-                amount: "0.50".to_string(),
-                asset_id: None,
-            },
+            TxOutput::new(addr.clone(), "9.50".to_string(), None),
+            TxOutput::new(admin_addr.clone(), "0.50".to_string(), None),
         ],
         fee: "0.50".to_string(),
         unlocks: vec![],
@@ -549,21 +517,9 @@ async fn activity_transfer_out_via_precompute() -> anyhow::Result<()> {
             },
         }],
         outputs: vec![
-            TxOutput {
-                address: receiver_addr.to_string(),
-                amount: "5.00".to_string(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: sender_addr.to_string(),
-                amount: "4.50".to_string(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: admin_addr.to_string(),
-                amount: "0.50".to_string(),
-                asset_id: None,
-            },
+            TxOutput::new(receiver_addr.to_string(), "5.00".to_string(), None),
+            TxOutput::new(sender_addr.to_string(), "4.50".to_string(), None),
+            TxOutput::new(admin_addr.to_string(), "0.50".to_string(), None),
         ],
         fee: "0.50".to_string(),
         unlocks: vec![],
@@ -887,21 +843,9 @@ async fn activity_fee_received_appears() -> anyhow::Result<()> {
             },
         }],
         outputs: vec![
-            TxOutput {
-                address: to_addr.clone(),
-                amount: taxable_amount.to_string(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: admin_addr.clone(),
-                amount: fee.clone(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: from_addr.clone(),
-                amount: change.clone(),
-                asset_id: None,
-            },
+            TxOutput::new(to_addr.clone(), taxable_amount.to_string(), None),
+            TxOutput::new(admin_addr.clone(), fee.clone(), None),
+            TxOutput::new(from_addr.clone(), change.clone(), None),
         ],
         fee: fee.clone(),
         unlocks: vec![],
@@ -956,11 +900,7 @@ async fn activity_reward_appears() -> anyhow::Result<()> {
 
     let reward_payload = PlainPayload::Reward {
         fee_outputs: vec![],
-        reward_outputs: vec![TxOutput {
-            address: addr.clone(),
-            amount: "5.00".to_string(),
-            asset_id: None,
-        }],
+        reward_outputs: vec![TxOutput::new(addr.clone(), "5.00".to_string(), None)],
         burned: "0.50".to_string(),
         tx_block_id: "fake-tx-ref-for-test".to_string(),
     };
@@ -1025,6 +965,7 @@ async fn activity_token_create_appears() -> anyhow::Result<()> {
         max_supply: None,
         creator: creator_addr.clone(),
         mint_authority: ctx.node_wallet.encoded_public_key(),
+        demurrage_bps_per_day: None,
     };
 
     let wb = forge_signed_wire_block_for_test(
@@ -1106,16 +1047,8 @@ async fn activity_reverse_received_appears() -> anyhow::Result<()> {
             },
         }],
         outputs: vec![
-            TxOutput {
-                address: receiver_addr.clone(),
-                amount: "9.50".to_string(),
-                asset_id: None,
-            },
-            TxOutput {
-                address: admin_addr.clone(),
-                amount: "0.50".to_string(),
-                asset_id: None,
-            },
+            TxOutput::new(receiver_addr.clone(), "9.50".to_string(), None),
+            TxOutput::new(admin_addr.clone(), "0.50".to_string(), None),
         ],
         fee: "0.50".to_string(),
         unlocks: vec![],
@@ -1597,11 +1530,7 @@ async fn activity_bridge_mint_appears() -> anyhow::Result<()> {
     let tips = get_tips(&ctx).await;
 
     let bridge_mint = PlainPayload::BridgeMint {
-        outputs: vec![TxOutput {
-            address: addr.clone(),
-            amount: "100.00".to_string(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(addr.clone(), "100.00".to_string(), None)],
         lock_block_id: "fake-lock-blk-for-test".to_string(),
         source_ledger_id: "main".to_string(),
     };

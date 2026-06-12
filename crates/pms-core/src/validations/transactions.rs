@@ -1,7 +1,7 @@
 use crate::Dag;
 use crate::validations::amount::{amount_parse_non_neg_dec, amount_parse_pos_dec};
 use crate::validations::check::ValidatePolicy;
-use crate::validations::ownership::unlock_matches_address;
+use crate::validations::conditions::{check_spend_authorization, validate_output_conditions};
 use crate::validations::signature::verify_tx_signatures;
 use pms_errors::ValidationError;
 use pms_types::{PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput};
@@ -31,27 +31,43 @@ pub fn utxo_sufficient_funds(dag: &Dag, tx: &Transaction) -> Result<(), Validati
     }
     let need = out_sum + fee;
 
+    // Appariement input[i] ↔ unlock[i] — déjà garanti dans le flux
+    // `validate_block` (verify_tx_signatures), re-vérifié ici pour que la
+    // fonction reste sûre appelée seule (sinon les conditions seraient
+    // silencieusement sautées sur les inputs sans unlock).
+    if tx.inputs.len() != tx.unlocks.len() {
+        return Err(ValidationError::InvalidSignature(format!(
+            "inputs/unlocks count mismatch: {} inputs, {} unlocks",
+            tx.inputs.len(),
+            tx.unlocks.len()
+        )));
+    }
+
+    // Résout les outputs dépensés depuis les blocs du DAG RAM, puis applique
+    // LES MÊMES helpers que le hot path (check_input_time_locks /
+    // check_spend_authorization) — la règle ne peut pas diverger.
+    let mut prev_outs: Vec<TxOutput> = Vec::with_capacity(tx.inputs.len());
     let mut in_sum = Decimal::ZERO;
     for inp in &tx.inputs {
         let Some(prev_block) = dag.blocks.get(&inp.out.txid) else {
             return Err(ValidationError::MissingInput);
         };
-        let prev_amount = match &prev_block.payload {
+        let prev_out = match &prev_block.payload {
             Some(PayloadEnvelope::Plain(PlainPayload::Mint { outputs })) => outputs
                 .get(inp.out.index as usize)
-                .ok_or(ValidationError::MissingOutput)?
-                .amount
-                .clone(),
+                .ok_or(ValidationError::MissingOutput)?,
             Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(txp))) => txp
                 .outputs
                 .get(inp.out.index as usize)
-                .ok_or(ValidationError::MissingOutput)?
-                .amount
-                .clone(),
+                .ok_or(ValidationError::MissingOutput)?,
             _ => return Err(ValidationError::MissingOutput),
         };
-        in_sum += amount_parse_pos_dec(&prev_amount)?;
+        in_sum += amount_parse_pos_dec(&prev_out.amount)?;
+        prev_outs.push(prev_out.clone());
     }
+
+    check_input_time_locks(&prev_outs, crate::utxo::current_time_ms())?;
+    check_spend_authorization(&tx.unlocks, &prev_outs)?;
 
     if in_sum < need {
         return Err(ValidationError::InsufficientFunds);
@@ -85,6 +101,38 @@ async fn fetch_input_outputs(
     Ok(fetched)
 }
 
+/// Time-lock natif (protocole 2.1) : rejette la dépense d'un input dont le
+/// `locked_until` (timestamp UNIX ms, porté par l'output on-DAG) est encore
+/// dans le futur par rapport à `now_ms`.
+///
+/// `input_outputs` = les `TxOutput` dépensés, dans l'ordre des inputs.
+/// Partagé entre le hot path (`validate_transaction_full`) et le chemin
+/// legacy (`utxo_sufficient_funds` via `validate_block`) pour que la règle
+/// ne puisse pas diverger entre les deux.
+pub fn check_input_time_locks(
+    input_outputs: &[TxOutput],
+    now_ms: u64,
+) -> Result<(), ValidationError> {
+    for (i, out) in input_outputs.iter().enumerate() {
+        if let Some(until) = out.locked_until {
+            if now_ms < until {
+                tracing::warn!(
+                    "🚫 Time-locked input {} spent too early: locked until {}, now {}",
+                    i,
+                    until,
+                    now_ms
+                );
+                return Err(ValidationError::OutputTimeLocked {
+                    input_index: i,
+                    until,
+                    now: now_ms,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Conservation stricte par asset : `sum(inputs[asset]) == sum(outputs[asset])`
 /// pour chaque asset, et aucun output ne crée un asset sans input correspondant.
 ///
@@ -101,13 +149,43 @@ pub fn check_asset_conservation(
     tx: &Transaction,
     input_outputs: &[TxOutput],
 ) -> Result<(), ValidationError> {
-    // Grouper les inputs par asset_id
+    check_asset_conservation_with_demurrage(tx, input_outputs, &HashMap::new(), 0)
+}
+
+/// Conservation par asset, variante demurrage-aware (protocole 2.5).
+///
+/// `demurrage_rates` = `asset_id -> bps_per_day` pour les assets opt-in
+/// (résolu par l'appelant depuis le token registry). Pour ces assets, la
+/// valeur d'input prise en compte est la valeur **effective** après décote
+/// ([`crate::validations::demurrage::effective_value`], horloge `now_ms`) et
+/// la règle devient `sum(outputs) <= sum(effective_inputs)` — l'écart est la
+/// décote brûlée implicitement. Les assets hors map gardent la conservation
+/// STRICTE (audit M-7).
+pub fn check_asset_conservation_with_demurrage(
+    tx: &Transaction,
+    input_outputs: &[TxOutput],
+    demurrage_rates: &HashMap<String, u32>,
+    now_ms: u64,
+) -> Result<(), ValidationError> {
+    // Grouper les inputs par asset_id — valeur effective pour les assets à
+    // demurrage, nominale sinon.
     let mut inputs_by_asset: HashMap<Option<String>, Decimal> = HashMap::new();
     for out in input_outputs {
-        let amount = amount_parse_pos_dec(&out.amount)?;
+        let nominal = amount_parse_pos_dec(&out.amount)?;
+        let rate = out
+            .asset_id
+            .as_ref()
+            .and_then(|a| demurrage_rates.get(a))
+            .copied()
+            .unwrap_or(0);
+        let value = if rate > 0 {
+            crate::validations::demurrage::effective_value(nominal, out.created_at, now_ms, rate)
+        } else {
+            nominal
+        };
         *inputs_by_asset
             .entry(out.asset_id.clone())
-            .or_insert(Decimal::ZERO) += amount;
+            .or_insert(Decimal::ZERO) += value;
     }
 
     // Grouper les outputs par asset_id
@@ -125,12 +203,26 @@ pub fn check_asset_conservation(
             .get(asset_id)
             .copied()
             .unwrap_or(Decimal::ZERO);
-        if *in_sum != out_sum {
+        let has_demurrage = asset_id
+            .as_ref()
+            .and_then(|a| demurrage_rates.get(a))
+            .copied()
+            .unwrap_or(0)
+            > 0;
+        // Demurrage : la décote (et tout surplus volontaire) est brûlée —
+        // out <= effective_in. Sinon : égalité stricte (M-7).
+        let violated = if has_demurrage {
+            out_sum > *in_sum
+        } else {
+            *in_sum != out_sum
+        };
+        if violated {
             tracing::warn!(
-                "Asset balance mismatch: asset={:?}, inputs={}, outputs={}",
+                "Asset balance mismatch: asset={:?}, inputs(effective)={}, outputs={}, demurrage={}",
                 asset_id,
                 in_sum,
-                out_sum
+                out_sum,
+                has_demurrage
             );
             return Err(ValidationError::AssetBalanceMismatch {
                 asset_id: asset_id.clone(),
@@ -183,11 +275,24 @@ pub async fn validate_transaction_async(
 /// 3. **Signatures (C-2)** : chaque unlock porte une signature ECDSA valide
 ///    du message canonique `{network_id, inputs, outputs, fee}` (anti-replay
 ///    cross-chain inclus).
-/// 4. **Ownership (C-1)** : pour chaque input, la pubkey de l'unlock apparié
-///    dérive bien l'adresse propriétaire de l'UTXO dépensé
-///    ([`unlock_matches_address`]). Sans ce binding, n'importe quelle
-///    signature valide permettrait de dépenser les fonds d'autrui.
-/// 5. **Existence + double-spend + conservation par asset** (règle canonique).
+/// 4. **Spend conditions des outputs créés (protocole 2.2)** : structure des
+///    conditions (`MultiSig` bien formée + adresse canonique, `HashLock`
+///    SHA-256) via [`validate_output_conditions`].
+/// 5. **Autorisation de dépense (C-1 généralisé)** : pour chaque input, la
+///    condition de l'UTXO STOCKÉ est satisfaite par l'unlock apparié —
+///    binding pubkey↔adresse (`PubKey`/None), quorum M-of-N (`MultiSig`),
+///    préimage (`HashLock`) — via [`check_spend_authorization`].
+/// 6. **Time-lock (protocole 2.1)** : aucun input `locked_until` dans le
+///    futur ([`check_input_time_locks`], horloge = `now_ms`).
+/// 7. **Existence + double-spend + conservation par asset** (règle canonique).
+///
+/// `now_ms` = horloge du validateur (timestamp UNIX ms) — paramètre explicite
+/// pour la testabilité ; en production, le hot path passe le `now_ms` du
+/// persist (même source que `now_ms_for_signers`).
+///
+/// `demurrage_rates` = `asset_id -> bps_per_day` des assets opt-in présents
+/// dans la tx (résolu par l'appelant depuis le token registry ; map vide =
+/// conservation stricte pour tout, protocole 2.5).
 ///
 /// Retourne les `TxOutput` des inputs (dans l'ordre) pour que l'appelant
 /// puisse réutiliser les adresses sans re-fetch (ex: compliance freeze check).
@@ -195,6 +300,8 @@ pub async fn validate_transaction_full(
     utxos: &crate::utxo::ShardedUtxoSet,
     tx: &Transaction,
     policy: &ValidatePolicy,
+    now_ms: u64,
+    demurrage_rates: &HashMap<String, u32>,
 ) -> Result<Vec<TxOutput>, ValidationError> {
     // 1. Appariement input[i] ↔ unlock[i]
     if tx.inputs.len() != tx.unlocks.len() {
@@ -214,25 +321,21 @@ pub async fn validate_transaction_full(
         });
     }
 
-    // 3. Signatures de transaction (C-2)
+    // 3. Signatures de transaction (C-2) — principale + cosignatures MultiSig
     verify_tx_signatures(tx, &policy.network_id)?;
 
-    // 4+5. Existence des inputs, puis binding ownership et conservation
+    // 4. Structure des conditions portées par les NOUVEAUX outputs (2.2)
+    validate_output_conditions(&tx.outputs)?;
+
+    // 5+6+7. Existence des inputs, puis autorisation (C-1 généralisé :
+    // PubKey/MultiSig/HashLock), time-lock et conservation.
     let input_outputs = fetch_input_outputs(utxos, tx).await?;
 
-    for (i, out) in input_outputs.iter().enumerate() {
-        if !unlock_matches_address(&tx.unlocks[i].pubkey_hex, &out.address) {
-            tracing::warn!(
-                "🚫 Ownership mismatch: input {} (utxo {}:{}) is not owned by unlock pubkey",
-                i,
-                tx.inputs[i].out.txid,
-                tx.inputs[i].out.index
-            );
-            return Err(ValidationError::OwnershipMismatch { input_index: i });
-        }
-    }
+    check_spend_authorization(&tx.unlocks, &input_outputs)?;
 
-    check_asset_conservation(tx, &input_outputs)?;
+    check_input_time_locks(&input_outputs, now_ms)?;
+
+    check_asset_conservation_with_demurrage(tx, &input_outputs, demurrage_rates, now_ms)?;
 
     Ok(input_outputs)
 }

@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.10.0] - Unreleased — Primitives protocole DAG : time-lock, spend conditions, mint contraint, demurrage, preuve de réserves (plan §2)
+
+Implémentation complète de la section 2 du plan protocole (`plan.md`). Les
+prérequis bloquants C-1/C-2 étaient déjà couverts par l'audit v0.9.0
+(`validate_transaction_full` canonique) — vérifié avant toute feature.
+
+### Added
+- **feat(protocol) 2.1 — Time-lock natif sur UTXO** : `TxOutput.locked_until`
+  (timestamp UNIX ms, optionnel). Un input encore verrouillé est rejeté
+  (`ValidationError::OutputTimeLocked{input_index, until, now}`) dans les DEUX
+  chemins de validation (hot path `validate_transaction_full` + legacy
+  `utxo_sufficient_funds`). La sélection de coins exclut les UTXOs verrouillés.
+  Constructeurs `TxOutput::new` / `new_locked` stabilisent ~155 sites.
+- **feat(protocol) 2.2 — Spend conditions** : `SpendCondition` portée par
+  l'output (pattern scriptPubKey) — `PubKey` (binding C-1 historique),
+  `MultiSig{m, pubkeys}` (quorum M-of-N, adresse canonique `msig1…` qui engage
+  la policy : SHA-256 domain-séparé `pms-multisig-v1`, set trié), `HashLock
+  {hash_hex}` (révélation de préimage SHA-256). `Unlock` gagne `cosigners`
+  (signatures vérifiées crypto dans `verify_tx_signatures`, dédupliquées anti
+  quorum-stuffing) et `preimage_hex`. Erreurs `InvalidSpendCondition` (création,
+  message spécifique) / `SpendConditionNotMet` (dépense, vague anti-enumeration).
+  Module `pms-core/src/validations/conditions.rs`.
+- **feat(protocol) 2.3/2.4 — Mint contraint per-asset** : le hot path enforce
+  désormais `TokenMetadata` pour chaque asset custom minté ENREGISTRÉ —
+  `signer == mint_authority` (`UnauthorizedTokenMint`, en PLUS du gate
+  Coordinator), granularité `decimals` (`InvalidAmount`), `circulating +
+  minted <= max_supply` (`MaxSupplyExceeded`, supply cache, sommé
+  multi-outputs). Avant : enforcement API-only, contournable par tout
+  producteur de bloc. L'enregistrement via `TokenCreate` est l'OPT-IN des
+  contraintes : un asset sans metadata garde le comportement historique
+  (gate Coordinator seul) — indispensable pour les refunds de contrats
+  (edenite-cube-burn) qui mintent des assets non enregistrés. Nouveau trait
+  `pms_storage::TokenRegistryStorage`.
+- **feat(protocol) 2.5 — Demurrage opt-in par asset** :
+  `TokenMetadata.demurrage_bps_per_day` (exposé sur `POST /admin/tokens/create`,
+  validé ≤ 10000). Chaque UTXO créé est estampillé `created_at` par le SYSTÈME
+  au persist (anti-antidatage). Valeur effective calculée à la lecture :
+  `amount − amount×bps×jours_pleins/10000` (plancher 0). Conservation
+  `out ≤ effective_in` pour les assets à demurrage (décote brûlée implicitement,
+  la supply circulante décroît) ; conservation STRICTE M-7 inchangée sinon.
+  UTXOs pré-upgrade (`created_at=None`) ne décotent pas. Module
+  `pms-core/src/validations/demurrage.rs`.
+- **feat(protocol) 2.6 — Preuve de réserves ancrée** :
+  `PlainPayload::ReserveSnapshot{state_root, total_supply, utxo_count,
+  computed_at_ms}` coordinator-only. `state_root` = SHA-256 domain-séparé
+  (`pms-reserves-v1`) de l'itération ordonnée clé+valeur du CF `utxo` (un seul
+  itérateur RocksDB = vue point-in-time consistante). Tâche périodique
+  `spawn_reserve_snapshot_task` (config `[reserves] enabled/interval_secs`,
+  désactivée par défaut, check read-only). Endpoints : `GET /v1/reserves/latest`
+  (public), `POST /admin/reserves/snapshot` (admin_writable), `POST
+  /admin/reserves/verify` (admin_recovery). Pointeur de commodité dans le CF
+  `last_ms` (pas de nouveau CF, pas de migration).
+- **test(core)**: nouvelles suites `timelock.rs` (6), `spend_conditions.rs` (13),
+  `mint_constraints.rs` (10), `demurrage_validation.rs` (7) + unit tests
+  conditions/demurrage + round-trip RocksDB (`rocks_utxo.rs`) + sandbox e2e
+  `test_reserve_snapshot_anchor_and_verify`.
+
+### Changed
+- **refactor(storage+core)**: `UtxoDelta.create` et `NetDagAdapter::add_utxo`
+  transportent désormais le `TxOutput` COMPLET (au lieu de tuples
+  addr/amount/asset) — élimine structurellement le piège « champ d'output perdu
+  entre validation et stockage ». Point d'écriture unique du CF `utxo` :
+  `UtxoValue::encode_output` (champs `lkd`/`cond`/`cat` optionnels,
+  rétro-compatibles sans migration).
+- **`validate_transaction_full`** prend `now_ms` (horloge explicite, testable)
+  et `demurrage_rates` (résolus du token registry par le hot path).
+- **Versions** : workspace `0.9.8` → `0.10.0` ; `DAG_VERSION` `3.0.0` → `3.1.0`
+  (additif, auto-migrating — les UTXOs/blocs existants restent valides) ;
+  `API_VERSION` `14` → `15` (endpoints reserves + champ demurrage) ;
+  `protocol_version` P2P `2` → `3` (nouveaux champs wire `TxOutput` + variante
+  `ReserveSnapshot`). `CURRENT_VER` schéma DB inchangé (`10`) — aucun nouveau CF.
+
+### Limitations connues (documentées)
+- Les handlers custodiaux (`send-simple`, `send_asset`) ne calculent pas encore
+  la décote demurrage côté serveur : les assets à demurrage se dépensent via
+  des transactions client-signées (`/wallet/tx/send`) dont le client calcule la
+  valeur effective (formule en jours pleins, reproductible).
+- Le chemin encrypted (`wallet_send_tx` pré-chiffrement) applique la
+  conservation stricte — assets à demurrage supportés sur le chemin plain.
+
+---
+
 ## [0.9.8] - Unreleased — `encrypted_utxo_delta_test` réhabilité (trouvé par le runner) + `sign_tx_inputs` promu au testkit
 
 Le runner v0.9.7 (`scripts/run-tests.sh`) a immédiatement fait son travail : il a

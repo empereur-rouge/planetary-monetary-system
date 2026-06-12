@@ -13,11 +13,7 @@ fn mvp_encrypt_decrypt_confidential_type_only() {
 
     // 2) Payload clair
     let mint_block = PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: "wallet123".to_string(),
-            amount: "42.00000000".to_string(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new("wallet123".to_string(), "42.00000000".to_string(), None)],
     };
     let pt = serde_json::to_vec(&mint_block).unwrap();
 
@@ -48,6 +44,7 @@ fn mvp_encrypt_decrypt_confidential_type_only() {
         PlainPayload::ContractUpdate { .. } => println!("Type = ContractUpdate"),
         PlainPayload::LedgerOwnershipTransfer { .. } => println!("Type = LedgerOwnershipTransfer"),
         PlainPayload::CoordinatorKeyRotate { .. } => println!("Type = CoordinatorKeyRotate"),
+        PlainPayload::ReserveSnapshot { .. } => println!("Type = ReserveSnapshot"),
     }
 
     // Vérif : bien du bon type
@@ -95,11 +92,7 @@ fn serde_roundtrip_seize() {
                 index: 0,
             },
         }],
-        outputs: vec![TxOutput {
-            address: "8e1treasury".into(),
-            amount: "500.0".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new("8e1treasury", "500.0", None)],
         reason: "court order".into(),
     };
     let envelope = PayloadEnvelope::Plain(payload);
@@ -118,11 +111,7 @@ fn serde_roundtrip_reverse() {
                 index: 0,
             },
         }],
-        outputs: vec![TxOutput {
-            address: "8e1original_sender".into(),
-            amount: "100.0".into(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new("8e1original_sender", "100.0", None)],
         reason: "fraud detected".into(),
     };
     let envelope = PayloadEnvelope::Plain(payload);

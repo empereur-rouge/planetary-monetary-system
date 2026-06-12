@@ -1,6 +1,7 @@
 use crate::{
     Address, Admin, Auth, Client, FeesSettings, HealthSettings, LedgerDef, Limits, LoadError,
-    Network, NetworkMode, P2pConfig, Rocks, SecretSettings, TlsConfig, ValidationSettings,
+    Network, NetworkMode, P2pConfig, ReservesSettings, Rocks, SecretSettings, TlsConfig,
+    ValidationSettings,
 };
 use anyhow::{Result, bail};
 
@@ -30,6 +31,10 @@ pub struct Settings {
     /// `config.toml` is optional.
     #[serde(default)]
     pub health: HealthSettings,
+    /// Preuve de réserves ancrée (protocole 2.6). Section `[reserves]`
+    /// optionnelle, désactivée par défaut.
+    #[serde(default)]
+    pub reserves: ReservesSettings,
     /// Multi-ledger definitions. Si absent, un seul ledger "main" est créé
     /// automatiquement à partir de [rocks] et [network].
     #[serde(default)]

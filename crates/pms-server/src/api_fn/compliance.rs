@@ -290,10 +290,8 @@ pub async fn admin_seize(
 
     let outputs: Vec<TxOutput> = amounts_by_asset
         .into_iter()
-        .map(|(asset_id, amount)| TxOutput {
-            address: treasury_addr.clone(),
-            amount: amount.to_string(),
-            asset_id,
+        .map(|(asset_id, amount)| {
+            TxOutput::new(treasury_addr.clone(), amount.to_string(), asset_id)
         })
         .collect();
 
@@ -518,11 +516,7 @@ pub async fn admin_reverse(
     }
 
     for ((address, asset_id), amount) in &refund_amounts {
-        reverse_outputs.push(TxOutput {
-            address: address.clone(),
-            amount: amount.to_string(),
-            asset_id: asset_id.clone(),
-        });
+        reverse_outputs.push(TxOutput::new(address.clone(), amount.to_string(), asset_id.clone()));
     }
 
     let payload = PayloadEnvelope::Plain(PlainPayload::Reverse {

@@ -177,11 +177,7 @@ impl LedgerInstance {
                 .get_utxo(txid, index)
                 .ok()
                 .flatten()
-                .map(|uv| pms_types::TxOutput {
-                    address: uv.address,
-                    amount: uv.amount,
-                    asset_id: uv.asset_id,
-                })
+                .map(|uv| uv.into_tx_output())
         });
 
         // Adapter + UTXO bootstrap from RocksDB utxo CF (authoritative, never pruned)
@@ -220,12 +216,7 @@ impl LedgerInstance {
                     txid,
                     index: idx,
                 };
-                let txo = pms_types::TxOutput {
-                    address: uv.address,
-                    amount: uv.amount,
-                    asset_id: uv.asset_id,
-                };
-                core_adapter.utxos.add(oid, txo).await;
+                core_adapter.utxos.add(oid, uv.into_tx_output()).await;
                 utxo_count += 1;
                 if utxo_count % 100_000 == 0 {
                     tracing::info!(ledger = %def.id, utxo_count, "UTXO streaming progress...");

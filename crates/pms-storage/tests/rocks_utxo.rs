@@ -192,3 +192,57 @@ async fn stream_all_utxos_receiver_dropped_early() -> Result<()> {
     println!("  PASS: producer stops gracefully on receiver drop");
     Ok(())
 }
+
+/// Time-lock 2.1 : `locked_until` survit au round-trip RocksDB (champ `lkd`)
+/// et les UTXOs legacy (sans `lkd`) se désérialisent en `None` sans migration.
+#[tokio::test]
+async fn locked_until_roundtrips_through_rocksdb() -> Result<()> {
+    use pms_storage::{DagStorage, StoredBlock, UtxoDelta};
+    use pms_types::TxOutput;
+
+    let ts = mk_store("lkdrt", 64).await?;
+
+    // Écrit via le chemin de persistance réel (UtxoDelta → encode_output)
+    let block = StoredBlock {
+        id: "blk-lkd-1".into(),
+        parents: vec![],
+        payload_json: None,
+        nonce: 0,
+        network_id: "test".into(),
+        protocol_version: 1,
+        signer_pk_hex: "00".into(),
+        signature_hex: "00".into(),
+        metadata: None,
+    };
+    let delta = UtxoDelta {
+        spend: vec![],
+        create: vec![(
+            "blk-lkd-1".into(),
+            0,
+            TxOutput::new_locked("8e1lockedaddr", "12.5", Some("edenite".into()), 1_900_000_000_000),
+        )],
+    };
+    ts.store
+        .append_block_atomic_with_utxo(&block, Some(&delta))
+        .await?;
+
+    let uv = ts.store.get_utxo("blk-lkd-1", 0)?.expect("utxo present");
+    println!("stored UtxoValue: {uv:?}");
+    assert_eq!(uv.locked_until, Some(1_900_000_000_000));
+    let txo = uv.into_tx_output();
+    println!("decoded TxOutput: {txo:?}");
+    assert_eq!(txo.locked_until, Some(1_900_000_000_000));
+    assert_eq!(txo.asset_id.as_deref(), Some("edenite"));
+
+    // Legacy : valeur écrite sans champ `lkd` → None (rétro-compat)
+    let cf_utxo = ts.store.cf("utxo");
+    ts.store.db.put_cf(
+        &cf_utxo,
+        b"legacy-blk#0",
+        br#"{"addr":"8e1old","amt":"1.0"}"#,
+    )?;
+    let legacy = ts.store.get_utxo("legacy-blk", 0)?.expect("legacy utxo");
+    println!("legacy UtxoValue: {legacy:?}");
+    assert_eq!(legacy.locked_until, None);
+    Ok(())
+}

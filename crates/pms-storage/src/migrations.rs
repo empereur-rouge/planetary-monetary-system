@@ -27,7 +27,7 @@ pub const CURRENT_VER: i64 = 10;
 /// canonique du contenu. Des blocs acceptés sous 2.x (unlocks invalides,
 /// ids forgés) sont rejetés sous 3.x ; un re-sync depuis zéro peut refuser
 /// un historique 2.x → wipe testnet requis.
-pub const DAG_VERSION: &str = "3.0.0";
+pub const DAG_VERSION: &str = "3.1.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

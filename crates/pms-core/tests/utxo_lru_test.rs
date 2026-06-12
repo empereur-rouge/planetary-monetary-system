@@ -14,11 +14,7 @@ fn make_oid(hex_prefix: &str, index: u32) -> OutputId {
 
 /// Helper: create a TxOutput with given address and amount.
 fn make_txo(address: &str, amount: &str) -> TxOutput {
-    TxOutput {
-        address: address.to_string(),
-        amount: amount.to_string(),
-        asset_id: None,
-    }
+    TxOutput::new(address.to_string(), amount.to_string(), None)
 }
 
 /// Build a mock UtxoFetcher backed by a HashMap (simulates RocksDB).

@@ -164,6 +164,29 @@ pub enum PlainPayload {
         /// `0` révoque l'ancienne clé immédiatement après ce bloc.
         grace_window_seconds: u64,
     },
+    /// Preuve de réserves ancrée (protocole 2.6) — snapshot périodique de
+    /// l'état agrégé du ledger, signé Coordinator.
+    ///
+    /// `state_root` = SHA-256 de l'itération ORDONNÉE (ordre des clés
+    /// RocksDB, vue point-in-time consistante) de tous les UTXOs non dépensés
+    /// (clé + valeur stockée), domain-séparé `pms-reserves-v1`. Tout
+    /// vérificateur disposant du même état peut recomputer le root et
+    /// comparer ; un mismatch prouve une divergence d'état.
+    ///
+    /// Le bloc constitue la preuve immuable on-DAG (conformément à la règle :
+    /// toute donnée d'audit passe par le DAG) ; un pointeur de commodité vers
+    /// le dernier snapshot est indexé hors-DAG pour `GET /v1/reserves/latest`.
+    ReserveSnapshot {
+        /// Racine d'état des UTXOs (64 hex chars, SHA-256).
+        state_root: String,
+        /// Supply totale par asset au moment du snapshot :
+        /// `(asset_id, montant)` — `None` = natif du ledger.
+        total_supply: Vec<(Option<String>, String)>,
+        /// Nombre d'UTXOs non dépensés couverts par le root.
+        utxo_count: u64,
+        /// Horodatage du calcul (UNIX ms), informatif.
+        computed_at_ms: u64,
+    },
 }
 
 /// Données de transfert d'ownership d'un ledger, sérialisées en JSON
@@ -250,4 +273,14 @@ pub struct TokenMetadata {
     pub creator: String,
     /// Clé publique autorisée à mint ce token
     pub mint_authority: String,
+    /// Demurrage opt-in (protocole 2.5) : décote en basis points par JOUR
+    /// PLEIN écoulé depuis la création de l'UTXO (`floor((now - created_at)
+    /// / 24h)`). `None` ou `0` = pas de demurrage (comportement historique).
+    ///
+    /// La valeur effective d'un UTXO à la dépense est
+    /// `amount - amount × bps × jours / 10_000` (plancher 0). La conservation
+    /// devient `sum(outputs) <= sum(effective_inputs)` pour cet asset — la
+    /// décote est brûlée implicitement (réduction de la supply circulante).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demurrage_bps_per_day: Option<u32>,
 }

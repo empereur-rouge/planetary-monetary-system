@@ -16,20 +16,12 @@ fn make_oid(hex_prefix: &str, index: u32) -> OutputId {
 
 /// Helper: create a TxOutput with a custom asset.
 fn make_token_txo(address: &str, amount: &str, asset_id: &str) -> TxOutput {
-    TxOutput {
-        address: address.to_string(),
-        amount: amount.to_string(),
-        asset_id: Some(asset_id.to_string()),
-    }
+    TxOutput::new(address.to_string(), amount.to_string(), Some(asset_id.to_string()))
 }
 
 /// Helper: create a native PMS TxOutput.
 fn make_pms_txo(address: &str, amount: &str) -> TxOutput {
-    TxOutput {
-        address: address.to_string(),
-        amount: amount.to_string(),
-        asset_id: None,
-    }
+    TxOutput::new(address.to_string(), amount.to_string(), None)
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -23,47 +23,60 @@ pub fn verify_tx_signatures(tx: &Transaction, network_id: &str) -> Result<(), Va
         .map_err(|_| ValidationError::Other("Serialization in signing_message failed"))?;
     let msg_bytes = msg_hex.as_bytes();
 
-    // Fast path : 1 seul unlock (cas dominant) — zéro allocation.
-    if tx.unlocks.len() == 1 {
-        return verify_single_signature(msg_bytes, &tx.unlocks[0], 0);
+    // Fast path : 1 seul unlock sans cosigners (cas dominant) — zéro allocation.
+    if tx.unlocks.len() == 1 && tx.unlocks[0].cosigners.is_empty() {
+        return verify_single_signature(
+            msg_bytes,
+            &tx.unlocks[0].pubkey_hex,
+            &tx.unlocks[0].signature_b64,
+            0,
+        );
     }
 
-    // 2. Dedupe identical unlocks before the expensive ECDSA verify.
-    // Single-owner wallets (SDK included) repeat the SAME (pubkey, signature)
-    // pair once per input — verifying it once is sufficient and N× cheaper.
+    // 2. Dedupe identical (pubkey, signature) pairs before the expensive
+    // ECDSA verify. Couvre la signature principale ET les cosignatures
+    // MultiSig (protocole 2.2) — chaque cosignature porte sur le même
+    // message canonique et DOIT être cryptographiquement valide, sinon un
+    // attaquant remplirait le quorum avec des signatures bidon.
     let mut seen = std::collections::HashSet::new();
-    let unique_unlocks: Vec<(usize, &pms_types::Unlock)> = tx
-        .unlocks
-        .iter()
-        .enumerate()
-        .filter(|(_, u)| seen.insert((u.pubkey_hex.as_str(), u.signature_b64.as_str())))
-        .collect();
+    let mut unique_sigs: Vec<(usize, &str, &str)> = Vec::with_capacity(tx.unlocks.len());
+    for (i, u) in tx.unlocks.iter().enumerate() {
+        if seen.insert((u.pubkey_hex.as_str(), u.signature_b64.as_str())) {
+            unique_sigs.push((i, &u.pubkey_hex, &u.signature_b64));
+        }
+        for co in &u.cosigners {
+            if seen.insert((co.pubkey_hex.as_str(), co.signature_b64.as_str())) {
+                unique_sigs.push((i, &co.pubkey_hex, &co.signature_b64));
+            }
+        }
+    }
 
     // 3. Hybrid verification strategy
     // Parallelism has overhead. For small transaction (1-3 inputs), sequential is faster.
     // Benchmark showed 4400 TPS (seq) vs 3300 TPS (par) for 1-input txs.
-    if unique_unlocks.len() < 4 {
-        for (i, unlock) in &unique_unlocks {
-            verify_single_signature(msg_bytes, unlock, *i)?;
+    if unique_sigs.len() < 4 {
+        for (i, pk, sig) in &unique_sigs {
+            verify_single_signature(msg_bytes, pk, sig, *i)?;
         }
     } else {
-        unique_unlocks
+        unique_sigs
             .par_iter()
-            .try_for_each(|(i, unlock)| verify_single_signature(msg_bytes, unlock, *i))?;
+            .try_for_each(|(i, pk, sig)| verify_single_signature(msg_bytes, pk, sig, *i))?;
     }
 
     Ok(())
 }
 
-/// Vérifie une seule signature (appelée en parallèle par rayon).
+/// Vérifie une seule signature ECDSA (appelée en parallèle par rayon).
 #[inline]
 fn verify_single_signature(
     msg_bytes: &[u8],
-    unlock: &pms_types::Unlock,
+    pubkey_hex: &str,
+    signature_b64: &str,
     index: usize,
 ) -> Result<(), ValidationError> {
     // Decode pubkey from hex
-    let vk_bytes = hex::decode(&unlock.pubkey_hex)
+    let vk_bytes = hex::decode(pubkey_hex)
         .map_err(|_| ValidationError::InvalidSignature("invalid pubkey hex".into()))?;
     let vk = VerifyingKey::from_sec1_bytes(&vk_bytes)
         .map_err(|_| ValidationError::InvalidSignature("invalid sec1 pubkey".into()))?;
@@ -71,7 +84,7 @@ fn verify_single_signature(
     // Decode signature from base64
     use base64::prelude::*;
     let sig_bytes = BASE64_STANDARD
-        .decode(&unlock.signature_b64)
+        .decode(signature_b64)
         .map_err(|_| ValidationError::InvalidSignature("invalid b64 signature".into()))?;
 
     // Parse k256 Signature

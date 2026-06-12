@@ -12,6 +12,13 @@ use tokio::sync::RwLock;
 /// Nombre de shards (256 = 1 octet du hash)
 const SHARD_COUNT: usize = 256;
 
+/// Horloge du protocole (re-export pratique de [`pms_utils::ts_ms`]) :
+/// timestamp UNIX courant en millisecondes, source unique des règles
+/// temporelles (time-lock 2.1, demurrage 2.5).
+pub fn current_time_ms() -> u64 {
+    pms_utils::ts_ms()
+}
+
 /// Cache du supply par asset_id : (total, count).
 type SupplyCache = HashMap<Option<String>, (Decimal, usize)>;
 
@@ -27,10 +34,24 @@ pub type UtxoFetcher = Arc<dyn Fn(&str, u32) -> Option<TxOutput> + Send + Sync>;
 /// - `Arc<str>` pour l'adresse : interné, partagé entre tous les UTXOs d'une même adresse
 /// - `Decimal` (16 bytes stack) au lieu de `String` pour le montant
 /// - `Option<Arc<str>>` pour l'asset_id : interné, None = PMS natif (0 heap)
+///
+/// `Clone` dérivé : tous les champs sont O(1) à cloner (`Arc`/Copy) — le
+/// re-push LRU clone la struct entière, aucun champ ne peut être oublié.
+#[derive(Clone)]
 struct CompactOutput {
     address: Arc<str>,
     amount: Decimal,
     asset_id: Option<Arc<str>>,
+    /// Time-lock (timestamp UNIX ms). DOIT être propagé depuis `TxOutput` —
+    /// un lock perdu ici devient invisible au validateur (piège check-list
+    /// « Cache UTXO RAM »).
+    locked_until: Option<u64>,
+    /// Condition de déverrouillage (protocole 2.2). Boxée + partagée en Arc :
+    /// rare en pratique (None = 8 bytes), et le clone lors de l'éviction LRU /
+    /// re-push reste O(1).
+    spend_condition: Option<Arc<pms_types::SpendCondition>>,
+    /// Timestamp de création système (UNIX ms) — base du demurrage (2.5).
+    created_at: Option<u64>,
 }
 
 impl CompactOutput {
@@ -39,6 +60,9 @@ impl CompactOutput {
             address: self.address.to_string(),
             amount: self.amount.to_string(),
             asset_id: self.asset_id.as_ref().map(|a| a.to_string()),
+            locked_until: self.locked_until,
+            spend_condition: self.spend_condition.as_deref().cloned(),
+            created_at: self.created_at,
         }
     }
 }
@@ -149,6 +173,9 @@ impl ShardedUtxoSet {
             address: self.interner.intern(&output.address),
             amount,
             asset_id: output.asset_id.as_deref().map(|a| self.interner.intern(a)),
+            locked_until: output.locked_until,
+            spend_condition: output.spend_condition.clone().map(Arc::new),
+            created_at: output.created_at,
         }
     }
 
@@ -395,14 +422,7 @@ impl ShardedUtxoSet {
                             true, // add
                         ));
                         self.supply_add_compact(compact);
-                        if let Some(evicted) = shard.push(
-                            id.clone(),
-                            CompactOutput {
-                                address: compact.address.clone(),
-                                amount: compact.amount,
-                                asset_id: compact.asset_id.clone(),
-                            },
-                        ) {
+                        if let Some(evicted) = shard.push(id.clone(), compact.clone()) {
                             evicted_entries.push(evicted);
                         }
                     }
@@ -576,6 +596,10 @@ impl ShardedUtxoSet {
         let mut total = Decimal::ZERO;
         let mut fallback_needed: Vec<OutputId> = Vec::new();
 
+        // Les UTXOs time-lockés encore verrouillés sont exclus de la sélection :
+        // le validateur hot path les rejetterait (OutputTimeLocked).
+        let now_ms = current_time_ms();
+
         for (shard_idx, ops) in &by_shard {
             let shard = self.shards[*shard_idx].read().await;
             for op in ops {
@@ -584,7 +608,7 @@ impl ShardedUtxoSet {
                         (None, None) => true,
                         (Some(a), Some(b)) => a.as_ref() == b.as_str(),
                         _ => false,
-                    };
+                    } && compact.locked_until.is_none_or(|l| l <= now_ms);
                     if matches {
                         result.push((op.clone(), compact.to_tx_output(), compact.amount));
                         total += compact.amount;
@@ -605,7 +629,7 @@ impl ShardedUtxoSet {
                     (None, None) => true,
                     (Some(a), Some(b)) => a == b,
                     _ => false,
-                };
+                } && txo.locked_until.is_none_or(|l| l <= now_ms);
                 if matches {
                     if let Ok(amt) = Decimal::from_str(&txo.amount) {
                         result.push((op, txo, amt));

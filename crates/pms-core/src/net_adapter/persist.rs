@@ -14,25 +14,14 @@ use anyhow::Result;
 use num_traits::ToPrimitive;
 use pms_event::PmsEvent;
 use pms_storage::store::PutResult;
-use pms_storage::coordinator_key_store::{CoordinatorKeyStorage, KeyRotationRecord};
-use pms_storage::{
-    ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage, StoredBlock,
-    UtxoDelta,
-};
+use pms_storage::coordinator_key_store::KeyRotationRecord;
+use pms_storage::{StoredBlock, UtxoDelta};
 use pms_types::{Block, PayloadEnvelope, PlainPayload};
 use pms_wire::WireBlock;
 
 impl<S> CoreAdapter<S>
 where
-    S: DagStorage
-        + NftStorage
-        + ConfigStorage
-        + NodeRewardsStorage
-        + ComplianceStorage
-        + CoordinatorKeyStorage
-        + Send
-        + Sync
-        + 'static,
+    S: pms_storage::EngineStorage,
 {
     /// Full block persistence pipeline.
     ///
@@ -239,6 +228,14 @@ where
                 return Ok(PutResult::Rejected(format!("mint policy violated: {e}")));
             }
 
+            // Verification 1.b: Spend conditions (protocole 2.2) — un Mint
+            // peut créer des outputs time-lockés / multisig / hashlock, mais
+            // leurs conditions doivent être bien formées (adresse multisig
+            // canonique, hash SHA-256 valide, M ≤ N, etc.).
+            if let Err(e) = crate::validations::conditions::validate_output_conditions(outputs) {
+                return Ok(PutResult::Rejected(format!("mint output condition: {e}")));
+            }
+
             // Verification 2: SECURITE COORDINATEUR
             // Seul le Coordinateur peut minter (Mainnet/Testnet).
             //
@@ -264,6 +261,60 @@ where
                     "mint security: {}. Key: {:?}",
                     e, policy.coordinator_public_key
                 )));
+            }
+
+            // Verification 3: MINT CONTRAINT PER-ASSET (plan 2.3 / 2.4, v0.10.0)
+            //
+            // Pour les outputs d'assets custom, le protocole enforce désormais
+            // TokenMetadata : asset enregistré, signer == mint_authority,
+            // granularité decimals, et supply cap (circulating + mint <=
+            // max_supply, supply cache du ShardedUtxoSet). Le gate Coordinator
+            // ci-dessus reste appliqué — ce check est per-asset, en plus.
+            {
+                use crate::validations::mint::{
+                    minted_amounts_by_custom_asset, validate_custom_asset_mints,
+                };
+                let minted = match minted_amounts_by_custom_asset(outputs) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Ok(PutResult::Rejected(format!("mint amounts: {e}")));
+                    }
+                };
+                if !minted.is_empty() {
+                    let mut metadata = std::collections::HashMap::new();
+                    let mut circulating = std::collections::HashMap::new();
+                    for asset_id in minted.keys() {
+                        // NOTE fail-open assumé : une erreur RocksDB sur le
+                        // lookup registry est traitée comme « non enregistré »
+                        // (contraintes per-asset skippées, gate Coordinator
+                        // conservé). À durcir avec la migration ApiError.
+                        let meta = self.store.get_token(asset_id).unwrap_or(None);
+                        // Le supply cache n'est interrogé que si une cap
+                        // existe — validate_custom_asset_mints traite une
+                        // entrée absente comme ZERO et ne la lit pas sans cap.
+                        if meta.as_ref().is_some_and(|m| m.max_supply.is_some()) {
+                            let (supply, _count) = self
+                                .utxos
+                                .circulating_supply_by_asset(Some(asset_id))
+                                .await;
+                            circulating.insert(asset_id.clone(), supply);
+                        }
+                        metadata.insert(asset_id.clone(), meta);
+                    }
+                    if let Err(e) = validate_custom_asset_mints(
+                        outputs,
+                        &wb.signer_pk_hex,
+                        &minted,
+                        &metadata,
+                        &circulating,
+                    ) {
+                        tracing::warn!(
+                            "🚫 Custom-asset mint blocked on block {}: {e}",
+                            &wb.id[..16.min(wb.id.len())]
+                        );
+                        return Ok(PutResult::Rejected(format!("token mint: {e}")));
+                    }
+                }
             }
         }
 
@@ -657,9 +708,46 @@ where
         //   - fee sanity + conservation stricte par asset (M-7),
         //   - existence des inputs + anti double-spend.
         let t_utxo_val_start = std::time::Instant::now();
+        // Horloge UNIQUE du bloc : la même valeur sert à la validation
+        // temporelle (time-lock, demurrage) ET à l'estampillage `created_at`
+        // des UTXOs créés — toute divergence fausserait le calcul de décote.
+        let now_ms = now_ms_for_signers.max(0) as u64;
         if let Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) = &block.payload {
             use crate::validations::transactions::validate_transaction_full;
-            let tx_input_outputs = match validate_transaction_full(&self.utxos, tx, policy).await
+
+            // Demurrage 2.5 : résout les taux des assets custom touchés par
+            // la tx. Un point read RocksDB par asset distinct — négligeable
+            // vs l'ECDSA. INVARIANT de résolution : les assets sont pris des
+            // OUTPUTS — la conservation exigeant un output par asset d'input,
+            // tout asset dépensé a son taux résolu. Corollaire assumé : un
+            // « full-burn » d'un asset à demurrage sans aucun output de cet
+            // asset retombe sur la règle stricte (rejeté) — il faut toujours
+            // au moins un output de l'asset dépensé.
+            let assets: std::collections::HashSet<&str> = tx
+                .outputs
+                .iter()
+                .filter_map(|o| o.asset_id.as_deref())
+                .collect();
+            let demurrage_rates: std::collections::HashMap<String, u32> = assets
+                .into_iter()
+                .filter_map(|asset| {
+                    self.store
+                        .get_token(asset)
+                        .ok()
+                        .flatten()
+                        .and_then(|m| m.demurrage_bps_per_day.filter(|bps| *bps > 0))
+                        .map(|bps| (asset.to_string(), bps))
+                })
+                .collect();
+
+            let tx_input_outputs = match validate_transaction_full(
+                &self.utxos,
+                tx,
+                policy,
+                now_ms,
+                &demurrage_rates,
+            )
+            .await
             {
                 Ok(outs) => outs,
                 Err(e) => {
@@ -754,29 +842,34 @@ where
         // the pipeline can't see the plaintext at all (`_ => None` branch
         // below). Applying the caller's delta inside the same critical
         // section as the block insert closes the H1 race.
+        // Demurrage 2.5 : chaque UTXO créé est estampillé `created_at` par le
+        // SYSTÈME (même horloge `now_ms` que la validation) — toute valeur
+        // client est écrasée (anti-antidatage). Base du calcul de décote.
+        let stamp = |out: &pms_types::TxOutput| -> pms_types::TxOutput {
+            pms_types::TxOutput {
+                created_at: Some(now_ms),
+                ..out.clone()
+            }
+        };
+        // Forme canonique des `create` du delta : un seul endroit construit
+        // les tuples (block_id, index, output estampillé) — un futur payload
+        // à UTXO ne peut pas oublier le stamp.
+        let stamped_creates = |outs: &[pms_types::TxOutput]| -> Vec<(String, u32, pms_types::TxOutput)> {
+            outs.iter()
+                .enumerate()
+                .map(|(i, out)| (sb.id.clone(), i as u32, stamp(out)))
+                .collect()
+        };
+
         let delta = if let Some(d) = external_delta {
             Some(d)
         } else {
             match &payload {
             Some(PayloadEnvelope::Plain(PlainPayload::Mint { outputs })) => {
                 // Mint = create only (no inputs)
-                let create = outputs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, out)| {
-                        (
-                            sb.id.clone(),
-                            i as u32,
-                            out.address.clone(),
-                            out.amount.clone(),
-                            out.asset_id.clone(),
-                        )
-                    })
-                    .collect();
-
                 Some(UtxoDelta {
                     spend: vec![],
-                    create,
+                    create: stamped_creates(outputs),
                 })
             }
 
@@ -788,20 +881,7 @@ where
                     .map(|inp| (inp.out.txid.clone(), inp.out.index))
                     .collect();
 
-                let create = tx
-                    .outputs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, out)| {
-                        (
-                            sb.id.clone(),
-                            i as u32,
-                            out.address.clone(),
-                            out.amount.clone(),
-                            out.asset_id.clone(),
-                        )
-                    })
-                    .collect();
+                let create = stamped_creates(&tx.outputs);
 
                 // Accumulation du pool de fees pour le Treasury
                 // Calcul: fee * (treasury_fee_bps / 10000)
@@ -849,32 +929,24 @@ where
                 // Reward = create outputs for fee distribution + block rewards (no inputs)
                 // fee_outputs: treasury, creator, parent signers
                 // reward_outputs: creator, treasury
-                let mut create = Vec::new();
-                let mut idx = 0u32;
-
-                // Add fee distribution outputs (always PMS native)
-                for out in fee_outputs {
-                    create.push((
-                        sb.id.clone(),
-                        idx,
-                        out.address.clone(),
-                        out.amount.clone(),
-                        None,
-                    ));
-                    idx += 1;
-                }
-
-                // Add block reward outputs (always PMS native)
-                for out in reward_outputs {
-                    create.push((
-                        sb.id.clone(),
-                        idx,
-                        out.address.clone(),
-                        out.amount.clone(),
-                        None,
-                    ));
-                    idx += 1;
-                }
+                // fee_outputs puis reward_outputs — l'ordre fixe l'index des
+                // OutputId (cf. PlainPayload::outputs()). Toujours PMS natif :
+                // asset_id forcé à None.
+                let create: Vec<(String, u32, pms_types::TxOutput)> = fee_outputs
+                    .iter()
+                    .chain(reward_outputs.iter())
+                    .enumerate()
+                    .map(|(i, out)| {
+                        (
+                            sb.id.clone(),
+                            i as u32,
+                            pms_types::TxOutput {
+                                asset_id: None,
+                                ..stamp(out)
+                            },
+                        )
+                    })
+                    .collect();
 
                 if create.is_empty() {
                     None
@@ -900,22 +972,9 @@ where
 
             Some(PayloadEnvelope::Plain(PlainPayload::BridgeMint { outputs, .. })) => {
                 // BridgeMint = create outputs, spend nothing (funds arrive on this ledger)
-                let create = outputs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, out)| {
-                        (
-                            sb.id.clone(),
-                            i as u32,
-                            out.address.clone(),
-                            out.amount.clone(),
-                            out.asset_id.clone(),
-                        )
-                    })
-                    .collect();
                 Some(UtxoDelta {
                     spend: vec![],
-                    create,
+                    create: stamped_creates(outputs),
                 })
             }
 
@@ -927,20 +986,10 @@ where
                     .iter()
                     .map(|inp| (inp.out.txid.clone(), inp.out.index))
                     .collect();
-                let create = outputs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, out)| {
-                        (
-                            sb.id.clone(),
-                            i as u32,
-                            out.address.clone(),
-                            out.amount.clone(),
-                            out.asset_id.clone(),
-                        )
-                    })
-                    .collect();
-                Some(UtxoDelta { spend, create })
+                Some(UtxoDelta {
+                    spend,
+                    create: stamped_creates(outputs),
+                })
             }
             Some(PayloadEnvelope::Plain(PlainPayload::Reverse {
                 inputs, outputs, ..
@@ -949,20 +998,10 @@ where
                     .iter()
                     .map(|inp| (inp.out.txid.clone(), inp.out.index))
                     .collect();
-                let create = outputs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, out)| {
-                        (
-                            sb.id.clone(),
-                            i as u32,
-                            out.address.clone(),
-                            out.amount.clone(),
-                            out.asset_id.clone(),
-                        )
-                    })
-                    .collect();
-                Some(UtxoDelta { spend, create })
+                Some(UtxoDelta {
+                    spend,
+                    create: stamped_creates(outputs),
+                })
             }
                 // Freeze/Unfreeze: no UTXO changes (registry-only)
                 _ => None,
@@ -990,17 +1029,13 @@ where
             let creates: Vec<(pms_types::OutputId, pms_types::TxOutput)> = d
                 .create
                 .iter()
-                .map(|(txid, idx, addr, amount, asset_id)| {
+                .map(|(txid, idx, out)| {
                     (
                         pms_types::OutputId {
                             txid: txid.clone(),
                             index: *idx,
                         },
-                        pms_types::TxOutput {
-                            address: addr.clone(),
-                            amount: amount.clone(),
-                            asset_id: asset_id.clone(),
-                        },
+                        out.clone(),
                     )
                 })
                 .collect();
@@ -1103,11 +1138,12 @@ where
                                                 txid: block_id.clone(),
                                                 index: idx as u32,
                                             };
-                                            let out = pms_types::TxOutput {
-                                                address: reward_address.clone(),
-                                                amount: amount_str,
-                                                asset_id: None, // rewards always PMS
-                                            };
+                                            // rewards always PMS native
+                                            let out = pms_types::TxOutput::new(
+                                                reward_address.clone(),
+                                                amount_str,
+                                                None,
+                                            );
 
                                             reward_utxos.push((
                                                 out_id,

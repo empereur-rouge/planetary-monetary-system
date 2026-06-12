@@ -234,9 +234,9 @@ async fn wallet_send_tx_injects_fee_and_admin_can_decrypt_fee_utxo() -> anyhow::
     let tx = Transaction {
         inputs: vec![TxInput { out: OutputId { txid: u.id.txid.clone(), index: u.id.index } }],
         outputs: vec![
-            TxOutput { address: to_addr.to_string(), amount: taxable_amount.to_string(), asset_id: None },
-            TxOutput { address: admin_addr.to_string(), amount: fee.to_string(), asset_id: None },
-            TxOutput { address: w_from.get_address(&hrp), amount: change.to_string(), asset_id: None },
+            TxOutput::new(to_addr.to_string(), taxable_amount.to_string(), None),
+            TxOutput::new(admin_addr.to_string(), fee.to_string(), None),
+            TxOutput::new(w_from.get_address(&hrp), change.to_string(), None),
         ],
         fee: fee.to_string(),
         unlocks: vec![],
@@ -365,9 +365,9 @@ async fn wallet_send_tx_fee_is_materialized_and_zeroed_and_visible_to_admin() ->
     let tx = Transaction {
         inputs: vec![TxInput { out: OutputId { txid: u.id.txid.clone(), index: u.id.index } }],
         outputs: vec![
-            TxOutput { address: to_addr.to_string(), amount: taxable_amount.to_string(), asset_id: None },
-            TxOutput { address: admin_addr.to_string(), amount: fee.to_string(), asset_id: None },
-            TxOutput { address: w_from.get_address(&hrp), amount: change.to_string(), asset_id: None },
+            TxOutput::new(to_addr.to_string(), taxable_amount.to_string(), None),
+            TxOutput::new(admin_addr.to_string(), fee.to_string(), None),
+            TxOutput::new(w_from.get_address(&hrp), change.to_string(), None),
         ],
         fee: fee.to_string(),
         unlocks: vec![],
@@ -503,9 +503,9 @@ async fn wallet_send_tx_does_not_duplicate_fee_output_if_already_present() -> an
     let tx = Transaction {
         inputs: vec![TxInput { out: OutputId { txid: u.id.txid.clone(), index: u.id.index } }],
         outputs: vec![
-            TxOutput { address: to_addr.to_string(), amount: taxable_amount.to_string(), asset_id: None },
-            TxOutput { address: admin_addr.to_string(), amount: fee.to_string(), asset_id: None },
-            TxOutput { address: w_from.get_address(&hrp), amount: change.to_string(), asset_id: None },
+            TxOutput::new(to_addr.to_string(), taxable_amount.to_string(), None),
+            TxOutput::new(admin_addr.to_string(), fee.to_string(), None),
+            TxOutput::new(w_from.get_address(&hrp), change.to_string(), None),
         ],
         fee: fee.to_string(),
         unlocks: vec![],

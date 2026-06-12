@@ -1,5 +1,6 @@
 use crate::rocks_store::store::RocksStore;
 use anyhow::Result;
+use pms_types::TxOutput;
 use rocksdb::WriteBatch;
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +17,14 @@ pub struct UtxoApply {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UtxoDelta {
     pub spend: Vec<(String, u32)>, // (txid, index)
-    pub create: Vec<(String, u32, String, String, Option<String>)>, // (txid, index, address, amount, asset_id)
+    /// `(txid, index, output)` — le `TxOutput` COMPLET est transporté jusqu'à
+    /// l'écriture RocksDB. Historiquement ce champ était un tuple
+    /// `(txid, index, address, amount, asset_id)` : chaque nouveau champ
+    /// protocole ajouté à `TxOutput` (asset_id hier, `locked_until` /
+    /// `spend_condition` aujourd'hui) était silencieusement perdu au passage —
+    /// le piège documenté de la check-list « Cache UTXO RAM ». Transporter la
+    /// struct entière élimine définitivement cette classe de bug.
+    pub create: Vec<(String, u32, TxOutput)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +35,61 @@ pub struct UtxoValue {
     pub amount: String,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "ast")]
     pub asset_id: Option<String>,
+    /// Time-lock (timestamp UNIX ms) — voir `TxOutput::locked_until`.
+    /// Optionnel + serde default : les UTXOs écrits avant la v0.10.0 se
+    /// désérialisent en `None` sans migration.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "lkd")]
+    pub locked_until: Option<u64>,
+    /// Condition de déverrouillage (protocole 2.2) — voir `TxOutput::spend_condition`.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "cond")]
+    pub spend_condition: Option<pms_types::SpendCondition>,
+    /// Timestamp de création système (UNIX ms) — voir `TxOutput::created_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "cat")]
+    pub created_at: Option<u64>,
+}
+
+impl UtxoValue {
+    /// Convertit la représentation stockage RocksDB en `TxOutput` protocole.
+    pub fn into_tx_output(self) -> TxOutput {
+        TxOutput {
+            address: self.address,
+            amount: self.amount,
+            asset_id: self.asset_id,
+            locked_until: self.locked_until,
+            spend_condition: self.spend_condition,
+            created_at: self.created_at,
+        }
+    }
+
+    /// Sérialise un `TxOutput` sous la forme JSON compacte du CF `utxo`
+    /// (`{"addr":…,"amt":…,"ast":…,"lkd":…}`) sans cloner les Strings.
+    ///
+    /// Point d'écriture UNIQUE du format : les deux chemins de persistance
+    /// (`append_block_atomic_with_utxo` et `append_blocks_batch`) passent ici,
+    /// donc un nouveau champ d'output ne peut pas diverger entre eux.
+    pub fn encode_output(out: &TxOutput) -> Result<Vec<u8>> {
+        #[derive(Serialize)]
+        struct OutValRef<'a> {
+            addr: &'a str,
+            amt: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            ast: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            lkd: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            cond: Option<&'a pms_types::SpendCondition>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            cat: Option<u64>,
+        }
+        Ok(serde_json::to_vec(&OutValRef {
+            addr: &out.address,
+            amt: &out.amount,
+            ast: out.asset_id.as_deref(),
+            lkd: out.locked_until,
+            cond: out.spend_condition.as_ref(),
+            cat: out.created_at,
+        })?)
+    }
 }
 
 impl RocksStore {

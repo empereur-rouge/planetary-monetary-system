@@ -179,6 +179,51 @@ pub fn spawn_inflation_mint_task(state: AppState) {
     }
 }
 
+/// Spawns the periodic reserve-snapshot task (protocole 2.6, v0.10.0).
+///
+/// Quand `[reserves].enabled = true`, calcule toutes les `interval_secs`
+/// un snapshot agrégé de l'état UTXO (state_root + supply par asset) et
+/// l'ancre dans le DAG via un bloc `ReserveSnapshot` signé Coordinator.
+///
+/// CRITICAL: produit des blocs → check `read_only.is_armed()` à chaque
+/// itération (le middleware HTTP ne couvre pas les boucles de fond).
+pub fn spawn_reserve_snapshot_task(state: AppState) {
+    let settings = &state.settings;
+    if !settings.reserves.enabled {
+        return;
+    }
+    let interval_sec = settings.reserves.interval_secs.max(60);
+    let state_reserves = state.clone();
+
+    tokio::spawn(async move {
+        tracing::info!(
+            "🏦 Reserve Snapshot Service started (interval: {}s)",
+            interval_sec
+        );
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_sec));
+        interval.tick().await; // consume first tick (immediate)
+
+        loop {
+            interval.tick().await;
+
+            if state_reserves.read_only.is_armed() {
+                tracing::debug!(
+                    target = "reserve_snapshot",
+                    reason = state_reserves.read_only.reason().as_str(),
+                    "skipping reserve snapshot: engine is read-only"
+                );
+                continue;
+            }
+
+            // perform_reserve_snapshot logge déjà l'ancrage (block, root, count)
+            if let Err(e) = crate::api_fn::reserves::perform_reserve_snapshot(&state_reserves).await
+            {
+                tracing::error!("❌ Reserve snapshot failed: {}", e);
+            }
+        }
+    });
+}
+
 /// Spawns the activity-retention task (audit follow-up to v0.7.4).
 ///
 /// When `[health].activity_retention_days` is set in the config, this

@@ -24,22 +24,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pms_interface::NetDagAdapter;
 use pms_storage::store::PutResult;
-use pms_storage::coordinator_key_store::CoordinatorKeyStorage;
-use pms_storage::{ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage};
+
 use pms_wire::WireBlock;
 
 #[async_trait]
 impl<S> NetDagAdapter for CoreAdapter<S>
 where
-    S: DagStorage
-        + NftStorage
-        + ConfigStorage
-        + NodeRewardsStorage
-        + ComplianceStorage
-        + CoordinatorKeyStorage
-        + Send
-        + Sync
-        + 'static,
+    S: pms_storage::EngineStorage,
 {
     async fn have_block(&self, id: &str) -> bool {
         self.do_have_block(id).await
@@ -152,16 +143,8 @@ where
             .await
     }
 
-    async fn add_utxo(
-        &self,
-        txid: String,
-        index: u32,
-        address: String,
-        amount: String,
-        asset_id: Option<String>,
-    ) {
-        self.do_add_utxo(txid, index, address, amount, asset_id)
-            .await;
+    async fn add_utxo(&self, txid: String, index: u32, output: pms_types::TxOutput) {
+        self.do_add_utxo(txid, index, output).await;
     }
 
     async fn remove_utxo(&self, output_id: &pms_types::OutputId) -> bool {

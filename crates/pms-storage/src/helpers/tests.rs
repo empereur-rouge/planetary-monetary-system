@@ -2,11 +2,7 @@ use super::*;
 use pms_types::{Transaction, TxOutput};
 
 fn out(addr: &str, amount: &str) -> TxOutput {
-    TxOutput {
-        address: addr.into(),
-        amount: amount.into(),
-        asset_id: None,
-    }
+    TxOutput::new(addr, amount, None)
 }
 
 // -- is_fee_output_only --

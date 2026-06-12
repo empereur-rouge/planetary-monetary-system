@@ -5,21 +5,12 @@
 //! `CoreAdapter` so the trait impl in `mod.rs` can delegate to them.
 
 use crate::CoreAdapter;
-use pms_storage::coordinator_key_store::CoordinatorKeyStorage;
-use pms_storage::{ComplianceStorage, ConfigStorage, DagStorage, NftStorage, NodeRewardsStorage};
+
 use pms_types::{OutputId, TxOutput};
 
 impl<S> CoreAdapter<S>
 where
-    S: DagStorage
-        + NftStorage
-        + ConfigStorage
-        + NodeRewardsStorage
-        + ComplianceStorage
-        + CoordinatorKeyStorage
-        + Send
-        + Sync
-        + 'static,
+    S: pms_storage::EngineStorage,
 {
     /// All unspent outputs belonging to the given address.
     pub(super) async fn do_utxos_by_address(
@@ -46,24 +37,10 @@ where
     }
 
     /// Insert a new UTXO into the sharded set.
-    pub(super) async fn do_add_utxo(
-        &self,
-        txid: String,
-        index: u32,
-        address: String,
-        amount: String,
-        asset_id: Option<String>,
-    ) {
-        self.utxos
-            .add(
-                OutputId { txid, index },
-                TxOutput {
-                    address,
-                    amount,
-                    asset_id,
-                },
-            )
-            .await;
+    /// Le `TxOutput` complet est inséré tel quel — aucun champ protocole
+    /// (asset_id, locked_until, spend_condition, …) n'est reconstruit à la main.
+    pub(super) async fn do_add_utxo(&self, txid: String, index: u32, output: TxOutput) {
+        self.utxos.add(OutputId { txid, index }, output).await;
     }
 
     /// Remove a UTXO by its output id. Returns `true` if it existed.

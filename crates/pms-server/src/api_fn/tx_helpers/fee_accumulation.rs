@@ -114,11 +114,7 @@ pub async fn create_reward_block(
 
     let fee_txouts: Vec<TxOutput> = fee_outputs_raw
         .iter()
-        .map(|fo| TxOutput {
-            address: fo.address.clone(),
-            amount: fo.amount.clone(),
-            asset_id: None,
-        })
+        .map(|fo| TxOutput::new(fo.address.clone(), fo.amount.clone(), None))
         .collect();
 
     let reward_payload = PlainPayload::Reward {

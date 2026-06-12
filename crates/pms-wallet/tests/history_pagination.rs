@@ -83,11 +83,7 @@ async fn history_pagination_by_time_and_id_rocks() -> Result<()> {
     for i in 1..=5u64 {
         // mint ciblé
         let plain = PlainPayload::Mint {
-            outputs: vec![TxOutput {
-                address: my_addr.clone(),
-                amount: format!("{}", 100 + i),
-                asset_id: None,
-            }],
+            outputs: vec![TxOutput::new(my_addr.clone(), format!("{}", 100 + i), None)],
         };
         let enc = EncryptedPayload::encrypt_for_plain(&plain, &[my_xpk.clone()])
             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -102,11 +98,7 @@ async fn history_pagination_by_time_and_id_rocks() -> Result<()> {
 
         // bruit: mint pour autre adresse (mais *aussi* encrypté pour moi)
         let other = PlainPayload::Mint {
-            outputs: vec![TxOutput {
-                address: "8e1_other_addr_____".into(),
-                amount: "7".into(),
-                asset_id: None,
-            }],
+            outputs: vec![TxOutput::new("8e1_other_addr_____", "7", None)],
         };
         let enc_o = EncryptedPayload::encrypt_for_plain(&other, &[my_xpk.clone()])
             .map_err(|e| anyhow::anyhow!("{}", e))?;

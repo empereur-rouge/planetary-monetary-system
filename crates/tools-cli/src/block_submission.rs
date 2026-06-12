@@ -201,11 +201,7 @@ pub async fn action_make_mint(
 
     // 4) Payload Mint → TRANSPARENT (pas de chiffrement)
     let plain = PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: w.get_address(&hrp),
-            amount: amount.clone(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(w.get_address(&hrp), amount.clone(), None)],
     };
 
     // Modification: on passe directement en Plain
@@ -282,18 +278,10 @@ pub async fn action_send_tokens(
     let (picked, change) = select_utxos_dec(utxos, need)?;
 
     // 6) Construire la transaction (outputs: destinataire [+ change])
-    let mut outputs = vec![TxOutput {
-        address: dest_addr.clone(),
-        amount: amount_str.clone(),
-        asset_id: None,
-    }];
+    let mut outputs = vec![TxOutput::new(dest_addr.clone(), amount_str.clone(), None)];
     if change > Decimal::ZERO {
         let change_addr = make_address(&hrp, &w_pub, &w_xpk);
-        outputs.push(TxOutput {
-            address: change_addr,
-            amount: change.to_string(),
-            asset_id: None,
-        });
+        outputs.push(TxOutput::new(change_addr, change.to_string(), None));
     }
 
     let inputs: Vec<TxInput> = picked
@@ -319,10 +307,7 @@ pub async fn action_send_tokens(
         let sig_b64 = w
             .sign(&msg)
             .map_err(|_| anyhow::anyhow!("Failed to sign transaction"))?;
-        tx.unlocks = vec![Unlock {
-            pubkey_hex: w.public_key_hex.clone(),
-            signature_b64: sig_b64,
-        }];
+        tx.unlocks = vec![Unlock::new(w.public_key_hex.clone(), sig_b64)];
     }
 
     // 8) Chiffrement du payload (destinataires = nous + destinataire)
@@ -389,18 +374,10 @@ pub async fn action_send_tokens_headless(
     let (picked, change) = select_utxos_dec(utxos, need)?;
 
     // 4) Build Transaction
-    let mut outputs = vec![TxOutput {
-        address: dest_addr.to_string(),
-        amount: amount_str.to_string(),
-        asset_id: None,
-    }];
+    let mut outputs = vec![TxOutput::new(dest_addr.to_string(), amount_str.to_string(), None)];
     if change > Decimal::ZERO {
         let change_addr = make_address(&hrp, &w_pub, &w_xpk);
-        outputs.push(TxOutput {
-            address: change_addr,
-            amount: change.to_string(),
-            asset_id: None,
-        });
+        outputs.push(TxOutput::new(change_addr, change.to_string(), None));
     }
 
     let inputs: Vec<TxInput> = picked
@@ -426,10 +403,7 @@ pub async fn action_send_tokens_headless(
         let sig_b64 = w
             .sign(&msg)
             .map_err(|_| anyhow::anyhow!("Failed to sign"))?;
-        tx.unlocks = vec![Unlock {
-            pubkey_hex: w.public_key_hex.clone(),
-            signature_b64: sig_b64,
-        }];
+        tx.unlocks = vec![Unlock::new(w.public_key_hex.clone(), sig_b64)];
     }
 
     // 6) Encrypt Payload
@@ -473,11 +447,7 @@ pub async fn action_make_mint_headless(
     }
 
     let plain = PlainPayload::Mint {
-        outputs: vec![TxOutput {
-            address: w.get_address(&hrp),
-            amount: amount_str.to_string(),
-            asset_id: None,
-        }],
+        outputs: vec![TxOutput::new(w.get_address(&hrp), amount_str.to_string(), None)],
     };
 
     submit_block_from_cli(

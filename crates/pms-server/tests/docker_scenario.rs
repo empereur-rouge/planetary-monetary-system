@@ -73,11 +73,7 @@ async fn e2e_scenario_1_minting_balance() -> Result<()> {
     for i in 0..blocks_to_mine {
         println!("   Mining block {}/{}...", i + 1, blocks_to_mine);
 
-        let output = TxOutput {
-            address: wallet_addr.clone(),
-            amount: "50.0".to_string(),
-            asset_id: None,
-        };
+        let output = TxOutput::new(wallet_addr.clone(), "50.0".to_string(), None);
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
             outputs: vec![output],
         }));
@@ -256,11 +252,7 @@ async fn e2e_scenario_2_transaction_fees() -> Result<()> {
         amount: &str,
         parents: Vec<String>,
     ) -> Result<String> {
-        let output = TxOutput {
-            address: to_addr.to_string(),
-            amount: amount.to_string(),
-            asset_id: None,
-        };
+        let output = TxOutput::new(to_addr.to_string(), amount.to_string(), None);
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
             outputs: vec![output],
         }));
@@ -386,19 +378,11 @@ async fn e2e_scenario_2_transaction_fees() -> Result<()> {
 
         let mut tx_outputs: Vec<TxOutput> = outputs
             .iter()
-            .map(|(addr, amt)| TxOutput {
-                address: addr.to_string(),
-                amount: amt.to_string(),
-                asset_id: None,
-            })
+            .map(|(addr, amt)| TxOutput::new(addr.to_string(), amt.to_string(), None))
             .collect();
 
         // Add fee output to Admin
-        tx_outputs.push(TxOutput {
-            address: admin_addr.to_string(),
-            amount: fee.to_string(),
-            asset_id: None,
-        });
+        tx_outputs.push(TxOutput::new(admin_addr.to_string(), fee.to_string(), None));
 
         let mut tx = Transaction {
             inputs: vec![input],
@@ -409,10 +393,7 @@ async fn e2e_scenario_2_transaction_fees() -> Result<()> {
 
         let msg_hex = tx.signing_message("pms-test")?;
         let sig_b64 = sender.sign(&msg_hex)?;
-        tx.unlocks.push(Unlock {
-            pubkey_hex: sender.encoded_public_key(),
-            signature_b64: sig_b64,
-        });
+        tx.unlocks.push(Unlock::new(sender.encoded_public_key(), sig_b64));
 
         println!("DEBUG send_tx: msg_hex={}", &msg_hex[..20]);
         println!(
@@ -711,11 +692,7 @@ async fn e2e_scenario_3_history() -> Result<()> {
         amount: &str,
         parents: Vec<String>,
     ) -> Result<String> {
-        let output = TxOutput {
-            address: to_addr.to_string(),
-            amount: amount.to_string(),
-            asset_id: None,
-        };
+        let output = TxOutput::new(to_addr.to_string(), amount.to_string(), None);
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
             outputs: vec![output],
         }));
@@ -774,16 +751,8 @@ async fn e2e_scenario_3_history() -> Result<()> {
                 },
             }],
             outputs: vec![
-                TxOutput {
-                    address: recipient_addr.to_string(),
-                    amount: amount.to_string(),
-                    asset_id: None,
-                },
-                TxOutput {
-                    address: change_addr.to_string(),
-                    amount: change_amount.to_string(),
-                    asset_id: None,
-                },
+                TxOutput::new(recipient_addr.to_string(), amount.to_string(), None),
+                TxOutput::new(change_addr.to_string(), change_amount.to_string(), None),
             ],
             fee: "0.0".to_string(),
             unlocks: vec![],
@@ -793,10 +762,7 @@ async fn e2e_scenario_3_history() -> Result<()> {
         let msg = tx.signing_message("pms-test").unwrap();
         // let msg_bytes = hex::decode(&msg).expect("Invalid signing message hex");
         let sig_b64 = sender.sign(&msg).unwrap(); // Use sign() interface directly
-        tx.unlocks = vec![Unlock {
-            pubkey_hex: sender.encoded_public_key(),
-            signature_b64: sig_b64,
-        }];
+        tx.unlocks = vec![Unlock::new(sender.encoded_public_key(), sig_b64)];
 
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx)));
         let mut block = Block::new(parents, payload, 0, None, compute_block_id).unwrap();
@@ -950,11 +916,7 @@ async fn e2e_scenario_4_double_spend() -> Result<()> {
         amount: &str,
         parents: Vec<String>,
     ) -> Result<String> {
-        let output = TxOutput {
-            address: to_addr.to_string(),
-            amount: amount.to_string(),
-            asset_id: None,
-        };
+        let output = TxOutput::new(to_addr.to_string(), amount.to_string(), None);
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::Mint {
             outputs: vec![output],
         }));
@@ -1007,11 +969,7 @@ async fn e2e_scenario_4_double_spend() -> Result<()> {
                     index: utxo_index,
                 },
             }],
-            outputs: vec![TxOutput {
-                address: recipient_addr.to_string(),
-                amount: amount.to_string(),
-                asset_id: None,
-            }],
+            outputs: vec![TxOutput::new(recipient_addr.to_string(), amount.to_string(), None)],
             fee: "0.0".to_string(),
             unlocks: vec![],
         };
@@ -1020,10 +978,7 @@ async fn e2e_scenario_4_double_spend() -> Result<()> {
         let sig_b64 = sender.sign(&msg).unwrap();
 
         let mut signed_tx = tx;
-        signed_tx.unlocks = vec![Unlock {
-            pubkey_hex: sender.encoded_public_key(),
-            signature_b64: sig_b64,
-        }];
+        signed_tx.unlocks = vec![Unlock::new(sender.encoded_public_key(), sig_b64)];
 
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(signed_tx)));
         let mut block = Block::new(parents, payload, 0, None, compute_block_id).unwrap();

@@ -58,11 +58,7 @@ async fn test_history_reward_plain() -> Result<()> {
 
     // 1) Create a Reward payload where my_addr is in fee_outputs
     let reward_payload = PlainPayload::Reward {
-        fee_outputs: vec![TxOutput {
-            address: my_addr.clone(),
-            amount: "10".into(),
-            asset_id: None,
-        }],
+        fee_outputs: vec![TxOutput::new(my_addr.clone(), "10", None)],
         reward_outputs: vec![],
         burned: "0".into(),
         tx_block_id: "some_tx".into(),

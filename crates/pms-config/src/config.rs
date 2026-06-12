@@ -340,6 +340,32 @@ pub struct Auth {
     pub api_keys_file: Option<String>,
 }
 
+/// Preuve de réserves ancrée (protocole 2.6) — section `[reserves]`,
+/// optionnelle. Désactivée par défaut : l'opérateur opte explicitement
+/// pour la production périodique de blocs `ReserveSnapshot`.
+#[derive(Deserialize, Clone, Debug)]
+pub struct ReservesSettings {
+    /// Active la tâche périodique de snapshot des réserves.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Intervalle entre deux snapshots (secondes). Défaut : 3600 (1 h).
+    #[serde(default = "default_reserves_interval_secs")]
+    pub interval_secs: u64,
+}
+
+fn default_reserves_interval_secs() -> u64 {
+    3600
+}
+
+impl Default for ReservesSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_reserves_interval_secs(),
+        }
+    }
+}
+
 /// `/healthz` thresholds. Defaults are deliberately permissive so a
 /// dev box doesn't flap. Tighten in production: a healthy coordinator
 /// emits a block at least every few seconds, and you want disk-free

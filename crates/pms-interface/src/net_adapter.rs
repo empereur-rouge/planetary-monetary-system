@@ -44,15 +44,8 @@ pub trait NetDagAdapter: Send + Sync {
                 })
                 .await;
             }
-            for (txid, idx, addr, amt, asset) in &delta.create {
-                self.add_utxo(
-                    txid.clone(),
-                    *idx,
-                    addr.clone(),
-                    amt.clone(),
-                    asset.clone(),
-                )
-                .await;
+            for (txid, idx, out) in &delta.create {
+                self.add_utxo(txid.clone(), *idx, out.clone()).await;
             }
         }
         Ok(res)
@@ -71,6 +64,10 @@ pub trait NetDagAdapter: Send + Sync {
             .iter()
             .map(|inp| (inp.out.txid.clone(), inp.out.index))
             .collect();
+        // Demurrage 2.5 : estampille `created_at` système, comme le pipeline
+        // plain de `persist_block` (anti-antidatage). Horloge partagée de
+        // pms-storage (pms-utils créerait un cycle via pms-network).
+        let now_ms = pms_storage::helpers::now_ms_i64().max(0) as u64;
         let create = outputs
             .iter()
             .enumerate()
@@ -78,9 +75,10 @@ pub trait NetDagAdapter: Send + Sync {
                 (
                     block_id.to_string(),
                     i as u32,
-                    out.address.clone(),
-                    out.amount.clone(),
-                    out.asset_id.clone(),
+                    TxOutput {
+                        created_at: Some(now_ms),
+                        ..out.clone()
+                    },
                 )
             })
             .collect();
@@ -186,15 +184,12 @@ pub trait NetDagAdapter: Send + Sync {
         (result, total)
     }
 
-    /// Ajoute un UTXO manuellement (utilisé par le coordinateur pour les EncryptedReward)
-    async fn add_utxo(
-        &self,
-        txid: String,
-        index: u32,
-        address: String,
-        amount: String,
-        asset_id: Option<String>,
-    );
+    /// Ajoute un UTXO manuellement (utilisé par le coordinateur pour les EncryptedReward).
+    ///
+    /// Prend le `TxOutput` COMPLET — tout champ protocole de l'output
+    /// (asset_id, locked_until, spend_condition, …) doit survivre jusqu'au
+    /// cache UTXO, sinon il devient invisible au validateur.
+    async fn add_utxo(&self, txid: String, index: u32, output: TxOutput);
 
     /// Supprime un UTXO du cache (utilisé quand un input est consommé par une TX encrypted)
     /// Retourne true si l'UTXO existait et a été supprimé, false sinon.

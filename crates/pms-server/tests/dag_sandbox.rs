@@ -5378,3 +5378,68 @@ async fn test_webhook_subscribe_list_unsubscribe_roundtrip() -> Result<()> {
 
     Ok(())
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Preuve de réserves ancrée (protocole 2.6, v0.10.0)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Snapshot manuel → bloc ReserveSnapshot ancré + pointeur /v1/reserves/latest
+/// + verify (recompute) cohérent tant que l'état n'a pas bougé.
+#[tokio::test]
+#[ignore]
+async fn test_reserve_snapshot_anchor_and_verify() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    println!("\n╔═══════════════════════════════════════════════════════════╗");
+    println!("║  TEST: Reserve Snapshot (proof-of-reserves, plan 2.6)     ║");
+    println!("╚═══════════════════════════════════════════════════════════╝\n");
+
+    // ── 1. Un peu d'état : 2 UTXOs via faucet ──
+    println!("   [1/5] Minting state (2 faucet UTXOs)...");
+    let w1 = pms_wallet::Wallet::from_seed(&[91u8; 32], None).expect("w1");
+    let w2 = pms_wallet::Wallet::from_seed(&[92u8; 32], None).expect("w2");
+    sandbox.faucet_mint(None, &w1.get_address("8e"), "150").await?;
+    sandbox.faucet_mint(None, &w2.get_address("8e"), "250").await?;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // ── 2. Avant tout snapshot : latest → 404 ──
+    let (status, body) = sandbox.public_get("/v1/reserves/latest").await;
+    println!("   [2/5] latest BEFORE any snapshot: {} {}", status, body);
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+    // ── 3. Snapshot manuel (admin, produit un bloc) ──
+    let (status, snap) = sandbox.admin_post("/admin/reserves/snapshot", json!({})).await;
+    println!("   [3/5] snapshot: {} {}", status, serde_json::to_string_pretty(&snap)?);
+    assert_eq!(status, reqwest::StatusCode::OK, "snapshot failed: {snap}");
+    let root = snap["state_root"].as_str().expect("state_root");
+    assert_eq!(root.len(), 64, "state_root must be 64 hex chars");
+    assert!(hex::decode(root).is_ok());
+    assert!(snap["utxo_count"].as_u64().unwrap() >= 2, "must cover the faucet UTXOs");
+    assert!(snap["block_id"].as_str().is_some(), "anchored block id");
+    // supply native (asset null) = 150 + 250 = 400
+    let native_total = snap["total_supply"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e[0].is_null())
+        .map(|e| e[1].as_str().unwrap().to_string())
+        .expect("native supply entry");
+    println!("       native total_supply = {native_total}");
+    assert_eq!(native_total.parse::<f64>().unwrap(), 400.0);
+
+    // ── 4. GET /v1/reserves/latest == snapshot ──
+    let (status, latest) = sandbox.public_get("/v1/reserves/latest").await;
+    println!("   [4/5] latest AFTER snapshot: {} state_root={}", status, latest["state_root"]);
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(latest["state_root"], snap["state_root"]);
+    assert_eq!(latest["block_id"], snap["block_id"]);
+
+    // ── 5. Verify : recompute == ancré (état inchangé) ──
+    let (status, verify) = sandbox.admin_post("/admin/reserves/verify", json!({})).await;
+    println!("   [5/5] verify: {} match={} note={}", status, verify["match"], verify["note"]);
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(verify["match"], json!(true), "recompute must match anchor: {verify}");
+
+    println!("\n   TEST PASSED: ReserveSnapshot anchored, exposed and verified.");
+    Ok(())
+}

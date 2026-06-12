@@ -672,11 +672,7 @@ mod data_preservation_tests {
 
     async fn write_mint(store: &RocksStore, id: &str, parent: &str, addr: &str, amount: &str) {
         let payload = PlainPayload::Mint {
-            outputs: vec![TxOutput {
-                address: addr.to_string(),
-                amount: amount.to_string(),
-                asset_id: None,
-            }],
+            outputs: vec![TxOutput::new(addr.to_string(), amount.to_string(), None)],
         };
         let sb = StoredBlock {
             id: id.to_string(),
