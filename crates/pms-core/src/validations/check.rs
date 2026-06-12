@@ -368,7 +368,8 @@ pub fn validate_block(
             | PlainPayload::ContractRegister(_)
             | PlainPayload::ContractUpdate { .. }
             | PlainPayload::LedgerOwnershipTransfer { .. }
-            | PlainPayload::CoordinatorKeyRotate { .. } => {}
+            | PlainPayload::CoordinatorKeyRotate { .. }
+            | PlainPayload::ReserveSnapshot { .. } => {}
         },
         Some(PayloadEnvelope::Encrypted(_ep)) => {
             // MVP privé : on ne peut pas valider le contenu → on se limite à la structure.

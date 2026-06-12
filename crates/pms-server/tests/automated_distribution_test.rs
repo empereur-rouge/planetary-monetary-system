@@ -267,6 +267,7 @@ async fn test_automated_fee_distribution() {
         },
         ledgers: vec![],
         health: HealthSettings::default(),
+        reserves: Default::default(),
     };
 
     // 5. Create Server with MockAdapter

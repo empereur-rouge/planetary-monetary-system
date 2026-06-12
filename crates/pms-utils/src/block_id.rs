@@ -56,6 +56,7 @@ pub fn compute_block_id(
                 PlainPayload::ContractUpdate { .. } => "ContractUpdate",
                 PlainPayload::LedgerOwnershipTransfer { .. } => "LedgerOwnershipTransfer",
                 PlainPayload::CoordinatorKeyRotate { .. } => "CoordinatorKeyRotate",
+                PlainPayload::ReserveSnapshot { .. } => "ReserveSnapshot",
             }
             .to_string();
 

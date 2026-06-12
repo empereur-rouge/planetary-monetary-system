@@ -195,6 +195,7 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
             max_peer_retries: 20,
         },
         health: pms_config::HealthSettings::default(),
+        reserves: Default::default(),
         // NOTE: Both ledgers must use "pms-dev" as network_id because
         // CoreAdapter::persist_block() validates against the global config
         // loaded from etc/config/config.dev.toml (network_id = "pms-dev").

@@ -116,6 +116,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
         // vide produit la config permissive par défaut.
         health: serde_json::from_value(serde_json::json!({}))
             .expect("default HealthSettings"),
+        reserves: Default::default(),
         p2p: pms_config::P2pConfig {
             known_peers: String::new(),
             bind_addr: None,

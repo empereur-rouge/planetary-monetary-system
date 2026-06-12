@@ -200,6 +200,27 @@ pub fn validate_payload_authority(
             }
             Ok(())
         }
+        PlainPayload::ReserveSnapshot {
+            state_root,
+            total_supply,
+            ..
+        } => {
+            require_coordinator(signer_pk, policy, "ReserveSnapshot")?;
+            let root = state_root.trim();
+            if root.len() != 64 || hex::decode(root).is_err() {
+                return Err(ValidationError::Other(
+                    "ReserveSnapshot: state_root must be 64 hex chars (SHA-256)",
+                ));
+            }
+            for (_asset, amount) in total_supply {
+                if rust_decimal::Decimal::from_str_exact(amount).is_err() {
+                    return Err(ValidationError::Other(
+                        "ReserveSnapshot: total_supply amounts must be decimals",
+                    ));
+                }
+            }
+            Ok(())
+        }
         PlainPayload::CoordinatorKeyRotate { old_pk, new_pk, .. } => {
             // Le hot path applique en plus une règle plus stricte (signé par
             // la clé COURANTE + old_pk == courante) dans son handler dédié.

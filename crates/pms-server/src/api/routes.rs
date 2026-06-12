@@ -119,6 +119,11 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
 
     let supply = Router::new()
         .route("/v1/supply", get(get_circulating_supply))
+        // Preuve de réserves ancrée (protocole 2.6) — dernier snapshot
+        .route(
+            "/v1/reserves/latest",
+            get(crate::api_fn::reserves::get_latest_reserves),
+        )
         .route("/v1/fee_pool", get(get_fee_pool_status));
 
     let token_routes = Router::new()
@@ -389,6 +394,11 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/admin/compliance/unfreeze", post(admin_unfreeze))
         .route("/admin/compliance/seize", post(admin_seize))
         .route("/admin/compliance/reverse", post(admin_reverse))
+        // Preuve de réserves (protocole 2.6) — produit un bloc ReserveSnapshot
+        .route(
+            "/admin/reserves/snapshot",
+            post(crate::api_fn::reserves::admin_snapshot_reserves),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_writable,
@@ -460,6 +470,12 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         // Admin Gas Pool API - Per-ledger gas pool management (CF writes)
         .route("/admin/gas-pool/deposit", post(admin_gas_pool_deposit))
         .route("/admin/gas-pool/withdraw", post(admin_gas_pool_withdraw))
+        // Preuve de réserves — verify recompute l'état disque, ne produit
+        // AUCUN bloc → admin_recovery (diagnostiquable même en read-only).
+        .route(
+            "/admin/reserves/verify",
+            post(crate::api_fn::reserves::admin_verify_reserves),
+        )
         // Read-only mode operator controls (v0.7.23)
         .route("/admin/read-only/status", get(crate::admin::admin_read_only_status))
         .route("/admin/read-only/arm", post(crate::admin::admin_read_only_arm))

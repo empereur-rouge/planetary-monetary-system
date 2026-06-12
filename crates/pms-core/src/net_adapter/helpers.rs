@@ -27,5 +27,6 @@ pub(super) fn plain_payload_type_str(p: &PlainPayload) -> &'static str {
         PlainPayload::ContractUpdate { .. } => "ContractUpdate",
         PlainPayload::LedgerOwnershipTransfer { .. } => "LedgerOwnershipTransfer",
         PlainPayload::CoordinatorKeyRotate { .. } => "CoordinatorKeyRotate",
+        PlainPayload::ReserveSnapshot { .. } => "ReserveSnapshot",
     }
 }

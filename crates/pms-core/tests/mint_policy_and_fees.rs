@@ -343,6 +343,7 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
         },
         ledgers: vec![],
         health: HealthSettings::default(),
+        reserves: Default::default(),
     };
 
     // WireBlock signé par un "non-admin"
@@ -490,6 +491,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_testnet() {
         },
         ledgers: vec![],
         health: HealthSettings::default(),
+        reserves: Default::default(),
     };
 
     let wb = WireBlock {
@@ -643,6 +645,7 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_mainnet() {
         },
         ledgers: vec![],
         health: HealthSettings::default(),
+        reserves: Default::default(),
     };
 
     let wb = WireBlock {
@@ -796,6 +799,7 @@ fn mint_policy_allows_empty_signer_pubkeys_in_dev() {
         },
         ledgers: vec![],
         health: HealthSettings::default(),
+        reserves: Default::default(),
     };
 
     let wb = WireBlock {

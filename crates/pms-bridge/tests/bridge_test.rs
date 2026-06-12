@@ -128,6 +128,7 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             max_peer_retries: 20,
         },
         health: pms_config::HealthSettings::default(),
+        reserves: Default::default(),
         ledgers: vec![
             LedgerDef {
                 id: "main".into(),
