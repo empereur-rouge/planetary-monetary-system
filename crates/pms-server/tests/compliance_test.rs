@@ -18,10 +18,33 @@ use axum::body::Body;
 use axum::extract::connect_info::ConnectInfo;
 use http::Request;
 use pms_storage::ComplianceStorage;
-use pms_testkit::make_test_ctx;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tower::ServiceExt;
+
+// ── Admin auth setup (v0.9.3 fix) ──────────────────────────────────────────
+//
+// Les endpoints admin (`/admin/compliance/*`) re-vérifient `is_admin_authorized`
+// DANS le handler (défense en profondeur), pas seulement via le middleware. Donc
+// même depuis loopback (qui bypasse le middleware), le handler exige un token
+// configuré ET envoyé. Avant ce fix, les tests POST/GETaient sans token → 401.
+
+/// Token admin posé via `PMS_ADMIN_TOKEN_DEV` (config.dev.toml :
+/// `admin_api_token = "env:PMS_ADMIN_TOKEN_DEV"`). Doit être set AVANT
+/// `make_test_ctx` pour que `resolve_admin_token` le capte.
+const ADMIN_TOKEN: &str = "compliance-test-admin-token";
+
+fn set_admin_token_env() {
+    unsafe {
+        std::env::set_var("PMS_ADMIN_TOKEN_DEV", ADMIN_TOKEN);
+    }
+}
+
+/// ctx de test avec le token admin configuré.
+async fn boot_ctx() -> pms_testkit::TestCtx {
+    set_admin_token_env();
+    pms_testkit::make_test_ctx().await.unwrap()
+}
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -34,6 +57,7 @@ async fn post_json(app: &axum::Router, uri: &str, body: &Value) -> (u16, Value) 
         .method("POST")
         .uri(uri)
         .header("content-type", "application/json")
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
         .body(Body::from(serde_json::to_string(body).unwrap()))
         .unwrap();
     req.extensions_mut().insert(local_addr());
@@ -51,6 +75,7 @@ async fn get_json(app: &axum::Router, uri: &str) -> (u16, Value) {
     let mut req = Request::builder()
         .method("GET")
         .uri(uri)
+        .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
         .body(Body::empty())
         .unwrap();
     req.extensions_mut().insert(local_addr());
@@ -70,7 +95,7 @@ async fn get_json(app: &axum::Router, uri: &str) -> (u16, Value) {
 
 #[tokio::test]
 async fn test_freeze_and_unfreeze_storage() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
     let addr = "8e1test_freeze_addr_123";
 
     // Initially not frozen
@@ -98,7 +123,7 @@ async fn test_freeze_and_unfreeze_storage() {
 
 #[tokio::test]
 async fn test_list_frozen_storage() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
 
     // Freeze 3 addresses
     ctx.store
@@ -122,7 +147,7 @@ async fn test_list_frozen_storage() {
 
 #[tokio::test]
 async fn test_compliance_log_storage() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
 
     ctx.store
         .log_compliance_action(
@@ -164,7 +189,7 @@ async fn test_compliance_log_storage() {
 
 #[tokio::test]
 async fn test_freeze_blocks_outgoing_tx() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
 
     let sender_addr = "8e1sender_frozen_test";
     let receiver_addr = "8e1receiver_test";
@@ -209,7 +234,7 @@ async fn test_freeze_blocks_outgoing_tx() {
 
 #[tokio::test]
 async fn test_freeze_blocks_incoming_tx() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
 
     let sender_addr = "8e1sender_ok_test";
     let receiver_addr = "8e1receiver_frozen_test";
@@ -258,7 +283,7 @@ async fn test_freeze_blocks_incoming_tx() {
 
 #[tokio::test]
 async fn test_unfreeze_restores_tx() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
 
     let sender_addr = "8e1sender_unfreeze_test";
     let receiver_addr = "8e1receiver_unfreeze_test";
@@ -311,7 +336,7 @@ async fn test_unfreeze_restores_tx() {
 
 #[tokio::test]
 async fn test_list_frozen_endpoint() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
 
     // Freeze some addresses directly in store
     ctx.store
@@ -330,7 +355,7 @@ async fn test_list_frozen_endpoint() {
 
 #[tokio::test]
 async fn test_compliance_log_endpoint() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
 
     // Add some log entries
     ctx.store
@@ -361,7 +386,7 @@ async fn test_compliance_log_endpoint() {
 
 #[tokio::test]
 async fn test_shadow_balance_endpoint() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
     let adapter = ctx.srv.adapter_arc();
 
     let addr1 = "8e1frozen_balance_1";
@@ -400,7 +425,7 @@ async fn test_shadow_balance_endpoint() {
 
 #[tokio::test]
 async fn test_double_freeze_returns_error() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
     let addr = "8e1double_freeze_test";
 
     ctx.store
@@ -419,7 +444,7 @@ async fn test_double_freeze_returns_error() {
 
 #[tokio::test]
 async fn test_unfreeze_non_frozen_returns_error() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
     let addr = "8e1never_frozen";
 
     // Unfreeze a non-frozen address should return an error
@@ -433,7 +458,7 @@ async fn test_unfreeze_non_frozen_returns_error() {
 
 #[tokio::test]
 async fn test_empty_frozen_list() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
 
     let (status, body) = get_json(&ctx.app, "/admin/compliance/frozen").await;
     assert_eq!(status, 200);
@@ -442,7 +467,7 @@ async fn test_empty_frozen_list() {
 
 #[tokio::test]
 async fn test_empty_shadow_balance() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
 
     let (status, body) = get_json(&ctx.app, "/admin/compliance/shadow_balance").await;
     assert_eq!(status, 200);
@@ -452,7 +477,7 @@ async fn test_empty_shadow_balance() {
 
 #[tokio::test]
 async fn test_empty_compliance_log() {
-    let ctx = make_test_ctx().await.unwrap();
+    let ctx = boot_ctx().await;
 
     let (status, body) = get_json(&ctx.app, "/admin/compliance/log").await;
     assert_eq!(status, 200);

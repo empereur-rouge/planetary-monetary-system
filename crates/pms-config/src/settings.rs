@@ -172,8 +172,15 @@ pub fn load_config() -> Result<Settings, ConfigError> {
         let config_dir = PathBuf::from(ROOT_CONFIG_DIR);
 
         // 2) Répertoire "etc/config" à la racine du repo
-        //    On remonte à la racine du repo à partir de crates/pms-config
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        //    On remonte à la racine du repo à partir de crates/pms-config.
+        //    On CANONICALISE pour éliminer les composants `../..` : certains
+        //    backends (config-rs sur des FS externes / chemins avec espaces)
+        //    ne résolvent pas un chemin absolu contenant `..` de façon fiable,
+        //    ce qui faisait silencieusement échouer le chargement (la source
+        //    est `required(false)`) → "missing field rocks". Fallback sur le
+        //    chemin brut si la canonicalisation échoue.
+        let repo_root_raw = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let repo_root = repo_root_raw.canonicalize().unwrap_or(repo_root_raw);
         let etc_config_dir = repo_root.join("etc/config");
 
         let candidates = [

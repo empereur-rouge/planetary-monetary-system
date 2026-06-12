@@ -51,8 +51,12 @@ async fn bootstrap_recovers_all_blocks_and_children_rocks() -> anyhow::Result<()
     //    logique que la prod (id calculé AVANT signature).
     let n = 300usize;
     for i in 0..n {
-        // 1) Choisir les parents à partir des tips du store (source de vérité)
-        let mut parents = store.top_tips(2).await?;
+        // 1) Choisir le parent à partir du tip du store (source de vérité).
+        //    UN SEUL parent : l'enforcement single-writer (config dev,
+        //    `enforce_single_writer = true`) rejette les blocs à 2+ parents
+        //    ("must have exactly 1 parent"). Une chaîne single-parent teste
+        //    aussi bien la recovery des blocs + children_count au bootstrap.
+        let mut parents = store.top_tips(1).await?;
         if parents.is_empty() {
             parents.push(genesis.id.clone());
         }
