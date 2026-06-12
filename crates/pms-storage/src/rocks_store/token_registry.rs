@@ -112,3 +112,11 @@ impl RocksStore {
         Ok(tokens)
     }
 }
+
+/// Délégation vers la méthode inhérente — permet au hot path générique
+/// (`CoreAdapter<S: TokenRegistryStorage + …>`) de lire le registre.
+impl crate::token_store::TokenRegistryStorage for RocksStore {
+    fn get_token(&self, asset_id: &str) -> Result<Option<TokenMetadata>> {
+        RocksStore::get_token(self, asset_id)
+    }
+}

@@ -146,7 +146,7 @@ mod key_rotation_state_tests {
 /// - `store` : persistance (RocksDB, …).
 /// - `server` : lien **faible** vers le serveur réseau pour éviter un cycle Arc.
 pub struct CoreAdapter<
-    S: DagStorage + NftStorage + ComplianceStorage + CoordinatorKeyStorage + Send + Sync + 'static,
+    S: DagStorage + NftStorage + ComplianceStorage + CoordinatorKeyStorage + pms_storage::TokenRegistryStorage + Send + Sync + 'static,
 > {
     /// DAG concurrent lock-free (IOTA-like architecture)
     pub dag: Arc<ConcurrentDag>,
@@ -173,7 +173,7 @@ pub struct CoreAdapter<
 }
 
 impl<
-    S: DagStorage + NftStorage + ComplianceStorage + CoordinatorKeyStorage + Send + Sync + 'static,
+    S: DagStorage + NftStorage + ComplianceStorage + CoordinatorKeyStorage + pms_storage::TokenRegistryStorage + Send + Sync + 'static,
 > CoreAdapter<S>
 {
     /// Étape 1/2 : construit l'adapter **sans** serveur attaché.

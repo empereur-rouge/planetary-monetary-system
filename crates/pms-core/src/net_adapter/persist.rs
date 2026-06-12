@@ -30,6 +30,7 @@ where
         + NodeRewardsStorage
         + ComplianceStorage
         + CoordinatorKeyStorage
+        + pms_storage::TokenRegistryStorage
         + Send
         + Sync
         + 'static,
@@ -272,6 +273,52 @@ where
                     "mint security: {}. Key: {:?}",
                     e, policy.coordinator_public_key
                 )));
+            }
+
+            // Verification 3: MINT CONTRAINT PER-ASSET (plan 2.3 / 2.4, v0.10.0)
+            //
+            // Pour les outputs d'assets custom, le protocole enforce désormais
+            // TokenMetadata : asset enregistré, signer == mint_authority,
+            // granularité decimals, et supply cap (circulating + mint <=
+            // max_supply, supply cache du ShardedUtxoSet). Le gate Coordinator
+            // ci-dessus reste appliqué — ce check est per-asset, en plus.
+            {
+                use crate::validations::mint::{
+                    minted_amounts_by_custom_asset, validate_custom_asset_mints,
+                };
+                let minted = match minted_amounts_by_custom_asset(outputs) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Ok(PutResult::Rejected(format!("mint amounts: {e}")));
+                    }
+                };
+                if !minted.is_empty() {
+                    let mut metadata = std::collections::HashMap::new();
+                    let mut circulating = std::collections::HashMap::new();
+                    for asset_id in minted.keys() {
+                        metadata.insert(
+                            asset_id.clone(),
+                            self.store.get_token(asset_id).unwrap_or(None),
+                        );
+                        let (supply, _count) = self
+                            .utxos
+                            .circulating_supply_by_asset(Some(asset_id))
+                            .await;
+                        circulating.insert(asset_id.clone(), supply);
+                    }
+                    if let Err(e) = validate_custom_asset_mints(
+                        outputs,
+                        &wb.signer_pk_hex,
+                        &metadata,
+                        &circulating,
+                    ) {
+                        tracing::warn!(
+                            "🚫 Custom-asset mint blocked on block {}: {e}",
+                            &wb.id[..16.min(wb.id.len())]
+                        );
+                        return Ok(PutResult::Rejected(format!("token mint: {e}")));
+                    }
+                }
             }
         }
 

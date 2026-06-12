@@ -17,6 +17,7 @@ where
         + NodeRewardsStorage
         + ComplianceStorage
         + CoordinatorKeyStorage
+        + pms_storage::TokenRegistryStorage
         + Send
         + Sync
         + 'static,
