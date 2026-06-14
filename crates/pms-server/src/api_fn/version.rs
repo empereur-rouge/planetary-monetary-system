@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::api::AppState;
 
 /// Version de l'API REST — à incrémenter à chaque modification des routes/formats.
+/// v17 (v0.13.0) : nouvelle route `POST /admin/onramp` (voie A fiat→PMS, mint
+/// natif sous budget d'émission partagé, plan §3.1) ; nouveau code d'erreur
+/// `5030` (EmissionBudgetExhausted) sur les chemins de mint gatés.
 /// v14 (audit H-5, v0.9.2) : les endpoints de restauration de wallet passent de
 /// `/v1/wallet/restore/{mnemonic,private-key}` (API-key) à
 /// `/admin/wallet/restore/{mnemonic,private-key}` (admin-gated). L'ancien
@@ -13,7 +16,7 @@ use crate::api::AppState;
 /// v13 (audit sécurité v0.9.0) : `POST /v1/wallet/tx/send` exige des unlocks
 /// valides (401 sinon) et la conservation par asset ; `POST /submit/block`
 /// rejette les tx sans autorisation de dépense et les block ids non canoniques.
-pub const API_VERSION: u32 = 16;
+pub const API_VERSION: u32 = 17;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,6 +91,7 @@ mod tests {
         // GET /v1/version handler is exercised in tests/version_endpoint.rs.
         // v0.11.0: 15 → 16 (faucet locked_until + champs collateral_* sur
         // /admin/tokens/create — mint collatéralisé 2.3 v2).
-        assert_eq!(parsed.api_version, 16);
+        // v0.13.0: 16 → 17 (POST /admin/onramp voie A + code 5030).
+        assert_eq!(parsed.api_version, 17);
     }
 }

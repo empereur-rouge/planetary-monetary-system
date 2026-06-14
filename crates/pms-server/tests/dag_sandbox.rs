@@ -5572,3 +5572,104 @@ async fn test_collateralized_mint_lifecycle() -> Result<()> {
     println!("\n   TEST PASSED: emission can never exceed the locked reserve.");
     Ok(())
 }
+
+/// On-ramp (voie A, plan §3.1) end-to-end through the SHARED emission budget.
+///
+/// Proves the HTTP path handler → orchestrator → gate → forge → recipient
+/// balance, and the stable error code on exhaustion. The cumulative/shared
+/// budget invariant across voies is additionally proven at the gate level by
+/// `tests/emission_budget_test.rs` (t3 residual, t4 exhaustion, t5 TOCTOU).
+///
+/// Run: `cargo test --release -p pms-server --test dag_sandbox \
+///   test_onramp_voie_a_emission_budget -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_onramp_voie_a_emission_budget() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // 1. Bootstrap circulating supply via faucet (ungated) so the percentage
+    //    budget is non-zero. Capped at `max_mint_per_block` (1M) per block.
+    //    Default config: 3 %/yr, ceiling 10 %, epoch 1 day
+    //    → budget ≈ 1M × 0.03 / 365 ≈ 82.19 PMS for this epoch.
+    let bootstrap = Wallet::generate();
+    let bootstrap_addr = bootstrap.get_address("8e");
+    sandbox.faucet_mint(None, &bootstrap_addr, "1000000").await?;
+
+    // 2. On-ramp a moderate amount — comfortably within the period budget.
+    let recipient = Wallet::generate();
+    let recipient_addr = recipient.get_address("8e");
+    let (status, body) = sandbox
+        .admin_post(
+            "/admin/onramp",
+            json!({
+                "to": recipient_addr,
+                "amount": "10",
+                "payment_ref": "stripe_ch_test_001",
+            }),
+        )
+        .await;
+    println!("   On-ramp 10 PMS → {} — {:?}", status, body);
+    assert!(
+        status.is_success(),
+        "on-ramp within budget must succeed: {} {:?}",
+        status,
+        body
+    );
+    assert_eq!(
+        body["minted"].as_str(),
+        Some("10"),
+        "on-ramp reports the exact minted amount"
+    );
+    assert!(
+        body["block_id"].as_str().is_some(),
+        "on-ramp returns the forged block id"
+    );
+
+    let bal = sandbox.get_balance("main", &recipient_addr).await?;
+    println!("   Recipient balance after on-ramp: {}", bal);
+    assert_eq!(
+        bal,
+        Decimal::from(10),
+        "recipient credited exactly 10 PMS by the on-ramp mint"
+    );
+
+    // 3. On-ramp far above the period budget → rejected with stable code 5030.
+    let (status2, body2) = sandbox
+        .admin_post(
+            "/admin/onramp",
+            json!({
+                "to": recipient_addr,
+                "amount": "999999999",
+                "payment_ref": "stripe_ch_test_002",
+            }),
+        )
+        .await;
+    println!(
+        "   On-ramp 999999999 PMS (over budget) → {} — {:?}",
+        status2, body2
+    );
+    assert_eq!(
+        status2.as_u16(),
+        503,
+        "over-budget on-ramp must return 503 Service Unavailable"
+    );
+    assert_eq!(
+        body2["code"].as_u64(),
+        Some(5030),
+        "stable numeric code for emission budget exhausted (anti-enumeration)"
+    );
+
+    // The rejected mint must NOT have credited anything (P1: no over-emission).
+    let bal2 = sandbox.get_balance("main", &recipient_addr).await?;
+    println!("   Recipient balance after rejected on-ramp: {}", bal2);
+    assert_eq!(
+        bal2,
+        Decimal::from(10),
+        "a rejected on-ramp credits nothing — balance unchanged"
+    );
+
+    println!(
+        "\n   TEST PASSED: on-ramp mints under the shared budget; over-budget → 503/5030, no over-emission."
+    );
+    Ok(())
+}

@@ -389,6 +389,8 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/admin/bridge/transfer", post(admin_bridge_transfer))
         // Admin Faucet - Mint native PMS (dev/testnet)
         .route("/admin/faucet", post(faucet_mint))
+        // On-ramp fiat→PMS (voie A, plan §3.1) — mint natif sous budget partagé
+        .route("/admin/onramp", post(crate::api_fn::onramp::admin_onramp))
         // Admin Compliance API — write-producing operations
         .route("/admin/compliance/freeze", post(admin_freeze))
         .route("/admin/compliance/unfreeze", post(admin_unfreeze))

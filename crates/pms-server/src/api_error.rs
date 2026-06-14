@@ -140,6 +140,12 @@ pub enum ApiError {
     GasPoolEmpty(String),
     /// 5020 — Ledger subscription expired or never bought.
     SubscriptionInactive(String),
+    /// 5030 — The requested native-PMS mint exceeds the remaining
+    /// emission budget for the current period (plan §3.1). Public
+    /// message is the quota-style "budget exhausted" (no amounts —
+    /// they'd leak the engine's emission state); `reason` carries the
+    /// voie + amounts for logs.
+    EmissionBudgetExhausted { reason: String },
 
     // ── 9xxx internal (vague public always) ───────────────────────
     /// 9001 — RocksDB / persist pipeline error.
@@ -182,6 +188,7 @@ impl ApiError {
             ApiError::RateLimited => 5001,
             ApiError::GasPoolEmpty(_) => 5010,
             ApiError::SubscriptionInactive(_) => 5020,
+            ApiError::EmissionBudgetExhausted { .. } => 5030,
             ApiError::StorageError { .. } => 9001,
             ApiError::ConsensusError { .. } => 9002,
             ApiError::Internal { .. } => 9999,
@@ -197,7 +204,8 @@ impl ApiError {
             | ApiError::InsufficientScope { .. } => StatusCode::FORBIDDEN,
             ApiError::ReadOnly { .. }
             | ApiError::GasPoolEmpty(_)
-            | ApiError::SubscriptionInactive(_) => StatusCode::SERVICE_UNAVAILABLE,
+            | ApiError::SubscriptionInactive(_)
+            | ApiError::EmissionBudgetExhausted { .. } => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::MalformedJson(_)
             | ApiError::InvalidAddress { .. }
             | ApiError::InvalidAmount { .. }
@@ -277,6 +285,9 @@ impl ApiError {
             ApiError::RateLimited => "Rate limit exceeded".into(),
             ApiError::GasPoolEmpty(_) => "Service temporarily unavailable".into(),
             ApiError::SubscriptionInactive(_) => "Subscription required".into(),
+            ApiError::EmissionBudgetExhausted { .. } => {
+                "Emission budget exhausted for this period".into()
+            }
 
             // Internal — never expose stack traces, RocksDB errors,
             // panics, etc. Operators see these in logs.
@@ -332,6 +343,9 @@ impl ApiError {
             ApiError::RateLimited => "rate limit exceeded".into(),
             ApiError::GasPoolEmpty(id) => format!("gas pool empty for ledger: {}", id),
             ApiError::SubscriptionInactive(id) => format!("subscription inactive: {}", id),
+            // `reason` carries voie + amounts; no descriptive prefix so it
+            // shares no word with the vague public message (leak test).
+            ApiError::EmissionBudgetExhausted { reason } => reason.clone(),
             ApiError::StorageError { reason } => reason.clone(),
             ApiError::ConsensusError { reason } => reason.clone(),
             ApiError::Internal { reason } => reason.clone(),
@@ -497,6 +511,7 @@ mod tests {
             ApiError::RateLimited.code(),
             ApiError::GasPoolEmpty("x".into()).code(),
             ApiError::SubscriptionInactive("x".into()).code(),
+            ApiError::EmissionBudgetExhausted { reason: "x".into() }.code(),
             ApiError::StorageError { reason: "x".into() }.code(),
             ApiError::ConsensusError { reason: "x".into() }.code(),
             ApiError::Internal { reason: "x".into() }.code(),
@@ -526,6 +541,12 @@ mod tests {
                 reason: "rocksdb: l0 compaction stalled".into(),
             },
             ApiError::AddressFrozen("8e1frozen_addr".into()),
+            // Emission budget: the amounts (requested/remaining/budget) MUST
+            // stay internal — they'd reveal the engine's emission state.
+            ApiError::EmissionBudgetExhausted {
+                reason: "voie=onramp requested=0.99887766 remaining=0.05479452 budget=0.05479452"
+                    .into(),
+            },
         ];
         for err in cases {
             let public = err.public_message();
