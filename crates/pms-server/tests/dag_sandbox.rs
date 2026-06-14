@@ -5934,3 +5934,128 @@ async fn test_governance_timelock_endpoints() -> Result<()> {
     println!("\n   TEST PASSED: governance — propose announces, early enact REJECTED (timelock), cancel works.");
     Ok(())
 }
+
+/// Gouvernance — asymétrie *tighten-now* end-to-end via les endpoints (G5).
+///
+/// Un **resserrage** (baisser `max_mint_per_block`) a un timelock **instantané** :
+/// le handler dérive `enact_after == announced_at` (via `required_timelock_ms`),
+/// donc un `enact` immédiat RÉUSSIT et applique le changement. C'est la moitié
+/// « tighten-now » de l'asymétrie, prouvée à travers la couche HTTP (le handler
+/// calcule lui-même la durée selon la direction). Le « loosen-later » est prouvé
+/// par `test_governance_timelock_endpoints` (enact précoce rejeté).
+///
+/// Run: `cargo test --release -p pms-server --test dag_sandbox \
+///   test_governance_tighten_instant_endpoints -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_governance_tighten_instant_endpoints() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // Propose un tighten : baisser max_mint_per_block à 1 (< défaut). Palier Policy
+    // (min requis pour SetMaxMint). Le handler doit dériver enact_after == announced_at.
+    let (s, body) = sandbox
+        .admin_post(
+            "/admin/governance/propose",
+            json!({
+                "update": { "SetMaxMint": { "amount": 1 } },
+                "tier": "Policy",
+                "reason": "emergency: cap per-block mint"
+            }),
+        )
+        .await;
+    println!("   Propose (tighten) → {} — {:?}", s, body);
+    assert!(s.is_success(), "tighten propose must succeed: {} {:?}", s, body);
+    let proposal_id = body["proposal_id"].as_str().expect("proposal_id").to_string();
+    assert_eq!(
+        body["enact_after_ms"].as_u64(),
+        body["announced_at_ms"].as_u64(),
+        "tighten ⇒ instant: enact_after MUST equal announced_at (got {:?} vs {:?})",
+        body["enact_after_ms"],
+        body["announced_at_ms"]
+    );
+
+    // Enact IMMÉDIATEMENT → succès (timelock instantané, légitime — pas de backdating).
+    let (s, enact_body) = sandbox
+        .admin_post(
+            &format!("/admin/governance/enact/{}", proposal_id),
+            json!({ "reason": "apply tighten now" }),
+        )
+        .await;
+    println!("   Enact (instant) → {} — {:?}", s, enact_body);
+    assert!(s.is_success(), "instant tighten enact MUST succeed, got {} {:?}", s, enact_body);
+
+    // La proposition est maintenant Enacted (dans /history, plus dans /pending).
+    let (_, history) = sandbox.public_get("/v1/governance/history").await;
+    let enacted = history["history"]
+        .as_array()
+        .map(|a| a.iter().any(|p| p["proposal_id"] == proposal_id && p["status"] == "enacted"))
+        .unwrap_or(false);
+    assert!(enacted, "tighten proposal must be Enacted in /history: {:?}", history);
+
+    println!("\n   TEST PASSED: governance tighten-now — enact_after==announced_at, enact instantané appliqué (Enacted).");
+    Ok(())
+}
+
+/// Gouvernance P2c — `admin_update_config` (POST /admin/config) passe par la
+/// GOUVERNANCE : plus d'application instantanée hors-DAG (la faille qui rendait
+/// le timelock sans effet). Asymétrie via HTTP :
+/// - un **resserrage** (baisser `max_mint_per_block`) est appliqué INSTANTANÉMENT
+///   (timelock nul) — UX préservée, mais désormais ancré DAG ;
+/// - un **desserrage** (hausser `fee_rate_bps`) devient une **proposition
+///   timelockée** : la config n'est PAS modifiée tout de suite (bypass fermé).
+///
+/// Run: `cargo test --release -p pms-server --test dag_sandbox \
+///   test_admin_config_governance_rewire -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_admin_config_governance_rewire() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // Baseline.
+    let (_, cfg0) = sandbox.admin_get("/admin/config").await;
+    let base_maxmint = cfg0["max_mint_per_block"].as_u64().expect("max_mint_per_block");
+    let base_fee = cfg0["fee_rate_bps"].as_u64().expect("fee_rate_bps");
+    println!("   baseline: max_mint_per_block={base_maxmint}, fee_rate_bps={base_fee}");
+    assert_eq!(base_maxmint, 1_000_000);
+
+    // ── TIGHTEN via /admin/config : appliqué INSTANTANÉMENT ──
+    let (s, body) = sandbox
+        .admin_post("/admin/config", json!({ "SetMaxMint": { "amount": 1 } }))
+        .await;
+    println!("   POST /admin/config (tighten SetMaxMint=1) → {} — {:?}", s, body);
+    assert!(s.is_success(), "tighten config change must succeed: {} {:?}", s, body);
+    assert_eq!(body["status"], "applied", "tighten ⇒ applied instantly");
+    assert!(
+        body["mode"].as_str().unwrap_or_default().contains("instant"),
+        "tighten mode must be instant, got {:?}", body["mode"]
+    );
+    // Vérifie l'application réelle.
+    let (_, cfg1) = sandbox.admin_get("/admin/config").await;
+    println!("   after tighten: max_mint_per_block={}", cfg1["max_mint_per_block"]);
+    assert_eq!(cfg1["max_mint_per_block"].as_u64(), Some(1), "tighten MUST apply (max_mint→1)");
+
+    // ── LOOSEN via /admin/config : proposition TIMELOCKÉE, PAS appliquée ──
+    let (s, body) = sandbox
+        .admin_post("/admin/config", json!({ "SetFeeRate": { "bps": 777 } }))
+        .await;
+    println!("   POST /admin/config (loosen SetFeeRate=777) → {} — {:?}", s, body);
+    assert!(s.is_success(), "loosen propose must be accepted: {} {:?}", s, body);
+    assert_eq!(body["status"], "proposed", "loosen ⇒ timelocked proposal, not applied");
+    let proposal_id = body["proposal_id"].as_str().expect("proposal_id").to_string();
+    // La config n'a PAS changé — le bypass instantané est fermé.
+    let (_, cfg2) = sandbox.admin_get("/admin/config").await;
+    println!("   after loosen-propose: fee_rate_bps={} (must be unchanged {base_fee})", cfg2["fee_rate_bps"]);
+    assert_eq!(
+        cfg2["fee_rate_bps"].as_u64(), Some(base_fee),
+        "BYPASS CLOSED: a loosen via /admin/config MUST NOT apply instantly"
+    );
+    // La proposition est visible publiquement, Pending.
+    let (_, pending) = sandbox.public_get("/v1/governance/pending").await;
+    let listed = pending["pending"].as_array()
+        .map(|a| a.iter().any(|p| p["proposal_id"] == proposal_id && p["status"] == "pending"))
+        .unwrap_or(false);
+    assert!(listed, "the loosen proposal must be announced as pending: {:?}", pending);
+
+    println!("\n   TEST PASSED: /admin/config rewire — tighten instant, loosen timelocké (bypass fermé).");
+    Ok(())
+}

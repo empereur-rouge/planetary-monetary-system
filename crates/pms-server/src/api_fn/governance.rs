@@ -17,7 +17,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use pms_config::{ConfigUpdate, GovernanceStatus, GovernanceTier};
-use pms_storage::{GovernanceStorage, PutResult};
+use pms_storage::{ConfigStorage, GovernanceStorage, PutResult};
 use pms_types::{PayloadEnvelope, PlainPayload};
 use serde::Deserialize;
 use serde_json::json;
@@ -77,29 +77,53 @@ async fn forge_governance_block(
     }
 }
 
-/// `POST /admin/governance/propose` — annonce un changement timelocké.
-pub async fn admin_propose(
-    State(state): State<AppState>,
-    Json(req): Json<ProposeRequest>,
-) -> Result<impl IntoResponse, ApiError> {
-    // La cohérence du `ConfigUpdate` (ex: répartition des fees) est vérifiée à
-    // l'enact, quand `apply_config_update` l'applique pour de vrai (validation
-    // partagée) — inutile de la dupliquer ici.
+/// Résultat d'une proposition forgée — partagé par l'endpoint `propose` et le
+/// rewire de `admin_update_config`. `pub` pour les tests d'intégration.
+pub struct ProposeOutcome {
+    pub proposal_id: String,
+    pub block_id: String,
+    pub announced_at_ms: u64,
+    pub enact_after_ms: u64,
+    /// `true` si le timelock est nul (resserrage) — l'enact peut être immédiat.
+    pub instant: bool,
+}
+
+/// Cœur du `propose` — réutilisé par l'endpoint HTTP ET par `admin_update_config`
+/// (qui auto-assigne le palier). Valide le palier-min, dérive `enact_after` via
+/// l'asymétrie, et forge le bloc `GovernanceProposal`. `pub` pour les tests.
+pub async fn do_propose(
+    state: &AppState,
+    update: ConfigUpdate,
+    tier: GovernanceTier,
+    reason: String,
+) -> Result<ProposeOutcome, ApiError> {
+    // Palier minimum (table §2) — rejet immédiat si trop bas (évite de forger un
+    // bloc voué au rejet par persist).
+    if let Err(reason) = pms_config::validate_tier(&update, tier) {
+        return Err(ApiError::GovernanceRejected { reason });
+    }
     let announced_at_ms = pms_utils::ts_ms();
-    let enact_after_ms = announced_at_ms.saturating_add(req.tier.default_duration_ms());
+    // Asymétrie tighten/loosen : timelock instantané pour un resserrage, plein
+    // sinon. MÊME fonction que la validation persist (un seul point de vérité).
+    let current_cfg = state
+        .store
+        .get_runtime_config()
+        .map_err(|e| ApiError::Internal { reason: format!("runtime config: {e}") })?;
+    let timelock_ms = pms_config::required_timelock_ms(&update, &current_cfg, tier);
+    let enact_after_ms = announced_at_ms.saturating_add(timelock_ms);
 
     // proposal_id = SHA-256(update + tier + announced_at) — déterministe.
     let id_input =
-        serde_json::to_vec(&(&req.update, req.tier.as_str(), announced_at_ms)).unwrap_or_default();
+        serde_json::to_vec(&(&update, tier.as_str(), announced_at_ms)).unwrap_or_default();
     let proposal_id = hex::encode(Sha256::digest(&id_input));
 
     let block_id = forge_governance_block(
-        &state,
+        state,
         PlainPayload::GovernanceProposal {
             proposal_id: proposal_id.clone(),
-            update: req.update,
-            tier: req.tier,
-            reason: req.reason.clone(),
+            update,
+            tier,
+            reason,
             announced_at_ms,
             enact_after_ms,
         },
@@ -107,13 +131,47 @@ pub async fn admin_propose(
     )
     .await?;
 
+    Ok(ProposeOutcome {
+        proposal_id,
+        block_id,
+        announced_at_ms,
+        enact_after_ms,
+        instant: timelock_ms == 0,
+    })
+}
+
+/// Cœur de l'`enact` — réutilisé par l'endpoint HTTP, le rewire d'admin, et la
+/// tâche d'auto-enact. Forge un bloc `GovernanceEnact` (la validation timelock +
+/// l'application vivent dans `persist_block`). Renvoie l'id du bloc enact.
+pub(crate) async fn do_enact(
+    state: &AppState,
+    proposal_id: &str,
+    reason: String,
+) -> Result<String, ApiError> {
+    forge_governance_block(
+        state,
+        PlainPayload::GovernanceEnact {
+            proposal_id: proposal_id.to_string(),
+            reason,
+        },
+        "GovernanceEnact",
+    )
+    .await
+}
+
+/// `POST /admin/governance/propose` — annonce un changement timelocké.
+pub async fn admin_propose(
+    State(state): State<AppState>,
+    Json(req): Json<ProposeRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let out = do_propose(&state, req.update, req.tier, req.reason).await?;
     Ok(Json(json!({
         "status": "ok",
-        "proposal_id": proposal_id,
-        "block_id": block_id,
+        "proposal_id": out.proposal_id,
+        "block_id": out.block_id,
         "tier": req.tier.as_str(),
-        "announced_at_ms": announced_at_ms,
-        "enact_after_ms": enact_after_ms,
+        "announced_at_ms": out.announced_at_ms,
+        "enact_after_ms": out.enact_after_ms,
     })))
 }
 
@@ -123,15 +181,7 @@ pub async fn admin_enact(
     Path(proposal_id): Path<String>,
     Json(req): Json<GovActionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let block_id = forge_governance_block(
-        &state,
-        PlainPayload::GovernanceEnact {
-            proposal_id: proposal_id.clone(),
-            reason: req.reason,
-        },
-        "GovernanceEnact",
-    )
-    .await?;
+    let block_id = do_enact(&state, &proposal_id, req.reason).await?;
     Ok(Json(json!({
         "status": "ok",
         "proposal_id": proposal_id,

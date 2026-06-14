@@ -7,6 +7,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.16.0] - Unreleased — Gouvernance P2 : palier-min + asymétrie tighten/loosen
+
+Deuxième phase de la gouvernance (`pms-spec-governance-timelock.md` §2-§3) : on
+encode QUEL timelock s'applique à QUEL changement. Deux règles, validées au
+protocole (donc inviolables au-delà du handler) :
+- **Palier minimum par paramètre** — chaque `ConfigUpdate` exige un palier
+  d'impact minimum (fees = Operator ; burn / distribution / pouvoir de mint =
+  Policy ; le couloir d'émission = Constitution en P3). On ne peut pas déclasser
+  un changement Policy en « Operator 7 j ».
+- **Asymétrie tighten-now / loosen-later** — resserrer (couper / réduire le mint)
+  est instantané (`enact_after == announced_at`) ; desserrer (reprendre / hausser)
+  garde le délai plein du palier. On n'attend pas 45 j pour stopper une fuite.
+
+**P2a** : table param→palier-min + direction + validation. **P2b** : câbler le
+kill-switch `mint_enabled` (dormant jusqu'ici). **P2c (cette version)** : tâche
+auto-enact + rewire `admin_update_config`→propose (fin du contournement du timelock).
+
+### Added — P2c (auto-enact + fin du bypass `admin_update_config`)
+- **feat(server/task)** — `spawn_governance_enact_task`
+  ([crates/pms-server/src/api/tasks.rs](crates/pms-server/src/api/tasks.rs)) : scanne
+  toutes les 60 s le CF `governance_proposals`, enacte les `Pending` dont le timelock
+  est écoulé (`enact_after <= now`). Check `read_only.is_armed()` (règle tâche de
+  fond produisant des blocs). Enact idempotent (statut ≠ Pending rejeté). Enregistrée
+  dans `serve.rs`.
+- **feat(api)** — **`POST /admin/config` ne s'applique PLUS instantanément** : il
+  forge un `GovernanceProposal` ([admin.rs](crates/pms-server/src/admin.rs)) avec le
+  palier auto-assigné (`min_tier`). Asymétrie : un **resserrage** est enacté
+  immédiatement (200 `applied`, ancré DAG), un **desserrage** devient une proposition
+  timelockée (202 `proposed`). C'est la **fermeture du contournement** qui rendait le
+  timelock sans effet (un opérateur pouvait changer la config en direct).
+- **refactor(governance)** — `do_propose`/`do_enact`/`ProposeOutcome`
+  ([governance.rs](crates/pms-server/src/api_fn/governance.rs)) extraits + `pub`,
+  partagés par les endpoints, le rewire admin, et la tâche auto-enact (un seul point
+  de vérité pour le forge + l'asymétrie).
+- **change(read-only)** — `POST /admin/config` passe de `admin_recovery` à
+  `admin_writable` (il produit un bloc) ; **GET** reste recovery. CLAUDE.md mis à jour.
+- **test(task)** — `governance_autoenact_test.rs` : le tick enacte une proposition
+  éligible (tighten, `max_mint`→1, Enacted) et IGNORE une proposition future (loosen,
+  reste Pending, config inchangée).
+- **test(e2e)** — `test_admin_config_governance_rewire` (dag_sandbox) : via HTTP,
+  tighten `/admin/config` → appliqué instantanément ; loosen → proposition timelockée,
+  **config inchangée (bypass fermé)**, visible dans `/v1/governance/pending`.
+
+### Added — P2b (kill-switch `mint_enabled`)
+- **feat(emission)** — `EmissionGate::reserve`
+  ([crates/pms-server/src/emission.rs](crates/pms-server/src/emission.rs)) refuse
+  TOUTE réservation avec `EmissionError::MintDisabled` quand `mint_enabled = false`
+  (chokepoint unique des voies budgétées : baseline, on-ramp, conversion token→PMS).
+  Le champ `mint_enabled` était **dormant** (jamais lu) depuis sa création.
+- **feat(emission)** — la **faucet** ([wallet_factory.rs](crates/pms-server/src/api_fn/wallet_factory.rs))
+  et le **bridge** de PMS natif (`asset_id = None`, [bridge.rs](crates/pms-server/src/api_fn/bridge.rs))
+  vérifient aussi `mint_enabled` (defense-in-depth : ces voies natives ne passent
+  pas par `EmissionGate`).
+- **feat(api/errors)** — nouveau code **`5031 MintDisabled`** (503)
+  ([api_error.rs](crates/pms-server/src/api_error.rs)) : distinct du `5030`
+  (budget épuisé, récupère à l'epoch suivant) — halt délibéré jusqu'à réactivation
+  par la gouvernance. Mappé dans on-ramp + conversion.
+- **test(G6)** — `t11_mint_disabled_killswitch_rejects_all_voies`
+  ([emission_budget_test.rs](crates/pms-server/tests/emission_budget_test.rs)) :
+  `SetMintEnabled{false}` (chemin gouverné) → `reserve` refuse les 4 voies
+  (onramp/baseline/conversion/faucet) avec `MintDisabled`, rien réservé,
+  réactivation rouvre le mint.
+- **chore(version)** — `API_VERSION` reste 20 (gouvernance P2), doc étendue au 5031.
+
+### Notes — couverture du kill-switch (audit complétude)
+- **Couvert** : baseline, on-ramp, conversion token→PMS (via `EmissionGate::reserve`),
+  faucet + bridge natif (checks dédiés).
+- **Résiduels DORMANTS non gatés** (documentés, à fermer si activés) : (1) un contrat
+  `AccumulateRefund` configuré pour rembourser du **PMS natif** (`asset_id=None`) —
+  aujourd'hui aucun contrat ne le fait (edenite rembourse le token EDN custom) ;
+  (2) le fee de mint de `admin_mint_token` en PMS natif — dormant (`mint_fee` = 0
+  dans toutes les configs). La réconciliation lock↔mint du bridge (anti over-mint)
+  est un durcissement séparé, hors P2.
+
+### Added — P2a (politique de gouvernance)
+- **feat(config)** — module `governance_policy`
+  ([crates/pms-config/src/governance_policy.rs](crates/pms-config/src/governance_policy.rs)) :
+  `min_tier(update)` (table §2), `direction(update, current)` (Tighten/Loosen),
+  `required_timelock_ms(update, current, tier)` (0 si tighten, durée pleine sinon),
+  `validate_tier(update, tier)` (rejet si palier déclaré < minimum). `GovernanceTier`
+  dérive `Ord` (l'ordre des variants = impact croissant).
+- **feat(core/validation)** — la validation persist d'un `GovernanceProposal`
+  ([persist.rs](crates/pms-core/src/net_adapter/persist.rs)) impose désormais :
+  (1) `tier >= min_tier(update)` (G4) ; (2) `enact_after == announced_at +
+  required_timelock_ms(...)` re-dérivé depuis la config COURANTE (le proposant ne
+  peut pas réclamer un timelock court pour un desserrage). Déterministe au
+  replay/sync (la config des ancêtres est appliquée avant la proposition).
+- **feat(api)** — `POST /admin/governance/propose` rejette en amont (`3071`) un
+  palier trop bas et dérive `enact_after` via l'asymétrie (instantané pour un
+  resserrage) — même fonction de vérité que la validation persist.
+- **test(unit)** — `governance_policy` : `min_tier_table_golden`, `direction_*`,
+  `required_timelock_asymmetry_golden`, `validate_tier_rejects_below_minimum`,
+  `batch_tighten_only_if_all_tighten`, `tier_ordering`.
+- **test(protocole)** — `governance_timelock_test.rs` : **G4** (palier trop bas
+  rejeté), **G3/G5** (tighten enacté instantanément applique `max_mint_per_block`
+  1_000_000→1 + Enacted), **G2** (loosen avant délai rejeté), **DUP**.
+- **test(e2e)** — `test_governance_tighten_instant_endpoints` (dag_sandbox) :
+  asymétrie tighten-now via HTTP — `enact_after == announced_at`, enact immédiat
+  appliqué (Enacted).
+- **chore(version)** — `Cargo.toml` 0.15.0 → **0.16.0** ; `DAG_VERSION` 3.4.0 →
+  **3.5.0** (validation renforcée, MINOR, pas de wipe) ; `API_VERSION` 19 → **20**.
+
+### Notes
+- **Anti-backdating volontairement NON câblé au protocole** : un check
+  `announced_at ≈ horloge` casserait le sync P2P / replay (la validation est
+  ré-exécutée plus tard, horloge avancée → rejet des blocs historiques). Dans le
+  modèle single-writer, seul le Coordinator (de confiance) forge les propositions
+  et son handler estampille `announced_at = now` ; la garantie « pas de surprise »
+  repose sur la TRANSPARENCE (le bloc proposal est observable dans le DAG en temps
+  réel). La relation `enact_after == announced_at + durée` reste validée
+  (déterministe).
+
+---
+
 ## [0.15.0] - Unreleased — Gouvernance timelock (plan §4, cœur protocole)
 
 Première phase de la gouvernance timelock (`pms-spec-governance-timelock.md`) :

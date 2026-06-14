@@ -2,7 +2,7 @@
 tags: [feature]
 created: 2026-06-14
 updated: 2026-06-14
-version: v0.15.0
+version: v0.16.0
 ---
 
 # Gouvernance Timelock
@@ -15,6 +15,13 @@ d'émission, etc.) passe par le cycle `GovernanceProposal → timelock → Gover
 capstone de crédibilité du [[budget-emission|système d'émission]] — la
 matérialisation de « règle inviolable que l'opérateur ne peut pas franchir par
 surprise » (plan §2.1, §4).
+
+**P2 (v0.16.0)** ajoute la *politique* : un **palier minimum par paramètre** (on ne
+peut pas déclasser un changement Constitution en « Operator 7 j »), l'**asymétrie
+tighten-now / loosen-later** (resserrer un risque est instantané, le desserrer exige
+le délai plein), le **kill-switch `mint_enabled`** enfin câblé, une **tâche
+d'auto-enact**, et la **fermeture du contournement** : `POST /admin/config` ne
+s'applique plus en direct — il passe par la gouvernance.
 
 Trois propriétés :
 
@@ -55,8 +62,12 @@ Aucune activation requise : les routes sont montées en standard ; les `propose`
 | `pms-storage` | `src/rocks_store/governance_storage.rs` | Impl RocksDB (CF `governance_proposals`) + garde d'unicité |
 | `pms-core` | `src/net_adapter/persist.rs` | Validation hot-path : timelock inviolable, apply à l'enact, unicité du proposal_id |
 | `pms-core` | `src/validations/{authority,check}.rs` | Autorité coordinator-only des 3 variantes |
-| `pms-server` | `src/api_fn/governance.rs` | Endpoints REST (propose/enact/cancel/pending/history) |
-| `pms-server` | `src/api_error.rs` | Code `3071 GovernanceRejected` (raison surfacée) |
+| `pms-server` | `src/api_fn/governance.rs` | Endpoints REST + `do_propose`/`do_enact` (cœur partagé) |
+| `pms-server` | `src/api_error.rs` | Codes `3071 GovernanceRejected`, `5031 MintDisabled` (kill-switch) |
+| `pms-config` | `src/governance_policy.rs` | **(P2)** `min_tier` (table §2), `direction`, `required_timelock_ms`, `validate_tier` |
+| `pms-server` | `src/emission.rs` | **(P2)** kill-switch `mint_enabled` dans `EmissionGate::reserve` |
+| `pms-server` | `src/api/tasks.rs` | **(P2)** `spawn_governance_enact_task` / `governance_enact_tick` (auto-enact, coordinator-only) |
+| `pms-server` | `src/admin.rs` | **(P2)** `admin_update_config` → forge un `GovernanceProposal` (fin du bypass) |
 
 ## Fonctions Clés
 
@@ -67,6 +78,27 @@ Aucune activation requise : les routes sont montées en standard ; les `propose`
 | `list_filtered` | `pms-server/src/api_fn/governance.rs` | Backend partagé de `list_pending`/`list_history` (filtre par statut) |
 | `GovernanceTier::default_duration_ms` | `pms-config/src/governance.rs` | Durées de timelock 7/15/45 j |
 | persist enact arm | `pms-core/src/net_adapter/persist.rs` | **Rejet si `now < enact_after`** ; sinon `apply_config_update` + `Enacted` |
+| `min_tier` / `direction` / `required_timelock_ms` | `pms-config/src/governance_policy.rs` | **(P2)** palier-min par param + asymétrie tighten/loosen (timelock 0 si resserrage) |
+| `governance_enact_tick` | `pms-server/src/api/tasks.rs` | **(P2)** enacte les `Pending` au timelock écoulé (coordinator-only, check read-only) |
+
+## Politique (P2) — palier-min + asymétrie
+
+- **Palier minimum** ([`min_tier`](../../crates/pms-config/src/governance_policy.rs)) :
+  fees = `Operator` ; burn / distribution / pouvoir-de-mint = `Policy` ; couloir
+  d'émission = `Constitution` (P3). La validation persist impose `tier ≥ min_tier`.
+- **Asymétrie tighten/loosen** : `direction(update, config)` ; un **resserrage**
+  (couper/réduire le mint, baisser un plafond) a un timelock **nul**
+  (`enact_after == announced_at`, enact immédiat) ; un **desserrage** garde le délai
+  plein du palier. Calculé par le protocole depuis la config courante — le proposant
+  ne peut pas réclamer un timelock court pour un desserrage.
+- **Kill-switch `mint_enabled`** : `EmissionGate::reserve` refuse toute émission
+  (`MintDisabled`, code `5031`) quand `mint_enabled = false`. Faucet + bridge natif
+  vérifient aussi (defense-in-depth).
+- **Auto-enact** : une tâche scanne toutes les 60 s et enacte les propositions dont
+  le timelock est écoulé (coordinator-only, idempotent, check read-only).
+- **Fin du bypass** : `POST /admin/config` forge désormais un `GovernanceProposal`
+  (palier auto = `min_tier`) au lieu d'appliquer en direct. Resserrage = instantané,
+  desserrage = timelocké. Plus aucun chemin n'applique la config hors-DAG.
 
 ## Endpoints API
 
@@ -77,6 +109,8 @@ Aucune activation requise : les routes sont montées en standard ; les `propose`
 | POST | `/admin/governance/cancel/{id}` | admin (gated) | Annule une proposition `Pending` |
 | GET | `/v1/governance/pending` | **public** | Propositions en attente (l'annonce) |
 | GET | `/v1/governance/history` | **public** | Propositions enacted / cancelled (audit) |
+| POST | `/admin/config` | admin (gated) | **(P2)** forge un `GovernanceProposal` (palier auto). Resserrage → appliqué (`applied`), desserrage → `proposed` timelocké. Plus d'application instantanée hors-DAG |
+| GET | `/admin/config` | admin (recovery) | Lecture de la `RuntimeConfig` courante |
 
 ## Tests
 
@@ -87,6 +121,14 @@ Aucune activation requise : les routes sont montées en standard ; les `propose`
 - `pms-server` (`tests/dag_sandbox.rs::test_governance_timelock_endpoints`) : e2e
   HTTP — propose → /pending → enact précoce rejeté (code 3071 + raison timelock) →
   cancel → /history.
+- **(P2)** `pms-config` (`governance_policy` units) : `min_tier`/`direction`/
+  `required_timelock_ms` golden + batch all-tighten/mixed/empty.
+- **(P2)** `pms-core` (`governance_timelock_test.rs`) : **G4** (palier trop bas
+  rejeté), **G3/G5** (tighten instantané applique `max_mint`), **G2**, **DUP**.
+- **(P2)** `pms-server` : `emission_budget_test::t11` (**G6** kill-switch refuse les
+  4 voies), `governance_autoenact_test` (tick enacte l'éligible, ignore le futur),
+  `dag_sandbox::test_governance_tighten_instant_endpoints` (asymétrie e2e),
+  `dag_sandbox::test_admin_config_governance_rewire` (bypass fermé).
 
 ## Interactions
 Liens : [[budget-emission]] (la politique monétaire que la gouvernance protège),

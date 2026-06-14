@@ -7,7 +7,9 @@
 //!
 //! Lancer : `cargo test -p pms-server --test emission_budget_test -- --nocapture`
 
+use pms_config::ConfigUpdate;
 use pms_server::emission::{EmissionGate, EmissionParams, EmissionError, Voie};
+use pms_storage::ConfigStorage;
 use pms_storage::rocks_store::store::{RocksMemoryConfig, RocksStore};
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -247,4 +249,63 @@ async fn t10_release_rolls_back_reservation() {
     let reloaded = EmissionGate::load(&store).snapshot().await;
     println!("T10 reloaded emitted={}", reloaded.emitted);
     assert_eq!(reloaded.emitted, Decimal::ZERO, "rollback persisté (P2)");
+}
+
+/// T11 / G6 — kill-switch `mint_enabled = false` (gouvernance) refuse TOUTE voie
+/// d'émission de PMS natif, AVANT toute réservation (rien n'est consommé).
+///
+/// Câble enfin le champ `mint_enabled` (dormant jusqu'à v0.16.0 P2b) : armé via
+/// un `ConfigUpdate::SetMintEnabled{false}` (le chemin réel, gouverné), il fait
+/// échouer `EmissionGate::reserve` avec `MintDisabled` pour baseline / on-ramp /
+/// conversion / faucet. La réactivation (gouvernance) rouvre le mint.
+#[tokio::test]
+async fn t11_mint_disabled_killswitch_rejects_all_voies() {
+    let (store, _tmp) = temp_store().await;
+    let gate = EmissionGate::new(Default::default());
+
+    // Sanity : kill-switch désarmé (défaut mint_enabled=true) → réservation OK.
+    let ok = gate
+        .reserve(&store, NOW_EPOCH_100, dec("1000"), std_params(), Voie::OnRamp, Some(dec("0.01")))
+        .await
+        .expect("default mint_enabled=true → reserve passes");
+    println!("T11 baseline (mint_enabled=true) reserve(0.01) → amount={}", ok.amount);
+    assert_eq!(ok.amount, dec("0.01"));
+
+    // Arme le kill-switch via le chemin gouverné (ConfigUpdate), pas un write direct.
+    store
+        .apply_config_update(&ConfigUpdate::SetMintEnabled { enabled: false }, "killswitch-block", 1)
+        .unwrap();
+    assert!(!store.get_runtime_config().unwrap().mint_enabled, "kill-switch armé");
+
+    // TOUTE voie est désormais refusée par MintDisabled (chokepoint unique).
+    for voie in [Voie::OnRamp, Voie::Baseline, Voie::TokenConversion, Voie::Faucet] {
+        let label = voie.as_str();
+        let res = gate
+            .reserve(&store, NOW_EPOCH_100, dec("1000"), std_params(), voie, Some(dec("0.001")))
+            .await;
+        println!("T11 mint_enabled=false reserve({label}) → {res:?}");
+        assert!(
+            matches!(res, Err(EmissionError::MintDisabled)),
+            "G6: kill-switch DOIT refuser la voie {label} (MintDisabled), got {res:?}"
+        );
+    }
+
+    // Aucune réservation pendant le halt : le compteur n'a pas bougé (seul le
+    // 0.01 d'avant le halt est compté).
+    let snap = gate.snapshot().await;
+    println!("T11 after kill-switch: emitted={}", snap.emitted);
+    assert_eq!(snap.emitted, dec("0.01"), "le kill-switch ne réserve rien");
+
+    // Réactivation (gouvernance) → le mint repasse.
+    store
+        .apply_config_update(&ConfigUpdate::SetMintEnabled { enabled: true }, "reenable-block", 2)
+        .unwrap();
+    let ok2 = gate
+        .reserve(&store, NOW_EPOCH_100, dec("1000"), std_params(), Voie::OnRamp, Some(dec("0.001")))
+        .await
+        .expect("re-enabled → reserve passes");
+    println!("T11 re-enabled reserve(0.001) → amount={}", ok2.amount);
+    assert_eq!(ok2.amount, dec("0.001"));
+
+    println!("\n   T11/G6 PASSED: mint_enabled=false refuse toutes les voies (MintDisabled), réactivation OK.");
 }

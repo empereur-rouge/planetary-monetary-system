@@ -7,6 +7,7 @@ use axum::response::IntoResponse;
 use pms_bridge::engine::BridgeEngine;
 use pms_bridge::store::BridgeStore;
 use pms_bridge::types::{BridgeDisableRequest, BridgeEnableRequest, BridgeTransferRequest};
+use pms_storage::ConfigStorage;
 use rust_decimal::Decimal;
 use serde_json::json;
 
@@ -136,6 +137,25 @@ pub async fn admin_bridge_transfer(
         )
             .into_response();
     };
+
+    // Kill-switch d'émission (gouvernance) — defense-in-depth. Un transfert
+    // cross-ledger de PMS NATIF (`asset_id = None`) forge un `BridgeMint` non
+    // gaté par `EmissionGate` ; tant que la réconciliation lock↔mint du bridge
+    // n'est pas durcie, un `mint_enabled = false` doit aussi le bloquer (sinon
+    // l'opérateur croit l'émission stoppée alors que le bridge peut encore créer
+    // du PMS natif). Les transferts d'assets custom (token_id défini) ne sont pas
+    // de l'émission de PMS natif → non gatés.
+    if req.asset_id.is_none() {
+        if let Ok(cfg) = state.store.get_runtime_config() {
+            if !cfg.mint_enabled {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": "native mint is disabled by governance"})),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     match engine.execute_transfer(&req).await {
         Ok(resp) => {

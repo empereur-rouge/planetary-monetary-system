@@ -474,6 +474,46 @@ where
                     )));
                 }
             }
+            // PAS de check `announced_at ≈ horloge-du-validateur` ICI : la
+            // validation persist est ré-exécutée lors du SYNC P2P (blocks.rs) et du
+            // replay — comparer `announced_at` à l'horloge COURANTE rejetterait tout
+            // bloc de gouvernance historique resynchronisé (l'horloge a avancé) →
+            // sync non-déterministe. Dans le modèle single-writer, seul le
+            // Coordinator (de confiance) peut forger une proposition, et son handler
+            // `admin_propose` estampille `announced_at = now`. La garantie « pas de
+            // back-dating » repose sur la TRANSPARENCE : le bloc proposal apparaît
+            // dans le DAG en temps réel, observable par le public, qui compare
+            // `announced_at` à l'arrivée réelle du bloc. La validation ci-dessous
+            // (relation `enact_after == announced_at + durée`) est déterministe et
+            // sûre au replay/sync.
+            //
+            // PALIER MINIMUM (G4) — le palier déclaré doit respecter le minimum du
+            // paramètre (table §2). Empêche de faire passer un changement Policy/
+            // Constitution en « Operator 7 j ».
+            if let Err(reason) = pms_config::validate_tier(update, *tier) {
+                return Ok(PutResult::Rejected(reason));
+            }
+            // ASYMÉTRIE tighten/loosen (G5) — la DIRECTION est calculée par le
+            // protocole depuis la config COURANTE, pas déclarée par le proposant.
+            // On re-dérive l'`enact_after` attendu (instantané si tighten, plein
+            // sinon) et on rejette toute incohérence : un proposant ne peut donc
+            // pas réclamer un timelock court pour un desserrage.
+            let current_cfg = match self.store.get_runtime_config() {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "governance proposal: runtime config unavailable: {e}"
+                    )));
+                }
+            };
+            let expected_timelock = pms_config::required_timelock_ms(update, &current_cfg, *tier);
+            let expected_enact_after = announced_at_ms.saturating_add(expected_timelock);
+            if *enact_after_ms != expected_enact_after {
+                return Ok(PutResult::Rejected(format!(
+                    "governance proposal: enact_after mismatch (declared={}, expected announced_at+{}ms={})",
+                    enact_after_ms, expected_timelock, expected_enact_after
+                )));
+            }
             let record = pms_config::GovernanceProposalRecord {
                 proposal_id: proposal_id.clone(),
                 update: update.clone(),

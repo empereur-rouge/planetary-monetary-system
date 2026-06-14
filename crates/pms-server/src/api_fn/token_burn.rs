@@ -176,6 +176,11 @@ pub async fn wallet_burn_token(
                     reason: e.to_string(),
                 });
             }
+            // Kill-switch armé : aucun burn n'a eu lieu (réserve-avant-burn) —
+            // l'utilisateur garde son token, rien à relâcher.
+            Err(EmissionError::MintDisabled) => {
+                return Err(ApiError::MintDisabled);
+            }
         }
     }
 

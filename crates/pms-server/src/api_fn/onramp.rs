@@ -109,5 +109,6 @@ pub async fn admin_onramp(
         Err(EmissionError::Persist(e)) => Err(ApiError::StorageError {
             reason: e.to_string(),
         }),
+        Err(EmissionError::MintDisabled) => Err(ApiError::MintDisabled),
     }
 }

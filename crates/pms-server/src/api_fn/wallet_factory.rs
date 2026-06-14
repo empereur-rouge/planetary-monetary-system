@@ -7,7 +7,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use http::StatusCode;
 use pms_contracts::engine::evaluate_transfer;
-use pms_storage::PutResult;
+use pms_storage::{ConfigStorage, PutResult};
 use pms_types::{Transaction, TxInput, TxOutput};
 use pms_types_payload::{EncryptedPayload, PayloadEnvelope, PlainPayload};
 use pms_wallet::SignerBackend;
@@ -264,6 +264,18 @@ pub async fn faucet_mint(
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "faucet is disabled on mainnet" })),
         );
+    }
+
+    // 0.5) Kill-switch d'émission (gouvernance) — `mint_enabled = false` coupe
+    // TOUTE émission de PMS natif, faucet inclus (c'est une voie de mint natif).
+    // Cohérent avec le check dans `EmissionGate::reserve`.
+    if let Ok(cfg) = state.store.get_runtime_config() {
+        if !cfg.mint_enabled {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "native mint is disabled by governance" })),
+            );
+        }
     }
 
     // 1) Parse amount

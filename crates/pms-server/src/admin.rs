@@ -550,51 +550,93 @@ pub async fn admin_update_config(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(update): Json<ConfigUpdate>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Vérification du token admin
     if !is_admin_authorized(&state, &headers) {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "unauthorized" })),
-        );
+        )
+            .into_response();
     }
 
-    // Générer un ID unique pour cette mise à jour admin (pas un vrai block)
-    let admin_update_id = format!("admin-{}", chrono::Utc::now().timestamp_millis());
-    let timestamp = chrono::Utc::now().timestamp_millis();
+    // GOUVERNANCE (plan §4) — un changement de config ne s'applique PLUS
+    // instantanément hors-DAG. Il passe par le processus gouverné : on forge un
+    // `GovernanceProposal` (ancré DAG, timelocké). Le palier est AUTO-ASSIGNÉ au
+    // minimum requis pour ce paramètre (table §2). Asymétrie tighten/loosen :
+    // - resserrage (couper/réduire le mint, baisser un plafond) ⇒ timelock nul ⇒
+    //   on enacte IMMÉDIATEMENT (UX instantanée préservée, mais désormais ancrée
+    //   dans le DAG, pas un write synthétique) ;
+    // - desserrage ⇒ proposition timelockée, auto-enactée à l'expiration (ou via
+    //   `POST /admin/governance/enact/{id}`). C'est la fin du contournement qui
+    //   rendait le timelock sans effet.
+    let tier = pms_config::min_tier(&update);
+    let desc = update.description();
+    tracing::warn!("[ADMIN] Config change via governance ({}): {}", tier.as_str(), desc);
 
-    // Log de l'action admin
-    tracing::warn!(
-        "[ADMIN] Config update requested: {} by admin",
-        update.description()
-    );
-
-    // Appliquer la mise à jour via le trait ConfigStorage
-    match state
-        .store
-        .apply_config_update(&update, &admin_update_id, timestamp)
+    let out = match crate::api_fn::governance::do_propose(
+        &state,
+        update,
+        tier,
+        "admin_update_config".to_string(),
+    )
+    .await
     {
-        Ok(new_config) => {
-            tracing::info!(
-                "[ADMIN] Config updated successfully: {}",
-                update.description()
-            );
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "status": "ok",
-                    "update_applied": update.description(),
-                    "config": new_config
-                })),
-            )
+        Ok(o) => o,
+        Err(e) => return e.into_response(),
+    };
+
+    if out.instant {
+        // Resserrage : enact immédiat (timelock nul).
+        match crate::api_fn::governance::do_enact(
+            &state,
+            &out.proposal_id,
+            "admin_update_config (instant tighten)".to_string(),
+        )
+        .await
+        {
+            Ok(enact_block_id) => {
+                let new_config = state.store.get_runtime_config().ok();
+                tracing::info!("[ADMIN] Config applied instantly (tighten): {}", desc);
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "status": "applied",
+                        "mode": "instant (tighten)",
+                        "update_applied": desc,
+                        "tier": tier.as_str(),
+                        "proposal_id": out.proposal_id,
+                        "proposal_block_id": out.block_id,
+                        "enact_block_id": enact_block_id,
+                        "config": new_config,
+                    })),
+                )
+                    .into_response()
+            }
+            Err(e) => e.into_response(),
         }
-        Err(e) => {
-            tracing::error!("[ADMIN] Failed to update config: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("Failed to update config: {}", e) })),
-            )
-        }
+    } else {
+        // Desserrage : proposition timelockée.
+        tracing::info!(
+            "[ADMIN] Config change proposed (timelocked until {}): {}",
+            out.enact_after_ms,
+            desc
+        );
+        (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "status": "proposed",
+                "mode": "timelocked (loosen)",
+                "update": desc,
+                "tier": tier.as_str(),
+                "proposal_id": out.proposal_id,
+                "proposal_block_id": out.block_id,
+                "announced_at_ms": out.announced_at_ms,
+                "enact_after_ms": out.enact_after_ms,
+                "message": "change is timelocked under governance; it auto-enacts when the timelock elapses, or POST /admin/governance/enact/{proposal_id}",
+            })),
+        )
+            .into_response()
     }
 }
 

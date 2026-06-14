@@ -6,6 +6,15 @@ use serde::{Deserialize, Serialize};
 use crate::api::AppState;
 
 /// Version de l'API REST — à incrémenter à chaque modification des routes/formats.
+/// v20 (v0.16.0) : gouvernance P2 — `POST /admin/governance/propose` applique
+/// désormais le palier MINIMUM par paramètre (rejet `3071` si trop bas) et
+/// l'asymétrie tighten/loosen (un resserrage a `enact_after == announced_at`,
+/// timelock instantané ; un desserrage garde le délai plein du palier). Nouveau
+/// code `5031` (MintDisabled) : le kill-switch `mint_enabled=false` fait échouer
+/// les chemins de mint natif (on-ramp, conversion token→PMS, faucet) en 503.
+/// `POST /admin/config` ne s'applique PLUS instantanément (P2c) : il forge un
+/// `GovernanceProposal` (palier auto-assigné), appliqué immédiatement si
+/// resserrage (200 `applied`), sinon proposition timelockée (202 `proposed`).
 /// v19 (v0.15.0) : routes gouvernance timelock (plan §4) — `POST /admin/governance/{propose,enact,cancel}`
 /// + `GET /v1/governance/{pending,history}` (public).
 /// v18 (v0.14.0) : nouvelle route `POST /v1/wallet/token/burn` (burn de token
@@ -21,7 +30,7 @@ use crate::api::AppState;
 /// v13 (audit sécurité v0.9.0) : `POST /v1/wallet/tx/send` exige des unlocks
 /// valides (401 sinon) et la conservation par asset ; `POST /submit/block`
 /// rejette les tx sans autorisation de dépense et les block ids non canoniques.
-pub const API_VERSION: u32 = 19;
+pub const API_VERSION: u32 = 20;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -99,6 +108,7 @@ mod tests {
         // v0.13.0: 16 → 17 (POST /admin/onramp voie A + code 5030).
         // v0.14.0: 17 → 18 (POST /v1/wallet/token/burn + PlainPayload::TokenBurn).
         // v0.15.0: 18 → 19 (gouvernance timelock routes).
-        assert_eq!(parsed.api_version, 19);
+        // v0.16.0: 19 → 20 (gouvernance P2 : palier-min + asymétrie sur propose).
+        assert_eq!(parsed.api_version, 20);
     }
 }

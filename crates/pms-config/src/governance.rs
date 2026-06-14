@@ -10,7 +10,11 @@ use crate::ConfigUpdate;
 use serde::{Deserialize, Serialize};
 
 /// Palier d'impact d'un changement gouverné — détermine le timelock (plan §4.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// L'ordre des variants (`Operator < Policy < Constitution`) est **signifiant** :
+/// `derive(PartialOrd, Ord)` l'utilise pour la comparaison `tier >= palier-min`
+/// ([`crate::governance_policy::min_tier`]). Ne jamais réordonner les variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GovernanceTier {
     /// Calibrage opérationnel (fees, anti-spam) — délai court.
     Operator,
