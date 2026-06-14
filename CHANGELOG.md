@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.16.0] - Unreleased — Gouvernance P2 : palier-min + asymétrie tighten/loosen
+
+Deuxième phase de la gouvernance (`pms-spec-governance-timelock.md` §2-§3) : on
+encode QUEL timelock s'applique à QUEL changement. Deux règles, validées au
+protocole (donc inviolables au-delà du handler) :
+- **Palier minimum par paramètre** — chaque `ConfigUpdate` exige un palier
+  d'impact minimum (fees = Operator ; burn / distribution / pouvoir de mint =
+  Policy ; le couloir d'émission = Constitution en P3). On ne peut pas déclasser
+  un changement Policy en « Operator 7 j ».
+- **Asymétrie tighten-now / loosen-later** — resserrer (couper / réduire le mint)
+  est instantané (`enact_after == announced_at`) ; desserrer (reprendre / hausser)
+  garde le délai plein du palier. On n'attend pas 45 j pour stopper une fuite.
+
+**P2a (cette version)** : table param→palier-min + direction + validation. P2b :
+câbler le kill-switch `mint_enabled`. P2c : tâche auto-enact + rewire
+`admin_update_config`→propose.
+
+### Added — P2a (politique de gouvernance)
+- **feat(config)** — module `governance_policy`
+  ([crates/pms-config/src/governance_policy.rs](crates/pms-config/src/governance_policy.rs)) :
+  `min_tier(update)` (table §2), `direction(update, current)` (Tighten/Loosen),
+  `required_timelock_ms(update, current, tier)` (0 si tighten, durée pleine sinon),
+  `validate_tier(update, tier)` (rejet si palier déclaré < minimum). `GovernanceTier`
+  dérive `Ord` (l'ordre des variants = impact croissant).
+- **feat(core/validation)** — la validation persist d'un `GovernanceProposal`
+  ([persist.rs](crates/pms-core/src/net_adapter/persist.rs)) impose désormais :
+  (1) `tier >= min_tier(update)` (G4) ; (2) `enact_after == announced_at +
+  required_timelock_ms(...)` re-dérivé depuis la config COURANTE (le proposant ne
+  peut pas réclamer un timelock court pour un desserrage). Déterministe au
+  replay/sync (la config des ancêtres est appliquée avant la proposition).
+- **feat(api)** — `POST /admin/governance/propose` rejette en amont (`3071`) un
+  palier trop bas et dérive `enact_after` via l'asymétrie (instantané pour un
+  resserrage) — même fonction de vérité que la validation persist.
+- **test(unit)** — `governance_policy` : `min_tier_table_golden`, `direction_*`,
+  `required_timelock_asymmetry_golden`, `validate_tier_rejects_below_minimum`,
+  `batch_tighten_only_if_all_tighten`, `tier_ordering`.
+- **test(protocole)** — `governance_timelock_test.rs` : **G4** (palier trop bas
+  rejeté), **G3/G5** (tighten enacté instantanément applique `max_mint_per_block`
+  1_000_000→1 + Enacted), **G2** (loosen avant délai rejeté), **DUP**.
+- **test(e2e)** — `test_governance_tighten_instant_endpoints` (dag_sandbox) :
+  asymétrie tighten-now via HTTP — `enact_after == announced_at`, enact immédiat
+  appliqué (Enacted).
+- **chore(version)** — `Cargo.toml` 0.15.0 → **0.16.0** ; `DAG_VERSION` 3.4.0 →
+  **3.5.0** (validation renforcée, MINOR, pas de wipe) ; `API_VERSION` 19 → **20**.
+
+### Notes
+- **Anti-backdating volontairement NON câblé au protocole** : un check
+  `announced_at ≈ horloge` casserait le sync P2P / replay (la validation est
+  ré-exécutée plus tard, horloge avancée → rejet des blocs historiques). Dans le
+  modèle single-writer, seul le Coordinator (de confiance) forge les propositions
+  et son handler estampille `announced_at = now` ; la garantie « pas de surprise »
+  repose sur la TRANSPARENCE (le bloc proposal est observable dans le DAG en temps
+  réel). La relation `enact_after == announced_at + durée` reste validée
+  (déterministe).
+
+---
+
 ## [0.15.0] - Unreleased — Gouvernance timelock (plan §4, cœur protocole)
 
 Première phase de la gouvernance timelock (`pms-spec-governance-timelock.md`) :

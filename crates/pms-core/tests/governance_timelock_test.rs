@@ -1,18 +1,25 @@
-//! Gouvernance timelock — invariant protocole (plan §4 / `pms-spec-governance-timelock.md`).
+//! Gouvernance timelock — invariants protocole (plan §4 / `pms-spec-governance-timelock.md`).
 //!
 //! Ces tests forgent DIRECTEMENT des blocs `GovernanceProposal` / `GovernanceEnact`
-//! avec un `enact_after_ms` CONTRÔLÉ (passé ou futur), ce que les endpoints HTTP
-//! ne permettent pas (les durées y sont hardcodées 7/15/45 j). Ils prouvent les
-//! deux moitiés de l'invariant timelock au niveau `persist_block` :
+//! pour exercer la validation `persist_block` sans passer par les endpoints :
 //!
-//! - **G3** : enact APRÈS expiration (`now ≥ enact_after`) → `apply_config_update`
-//!   est exécuté, le `RuntimeConfig` reflète le changement, le statut passe `Enacted`.
-//! - **G2** : enact AVANT expiration (`now < enact_after`) → `PutResult::Rejected`,
-//!   le paramètre est INCHANGÉ, la proposition reste `Pending` (aucune application).
+//! - **G3** : enact d'un *tighten* (timelock 0, légitimement instantané) →
+//!   `apply_config_update` est exécuté, le `RuntimeConfig` reflète le changement,
+//!   le statut passe `Enacted`. Prouve la moitié « apply » du timelock + l'instant
+//!   du tighten (G5).
+//! - **G2** : enact d'un *loosen* AVANT expiration (`now < enact_after`) →
+//!   `PutResult::Rejected`, paramètre INCHANGÉ, proposition toujours `Pending`.
+//! - **G4** : palier minimum imposé — proposer un paramètre Policy en tier Operator
+//!   → rejeté (anti-déclassement de timelock).
+//! - **DUP** : doublon de `proposal_id` → rejeté, record d'origine intact.
+//!
+//! Note : pas de test « anti-backdating » — il n'y a volontairement PAS de check
+//! `announced_at ≈ horloge` (il casserait le sync P2P / replay, non-déterministe).
+//! La validation `enact_after == announced_at + durée` reste, elle, déterministe.
 //!
 //! En mode dev (`coordinator_public_key = None`) la vérification d'autorité
-//! coordinator est court-circuitée (cf. `authority.rs`), donc n'importe quel wallet
-//! peut forger le bloc — on isole ainsi la logique de timelock, pas l'auth.
+//! coordinator est court-circuitée (cf. `authority.rs`), on isole donc la logique
+//! de gouvernance, pas l'auth.
 //!
 //! Run : `cargo test -p pms-core --test governance_timelock_test -- --nocapture`
 
@@ -30,6 +37,8 @@ use pms_wallet::{SignerBackend, Wallet};
 use pms_wire::WireMeta;
 
 type DagRef = Arc<ConcurrentDag>;
+
+const DAY_MS: u64 = 86_400_000;
 
 /// Store Rocks éphémère + DAG genesis + adapter réel (policy dev : pas de
 /// coordinateur configuré → autorité skip ; `enforce_parent_existence = false`).
@@ -58,75 +67,69 @@ async fn setup(tag: &str) -> anyhow::Result<(DagRef, Arc<dyn NetDagAdapter>, Arc
     Ok((dag, adapter, store, meta))
 }
 
-const FAR_FUTURE_MS: u64 = 32_503_680_000_000; // ~ an 3000 — jamais écoulé en test.
-
-/// G3 — enact APRÈS expiration applique réellement le `ConfigUpdate`.
+/// G3 + G5 — enact d'un *tighten* (timelock instantané) applique réellement le
+/// `ConfigUpdate`.
 ///
-/// Scénario : on annonce une proposition dont le timelock est DÉJÀ écoulé
-/// (`enact_after_ms = 1`, soit 1970), puis on l'enacte. Le `fee_rate_bps` du
-/// `RuntimeConfig` doit passer à la valeur proposée (golden 4242) et le statut
-/// de la proposition doit devenir `Enacted`.
+/// `SetMaxMint { amount: 1 }` avec la config par défaut (`max_mint_per_block =
+/// 1_000_000`) est un **tighten** (on baisse le plafond) → timelock 0 →
+/// `enact_after == announced_at`. L'enact immédiat est donc LÉGITIME (pas de
+/// back-dating) et applique : `max_mint_per_block` passe à 1, statut `Enacted`.
 #[tokio::test]
-async fn governance_enact_after_timelock_applies_config() -> anyhow::Result<()> {
+async fn governance_tighten_enacts_instantly_and_applies() -> anyhow::Result<()> {
     let (_dag, adapter, store, meta) = setup("g3").await?;
     let wallet = Wallet::from_seed(&[42u8; 32], None).unwrap();
     let genesis_id = Block::genesis(compute_block_id).id;
 
-    // Baseline : la valeur AVANT enact ≠ la valeur proposée (sinon le test serait
-    // une tautologie — il passerait même sans application).
-    let before = store.get_runtime_config()?.fee_rate_bps;
-    const NEW_BPS: u32 = 4242;
-    assert_ne!(before, NEW_BPS, "baseline fee_rate_bps must differ from the proposed value");
-    println!("   baseline fee_rate_bps = {before}");
+    let before = store.get_runtime_config()?.max_mint_per_block;
+    assert_eq!(before, 1_000_000, "baseline max_mint_per_block (dev default)");
+    println!("   baseline max_mint_per_block = {before}");
 
-    // 1) Proposal avec timelock DÉJÀ écoulé (enact_after = 1 ms après epoch).
-    let proposal_id = "g3-proposal-feerate".to_string();
+    // Tighten : enact_after = announced_at (timelock 0). announced_at = now (ancré).
+    let now = pms_utils::ts_ms();
+    let proposal_id = "g3-tighten-maxmint".to_string();
     let proposal = PlainPayload::GovernanceProposal {
         proposal_id: proposal_id.clone(),
-        update: ConfigUpdate::SetFeeRate { bps: NEW_BPS },
-        tier: GovernanceTier::Operator,
-        reason: "raise fee (timelock already elapsed)".to_string(),
-        announced_at_ms: 1,
-        enact_after_ms: 1,
+        update: ConfigUpdate::SetMaxMint { amount: 1 },
+        tier: GovernanceTier::Policy, // SetMaxMint exige au moins Policy
+        reason: "tighten per-block mint cap (emergency)".to_string(),
+        announced_at_ms: now,
+        enact_after_ms: now, // tighten ⇒ instantané
     };
     let wb_prop =
         forge_signed_wire_block_for_test(vec![genesis_id], &meta, &wallet, 1, Some(PayloadEnvelope::Plain(proposal)));
     let r_prop = adapter.persist_block(&wb_prop).await?;
     println!("   proposal persist → {r_prop:?}");
     assert!(matches!(r_prop, PutResult::Inserted), "proposal must be inserted, got {r_prop:?}");
-    let rec = store.get_governance_proposal(&proposal_id)?.expect("proposal stored");
-    assert_eq!(rec.status, GovernanceStatus::Pending, "freshly announced → Pending");
+    let rec = store.get_governance_proposal(&proposal_id)?.expect("stored");
+    assert_eq!(rec.enact_after_ms, rec.announced_at_ms, "tighten ⇒ enact_after == announced_at (instant)");
 
-    // 2) Enact : now (2026) ≥ enact_after (1) → applique.
+    // Enact immédiat → applique (now ≥ enact_after, légitime).
     let enact = PlainPayload::GovernanceEnact {
         proposal_id: proposal_id.clone(),
-        reason: "enact now".to_string(),
+        reason: "enact tighten".to_string(),
     };
     let wb_enact =
         forge_signed_wire_block_for_test(vec![wb_prop.id.clone()], &meta, &wallet, 2, Some(PayloadEnvelope::Plain(enact)));
     let r_enact = adapter.persist_block(&wb_enact).await?;
     println!("   enact persist → {r_enact:?}");
-    assert!(matches!(r_enact, PutResult::Inserted), "enact after timelock must be inserted, got {r_enact:?}");
+    assert!(matches!(r_enact, PutResult::Inserted), "instant tighten enact must be inserted, got {r_enact:?}");
 
-    // 3) Vérification de l'APPLICATION réelle (G3) — valeurs golden, pas re-dérivées.
-    let after = store.get_runtime_config()?.fee_rate_bps;
+    let after = store.get_runtime_config()?.max_mint_per_block;
     let status = store.get_governance_proposal(&proposal_id)?.expect("proposal").status;
-    println!("   after enact: fee_rate_bps = {after}, status = {}", status.as_str());
-    assert_eq!(after, NEW_BPS, "G3: enact after timelock MUST apply the ConfigUpdate (fee_rate_bps)");
+    println!("   after enact: max_mint_per_block = {after}, status = {}", status.as_str());
+    assert_eq!(after, 1, "G3/G5: tighten enact MUST apply the ConfigUpdate (max_mint_per_block)");
     assert_eq!(status, GovernanceStatus::Enacted, "G3: proposal status MUST become Enacted");
 
-    println!("\n   G3 PASSED: enact après expiration applique le ConfigUpdate + marque Enacted.");
+    println!("\n   G3/G5 PASSED: tighten enacté instantanément applique le ConfigUpdate + Enacted.");
     Ok(())
 }
 
-/// G2 — enact AVANT expiration est REJETÉ, sans aucune application (timelock
-/// inviolable au niveau protocole).
+/// G2 — enact d'un *loosen* AVANT expiration est REJETÉ, sans application.
 ///
-/// Scénario : proposition avec `enact_after_ms` très loin dans le futur, enact
-/// immédiat → `PutResult::Rejected("timelock not elapsed")`. Le `fee_rate_bps`
-/// est INCHANGÉ et la proposition reste `Pending`.
+/// `SetFeeRate` (loosen, palier Operator → 7 j) : `enact_after = announced_at +
+/// 7 j`. L'enact immédiat (`now < enact_after`) → `Rejected("timelock")`.
 #[tokio::test]
-async fn governance_enact_before_timelock_rejected_no_apply() -> anyhow::Result<()> {
+async fn governance_loosen_enact_before_timelock_rejected() -> anyhow::Result<()> {
     let (_dag, adapter, store, meta) = setup("g2").await?;
     let wallet = Wallet::from_seed(&[43u8; 32], None).unwrap();
     let genesis_id = Block::genesis(compute_block_id).id;
@@ -136,24 +139,20 @@ async fn governance_enact_before_timelock_rejected_no_apply() -> anyhow::Result<
     assert_ne!(before, NEW_BPS);
     println!("   baseline fee_rate_bps = {before}");
 
-    // 1) Proposal avec timelock LOIN dans le futur.
-    let proposal_id = "g2-proposal-feerate".to_string();
+    let now = pms_utils::ts_ms();
+    let proposal_id = "g2-loosen-feerate".to_string();
     let proposal = PlainPayload::GovernanceProposal {
         proposal_id: proposal_id.clone(),
         update: ConfigUpdate::SetFeeRate { bps: NEW_BPS },
-        tier: GovernanceTier::Constitution,
-        reason: "raise fee (timelock NOT elapsed)".to_string(),
-        announced_at_ms: 1,
-        enact_after_ms: FAR_FUTURE_MS,
+        tier: GovernanceTier::Operator,
+        reason: "raise fee (loosen, 7d timelock)".to_string(),
+        announced_at_ms: now,
+        enact_after_ms: now + 7 * DAY_MS, // loosen Operator ⇒ 7 j
     };
     let wb_prop =
         forge_signed_wire_block_for_test(vec![genesis_id], &meta, &wallet, 1, Some(PayloadEnvelope::Plain(proposal)));
-    let r_prop = adapter.persist_block(&wb_prop).await?;
-    println!("   proposal persist → {r_prop:?}");
-    assert!(matches!(r_prop, PutResult::Inserted));
+    assert!(matches!(adapter.persist_block(&wb_prop).await?, PutResult::Inserted));
 
-    // 2) Enact immédiat → REJETÉ (timelock non écoulé). On isole la raison du rejet
-    //    (anti-faux-test rule #6) : ce doit être le timelock, pas un statut/lookup.
     let enact = PlainPayload::GovernanceEnact {
         proposal_id: proposal_id.clone(),
         reason: "enact too early".to_string(),
@@ -163,60 +162,88 @@ async fn governance_enact_before_timelock_rejected_no_apply() -> anyhow::Result<
     let r_enact = adapter.persist_block(&wb_enact).await?;
     println!("   early enact persist → {r_enact:?}");
     match r_enact {
-        PutResult::Rejected(reason) => {
-            assert!(
-                reason.to_lowercase().contains("timelock"),
-                "G2: enact must be rejected SPECIFICALLY for the timelock, got: {reason}"
-            );
-        }
+        PutResult::Rejected(reason) => assert!(
+            reason.to_lowercase().contains("timelock"),
+            "G2: enact must be rejected SPECIFICALLY for the timelock, got: {reason}"
+        ),
         other => panic!("G2: enact before timelock MUST be Rejected, got {other:?}"),
     }
 
-    // 3) Aucune application : config inchangée + proposition toujours Pending.
     let after = store.get_runtime_config()?.fee_rate_bps;
     let status = store.get_governance_proposal(&proposal_id)?.expect("proposal").status;
     println!("   after rejected enact: fee_rate_bps = {after}, status = {}", status.as_str());
     assert_eq!(after, before, "G2: a rejected enact MUST NOT change the parameter");
     assert_eq!(status, GovernanceStatus::Pending, "G2: a rejected enact leaves the proposal Pending");
 
-    println!("\n   G2 PASSED: enact avant expiration REJETÉ (timelock), aucun changement de config.");
+    println!("\n   G2 PASSED: loosen enact avant expiration REJETÉ (timelock), config inchangée.");
     Ok(())
 }
 
-/// Unicité du `proposal_id` — un second `GovernanceProposal` réutilisant un id
-/// déjà connu est REJETÉ au niveau DAG (pas d'overwrite aveugle du record).
-///
-/// `put_governance_proposal` est un write aveugle ; la garde d'unicité vit dans
-/// `persist_block` (source de vérité). On vérifie que le record d'origine
-/// (statut/raison) est INTACT après la tentative de doublon.
+/// G4 — palier minimum imposé : un paramètre Policy proposé en tier Operator est
+/// rejeté (on ne peut pas déclasser le timelock).
+#[tokio::test]
+async fn governance_tier_below_minimum_rejected() -> anyhow::Result<()> {
+    let (_dag, adapter, _store, meta) = setup("g4").await?;
+    let wallet = Wallet::from_seed(&[45u8; 32], None).unwrap();
+    let genesis_id = Block::genesis(compute_block_id).id;
+
+    // SetBurnRate exige au moins Policy ; on le propose en Operator → rejet.
+    let now = pms_utils::ts_ms();
+    let proposal = PlainPayload::GovernanceProposal {
+        proposal_id: "g4-burn-as-operator".to_string(),
+        update: ConfigUpdate::SetBurnRate { bps: 1234 },
+        tier: GovernanceTier::Operator, // trop bas pour SetBurnRate (min Policy)
+        reason: "sneak a Policy change through Operator".to_string(),
+        announced_at_ms: now,
+        enact_after_ms: now + 7 * DAY_MS,
+    };
+    let wb =
+        forge_signed_wire_block_for_test(vec![genesis_id], &meta, &wallet, 1, Some(PayloadEnvelope::Plain(proposal)));
+    let r = adapter.persist_block(&wb).await?;
+    println!("   under-tier proposal persist → {r:?}");
+    match r {
+        PutResult::Rejected(reason) => assert!(
+            reason.to_lowercase().contains("requires at least tier policy"),
+            "G4: must be rejected for the min-tier, naming the required tier, got: {reason}"
+        ),
+        other => panic!("G4: a Policy param proposed as Operator MUST be Rejected, got {other:?}"),
+    }
+
+    println!("\n   G4 PASSED: palier minimum imposé (SetBurnRate en Operator rejeté).");
+    Ok(())
+}
+
+/// DUP — un second `GovernanceProposal` réutilisant un `proposal_id` connu est
+/// rejeté au niveau DAG (pas d'overwrite aveugle), record d'origine intact.
 #[tokio::test]
 async fn governance_duplicate_proposal_id_rejected_no_overwrite() -> anyhow::Result<()> {
     let (_dag, adapter, store, meta) = setup("dup").await?;
     let wallet = Wallet::from_seed(&[44u8; 32], None).unwrap();
     let genesis_id = Block::genesis(compute_block_id).id;
     let proposal_id = "dup-proposal-feerate".to_string();
+    let now = pms_utils::ts_ms();
 
-    // 1) Première proposition → stockée Pending.
     let p1 = PlainPayload::GovernanceProposal {
         proposal_id: proposal_id.clone(),
         update: ConfigUpdate::SetFeeRate { bps: 1111 },
         tier: GovernanceTier::Operator,
         reason: "original".to_string(),
-        announced_at_ms: 1,
-        enact_after_ms: FAR_FUTURE_MS,
+        announced_at_ms: now,
+        enact_after_ms: now + 7 * DAY_MS,
     };
     let wb1 =
         forge_signed_wire_block_for_test(vec![genesis_id.clone()], &meta, &wallet, 1, Some(PayloadEnvelope::Plain(p1)));
     assert!(matches!(adapter.persist_block(&wb1).await?, PutResult::Inserted));
 
-    // 2) Doublon : MÊME proposal_id, contenu différent → REJETÉ.
+    // Doublon : MÊME proposal_id, contenu différent → REJETÉ.
+    let now2 = pms_utils::ts_ms();
     let p2 = PlainPayload::GovernanceProposal {
         proposal_id: proposal_id.clone(),
         update: ConfigUpdate::SetFeeRate { bps: 2222 },
-        tier: GovernanceTier::Constitution,
+        tier: GovernanceTier::Operator,
         reason: "attempted overwrite".to_string(),
-        announced_at_ms: 2,
-        enact_after_ms: 2,
+        announced_at_ms: now2,
+        enact_after_ms: now2 + 7 * DAY_MS,
     };
     let wb2 =
         forge_signed_wire_block_for_test(vec![wb1.id.clone()], &meta, &wallet, 2, Some(PayloadEnvelope::Plain(p2)));
@@ -230,11 +257,9 @@ async fn governance_duplicate_proposal_id_rejected_no_overwrite() -> anyhow::Res
         other => panic!("duplicate proposal_id MUST be Rejected, got {other:?}"),
     }
 
-    // 3) Le record d'origine est INTACT (pas d'overwrite par le doublon).
     let rec = store.get_governance_proposal(&proposal_id)?.expect("original record");
-    println!("   original record after dup: reason={:?}, tier={}", rec.reason, rec.tier.as_str());
+    println!("   original record after dup: reason={:?}", rec.reason);
     assert_eq!(rec.reason, "original", "the original proposal must NOT be overwritten");
-    assert_eq!(rec.tier, GovernanceTier::Operator, "tier must remain the original");
     assert_eq!(rec.status, GovernanceStatus::Pending);
 
     println!("\n   DUP PASSED: doublon de proposal_id rejeté, record d'origine intact.");

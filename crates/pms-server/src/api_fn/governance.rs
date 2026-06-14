@@ -17,7 +17,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use pms_config::{ConfigUpdate, GovernanceStatus, GovernanceTier};
-use pms_storage::{GovernanceStorage, PutResult};
+use pms_storage::{ConfigStorage, GovernanceStorage, PutResult};
 use pms_types::{PayloadEnvelope, PlainPayload};
 use serde::Deserialize;
 use serde_json::json;
@@ -82,11 +82,24 @@ pub async fn admin_propose(
     State(state): State<AppState>,
     Json(req): Json<ProposeRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Palier minimum (table §2) : rejet immédiat si le palier déclaré est trop
+    // bas pour ce paramètre — évite de forger un bloc voué au rejet par persist.
+    if let Err(reason) = pms_config::validate_tier(&req.update, req.tier) {
+        return Err(ApiError::GovernanceRejected { reason });
+    }
     // La cohérence du `ConfigUpdate` (ex: répartition des fees) est vérifiée à
     // l'enact, quand `apply_config_update` l'applique pour de vrai (validation
     // partagée) — inutile de la dupliquer ici.
     let announced_at_ms = pms_utils::ts_ms();
-    let enact_after_ms = announced_at_ms.saturating_add(req.tier.default_duration_ms());
+    // Asymétrie tighten/loosen : le timelock est instantané pour un resserrage
+    // (couper/réduire le mint), plein sinon. Dérivé de la MÊME fonction que la
+    // validation persist (un seul point de vérité) à partir de la config courante.
+    let current_cfg = state
+        .store
+        .get_runtime_config()
+        .map_err(|e| ApiError::Internal { reason: format!("runtime config: {e}") })?;
+    let timelock_ms = pms_config::required_timelock_ms(&req.update, &current_cfg, req.tier);
+    let enact_after_ms = announced_at_ms.saturating_add(timelock_ms);
 
     // proposal_id = SHA-256(update + tier + announced_at) — déterministe.
     let id_input =

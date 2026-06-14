@@ -5934,3 +5934,64 @@ async fn test_governance_timelock_endpoints() -> Result<()> {
     println!("\n   TEST PASSED: governance — propose announces, early enact REJECTED (timelock), cancel works.");
     Ok(())
 }
+
+/// Gouvernance — asymétrie *tighten-now* end-to-end via les endpoints (G5).
+///
+/// Un **resserrage** (baisser `max_mint_per_block`) a un timelock **instantané** :
+/// le handler dérive `enact_after == announced_at` (via `required_timelock_ms`),
+/// donc un `enact` immédiat RÉUSSIT et applique le changement. C'est la moitié
+/// « tighten-now » de l'asymétrie, prouvée à travers la couche HTTP (le handler
+/// calcule lui-même la durée selon la direction). Le « loosen-later » est prouvé
+/// par `test_governance_timelock_endpoints` (enact précoce rejeté).
+///
+/// Run: `cargo test --release -p pms-server --test dag_sandbox \
+///   test_governance_tighten_instant_endpoints -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_governance_tighten_instant_endpoints() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // Propose un tighten : baisser max_mint_per_block à 1 (< défaut). Palier Policy
+    // (min requis pour SetMaxMint). Le handler doit dériver enact_after == announced_at.
+    let (s, body) = sandbox
+        .admin_post(
+            "/admin/governance/propose",
+            json!({
+                "update": { "SetMaxMint": { "amount": 1 } },
+                "tier": "Policy",
+                "reason": "emergency: cap per-block mint"
+            }),
+        )
+        .await;
+    println!("   Propose (tighten) → {} — {:?}", s, body);
+    assert!(s.is_success(), "tighten propose must succeed: {} {:?}", s, body);
+    let proposal_id = body["proposal_id"].as_str().expect("proposal_id").to_string();
+    assert_eq!(
+        body["enact_after_ms"].as_u64(),
+        body["announced_at_ms"].as_u64(),
+        "tighten ⇒ instant: enact_after MUST equal announced_at (got {:?} vs {:?})",
+        body["enact_after_ms"],
+        body["announced_at_ms"]
+    );
+
+    // Enact IMMÉDIATEMENT → succès (timelock instantané, légitime — pas de backdating).
+    let (s, enact_body) = sandbox
+        .admin_post(
+            &format!("/admin/governance/enact/{}", proposal_id),
+            json!({ "reason": "apply tighten now" }),
+        )
+        .await;
+    println!("   Enact (instant) → {} — {:?}", s, enact_body);
+    assert!(s.is_success(), "instant tighten enact MUST succeed, got {} {:?}", s, enact_body);
+
+    // La proposition est maintenant Enacted (dans /history, plus dans /pending).
+    let (_, history) = sandbox.public_get("/v1/governance/history").await;
+    let enacted = history["history"]
+        .as_array()
+        .map(|a| a.iter().any(|p| p["proposal_id"] == proposal_id && p["status"] == "enacted"))
+        .unwrap_or(false);
+    assert!(enacted, "tighten proposal must be Enacted in /history: {:?}", history);
+
+    println!("\n   TEST PASSED: governance tighten-now — enact_after==announced_at, enact instantané appliqué (Enacted).");
+    Ok(())
+}
