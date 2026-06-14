@@ -153,6 +153,12 @@ pub enum ApiError {
     /// they'd leak the engine's emission state); `reason` carries the
     /// voie + amounts for logs.
     EmissionBudgetExhausted { reason: String },
+    /// 5031 — Native-PMS mint is disabled by governance (`mint_enabled =
+    /// false`, the emission kill-switch). Distinct from `5030` (budget
+    /// exhausted, recovers next epoch): this is a deliberate, indefinite halt
+    /// until governance re-enables minting. Operational state, not a secret —
+    /// the public message says so plainly.
+    MintDisabled,
 
     // ── 9xxx internal (vague public always) ───────────────────────
     /// 9001 — RocksDB / persist pipeline error.
@@ -197,6 +203,7 @@ impl ApiError {
             ApiError::GasPoolEmpty(_) => 5010,
             ApiError::SubscriptionInactive(_) => 5020,
             ApiError::EmissionBudgetExhausted { .. } => 5030,
+            ApiError::MintDisabled => 5031,
             ApiError::StorageError { .. } => 9001,
             ApiError::ConsensusError { .. } => 9002,
             ApiError::Internal { .. } => 9999,
@@ -213,7 +220,8 @@ impl ApiError {
             ApiError::ReadOnly { .. }
             | ApiError::GasPoolEmpty(_)
             | ApiError::SubscriptionInactive(_)
-            | ApiError::EmissionBudgetExhausted { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            | ApiError::EmissionBudgetExhausted { .. }
+            | ApiError::MintDisabled => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::MalformedJson(_)
             | ApiError::InvalidAddress { .. }
             | ApiError::InvalidAmount { .. }
@@ -300,6 +308,7 @@ impl ApiError {
             ApiError::EmissionBudgetExhausted { .. } => {
                 "Emission budget exhausted for this period".into()
             }
+            ApiError::MintDisabled => "Native mint is disabled".into(),
 
             // Internal — never expose stack traces, RocksDB errors,
             // panics, etc. Operators see these in logs.
@@ -359,6 +368,9 @@ impl ApiError {
             // `reason` carries voie + amounts; no descriptive prefix so it
             // shares no word with the vague public message (leak test).
             ApiError::EmissionBudgetExhausted { reason } => reason.clone(),
+            ApiError::MintDisabled => {
+                "native PMS mint disabled by governance (mint_enabled=false)".into()
+            }
             ApiError::StorageError { reason } => reason.clone(),
             ApiError::ConsensusError { reason } => reason.clone(),
             ApiError::Internal { reason } => reason.clone(),
@@ -526,6 +538,7 @@ mod tests {
             ApiError::GasPoolEmpty("x".into()).code(),
             ApiError::SubscriptionInactive("x".into()).code(),
             ApiError::EmissionBudgetExhausted { reason: "x".into() }.code(),
+            ApiError::MintDisabled.code(),
             ApiError::StorageError { reason: "x".into() }.code(),
             ApiError::ConsensusError { reason: "x".into() }.code(),
             ApiError::Internal { reason: "x".into() }.code(),

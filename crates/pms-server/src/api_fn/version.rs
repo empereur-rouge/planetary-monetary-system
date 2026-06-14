@@ -9,7 +9,9 @@ use crate::api::AppState;
 /// v20 (v0.16.0) : gouvernance P2 — `POST /admin/governance/propose` applique
 /// désormais le palier MINIMUM par paramètre (rejet `3071` si trop bas) et
 /// l'asymétrie tighten/loosen (un resserrage a `enact_after == announced_at`,
-/// timelock instantané ; un desserrage garde le délai plein du palier).
+/// timelock instantané ; un desserrage garde le délai plein du palier). Nouveau
+/// code `5031` (MintDisabled) : le kill-switch `mint_enabled=false` fait échouer
+/// les chemins de mint natif (on-ramp, conversion token→PMS, faucet) en 503.
 /// v19 (v0.15.0) : routes gouvernance timelock (plan §4) — `POST /admin/governance/{propose,enact,cancel}`
 /// + `GET /v1/governance/{pending,history}` (public).
 /// v18 (v0.14.0) : nouvelle route `POST /v1/wallet/token/burn` (burn de token

@@ -20,9 +20,40 @@ protocole (donc inviolables au-delà du handler) :
   est instantané (`enact_after == announced_at`) ; desserrer (reprendre / hausser)
   garde le délai plein du palier. On n'attend pas 45 j pour stopper une fuite.
 
-**P2a (cette version)** : table param→palier-min + direction + validation. P2b :
-câbler le kill-switch `mint_enabled`. P2c : tâche auto-enact + rewire
-`admin_update_config`→propose.
+**P2a** : table param→palier-min + direction + validation. **P2b (cette version)** :
+câbler le kill-switch `mint_enabled` (dormant jusqu'ici). P2c : tâche auto-enact +
+rewire `admin_update_config`→propose.
+
+### Added — P2b (kill-switch `mint_enabled`)
+- **feat(emission)** — `EmissionGate::reserve`
+  ([crates/pms-server/src/emission.rs](crates/pms-server/src/emission.rs)) refuse
+  TOUTE réservation avec `EmissionError::MintDisabled` quand `mint_enabled = false`
+  (chokepoint unique des voies budgétées : baseline, on-ramp, conversion token→PMS).
+  Le champ `mint_enabled` était **dormant** (jamais lu) depuis sa création.
+- **feat(emission)** — la **faucet** ([wallet_factory.rs](crates/pms-server/src/api_fn/wallet_factory.rs))
+  et le **bridge** de PMS natif (`asset_id = None`, [bridge.rs](crates/pms-server/src/api_fn/bridge.rs))
+  vérifient aussi `mint_enabled` (defense-in-depth : ces voies natives ne passent
+  pas par `EmissionGate`).
+- **feat(api/errors)** — nouveau code **`5031 MintDisabled`** (503)
+  ([api_error.rs](crates/pms-server/src/api_error.rs)) : distinct du `5030`
+  (budget épuisé, récupère à l'epoch suivant) — halt délibéré jusqu'à réactivation
+  par la gouvernance. Mappé dans on-ramp + conversion.
+- **test(G6)** — `t11_mint_disabled_killswitch_rejects_all_voies`
+  ([emission_budget_test.rs](crates/pms-server/tests/emission_budget_test.rs)) :
+  `SetMintEnabled{false}` (chemin gouverné) → `reserve` refuse les 4 voies
+  (onramp/baseline/conversion/faucet) avec `MintDisabled`, rien réservé,
+  réactivation rouvre le mint.
+- **chore(version)** — `API_VERSION` reste 20 (gouvernance P2), doc étendue au 5031.
+
+### Notes — couverture du kill-switch (audit complétude)
+- **Couvert** : baseline, on-ramp, conversion token→PMS (via `EmissionGate::reserve`),
+  faucet + bridge natif (checks dédiés).
+- **Résiduels DORMANTS non gatés** (documentés, à fermer si activés) : (1) un contrat
+  `AccumulateRefund` configuré pour rembourser du **PMS natif** (`asset_id=None`) —
+  aujourd'hui aucun contrat ne le fait (edenite rembourse le token EDN custom) ;
+  (2) le fee de mint de `admin_mint_token` en PMS natif — dormant (`mint_fee` = 0
+  dans toutes les configs). La réconciliation lock↔mint du bridge (anti over-mint)
+  est un durcissement séparé, hors P2.
 
 ### Added — P2a (politique de gouvernance)
 - **feat(config)** — module `governance_policy`

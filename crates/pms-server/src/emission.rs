@@ -25,6 +25,7 @@
 //! au plafond (10 %/an par défaut). C'est inviolable sans changer la config de
 //! boot (pas de hot-swap tant que la gouvernance timelock n'existe pas).
 
+use pms_storage::ConfigStorage;
 use pms_storage::rocks_store::store::RocksStore;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
@@ -143,6 +144,10 @@ pub enum EmissionError {
     /// L'écriture durable du compteur a échoué — la réservation est annulée
     /// (rien n'a été réservé), l'appelant ne doit pas forger.
     Persist(anyhow::Error),
+    /// Le kill-switch d'émission est armé (`mint_enabled = false` dans la config
+    /// runtime gouvernée) — TOUTE émission de PMS natif est refusée jusqu'à ce
+    /// que la gouvernance le réactive. Rien n'est réservé.
+    MintDisabled,
 }
 
 impl std::fmt::Display for EmissionError {
@@ -162,6 +167,9 @@ impl std::fmt::Display for EmissionError {
                 budget
             ),
             EmissionError::Persist(e) => write!(f, "emission counter persist failed: {}", e),
+            EmissionError::MintDisabled => {
+                write!(f, "native PMS mint is disabled by governance (mint_enabled=false)")
+            }
         }
     }
 }
@@ -253,6 +261,21 @@ impl EmissionGate {
         voie: Voie,
         requested: Option<Decimal>,
     ) -> Result<Reservation, EmissionError> {
+        // KILL-SWITCH (gouvernance) — `mint_enabled = false` coupe TOUTE émission
+        // de PMS natif, AVANT toute réservation. C'est le point de chokepoint
+        // unique des voies budgétées (baseline / on-ramp / conversion), tous les
+        // appelants passant par `reserve`. Un échec de lecture de la config ne
+        // doit pas ouvrir le kill-switch silencieusement : on ne refuse que sur un
+        // `mint_enabled = false` observé (la config absente vaut `true` par défaut).
+        if let Ok(cfg) = store.get_runtime_config() {
+            if !cfg.mint_enabled {
+                crate::metrics::EMISSION_REJECTIONS
+                    .with_label_values(&[voie.as_str()])
+                    .inc();
+                return Err(EmissionError::MintDisabled);
+            }
+        }
+
         let mut st = self.state.lock().await;
 
         // Rollover FORWARD uniquement : une horloge qui recule ne réinitialise

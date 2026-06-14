@@ -117,6 +117,7 @@ Certains codes ajoutent des champs additionnels pour ergonomie SDK :
 | `5010` | 503 | `GasPoolEmpty(ledger_id)` | `Service temporarily unavailable` | `gas pool empty for ledger: <id>` |
 | `5020` | 503 | `SubscriptionInactive(ledger_id)` | `Subscription required` | `subscription inactive: <id>` |
 | `5030` | 503 | `EmissionBudgetExhausted{reason}` | `Emission budget exhausted for this period` | `voie=<v> requested=<x> remaining=<y> budget=<z>` (montants jamais publics) |
+| `5031` | 503 | `MintDisabled` | `Native mint is disabled` | `native PMS mint disabled by governance (mint_enabled=false)` — kill-switch d'émission, distinct du 5030 (épuisement, récupère à l'epoch suivant) : halt délibéré jusqu'à réactivation par la gouvernance |
 
 ### 9xxx — Internal (jamais explicite)
 
