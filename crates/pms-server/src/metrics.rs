@@ -222,6 +222,76 @@ pub static API_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Emission budget (plan §3.1) — observabilité du couloir d'émission.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Budget d'émission de la période courante (PMS natif), par ledger.
+pub static EMISSION_BUDGET_TOTAL: Lazy<GaugeVec> = Lazy::new(|| {
+    prometheus::register_gauge_vec!(
+        "pms_emission_budget_total",
+        "Budget d'émission de la période courante (PMS natif)",
+        &["ledger_id"]
+    )
+    .unwrap()
+});
+
+/// Part du budget déjà consommée (réservée/émise) dans la période courante.
+pub static EMISSION_BUDGET_CONSUMED: Lazy<GaugeVec> = Lazy::new(|| {
+    prometheus::register_gauge_vec!(
+        "pms_emission_budget_consumed",
+        "Émission déjà réservée/émise dans la période courante (PMS natif)",
+        &["ledger_id"]
+    )
+    .unwrap()
+});
+
+/// Budget d'émission restant pour la période courante (`total − consumed`).
+pub static EMISSION_BUDGET_REMAINING: Lazy<GaugeVec> = Lazy::new(|| {
+    prometheus::register_gauge_vec!(
+        "pms_emission_budget_remaining",
+        "Budget d'émission restant pour la période courante (PMS natif)",
+        &["ledger_id"]
+    )
+    .unwrap()
+});
+
+/// Taux d'émission effectif appliqué (% / an), borné au couloir.
+///
+/// **Canari de sécurité** : une alerte `pms_emission_effective_rate >
+/// annual_ceiling_percent` doit être impossible si le `clamp` du couloir est
+/// correct — son déclenchement signale un bug d'enforcement.
+pub static EMISSION_EFFECTIVE_RATE: Lazy<GaugeVec> = Lazy::new(|| {
+    prometheus::register_gauge_vec!(
+        "pms_emission_effective_rate",
+        "Taux d'émission effectif appliqué (%/an), borné au couloir",
+        &["ledger_id"]
+    )
+    .unwrap()
+});
+
+/// Cumul de PMS natif émis par voie de mint (baseline, onramp, bridge_scrip, faucet).
+pub static EMISSION_MINTED: Lazy<prometheus::CounterVec> = Lazy::new(|| {
+    prometheus::register_counter_vec!(
+        "pms_emission_minted_total",
+        "Cumul de PMS natif émis, par voie de mint",
+        &["ledger_id", "voie"]
+    )
+    .unwrap()
+});
+
+/// Cumul des mints refusés faute de budget, par voie (P1 — plafond appliqué).
+/// Incrémenté par les voies à montant explicite (on-ramp, pont scrip) ; la
+/// baseline ne rejette jamais (elle minte le résidu).
+pub static EMISSION_REJECTIONS: Lazy<IntCounterVec> = Lazy::new(|| {
+    prometheus::register_int_counter_vec!(
+        "pms_emission_rejections_total",
+        "Mints refusés faute de budget d'émission (par voie)",
+        &["voie"]
+    )
+    .unwrap()
+});
+
 /// Render ALL metrics in standard Prometheus text format (with labels).
 /// Used by `/metrics/all` for ops/Grafana scraping.
 pub fn render() -> String {

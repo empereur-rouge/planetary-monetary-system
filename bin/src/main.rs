@@ -377,6 +377,10 @@ async fn main() -> Result<()> {
             // /admin/webhooks but the field must be present. Empty store
             // is harmless: no subscriptions = no deliveries.
             webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
+            // Emission budget gate (plan §3.1) — recovered from the shared
+            // main store. `store` is cloned (not moved) above, so borrowing
+            // it here is fine.
+            emission_gate: std::sync::Arc::new(pms_server::emission::EmissionGate::load(&store)),
         };
 
         eprintln!("🔧 Launching Internal API at {}", addr);

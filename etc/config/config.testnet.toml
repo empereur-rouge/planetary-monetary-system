@@ -93,6 +93,13 @@ annual_inflation_percent = 3.0
 treasury_reward_percent = 20
 creator_reward_percent = 70
 burn_percent = 10
+# Budget d'emission (plan §3.1) — couloir gouverne.
+# Epoch = 120s pour garder une emission frequente time-proportionnelle sur le
+# testnet (chaque tick = un epoch ; budget = supply x taux x 120s/an). Sans ca,
+# l'epoch par defaut (86400s) ne minterait qu'une fois par jour malgre le tick
+# a 120s. annual_ceiling_percent = plafond DUR du couloir (defaut 10%).
+emission_epoch_duration_sec = 120
+annual_ceiling_percent = 10.0
 # Coordinator sub-address sharding (audit follow-up to v0.7.4).
 # When > 0, fee outputs are round-robin'd across N HKDF-SHA256-derived
 # sub-addresses instead of all landing on the master coordinator

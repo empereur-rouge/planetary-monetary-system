@@ -615,6 +615,7 @@ async fn boot_sandbox() -> Result<Sandbox> {
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
         webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
+        emission_gate: Arc::new(pms_server::emission::EmissionGate::load(&store)),
     };
 
     // ── 11. Spawn fee distributor task (2s interval) ─────────────────
@@ -3269,6 +3270,7 @@ async fn boot_one_engine(
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
         webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
+        emission_gate: Arc::new(pms_server::emission::EmissionGate::load(&store)),
     };
 
     // Only the coordinator runs the fee distributor — followers don't

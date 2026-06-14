@@ -131,6 +131,14 @@ pub struct AppState {
     /// rebuilt on every restart — see `crate::api_fn::webhooks` for the
     /// rationale and the persistence roadmap.
     pub webhook_store: crate::api_fn::webhooks::WebhookStore,
+    /// Shared emission budget gate (plan §3.1). Serialises every native-PMS
+    /// mint on the **main** ledger (baseline inflation, on-ramp, scrip bridge,
+    /// faucet) and enforces the per-period budget corridor. Always points at the
+    /// **main** store's persisted counter — custom ledgers have their own
+    /// economies. `Arc` so every cloned `AppState` shares the same gate (the
+    /// mutex inside is the single serialization point that closes the mint
+    /// TOCTOU). See `crate::emission`.
+    pub emission_gate: Arc<crate::emission::EmissionGate>,
 }
 
 impl AppState {

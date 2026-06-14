@@ -828,6 +828,32 @@ pub struct FeesSettings {
     pub daily_inflation_interval_sec: u64,
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Emission Budget — couloir d'émission gouverné (plan §2.3, §3.1)
+    //
+    // Le budget par période = supply_ref × clamp(annual_inflation_percent,
+    // floor, ceiling) × (epoch_duration / 1 an). Toutes les voies de mint de
+    // PMS natif sur le ledger main puisent dans CE budget (gate d'émission,
+    // crates/pms-server/src/emission/). `annual_inflation_percent` (ci-dessus)
+    // sert de taux cible ; les deux champs suivants bornent le couloir DUR :
+    // même si le taux cible est poussé au-delà, le budget est plafonné au
+    // ceiling. C'est la matérialisation en code de « règle inviolable » du
+    // plan §2.1. Le ceiling reste boot-only (pas de hot-swap) tant que la
+    // gouvernance timelock n'existe pas (plan §4 / option 3).
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Plafond DUR du couloir d'émission (% / an). Borne supérieure du taux
+    /// effectif, quelle que soit la config. Default: 10.0% (plan §2.3).
+    #[serde(default = "default_annual_ceiling_percent")]
+    pub annual_ceiling_percent: f64,
+    /// Plancher anti-asphyxie du couloir d'émission (% / an). Borne inférieure
+    /// du taux effectif. Default: 0.0 (pas de plancher actif en Phase 1).
+    #[serde(default)]
+    pub annual_floor_percent: f64,
+    /// Durée d'une période d'émission (epoch) en secondes. Le budget est
+    /// recalculé une fois par epoch (supply figée au début). Default: 86400 (1j).
+    #[serde(default = "default_emission_epoch_duration_sec")]
+    pub emission_epoch_duration_sec: u64,
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Coordinator address sharding (audit follow-up to v0.7.4 — UTXO
     // accumulation bottleneck). When > 0, transaction fee outputs are
     // round-robin'd across N derived sub-addresses instead of landing on
@@ -860,6 +886,14 @@ fn default_distribution_interval_sec() -> u64 {
 }
 fn default_daily_inflation_interval_sec() -> u64 {
     86400 // 24 hours
+}
+
+// Emission budget corridor defaults (plan §2.3)
+fn default_annual_ceiling_percent() -> f64 {
+    10.0 // hard ceiling: 10%/an (plan §2.3 — "plafond d'urgence")
+}
+fn default_emission_epoch_duration_sec() -> u64 {
+    86400 // 1 jour — aligné sur daily_inflation_interval_sec mainnet
 }
 
 // Fee distribution defaults (coordinator + treasury = 100%)
