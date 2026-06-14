@@ -27,6 +27,11 @@ pub const CURRENT_VER: i64 = 11;
 /// canonique du contenu. Des blocs acceptés sous 2.x (unlocks invalides,
 /// ids forgés) sont rejetés sous 3.x ; un re-sync depuis zéro peut refuser
 /// un historique 2.x → wipe testnet requis.
+/// v3.6.0 (plan §4 gouvernance, P3) : nouvelle variante `ConfigUpdate::SetEmissionCorridor`
+/// (couloir d'émission gouverné — ceiling/floor/target/epoch en bps). Additive : un
+/// nœud à jour parse le nouveau variant ; les anciens blocs/configs restent valides.
+/// MINOR → migration auto, pas de wipe. (Mixed-version P2P : un nœud 3.5.0 ne sait pas
+/// désérialiser un `SetEmissionCorridor`.)
 /// v3.5.0 (plan §4 gouvernance, P2) : règles de validation des `GovernanceProposal`
 /// renforcées — palier MINIMUM par paramètre (table param→tier) et asymétrie
 /// tighten/loosen (`enact_after == announced_at + durée(direction)`). Une
@@ -40,7 +45,7 @@ pub const CURRENT_VER: i64 = 11;
 /// (burn de token owner-signé, la supply baisse, trigger des contrats
 /// `OnTokenBurn`). Backward-compatible : les blocs existants parsent toujours ;
 /// un nœud à jour accepte le nouveau type. MINOR → migration auto, pas de wipe.
-pub const DAG_VERSION: &str = "3.5.0";
+pub const DAG_VERSION: &str = "3.6.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

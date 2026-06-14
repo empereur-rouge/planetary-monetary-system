@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.17.0] - Unreleased — Gouvernance P3 : couloir d'émission sous gouvernance
+
+Dernière phase de la gouvernance (`pms-spec-governance-timelock.md` §5) : le
+**couloir d'émission** (`supply × clamp(target, floor, ceiling) × frac_année`),
+jusqu'ici **boot-only** dans `FeesSettings`, devient **gouverné**. Il est mirroré
+dans `RuntimeConfig` et modifiable par un `GovernanceProposal` de palier
+**Constitution** (45 j). Cela rend enfin vraie la promesse `plan.md` §2.1 : le
+plafond de 10 %/an n'est plus modifiable « par surprise » — seulement par un
+processus annoncé + timelocké de 45 j, tracé dans le DAG.
+
+### Added
+- **feat(config)** — `ConfigUpdate::SetEmissionCorridor { ceiling_bps, floor_bps,
+  target_bps, epoch_duration_sec }` ([runtime.rs](crates/pms-config/src/runtime.rs)) +
+  4 champs `Option` mirroir dans `RuntimeConfig` (`emission_{ceiling,floor,target}_bps`,
+  `emission_epoch_duration_sec`). `None` = pas encore gouverné → fallback boot
+  (`FeesSettings`). bps pour garder `ConfigUpdate: Eq`. `apply_update` valide
+  `floor <= target <= ceiling` et `epoch > 0`.
+- **feat(governance)** — `SetEmissionCorridor` = palier **Constitution** dans
+  `governance_policy::min_tier` ; direction asymétrique : baisser ceiling+target =
+  resserrage (instantané), toute hausse = desserrage (45 j) ; premier passage sous
+  gouvernance (couloir `None`) = desserrage (timelock plein, conservateur).
+- **feat(emission)** — `params_from_runtime(settings, runtime)`
+  ([emission_mint.rs](crates/pms-server/src/emission_mint.rs)) remplace
+  `params_from_settings` : `EmissionGate` lit le couloir depuis `RuntimeConfig`
+  (gouverné) avec fallback boot. Câblé dans `emit_native_gated` + `token_burn`
+  (réservation + jauges).
+- **test(unit)** — `governance_policy::emission_corridor_is_constitution_and_directional`
+  (Constitution + lower=Tighten / raise=Loosen / first-set=Loosen, golden).
+- **test(G9)** — `emission_budget_test::t12_emission_corridor_governs_budget` :
+  `SetEmissionCorridor` 20 % → budget période 0.54794521 ; baisse à 5 % → 0.13698630
+  (le couloir gouverne réellement le budget de `EmissionGate::reserve`).
+- **chore(version)** — `Cargo.toml` 0.16.0 → **0.17.0** ; `DAG_VERSION` 3.5.0 →
+  **3.6.0** (variante additive, pas de wipe) ; `API_VERSION` 20 → **21**.
+
+---
+
 ## [0.16.0] - Unreleased — Gouvernance P2 : palier-min + asymétrie tighten/loosen
 
 Deuxième phase de la gouvernance (`pms-spec-governance-timelock.md` §2-§3) : on

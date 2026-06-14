@@ -309,3 +309,75 @@ async fn t11_mint_disabled_killswitch_rejects_all_voies() {
 
     println!("\n   T11/G6 PASSED: mint_enabled=false refuse toutes les voies (MintDisabled), réactivation OK.");
 }
+
+/// T12 / G9 — le couloir d'émission est gouverné : un `SetEmissionCorridor`
+/// change le budget de la période.
+///
+/// Le couloir vit dans `RuntimeConfig` (modifiable par gouvernance timelock) ;
+/// `params_from_runtime` le lit (fallback boot). On prouve la boucle complète :
+/// `ConfigUpdate::SetEmissionCorridor` → `RuntimeConfig` → `params_from_runtime`
+/// → budget de `EmissionGate::reserve`. Une baisse du plafond réduit le budget à
+/// l'epoch suivant.
+#[tokio::test]
+async fn t12_emission_corridor_governs_budget() {
+    let (store, _tmp) = temp_store().await;
+    let settings = pms_config::load_config().expect("load_config");
+    let gate = EmissionGate::new(Default::default());
+
+    // 1) Gouvernance fixe le couloir à 20 %/an (ceiling=target=2000 bps).
+    store
+        .apply_config_update(
+            &ConfigUpdate::SetEmissionCorridor {
+                ceiling_bps: 2000,
+                floor_bps: 0,
+                target_bps: 2000,
+                epoch_duration_sec: 86_400,
+            },
+            "gov-corridor-20pct",
+            1,
+        )
+        .unwrap();
+    let rt = store.get_runtime_config().unwrap();
+    let params_20 = pms_server::emission_mint::params_from_runtime(&settings, &rt);
+    println!("corridor governed: ceiling_pct={}, target_pct={}", params_20.ceiling_pct, params_20.target_pct);
+    assert_eq!(params_20.ceiling_pct, 20.0, "bps→pct: 2000 bps = 20%");
+    assert_eq!(params_20.target_pct, 20.0);
+
+    // Epoch 100, supply 1000 → baseline réserve le budget = 1000 × 20% / 365.
+    let r20 = gate
+        .reserve(&store, NOW_EPOCH_100, dec("1000"), params_20, Voie::Baseline, None)
+        .await
+        .unwrap();
+    println!("epoch100 budget @20% → {}", r20.amount);
+    // 1000 * 0.20 / 365 = 0.547945205...
+    assert!(r20.amount > dec("0.5479") && r20.amount < dec("0.5480"), "budget@20% ~= 0.54794, got {}", r20.amount);
+
+    // 2) Gouvernance BAISSE le couloir à 5 % (resserrage).
+    store
+        .apply_config_update(
+            &ConfigUpdate::SetEmissionCorridor {
+                ceiling_bps: 500,
+                floor_bps: 0,
+                target_bps: 500,
+                epoch_duration_sec: 86_400,
+            },
+            "gov-corridor-5pct",
+            2,
+        )
+        .unwrap();
+    let rt2 = store.get_runtime_config().unwrap();
+    let params_5 = pms_server::emission_mint::params_from_runtime(&settings, &rt2);
+    assert_eq!(params_5.ceiling_pct, 5.0, "bps→pct: 500 bps = 5%");
+
+    // Epoch 101 (rollover) → nouveau budget = 1000 × 5% / 365.
+    let r5 = gate
+        .reserve(&store, NOW_EPOCH_101, dec("1000"), params_5, Voie::Baseline, None)
+        .await
+        .unwrap();
+    println!("epoch101 budget @5% → {}", r5.amount);
+    // 1000 * 0.05 / 365 = 0.136986301...
+    assert!(r5.amount > dec("0.1369") && r5.amount < dec("0.1370"), "budget@5% ~= 0.13698, got {}", r5.amount);
+    assert!(r5.amount < r20.amount, "G9: baisser le couloir RÉDUIT le budget ({} < {})", r5.amount, r20.amount);
+
+    println!("\n   T12/G9 PASSED: le couloir d'émission est gouverné (20% → 5% via SetEmissionCorridor change le budget).");
+}

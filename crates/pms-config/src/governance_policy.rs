@@ -40,6 +40,9 @@ pub enum Direction {
 /// sera ajouté en P3 avec sa variante.)
 pub fn min_tier(update: &ConfigUpdate) -> GovernanceTier {
     match update {
+        // ── Constitution : le couloir d'émission (la classe « inviolable ») ──
+        ConfigUpdate::SetEmissionCorridor { .. } => GovernanceTier::Constitution,
+
         // ── Politique : pouvoir de mint, distribution, burn, voies ──
         ConfigUpdate::SetMintEnabled { .. } => GovernanceTier::Policy,
         ConfigUpdate::SetMaxMint { .. } => GovernanceTier::Policy,
@@ -95,6 +98,23 @@ pub fn direction(update: &ConfigUpdate, current: &RuntimeConfig) -> Direction {
                 Direction::Loosen
             }
         }
+        // Couloir d'émission : baisser le plafond ET la cible resserre (moins de
+        // dilution possible) ⇒ instantané ; toute hausse desserre ⇒ timelock plein.
+        // Si le couloir n'est pas encore gouverné (valeurs `None`, on retombe sur
+        // le boot), on traite par défaut comme un DESSERRAGE : le premier passage
+        // sous gouvernance prend le timelock plein (conservateur).
+        ConfigUpdate::SetEmissionCorridor {
+            ceiling_bps,
+            target_bps,
+            ..
+        } => match (current.emission_ceiling_bps, current.emission_target_bps) {
+            (Some(cur_ceiling), Some(cur_target))
+                if *ceiling_bps <= cur_ceiling && *target_bps <= cur_target =>
+            {
+                Direction::Tighten
+            }
+            _ => Direction::Loosen,
+        },
         // Un batch est tighten SEULEMENT si TOUS ses composants le sont (sinon un
         // desserrage caché passerait en instantané).
         ConfigUpdate::BatchUpdate(updates) => {
@@ -173,6 +193,33 @@ mod tests {
         ]);
         assert_eq!(min_tier(&batch), GovernanceTier::Policy);
         println!("min_tier: fee=Operator, burn=Policy, mint_enabled=Policy, batch(op,pol)=Policy ✓");
+    }
+
+    #[test]
+    fn emission_corridor_is_constitution_and_directional() {
+        let corridor = |c: u32, t: u32| ConfigUpdate::SetEmissionCorridor {
+            ceiling_bps: c,
+            floor_bps: 0,
+            target_bps: t,
+            epoch_duration_sec: 86_400,
+        };
+        // Le couloir d'émission = Constitution (la classe inviolable, G4 pour le couloir).
+        assert_eq!(min_tier(&corridor(2000, 200)), GovernanceTier::Constitution);
+
+        // Direction : avec un couloir déjà gouverné (ceiling 1000, target 200) —
+        // baisser ceiling ET target = tighten ; toute hausse = loosen.
+        let mut c = cfg();
+        c.emission_ceiling_bps = Some(1000);
+        c.emission_target_bps = Some(200);
+        assert_eq!(direction(&corridor(500, 100), &c), Direction::Tighten, "baisse ceiling+target = tighten");
+        assert_eq!(direction(&corridor(2000, 200), &c), Direction::Loosen, "hausse ceiling = loosen");
+        assert_eq!(direction(&corridor(1000, 400), &c), Direction::Loosen, "hausse target = loosen");
+
+        // Premier passage sous gouvernance (couloir None) = loosen (timelock plein).
+        let fresh = cfg();
+        assert!(fresh.emission_ceiling_bps.is_none());
+        assert_eq!(direction(&corridor(500, 100), &fresh), Direction::Loosen, "first governance set = loosen");
+        println!("corridor: min_tier=Constitution; lower=Tighten, raise=Loosen, first-set=Loosen ✓");
     }
 
     #[test]

@@ -158,6 +158,27 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub max_fee_multiplier: f64,
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Couloir d'émission sous gouvernance (plan §4 / spec §5, P3)
+    // ═══════════════════════════════════════════════════════════════════════
+    // Le couloir (`supply × clamp(target, floor, ceiling) × frac_année`) était
+    // boot-only dans `FeesSettings`. Mirroré ici pour être gouverné (timelock
+    // Constitution). `None` = pas encore gouverné ⇒ `EmissionGate` retombe sur
+    // les valeurs de boot (`FeesSettings`). En basis points (1000 = 10 %/an) pour
+    // garder `ConfigUpdate: Eq` (les f64 ne l'implémentent pas).
+    /// Plafond DUR du couloir (bps/an). `None` = valeur de boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emission_ceiling_bps: Option<u32>,
+    /// Plancher du couloir (bps/an). `None` = valeur de boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emission_floor_bps: Option<u32>,
+    /// Taux cible d'émission (bps/an). `None` = valeur de boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emission_target_bps: Option<u32>,
+    /// Durée d'une période d'émission (secondes). `None` = valeur de boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emission_epoch_duration_sec: Option<u64>,
+
     /// Block ID où cette config a été appliquée (vide = config initiale)
     pub updated_at_block: String,
 
@@ -188,6 +209,10 @@ impl Default for RuntimeConfig {
             dynamic_fee_enabled: false,
             target_tps: 100,
             max_fee_multiplier: 5.0,
+            emission_ceiling_bps: None,
+            emission_floor_bps: None,
+            emission_target_bps: None,
+            emission_epoch_duration_sec: None,
             updated_at_block: String::new(),
             updated_at_timestamp: 0,
         }
@@ -247,6 +272,27 @@ impl RuntimeConfig {
             }
             ConfigUpdate::SetMintEnabled { enabled } => {
                 new_config.mint_enabled = *enabled;
+            }
+            ConfigUpdate::SetEmissionCorridor {
+                ceiling_bps,
+                floor_bps,
+                target_bps,
+                epoch_duration_sec,
+            } => {
+                // Cohérence du couloir : floor <= target <= ceiling, et une période
+                // non nulle (sinon division par zéro dans le calcul de budget).
+                if floor_bps > target_bps || target_bps > ceiling_bps {
+                    return Err(format!(
+                        "invalid emission corridor: require floor({floor_bps}) <= target({target_bps}) <= ceiling({ceiling_bps}) bps"
+                    ));
+                }
+                if *epoch_duration_sec == 0 {
+                    return Err("invalid emission corridor: epoch_duration_sec must be > 0".to_string());
+                }
+                new_config.emission_ceiling_bps = Some(*ceiling_bps);
+                new_config.emission_floor_bps = Some(*floor_bps);
+                new_config.emission_target_bps = Some(*target_bps);
+                new_config.emission_epoch_duration_sec = Some(*epoch_duration_sec);
             }
             ConfigUpdate::SetFeeTiers { tiers } => {
                 validate_fee_tiers(tiers)?;
@@ -412,6 +458,16 @@ pub enum ConfigUpdate {
         max_multiplier: Option<String>,
     },
 
+    /// Définir le couloir d'émission gouverné (plan §4 / spec §5). En basis
+    /// points/an (1000 = 10 %). Palier Constitution. Hausser le plafond/cible =
+    /// desserrage (timelock plein) ; baisser = resserrage (instantané).
+    SetEmissionCorridor {
+        ceiling_bps: u32,
+        floor_bps: u32,
+        target_bps: u32,
+        epoch_duration_sec: u64,
+    },
+
     /// Appliquer plusieurs updates en une transaction
     BatchUpdate(Vec<ConfigUpdate>),
 }
@@ -455,6 +511,14 @@ impl ConfigUpdate {
                     enabled, target_tps, max_multiplier
                 )
             }
+            Self::SetEmissionCorridor {
+                ceiling_bps,
+                floor_bps,
+                target_bps,
+                epoch_duration_sec,
+            } => format!(
+                "SetEmissionCorridor(ceiling={ceiling_bps}bps, floor={floor_bps}bps, target={target_bps}bps, epoch={epoch_duration_sec}s)"
+            ),
             Self::BatchUpdate(updates) => {
                 format!("BatchUpdate({} items)", updates.len())
             }

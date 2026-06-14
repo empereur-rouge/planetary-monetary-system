@@ -56,9 +56,12 @@ Section `[fees]` (struct `FeesSettings`) :
 > fréquente (chaque tick de 120 s = un epoch, budget time-proportionnel). Sans
 > ça, l'epoch par défaut (1 j) ne minterait qu'une fois par jour malgré le tick.
 
-Le couloir (`ceiling`/`floor`) est **boot-only** (pas de hot-swap) tant que la
-gouvernance timelock n'existe pas — garde-fou intérimaire contre un changement
-instantané.
+Le couloir (`ceiling`/`floor`/`target`/`epoch`) était **boot-only** ; depuis
+v0.17.0 il est **gouverné** via `ConfigUpdate::SetEmissionCorridor` (palier
+Constitution, 45 j sur toute hausse) — mirroré dans `RuntimeConfig`, fallback boot
+`FeesSettings` au premier démarrage. `EmissionGate` le lit via `params_from_runtime`.
+Voir [[gouvernance-timelock]]. ⚠️ une fois gouverné, le couloir du `config.toml`
+est shadowé (la gouvernance est la source de vérité).
 
 ## Crates et Fichiers
 

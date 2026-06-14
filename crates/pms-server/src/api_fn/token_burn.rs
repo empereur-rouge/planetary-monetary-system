@@ -32,7 +32,7 @@ use crate::emission::{EmissionError, Voie};
 use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
-use pms_storage::PutResult;
+use pms_storage::{ConfigStorage, PutResult};
 use pms_types::{PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput};
 use pms_wallet::SignerBackend;
 use rust_decimal::Decimal;
@@ -143,9 +143,12 @@ pub async fn wallet_burn_token(
     };
     let pms_to_mint: Decimal = conversions.iter().map(|r| r.amount).sum();
 
+    // Couloir gouverné (RuntimeConfig, fallback boot) — réutilisé pour la
+    // réservation et la publication des jauges après mint.
+    let runtime_cfg = state.store.get_runtime_config().unwrap_or_default();
     let mut reserved = Decimal::ZERO;
     if pms_to_mint > Decimal::ZERO {
-        let params = crate::emission_mint::params_from_settings(&state.settings);
+        let params = crate::emission_mint::params_from_runtime(&state.settings, &runtime_cfg);
         let (supply, _) = adapter.circulating_supply().await;
         match state
             .emission_gate
@@ -297,7 +300,7 @@ pub async fn wallet_burn_token(
                     .inc_by(reserved.to_f64().unwrap_or(0.0));
                 crate::emission_mint::publish_emission_gauges(
                     &state,
-                    crate::emission_mint::params_from_settings(&state.settings),
+                    crate::emission_mint::params_from_runtime(&state.settings, &runtime_cfg),
                 )
                 .await;
                 mint_block_id = Some(id);
