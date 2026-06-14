@@ -207,10 +207,10 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
                 id: "main".into(),
                 network_id: "pms-dev".into(),
                 prefix: "main".into(),
-                // Must match the global config.dev.toml protocol_version (=2),
+                // Must match the global config.dev.toml protocol_version (=3),
                 // else CoreAdapter::persist_block rejects the Mint with "wrong
                 // network_id or protocol_version" (v0.9.0 canonical validation).
-                protocol_version: 2,
+                protocol_version: 3,
                 tip_limit: Some(100),
                 fees: None,
                 validation: None,
@@ -222,7 +222,7 @@ fn test_settings(db_path: &str, coordinator_pk: &str) -> pms_config::Settings {
                 id: "nft".into(),
                 network_id: "pms-dev".into(),
                 prefix: "nft".into(),
-                protocol_version: 2,
+                protocol_version: 3,
                 tip_limit: Some(50),
                 fees: None,
                 validation: None,
