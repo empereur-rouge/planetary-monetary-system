@@ -114,6 +114,13 @@ pub enum ApiError {
     AddressFrozen(String),
     /// 3070 — Operation conflict with concurrent state change.
     Conflict(String),
+    /// 3071 — Governance action rejected by the protocol (timelock not elapsed,
+    /// proposal not pending, unknown proposal, etc.). Unlike [`Conflict`], the
+    /// reason is surfaced verbatim to the caller: governance enact/cancel is an
+    /// authenticated operator-only surface and the rejection reasons carry no
+    /// financial secrets (only timestamps + status names), so an operator must
+    /// be able to see WHY their action was refused.
+    GovernanceRejected { reason: String },
 
     // ── 4xxx crypto / security (vague public, anti-enumeration) ───
     /// 4001 — Signature verification failed. Internal logs which
@@ -181,6 +188,7 @@ impl ApiError {
             ApiError::AlreadyExists { .. } => 3050,
             ApiError::AddressFrozen(_) => 3060,
             ApiError::Conflict(_) => 3070,
+            ApiError::GovernanceRejected { .. } => 3071,
             ApiError::SignatureMismatch { .. } => 4001,
             ApiError::ReplayDetected { .. } => 4002,
             ApiError::CryptoFailure { .. } => 4010,
@@ -217,7 +225,9 @@ impl ApiError {
             | ApiError::ContractDisabled(_)
             | ApiError::AddressFrozen(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::UnknownLedger(_) | ApiError::NotFound { .. } => StatusCode::NOT_FOUND,
-            ApiError::AlreadyExists { .. } | ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::AlreadyExists { .. }
+            | ApiError::Conflict(_)
+            | ApiError::GovernanceRejected { .. } => StatusCode::CONFLICT,
             // Crypto failures map to 401 instead of 400 to make timing
             // attacks against signature verification harder — same
             // status as a missing auth header so an attacker can't tell
@@ -274,6 +284,8 @@ impl ApiError {
             ApiError::AlreadyExists { kind, .. } => format!("{} already exists", kind),
             ApiError::AddressFrozen(_) => "Operation forbidden".into(),
             ApiError::Conflict(_) => "Operation conflict".into(),
+            // Operator-facing, non-sensitive reason — surfaced verbatim (cf. variant doc).
+            ApiError::GovernanceRejected { reason } => reason.clone(),
 
             // Crypto / security — always vague.
             ApiError::SignatureMismatch { .. } => "Authentication failed".into(),
@@ -336,6 +348,7 @@ impl ApiError {
             ApiError::AlreadyExists { kind, id } => format!("{} already exists: {}", kind, id),
             ApiError::AddressFrozen(addr) => format!("address frozen: {}", addr),
             ApiError::Conflict(reason) => reason.clone(),
+            ApiError::GovernanceRejected { reason } => reason.clone(),
             ApiError::SignatureMismatch { reason } => reason.clone(),
             ApiError::ReplayDetected { reason } => reason.clone(),
             ApiError::CryptoFailure { reason } => reason.clone(),
@@ -504,6 +517,7 @@ mod tests {
             .code(),
             ApiError::AddressFrozen("x".into()).code(),
             ApiError::Conflict("x".into()).code(),
+            ApiError::GovernanceRejected { reason: "x".into() }.code(),
             ApiError::SignatureMismatch { reason: "x".into() }.code(),
             ApiError::ReplayDetected { reason: "x".into() }.code(),
             ApiError::CryptoFailure { reason: "x".into() }.code(),

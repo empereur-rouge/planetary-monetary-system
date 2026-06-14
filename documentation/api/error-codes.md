@@ -82,6 +82,14 @@ Certains codes ajoutent des champs additionnels pour ergonomie SDK :
 | `3050` | 409 | `AlreadyExists { kind, id }` | `<kind> already exists` | `<kind> already exists: <id>` |
 | `3060` | 422 | `AddressFrozen(addr)` | `Operation forbidden` | `address frozen: <addr>` |
 | `3070` | 409 | `Conflict(reason)` | `Operation conflict` | (reason) |
+| `3071` | 409 | `GovernanceRejected { reason }` | (reason, **surfacée**) | (reason) |
+
+> **Pourquoi `3071 GovernanceRejected` surface sa raison** (contrairement aux
+> autres `3xxx` vagues) : l'enact/cancel de gouvernance est une surface
+> **opérateur authentifiée**, et les raisons de rejet (timelock non écoulé,
+> statut non-pending, id inconnu, doublon) ne portent **aucun secret financier**
+> — uniquement des timestamps et des noms de statut. L'opérateur DOIT savoir
+> *pourquoi* son action a été refusée. Tout chemin financier/crypto reste vague.
 
 > **Pourquoi `InsufficientBalance` est vague** : un attaquant qui sonde une
 > adresse pourrait déduire les balances en envoyant des transferts à

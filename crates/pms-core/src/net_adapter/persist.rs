@@ -455,6 +455,25 @@ where
             enact_after_ms,
         })) = &payload
         {
+            // Le proposal_id est content-addressed (SHA-256 du changement) — mais
+            // `put_governance_proposal` est un write aveugle. On garde l'unicité
+            // ICI, au niveau DAG (source de vérité) : un id déjà connu ne doit
+            // JAMAIS écraser silencieusement un record existant (overwrite d'une
+            // proposition Pending/Enacted/Cancelled). Une vraie re-proposition
+            // obtient un id distinct via un `announced_at_ms` frais.
+            match self.store.get_governance_proposal(proposal_id) {
+                Ok(Some(_)) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "governance proposal already exists: {proposal_id}"
+                    )));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "governance proposal lookup failed: {e}"
+                    )));
+                }
+            }
             let record = pms_config::GovernanceProposalRecord {
                 proposal_id: proposal_id.clone(),
                 update: update.clone(),

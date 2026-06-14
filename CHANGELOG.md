@@ -38,11 +38,43 @@ endpoints HTTP + rewire `admin_update_config` → propose + tâche auto-enact + 
 - **chore(version)** — `DAG_VERSION` 3.3.0 → **3.4.0** (payloads additifs, pas de
   wipe), `CURRENT_VER` 10 → **11** (CF), `Cargo.toml` 0.14.0 → **0.15.0**.
 
+### Added — P1b (endpoints HTTP + e2e timelock)
+- **feat(api)** — endpoints de gouvernance
+  ([crates/pms-server/src/api_fn/governance.rs](crates/pms-server/src/api_fn/governance.rs)) :
+  - `POST /admin/governance/propose` (admin, gated read-only) — annonce un
+    `GovernanceProposal` (bloc DAG signé Coordinator), `enact_after = now +
+    tier.duration` (7/15/45 j). N'applique RIEN. Renvoie `{proposal_id, block_id,
+    enact_after_ms}`. `proposal_id = SHA-256(update + tier + announced_at)`.
+  - `POST /admin/governance/enact/{id}` (admin, gated) — applique après expiration.
+  - `POST /admin/governance/cancel/{id}` (admin, gated) — annule une `Pending`.
+  - `GET /v1/governance/pending` + `GET /v1/governance/history` (**public**) —
+    l'annonce et l'audit (droit de sortie : tout le monde voit ce qui se prépare).
+- **feat(api/errors)** — nouveau code **`3071 GovernanceRejected`**
+  ([api_error.rs](crates/pms-server/src/api_error.rs)) : raison **surfacée verbatim**
+  (timelock non écoulé / statut non-pending / id inconnu / doublon) — surface
+  opérateur authentifiée, raisons non-sensibles. Distingue le « pourquoi » d'un
+  `Conflict` opaque.
+- **feat(core/validation)** — garde d'unicité du `proposal_id` au niveau DAG
+  ([persist.rs](crates/pms-core/src/net_adapter/persist.rs)) : un id déjà connu
+  est rejeté (`already exists`), pas d'overwrite aveugle du record existant.
+- **test(e2e)** — `test_governance_timelock_endpoints`
+  ([dag_sandbox.rs](crates/pms-server/tests/dag_sandbox.rs)) : propose → annonce
+  publique (G8) → enact précoce **REJETÉ avec code 3071 + raison timelock** (G2) →
+  cancel → /history (G7).
+- **test(protocole)** — `governance_timelock_test.rs`
+  ([crates/pms-core/tests/governance_timelock_test.rs](crates/pms-core/tests/governance_timelock_test.rs)),
+  `enact_after` contrôlé (impossible via endpoint, durées hardcodées) :
+  **G3** enact après expiration applique le `ConfigUpdate` (fee_rate 300→4242,
+  statut Enacted) ; **G2** enact avant expiration rejeté, config inchangée ;
+  **DUP** doublon de `proposal_id` rejeté, record d'origine intact.
+- **chore(version)** — `API_VERSION` 18 → **19** (routes gouvernance).
+
 ### Notes
-- **Pas encore branché côté admin** : `admin_update_config` reste instantané pour
-  l'instant ; P1b le rewire en `propose` (timelocké) + ajoute les endpoints
-  `/admin/governance/{propose,enact,cancel}` + `/v1/governance/{pending,history}`
-  + la tâche d'auto-enact + le test e2e du timelock (G2/G3).
+- **Pas encore branché côté admin** : `admin_update_config` reste instantané ;
+  son rewire en `propose` (timelocké) dépend de la table palier-min par paramètre
+  (P2). Idem la tâche d'auto-enact (P2). Les durées de timelock sont hardcodées
+  (`GovernanceTier::default_duration_ms`) ; surcharge config (testnet raccourci)
+  en phase ultérieure.
 - Spec : `pms-spec-governance-timelock.md` (§9 plan d'implémentation).
 
 ---

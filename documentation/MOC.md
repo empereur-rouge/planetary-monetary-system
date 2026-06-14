@@ -14,6 +14,7 @@ updated: 2026-05-04
 | Fiche | Description |
 |-------|-------------|
 | [[trust-model]] | Modèle de confiance : ce que le Coordinator peut/ne peut pas, SPOF, RTO/RPO, comparaison Bitcoin/Ethereum, résumé pour CGV |
+| [[gouvernance-timelock]] | Gouvernance timelock : propose→timelock→enact ancré DAG, paliers 7/15/45 j, annonce publique, délai inviolable au protocole |
 
 ---
 
