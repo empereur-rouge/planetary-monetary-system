@@ -11,6 +11,7 @@ pub(super) fn plain_payload_type_str(p: &PlainPayload) -> &'static str {
         PlainPayload::Genesis => "Genesis",
         PlainPayload::Mint { .. } => "Mint",
         PlainPayload::TxUtxo(_) => "TxUtxo",
+        PlainPayload::TokenBurn { .. } => "TokenBurn",
         PlainPayload::Milestone { .. } => "Milestone",
         PlainPayload::Nft(_) => "Nft",
         PlainPayload::ConfigUpdate(_) => "ConfigUpdate",

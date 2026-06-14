@@ -15,6 +15,7 @@ pub fn extract_involved_addresses(plain: &PlainPayload) -> Vec<String> {
         PlainPayload::TxUtxo(tx) => {
             addrs.extend(tx.outputs.iter().map(|o| o.address.clone()));
         }
+        PlainPayload::TokenBurn { owner, .. } => addrs.push(owner.clone()),
         PlainPayload::Reward {
             fee_outputs,
             reward_outputs,
@@ -74,6 +75,7 @@ pub enum ActivityCategory {
     Bridge = 7,
     Compliance = 8,
     Reverse = 9,
+    Burn = 10,
 }
 
 impl ActivityCategory {
@@ -88,6 +90,7 @@ impl ActivityCategory {
                 Some(Self::Nft)
             }
             "token_create" => Some(Self::TokenCreate),
+            "token_burn" => Some(Self::Burn),
             "bridge_lock_in" | "bridge_mint" => Some(Self::Bridge),
             "freeze" | "unfreeze" | "seized" | "seize_received" => Some(Self::Compliance),
             "reverse_received" => Some(Self::Reverse),
@@ -156,6 +159,9 @@ pub fn extract_involved_with_category(plain: &PlainPayload) -> Vec<(String, Acti
         },
         PlainPayload::TokenCreate(meta) => {
             out.push((meta.creator.clone(), ActivityCategory::TokenCreate));
+        }
+        PlainPayload::TokenBurn { owner, .. } => {
+            out.push((owner.clone(), ActivityCategory::Burn));
         }
         PlainPayload::BridgeLock { dest_address, .. } => {
             out.push((dest_address.clone(), ActivityCategory::Bridge));
@@ -412,6 +418,22 @@ pub fn classify_for_storage(
                 asset_id: Some(meta.asset_id.clone()),
                 counterparty: None,
                 payload: serde_json::to_value(meta).unwrap_or_default(),
+            }]
+        }
+
+        PlainPayload::TokenBurn {
+            owner,
+            amount,
+            asset_id,
+            ..
+        } if owner == addr => {
+            vec![StoredActivityItem {
+                activity_type: "token_burn".into(),
+                direction: "out".into(),
+                amount: Some(amount.clone()),
+                asset_id: asset_id.clone(),
+                counterparty: None,
+                payload: serde_json::to_value(plain).unwrap_or_default(),
             }]
         }
 

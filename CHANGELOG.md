@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.14.0] - Unreleased — Burn de token (primitive protocole, fondation voie B)
+
+Première brique de la **voie B** (conversion token custom→PMS, « scrip » = ex.
+edenite) en **smart contract** : un primitif de **burn de token** générique au
+niveau protocole. Conforme à l'invariant d'architecture (seul le PMS natif est
+codé en dur ; tout le custom passe par contrat) — le moteur ne connaît jamais
+« edenite ». Le câblage event→contrat→mint PMS arrive en phase suivante.
+
+### Added
+- **feat(protocol)** — nouvelle variante `PlainPayload::TokenBurn { tx, asset_id, amount, owner }`
+  ([crates/pms-types-payload/src/payload.rs](crates/pms-types-payload/src/payload.rs)) :
+  destruction permanente de token (la supply baisse). Owner-signé (le burner
+  dépense ses propres UTXOs), bloc forgé par le Coordinator. Payload **PLAIN**
+  (proof-of-burn transparent). `amount = Σ inputs − Σ change` détruit ; le change
+  revient au burner.
+- **feat(core/validation)** — `validate_token_burn_async`
+  ([crates/pms-core/src/validations/transactions.rs](crates/pms-core/src/validations/transactions.rs)) :
+  validation hot-path complète (signatures C-2, ownership C-1, time-lock 2.1,
+  anti-double-spend) avec **conservation-burn** (`inputs = change + amount`,
+  même asset, tout au `owner`, fee=0) au lieu de la conservation stricte M-7.
+  Réutilise les helpers partagés (`fetch_input_outputs`, `verify_tx_signatures`,
+  `check_spend_authorization`, `check_input_time_locks`).
+- **feat(server)** — route `POST /v1/wallet/token/burn`
+  ([crates/pms-server/src/api_fn/token_burn.rs](crates/pms-server/src/api_fn/token_burn.rs)) :
+  handler de burn (coin selection + signature + forge), `ApiError` typé. Gated
+  `auth_write` (read-only).
+- **feat(activity)** — `ActivityCategory::Burn` + type `token_burn` (direction
+  `out`) dans les index d'activité (storage + serveur).
+- **test(sandbox)** — `test_token_burn_reduces_supply`
+  ([crates/pms-server/tests/dag_sandbox.rs](crates/pms-server/tests/dag_sandbox.rs)) :
+  burn 100 PMS → balance 1000→900 (change rendu), supply −100 (vraiment détruit),
+  over-burn → 422 (`3001`), balance inchangée. End-to-end HTTP.
+
+### Changed
+- **chore(version)** — `DAG_VERSION` 3.2.0 → **3.3.0** (variante de payload
+  additive, backward-compatible → migration auto, **pas de wipe**). `API_VERSION`
+  17 → **18** (route burn). `Cargo.toml` 0.13.0 → **0.14.0** (MINOR).
+- **docs(spec)** — `pms-spec-emission-budget.md` : voie B reframée en **smart
+  contract** (`OnTokenBurn{asset_id}` → action mint-natif-sous-budget), plus un
+  bridge hardcodé.
+
+### Notes
+- **Inerte côté contrats pour l'instant** : `OnTokenBurn` n'est pas encore évalué
+  par le moteur ([engine.rs:563](crates/pms-contracts/src/engine.rs#L563)) ; le
+  burn détruit le token mais ne déclenche aucun mint. Phase 2 : `TokenBurnProcessed`
+  event + `evaluate_token_burn` + action `MintNative`. Phase 3 : sink + mint PMS
+  via `EmissionGate`.
+
+---
+
 ## [0.13.0] - Unreleased — Voie A on-ramp fiat→PMS (plan §3.2, sous budget partagé)
 
 Deuxième voie de mint, branchée sur le **même** budget d'émission que la baseline

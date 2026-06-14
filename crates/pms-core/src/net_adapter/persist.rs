@@ -827,6 +827,47 @@ where
             }
         }
 
+        // TokenBurn (plan §3.1, voie B) : validation complète owner-signée +
+        // conservation-burn (inputs = change + amount détruit). Hot path, comme
+        // TxUtxo/BridgeLock.
+        if let Some(PayloadEnvelope::Plain(PlainPayload::TokenBurn {
+            tx,
+            asset_id,
+            amount,
+            owner,
+        })) = &block.payload
+        {
+            use crate::validations::transactions::validate_token_burn_async;
+            let burn_input_outputs = match validate_token_burn_async(
+                &self.utxos,
+                tx,
+                asset_id,
+                amount,
+                owner,
+                policy,
+                now_ms,
+            )
+            .await
+            {
+                Ok(outs) => outs,
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "token burn validation failed: {e}"
+                    )));
+                }
+            };
+            // Compliance : le burner (et donc le change, qui lui revient) ne
+            // doit pas être gelé.
+            for out in &burn_input_outputs {
+                if self.store.is_frozen(&out.address).unwrap_or(false) {
+                    return Ok(PutResult::Rejected(format!(
+                        "compliance: burner address is frozen: {}",
+                        out.address
+                    )));
+                }
+            }
+        }
+
         let t_utxo_val = t_utxo_val_start.elapsed();
 
         // 4.b) DAG validation is handled by the lock-free pipeline:
@@ -940,6 +981,20 @@ where
                     }
                 }
 
+                Some(UtxoDelta { spend, create })
+            }
+
+            Some(PayloadEnvelope::Plain(PlainPayload::TokenBurn { tx, .. })) => {
+                // TokenBurn (plan §3.1, voie B) = spend inputs + create CHANGE
+                // outputs. La part brûlée (inputs − change) ne crée aucun output
+                // → la supply baisse. Pas d'accumulation de fee (un burn ne paie
+                // pas de frais — garanti par validate_token_burn_async).
+                let spend = tx
+                    .inputs
+                    .iter()
+                    .map(|inp| (inp.out.txid.clone(), inp.out.index))
+                    .collect();
+                let create = stamped_creates(&tx.outputs);
                 Some(UtxoDelta { spend, create })
             }
 

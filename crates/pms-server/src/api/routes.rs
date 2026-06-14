@@ -113,7 +113,13 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
     // Write-producing wallet endpoints — gated.
     let wallet_write = Router::new()
         .route("/wallet/tx/send", post(wallet_send_tx))
-        .route("/v1/wallet/send-simple", post(wallet_send_simple));
+        .route("/v1/wallet/send-simple", post(wallet_send_simple))
+        // Token burn (plan §3.1, voie B) — destroys tokens, reduces supply,
+        // fires OnTokenBurn contracts.
+        .route(
+            "/v1/wallet/token/burn",
+            post(crate::api_fn::token_burn::wallet_burn_token),
+        );
 
     let blocks = Router::new().route("/blocks/stream", get(stream_blocks));
 

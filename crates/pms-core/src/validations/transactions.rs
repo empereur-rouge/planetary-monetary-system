@@ -410,3 +410,110 @@ pub async fn validate_bridge_lock_async(
 
     Ok(())
 }
+
+/// Validation COMPLÈTE d'un `TokenBurn` pour le hot path (plan §3.1, voie B).
+///
+/// Comme [`validate_transaction_full`] (signatures C-2, ownership C-1, time-lock
+/// 2.1, anti-double-spend) MAIS avec une **conservation-burn** au lieu de la
+/// conservation stricte M-7 : la valeur est intentionnellement détruite, donc
+/// `Σ(inputs[asset]) = Σ(change[asset]) + amount`, le `amount` étant brûlé (la
+/// supply baisse). Invariants supplémentaires :
+/// - tous les inputs ET le change portent le même `asset_id` (le token brûlé) ;
+/// - tous les inputs appartiennent à `owner`, et le change revient à `owner`
+///   (un burn ne peut pas déplacer des fonds vers un tiers) ;
+/// - `tx.fee == 0` (un burn ne paie pas de frais — il détruit) ;
+/// - `amount > 0` et `amount == inputs − change` (cohérence du montant déclaré).
+///
+/// Retourne les `TxOutput` des inputs (pour le freeze-check de l'appelant, comme
+/// `validate_transaction_full`).
+pub async fn validate_token_burn_async(
+    utxos: &crate::utxo::ShardedUtxoSet,
+    tx: &Transaction,
+    asset_id: &Option<String>,
+    amount: &str,
+    owner: &str,
+    policy: &ValidatePolicy,
+    now_ms: u64,
+) -> Result<Vec<TxOutput>, ValidationError> {
+    // 1. Appariement input[i] ↔ unlock[i] + au moins un input.
+    if tx.inputs.is_empty() {
+        return Err(ValidationError::MissingInput);
+    }
+    if tx.inputs.len() != tx.unlocks.len() {
+        return Err(ValidationError::InvalidSignature(format!(
+            "inputs/unlocks count mismatch: {} inputs, {} unlocks",
+            tx.inputs.len(),
+            tx.unlocks.len()
+        )));
+    }
+
+    // 2. Pas de fee : un burn détruit, il ne paie pas.
+    let fee = amount_parse_non_neg_dec(&tx.fee)?;
+    if fee != Decimal::ZERO {
+        return Err(ValidationError::InvalidAmount {
+            reason: "TokenBurn must carry no fee (fee must be 0)".to_string(),
+        });
+    }
+
+    // 3. Signatures (C-2) + 4. structure des conditions du change (2.2).
+    verify_tx_signatures(tx, &policy.network_id)?;
+    validate_output_conditions(&tx.outputs)?;
+
+    // 5. Existence des inputs, autorisation de dépense (C-1), time-lock (2.1).
+    let input_outputs = fetch_input_outputs(utxos, tx).await?;
+    check_spend_authorization(&tx.unlocks, &input_outputs)?;
+    check_input_time_locks(&input_outputs, now_ms)?;
+
+    // 6. Conservation-burn : owner possède tout, même asset, inputs = change + amount.
+    let mut in_sum = Decimal::ZERO;
+    for out in &input_outputs {
+        if out.address != owner {
+            return Err(ValidationError::InvalidSignature(format!(
+                "TokenBurn input not owned by burner: input addr={}, owner={}",
+                out.address, owner
+            )));
+        }
+        if &out.asset_id != asset_id {
+            return Err(ValidationError::AssetBalanceMismatch {
+                asset_id: asset_id.clone(),
+                inputs: format!("{:?}", out.asset_id),
+                outputs: format!("{:?}", asset_id),
+            });
+        }
+        in_sum = checked_sum(in_sum, amount_parse_pos_dec(&out.amount)?)?;
+    }
+    let mut change_sum = Decimal::ZERO;
+    for o in &tx.outputs {
+        if &o.asset_id != asset_id {
+            return Err(ValidationError::AssetBalanceMismatch {
+                asset_id: o.asset_id.clone(),
+                inputs: format!("{:?}", asset_id),
+                outputs: format!("{:?}", o.asset_id),
+            });
+        }
+        if o.address != owner {
+            return Err(ValidationError::InvalidSignature(format!(
+                "TokenBurn change must return to burner: output addr={}, owner={}",
+                o.address, owner
+            )));
+        }
+        change_sum = checked_sum(change_sum, amount_parse_pos_dec(&o.amount)?)?;
+    }
+
+    // amount détruit = inputs − change ; doit égaler le montant déclaré et > 0.
+    let declared = amount_parse_pos_dec(amount)?;
+    let burned = in_sum
+        .checked_sub(change_sum)
+        .ok_or(ValidationError::InvalidAmount {
+            reason: "TokenBurn change exceeds inputs".to_string(),
+        })?;
+    if burned != declared {
+        return Err(ValidationError::AssetBalanceMismatch {
+            asset_id: asset_id.clone(),
+            inputs: in_sum.to_string(),
+            outputs: format!("change={change_sum} + declared_burn={declared}"),
+        });
+    }
+
+    Ok(input_outputs)
+}

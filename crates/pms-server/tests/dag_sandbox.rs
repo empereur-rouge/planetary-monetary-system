@@ -5673,3 +5673,76 @@ async fn test_onramp_voie_a_emission_budget() -> Result<()> {
     );
     Ok(())
 }
+
+/// TokenBurn primitive (plan §3.1, voie B foundation) end-to-end: burning a
+/// token TRULY destroys it — circulating supply drops by the burned amount, the
+/// change returns to the burner, and an over-burn (more than owned) is rejected
+/// with no supply change. Proves the new `PlainPayload::TokenBurn` protocol
+/// primitive through the real HTTP route + hot-path validation.
+///
+/// Run: `cargo test --release -p pms-server --test dag_sandbox \
+///   test_token_burn_reduces_supply -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_token_burn_reduces_supply() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    let user = Wallet::generate();
+    let user_addr = user.get_address("8e");
+
+    // 1. Fund the burner with 1000 PMS (faucet, ungated → single UTXO).
+    sandbox.faucet_mint(None, &user_addr, "1000").await?;
+    let bal0 = sandbox.get_balance("main", &user_addr).await?;
+    let supply0 = Decimal::from_str(
+        sandbox.get_supply("main", None).await?["circulating_supply"]
+            .as_str()
+            .unwrap_or("0"),
+    )
+    .unwrap_or(Decimal::ZERO);
+    println!("   Before burn: balance={}, supply={}", bal0, supply0);
+    assert_eq!(bal0, Decimal::from(1000), "faucet credited 1000 PMS");
+
+    // 2. Burn 100 PMS (asset_id omitted = native PMS).
+    let (status, body) = sandbox
+        .post(
+            None,
+            "/v1/wallet/token/burn",
+            json!({ "private_key_b64": user.private_key_b64, "amount": "100" }),
+        )
+        .await;
+    println!("   Burn 100 PMS → {} — {:?}", status, body);
+    assert!(status.is_success(), "burn must succeed: {} {:?}", status, body);
+    assert_eq!(body["burned"].as_str(), Some("100"), "reports burned amount");
+
+    // 3. Balance dropped by 100 (change returned); supply dropped by 100.
+    let bal1 = sandbox.get_balance("main", &user_addr).await?;
+    let supply1 = Decimal::from_str(
+        sandbox.get_supply("main", None).await?["circulating_supply"]
+            .as_str()
+            .unwrap_or("0"),
+    )
+    .unwrap_or(Decimal::ZERO);
+    println!("   After burn:  balance={}, supply={}", bal1, supply1);
+    assert_eq!(bal1, Decimal::from(900), "burner keeps the 900 change");
+    assert_eq!(
+        supply0 - supply1,
+        Decimal::from(100),
+        "circulating supply dropped by exactly the burned amount"
+    );
+
+    // 4. Over-burn (more than owned) → rejected; balance unchanged.
+    let (status2, body2) = sandbox
+        .post(
+            None,
+            "/v1/wallet/token/burn",
+            json!({ "private_key_b64": user.private_key_b64, "amount": "100000" }),
+        )
+        .await;
+    println!("   Over-burn 100000 → {} — {:?}", status2, body2);
+    assert!(!status2.is_success(), "over-burn must be rejected");
+    let bal2 = sandbox.get_balance("main", &user_addr).await?;
+    assert_eq!(bal2, Decimal::from(900), "rejected burn leaves balance unchanged");
+
+    println!("\n   TEST PASSED: token burn destroys supply, returns change, rejects over-burn.");
+    Ok(())
+}
