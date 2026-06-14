@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.17.1] - Unreleased — Fix test rot : bridge e2e protocol_version
+
+### Fixed
+- **fix(test/bridge)** — `bridge_e2e_test.rs` forgeait ses blocs Mint avec
+  `protocol_version: 2` (hardcodé), alors que `config.dev.toml` est passé à `3`
+  → `CoreAdapter::persist_block` rejetait avec « wrong network_id or
+  protocol_version » et les 4 tests (`bridge_full_lifecycle`,
+  `bridge_directional_atob`, `bridge_multiple_transfers`,
+  `bridge_insufficient_balance`) étaient ROUGES. **Rot pré-existant** (confirmé
+  identique sur v0.14.0, antérieur à toute la gouvernance §4) découvert par le
+  run complet `scripts/run-tests.sh`. Aligné le `protocol_version` des `LedgerDef`
+  du test sur la config (2 → 3). Suite désormais 100 % verte (29/29 crates).
+
+---
+
 ## [0.17.0] - Unreleased — Gouvernance P3 : couloir d'émission sous gouvernance
 
 Dernière phase de la gouvernance (`pms-spec-governance-timelock.md` §5) : le
