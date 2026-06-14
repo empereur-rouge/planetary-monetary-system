@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.18.1] - Unreleased — API : tolérance de casse du `tier` de gouvernance
+
+### Fixed
+- **fix(api/governance)** — asymétrie de casse découverte en alignant le SDK :
+  `POST /admin/governance/propose` exigeait le `tier` en **PascalCase**
+  (`"Operator"`) alors que les réponses publiques (`/v1/governance/*`) renvoient le
+  palier en **lowercase** (`"operator"`). Un client ne pouvait donc pas relire un
+  `tier` de réponse et le renvoyer tel quel. `GovernanceTier` accepte désormais les
+  DEUX casses en entrée (`#[serde(alias)]`) tout en gardant la sérialisation
+  PascalCase (payload DAG + record inchangés). Rétro-compatible.
+- **chore(version)** — `Cargo.toml` 0.18.0 → **0.18.1** ; `API_VERSION` 22 → **23**.
+
+---
+
 ## [0.18.0] - Unreleased — API : journal d'audit des blocs de gouvernance
 
 ### Added
