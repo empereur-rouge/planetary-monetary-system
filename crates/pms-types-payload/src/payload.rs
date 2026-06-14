@@ -1,5 +1,5 @@
 use crate::EncryptedPayload;
-use pms_config::ConfigUpdate;
+use pms_config::{ConfigUpdate, GovernanceTier};
 use pms_types_contract::Contract;
 use pms_types_nft::NftAction;
 use pms_types_transaction::{Transaction, TxInput, TxOutput};
@@ -83,6 +83,36 @@ pub enum PlainPayload {
     Nft(NftAction),
     /// Mise à jour de configuration (Coordinator seulement)
     ConfigUpdate(ConfigUpdate),
+    /// Proposition de gouvernance (plan §4) : **annonce** un changement de config
+    /// timelocké, ancré DAG. N'applique RIEN — le timelock court jusqu'à
+    /// `enact_after_ms` (= `announced_at_ms + durée(tier)`). Coordinator-only.
+    /// Le changement réel est appliqué par un `GovernanceEnact` après expiration.
+    GovernanceProposal {
+        /// `SHA-256(update + tier + announced_at)` — déterministe.
+        proposal_id: String,
+        /// Le changement de config à appliquer à l'enact.
+        update: ConfigUpdate,
+        /// Palier d'impact (→ durée du timelock).
+        tier: GovernanceTier,
+        /// Justification publique.
+        reason: String,
+        /// Horodatage de l'annonce (ms).
+        announced_at_ms: u64,
+        /// Effet autorisé à partir de cet instant (ms). **Invariant timelock**.
+        enact_after_ms: u64,
+    },
+    /// **Applique** une proposition après expiration du timelock — exécute son
+    /// `ConfigUpdate`. REJETÉ si `now < enact_after` (timelock non écoulé) ou si
+    /// la proposition n'est pas `Pending`. Coordinator-only.
+    GovernanceEnact {
+        proposal_id: String,
+        reason: String,
+    },
+    /// **Annule** une proposition `Pending` (avant effet). Coordinator-only.
+    GovernanceCancel {
+        proposal_id: String,
+        reason: String,
+    },
     /// Distribution de récompenses (fees + block rewards) - VERSION PLAIN (dev only)
     /// Créé automatiquement par le serveur après chaque transaction
     Reward {

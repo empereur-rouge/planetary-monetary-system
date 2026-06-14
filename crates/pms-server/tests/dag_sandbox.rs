@@ -5837,3 +5837,100 @@ async fn test_voie_b_token_conversion() -> Result<()> {
     println!("\n   TEST PASSED: voie B — burn 10 gold → OnTokenBurn contract → 15 PMS minted under budget.");
     Ok(())
 }
+
+/// Gouvernance timelock (plan §4) end-to-end via les endpoints HTTP.
+/// Prouve : propose ancre un bloc + l'expose publiquement (G8), un enact AVANT
+/// l'expiration du timelock est REJETÉ (G2, inviolabilité), et un cancel marque
+/// la proposition annulée (G7). L'enact APRÈS expiration (G3) est prouvé au
+/// niveau protocole par `pms-core/tests/governance_timelock_test.rs` (enact_after
+/// contrôlé, impossible via l'endpoint car les durées sont hardcodées 7/15/45 j).
+///
+/// Run: `cargo test --release -p pms-server --test dag_sandbox \
+///   test_governance_timelock_endpoints -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_governance_timelock_endpoints() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // 1. Propose : changer le fee_rate à 777 bps, palier Operator (timelock 7 j).
+    let (s, body) = sandbox
+        .admin_post(
+            "/admin/governance/propose",
+            json!({
+                "update": { "SetFeeRate": { "bps": 777 } },
+                "tier": "Operator",
+                "reason": "raise fee to 777bps"
+            }),
+        )
+        .await;
+    println!("   Propose → {} — {:?}", s, body);
+    assert!(s.is_success(), "propose must succeed: {} {:?}", s, body);
+    let proposal_id = body["proposal_id"].as_str().expect("proposal_id").to_string();
+    assert!(body["enact_after_ms"].as_u64().unwrap() > body["announced_at_ms"].as_u64().unwrap());
+
+    // 2. /v1/governance/pending (PUBLIC) liste la proposition annoncée (G8).
+    let (s, pending) = sandbox.public_get("/v1/governance/pending").await;
+    println!("   /pending → {} — {:?}", s, pending);
+    let listed = pending["pending"]
+        .as_array()
+        .map(|a| a.iter().any(|p| p["proposal_id"] == proposal_id && p["status"] == "pending"))
+        .unwrap_or(false);
+    assert!(listed, "proposal must be publicly announced as pending");
+
+    // 3. Enact IMMÉDIATEMENT → REJETÉ : le timelock n'est pas écoulé (G2).
+    let (s, enact_body) = sandbox
+        .admin_post(
+            &format!("/admin/governance/enact/{}", proposal_id),
+            json!({ "reason": "too early" }),
+        )
+        .await;
+    println!("   Enact (early) → {} — {:?}", s, enact_body);
+    assert!(
+        !s.is_success(),
+        "enact before timelock elapsed MUST be rejected (got {})",
+        s
+    );
+    // La raison DOIT être remontée à l'opérateur (code 3071 GovernanceRejected) —
+    // il faut savoir POURQUOI (timelock), pas un « Operation conflict » opaque.
+    assert_eq!(enact_body["code"].as_u64(), Some(3071), "early enact → code 3071");
+    assert!(
+        enact_body["message"].as_str().unwrap_or_default().to_lowercase().contains("timelock"),
+        "the rejection message must surface the timelock reason, got: {:?}",
+        enact_body["message"]
+    );
+
+    // 4. La proposition est TOUJOURS pending (l'enact rejeté n'a rien appliqué).
+    let (_, pending2) = sandbox.public_get("/v1/governance/pending").await;
+    let still_pending = pending2["pending"]
+        .as_array()
+        .map(|a| a.iter().any(|p| p["proposal_id"] == proposal_id && p["status"] == "pending"))
+        .unwrap_or(false);
+    assert!(still_pending, "rejected enact leaves the proposal pending (no apply)");
+
+    // 5. Cancel → annulée (G7).
+    let (s, _) = sandbox
+        .admin_post(
+            &format!("/admin/governance/cancel/{}", proposal_id),
+            json!({ "reason": "abort" }),
+        )
+        .await;
+    assert!(s.is_success(), "cancel of a pending proposal must succeed: {}", s);
+
+    // 6. Plus dans /pending ; présente dans /history (status cancelled).
+    let (_, pending3) = sandbox.public_get("/v1/governance/pending").await;
+    let gone = pending3["pending"]
+        .as_array()
+        .map(|a| !a.iter().any(|p| p["proposal_id"] == proposal_id))
+        .unwrap_or(true);
+    assert!(gone, "cancelled proposal must leave /pending");
+    let (_, history) = sandbox.public_get("/v1/governance/history").await;
+    println!("   /history → {:?}", history);
+    let in_history = history["history"]
+        .as_array()
+        .map(|a| a.iter().any(|p| p["proposal_id"] == proposal_id && p["status"] == "cancelled"))
+        .unwrap_or(false);
+    assert!(in_history, "cancelled proposal must appear in /history");
+
+    println!("\n   TEST PASSED: governance — propose announces, early enact REJECTED (timelock), cancel works.");
+    Ok(())
+}

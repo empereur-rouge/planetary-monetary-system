@@ -130,7 +130,17 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
             "/v1/reserves/latest",
             get(crate::api_fn::reserves::get_latest_reserves),
         )
-        .route("/v1/fee_pool", get(get_fee_pool_status));
+        .route("/v1/fee_pool", get(get_fee_pool_status))
+        // Gouvernance (plan §4) — PUBLIC : l'annonce des changements timelockés
+        // (droit de sortie informée) + l'historique enacted/cancelled.
+        .route(
+            "/v1/governance/pending",
+            get(crate::api_fn::governance::list_pending),
+        )
+        .route(
+            "/v1/governance/history",
+            get(crate::api_fn::governance::list_history),
+        );
 
     let token_routes = Router::new()
         .route("/v1/tokens", get(list_tokens))
@@ -397,6 +407,10 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/admin/faucet", post(faucet_mint))
         // On-ramp fiat→PMS (voie A, plan §3.1) — mint natif sous budget partagé
         .route("/admin/onramp", post(crate::api_fn::onramp::admin_onramp))
+        // Gouvernance timelock (plan §4) — propose/enact/cancel produisent des blocs
+        .route("/admin/governance/propose", post(crate::api_fn::governance::admin_propose))
+        .route("/admin/governance/enact/{proposal_id}", post(crate::api_fn::governance::admin_enact))
+        .route("/admin/governance/cancel/{proposal_id}", post(crate::api_fn::governance::admin_cancel))
         // Admin Compliance API — write-producing operations
         .route("/admin/compliance/freeze", post(admin_freeze))
         .route("/admin/compliance/unfreeze", post(admin_unfreeze))

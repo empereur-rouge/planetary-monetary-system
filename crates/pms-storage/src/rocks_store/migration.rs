@@ -69,6 +69,7 @@ impl RocksStore {
                 7 => self.mig_7_to_8().await?,
                 8 => self.mig_8_to_9().await?,
                 9 => self.mig_9_to_10().await?,
+                10 => self.mig_10_to_11().await?,
                 _ => return Err(MigError::Unexpected(v)),
             }
             v += 1;
@@ -621,6 +622,23 @@ impl RocksStore {
             .map_err(|e| MigError::Any(anyhow!(e)))?;
 
         tracing::info!("Migration 9→10: coordinator_key_history CF ready");
+        Ok(())
+    }
+
+    /// Migration 10 → 11 (gouvernance timelock, plan §4). Le CF
+    /// `governance_proposals` est créé à l'ouverture par la réconciliation de la
+    /// liste des CF ; cette migration le touche pour catcher tout souci de
+    /// création ici plutôt qu'au premier bloc `GovernanceProposal`.
+    async fn mig_10_to_11(&self) -> std::result::Result<(), MigError> {
+        let cf = self.cf("governance_proposals");
+        self.db
+            .put_cf(&cf, b"__init__", b"")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+        self.db
+            .delete_cf(&cf, b"__init__")
+            .map_err(|e| MigError::Any(anyhow!(e)))?;
+
+        tracing::info!("Migration 10→11: governance_proposals CF ready");
         Ok(())
     }
 }

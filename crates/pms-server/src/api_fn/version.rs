@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::api::AppState;
 
 /// Version de l'API REST — à incrémenter à chaque modification des routes/formats.
+/// v19 (v0.15.0) : routes gouvernance timelock (plan §4) — `POST /admin/governance/{propose,enact,cancel}`
+/// + `GET /v1/governance/{pending,history}` (public).
 /// v18 (v0.14.0) : nouvelle route `POST /v1/wallet/token/burn` (burn de token
 /// owner-signé, plan §3.1 voie B) + nouveau `PlainPayload::TokenBurn`
 /// (DAG_VERSION 3.3.0).
@@ -19,7 +21,7 @@ use crate::api::AppState;
 /// v13 (audit sécurité v0.9.0) : `POST /v1/wallet/tx/send` exige des unlocks
 /// valides (401 sinon) et la conservation par asset ; `POST /submit/block`
 /// rejette les tx sans autorisation de dépense et les block ids non canoniques.
-pub const API_VERSION: u32 = 18;
+pub const API_VERSION: u32 = 19;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,6 +98,7 @@ mod tests {
         // /admin/tokens/create — mint collatéralisé 2.3 v2).
         // v0.13.0: 16 → 17 (POST /admin/onramp voie A + code 5030).
         // v0.14.0: 17 → 18 (POST /v1/wallet/token/burn + PlainPayload::TokenBurn).
-        assert_eq!(parsed.api_version, 18);
+        // v0.15.0: 18 → 19 (gouvernance timelock routes).
+        assert_eq!(parsed.api_version, 19);
     }
 }

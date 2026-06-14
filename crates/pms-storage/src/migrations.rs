@@ -15,7 +15,7 @@ use thiserror::Error;
 
 /// Version logique du schéma attendu par ce binaire.
 /// Incrémentez lorsqu'une nouvelle migration est introduite.
-pub const CURRENT_VER: i64 = 10;
+pub const CURRENT_VER: i64 = 11;
 
 /// Version du protocole DAG (SemVer).
 /// - MAJOR : changement incompatible (refus de démarrer, migration manuelle requise)
@@ -27,11 +27,14 @@ pub const CURRENT_VER: i64 = 10;
 /// canonique du contenu. Des blocs acceptés sous 2.x (unlocks invalides,
 /// ids forgés) sont rejetés sous 3.x ; un re-sync depuis zéro peut refuser
 /// un historique 2.x → wipe testnet requis.
+/// v3.4.0 (plan §4 gouvernance) : nouvelles variantes `PlainPayload::Governance{Proposal,Enact,Cancel}`
+/// (changements de config timelockés + ancrés DAG). Additif backward-compatible →
+/// migration auto, pas de wipe.
 /// v3.3.0 (plan §3.1 voie B) : nouvelle variante `PlainPayload::TokenBurn`
 /// (burn de token owner-signé, la supply baisse, trigger des contrats
 /// `OnTokenBurn`). Backward-compatible : les blocs existants parsent toujours ;
 /// un nœud à jour accepte le nouveau type. MINOR → migration auto, pas de wipe.
-pub const DAG_VERSION: &str = "3.3.0";
+pub const DAG_VERSION: &str = "3.4.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

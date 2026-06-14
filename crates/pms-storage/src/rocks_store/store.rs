@@ -304,6 +304,7 @@ impl RocksStore {
             "nft_block_ids", // NFT block references: token_id -> block_id (encrypted metadata in DAG)
             "runtime_config", // Current runtime config (single key "current")
             "config_history", // History of config changes (block_id -> entry)
+            "governance_proposals", // Governance timelock proposals: proposal_id -> record (plan §4)
             "node_block_counts", // Block count per node: node_pk -> count
             "node_fee_pool", // Fee pool: single key "pool" -> amount (u64)
             "node_reward_addresses", // Reward addresses: node_pk -> address
@@ -465,6 +466,7 @@ impl RocksStore {
         "nft_block_ids",
         "runtime_config",
         "config_history",
+        "governance_proposals",
         "node_block_counts",
         "node_fee_pool",
         "node_reward_addresses",

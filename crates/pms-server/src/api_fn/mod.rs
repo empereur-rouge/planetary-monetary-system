@@ -14,6 +14,7 @@ pub mod history;
 pub mod ledger;
 pub mod memory_profile;
 pub mod milestone;
+pub mod governance;
 pub mod nft;
 pub mod nodes;
 pub mod onramp;

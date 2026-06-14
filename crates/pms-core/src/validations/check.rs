@@ -370,6 +370,9 @@ pub fn validate_block(
             // avec le hot path — audit C-2 extension, v0.9.0).
             PlainPayload::Milestone { .. }
             | PlainPayload::ConfigUpdate(_)
+            | PlainPayload::GovernanceProposal { .. }
+            | PlainPayload::GovernanceEnact { .. }
+            | PlainPayload::GovernanceCancel { .. }
             | PlainPayload::Reward { .. }
             | PlainPayload::EncryptedReward { .. }
             | PlainPayload::TokenCreate(_)
