@@ -290,7 +290,20 @@ where
                         // lookup registry est traitée comme « non enregistré »
                         // (contraintes per-asset skippées, gate Coordinator
                         // conservé). À durcir avec la migration ApiError.
-                        let meta = self.store.get_token(asset_id).unwrap_or(None);
+                        //
+                        // Un `asset_id` est SOIT un token (token_registry) SOIT une
+                        // classe SFT (sft_classes — namespace `:`, mutuellement
+                        // exclusifs). Si ce n'est pas un token, on tente la classe
+                        // SFT et on réutilise la MÊME validation de mint contraint
+                        // (mint_authority + max_supply) via sa vue TokenMetadata.
+                        let meta = match self.store.get_token(asset_id).unwrap_or(None) {
+                            Some(m) => Some(m),
+                            None => self
+                                .store
+                                .get_sft_class(asset_id)
+                                .unwrap_or(None)
+                                .map(|c| c.to_token_metadata()),
+                        };
                         // Le supply cache n'est interrogé que si une cap OU un
                         // collatéral existe — validate_custom_asset_mints
                         // traite une entrée absente comme ZERO.

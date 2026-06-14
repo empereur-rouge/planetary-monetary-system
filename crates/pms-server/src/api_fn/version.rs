@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::api::AppState;
 
 /// Version de l'API REST — à incrémenter à chaque modification des routes/formats.
+/// v24 (v0.19.0) : semi-fongibles (SFT) — `POST /admin/sft/{classes,mint}` (admin)
+/// + `GET /v1/sft/{classes,classes/{asset_id},collections/{collection}}` (public).
+/// Une classe = asset fongible `"collection:class"` ; mint contraint par `max_supply`.
 /// v23 (v0.18.1) : `POST /admin/governance/propose` accepte désormais le `tier` en
 /// lowercase (`"operator"`) EN PLUS du PascalCase (`"Operator"`) — symétrie avec les
 /// réponses publiques qui renvoient le palier en lowercase. Rétro-compatible.
@@ -41,7 +44,7 @@ use crate::api::AppState;
 /// v13 (audit sécurité v0.9.0) : `POST /v1/wallet/tx/send` exige des unlocks
 /// valides (401 sinon) et la conservation par asset ; `POST /submit/block`
 /// rejette les tx sans autorisation de dépense et les block ids non canoniques.
-pub const API_VERSION: u32 = 23;
+pub const API_VERSION: u32 = 24;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -123,6 +126,7 @@ mod tests {
         // v0.17.0: 20 → 21 (gouvernance P3 : ConfigUpdate::SetEmissionCorridor).
         // v0.18.0: 21 → 22 (GET /v1/governance/blocks + block_ids dans pending/history).
         // v0.18.1: 22 → 23 (propose accepte tier lowercase).
-        assert_eq!(parsed.api_version, 23);
+        // v0.19.0: 23 → 24 (semi-fongibles SFT : routes /admin/sft + /v1/sft).
+        assert_eq!(parsed.api_version, 24);
     }
 }

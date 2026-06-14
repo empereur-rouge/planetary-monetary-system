@@ -41,10 +41,26 @@ spend-conditions. P1 = couche protocole (pas encore branchée sur l'admin).
 - **chore(version)** — `Cargo.toml` 0.18.1 → **0.19.0** ; `DAG_VERSION` 3.6.0 →
   **3.7.0** (payload additif, pas de wipe) ; `CURRENT_VER` 11 → **12** (CF).
 
-### Notes
-- **Pas encore branché côté admin** : P2 ajoutera create / mint (valide classe +
-  cap + authority) / list / supply. Transfert & burn réutiliseront le chemin UTXO
-  générique + `TokenBurn` (zéro code neuf). P3 = SDK + docs.
+### Added — P2 (endpoints + mint)
+- **feat(api)** — endpoints SFT ([sft.rs](crates/pms-server/src/api_fn/sft.rs)) :
+  - `POST /admin/sft/classes` (admin, gated) — crée une classe (forge `SftClassCreate` ;
+    `mint_authority`/`creator` = coordinateur).
+  - `POST /admin/sft/mint` (admin, gated) — mint une quantité (réutilise `Mint` ;
+    pré-check du `max_supply` avec message clair + **cap enforcé au protocole** via
+    la validation de mint contraint partagée).
+  - `GET /v1/sft/classes` + `/v1/sft/classes/{asset_id}` + `/v1/sft/collections/{collection}`
+    (**publics** — catalogue).
+- **feat(core)** — la validation de mint contraint de `persist_block` est désormais
+  **SFT-aware** : pour un `asset_id` non-token, elle consulte `sft_classes` et
+  réutilise `SftClass::to_token_metadata()` → `mint_authority` + `max_supply` enforcés
+  par le MÊME chemin éprouvé que les tokens (pas de validation dupliquée).
+- **feat(reuse)** — transfert & burn d'une classe SFT passent par les endpoints
+  existants (`/v1/wallet/send-simple`, `/v1/wallet/token/burn`) avec
+  `asset_id = "collection:class"` — **zéro code neuf** (héritage du moteur UTXO).
+- **test(e2e)** — `test_sft_lifecycle` (dag_sandbox) : création + catalogue public
+  (list/get/collection) + mint contraint (S3 : over-cap → 400 avec la raison) +
+  **fongibilité** (S5 : transfert partiel 100→70/30 via le chemin UTXO générique).
+- **chore(version)** — `API_VERSION` 23 → **24** (routes SFT).
 
 ---
 

@@ -19,6 +19,7 @@ pub mod nft;
 pub mod nodes;
 pub mod onramp;
 pub mod reserves;
+pub mod sft;
 pub mod token_burn;
 pub mod stream_blocks;
 pub mod supply;

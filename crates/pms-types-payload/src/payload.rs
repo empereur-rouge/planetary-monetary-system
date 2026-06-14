@@ -397,7 +397,7 @@ pub struct TokenMetadata {
 /// Une classe est un asset **fongible à l'intérieur de la classe** (quantité par
 /// détenteur, divisible selon `decimals`) et **distincte entre classes**. Son
 /// `asset_id` est `"{collection_id}:{class_id}"` — le `:` garantit qu'il ne peut
-/// jamais entrer en collision avec un token (`[A-Za-z0-9_-]{1,64}`, sans `:`) ni avec
+/// jamais entrer en collision avec un token (dont l'`asset_id` ne contient PAS `:`) ni avec
 /// le PMS natif (`asset_id = None`). Les soldes vivent dans le moteur UTXO, donc
 /// la classe hérite gratuitement du time-lock, du demurrage et des spend-conditions.
 ///
@@ -429,4 +429,27 @@ pub struct SftClass {
     pub creator: String,
     /// Clé publique autorisée à mint cette classe.
     pub mint_authority: String,
+}
+
+impl SftClass {
+    /// Vue `TokenMetadata` d'une classe SFT, pour réutiliser **telle quelle** la
+    /// validation de mint contraint des assets custom (`mint_authority`,
+    /// `max_supply`, granularité `decimals` — plan 2.3/2.4). Une classe SFT est,
+    /// pour le moteur UTXO, un asset fongible : ses contraintes de mint sont les
+    /// mêmes qu'un token. Pas de collatéral ni de demurrage en v1 (`None`).
+    pub fn to_token_metadata(&self) -> TokenMetadata {
+        TokenMetadata {
+            asset_id: self.asset_id.clone(),
+            symbol: self.class_id.clone(),
+            name: self.name.clone(),
+            decimals: self.decimals,
+            max_supply: self.max_supply.clone(),
+            creator: self.creator.clone(),
+            mint_authority: self.mint_authority.clone(),
+            demurrage_bps_per_day: None,
+            collateral_address: None,
+            collateral_asset_id: None,
+            collateral_ratio_bps: None,
+        }
+    }
 }
