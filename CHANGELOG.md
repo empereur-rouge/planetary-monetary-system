@@ -20,9 +20,35 @@ protocole (donc inviolables au-delà du handler) :
   est instantané (`enact_after == announced_at`) ; desserrer (reprendre / hausser)
   garde le délai plein du palier. On n'attend pas 45 j pour stopper une fuite.
 
-**P2a** : table param→palier-min + direction + validation. **P2b (cette version)** :
-câbler le kill-switch `mint_enabled` (dormant jusqu'ici). P2c : tâche auto-enact +
-rewire `admin_update_config`→propose.
+**P2a** : table param→palier-min + direction + validation. **P2b** : câbler le
+kill-switch `mint_enabled` (dormant jusqu'ici). **P2c (cette version)** : tâche
+auto-enact + rewire `admin_update_config`→propose (fin du contournement du timelock).
+
+### Added — P2c (auto-enact + fin du bypass `admin_update_config`)
+- **feat(server/task)** — `spawn_governance_enact_task`
+  ([crates/pms-server/src/api/tasks.rs](crates/pms-server/src/api/tasks.rs)) : scanne
+  toutes les 60 s le CF `governance_proposals`, enacte les `Pending` dont le timelock
+  est écoulé (`enact_after <= now`). Check `read_only.is_armed()` (règle tâche de
+  fond produisant des blocs). Enact idempotent (statut ≠ Pending rejeté). Enregistrée
+  dans `serve.rs`.
+- **feat(api)** — **`POST /admin/config` ne s'applique PLUS instantanément** : il
+  forge un `GovernanceProposal` ([admin.rs](crates/pms-server/src/admin.rs)) avec le
+  palier auto-assigné (`min_tier`). Asymétrie : un **resserrage** est enacté
+  immédiatement (200 `applied`, ancré DAG), un **desserrage** devient une proposition
+  timelockée (202 `proposed`). C'est la **fermeture du contournement** qui rendait le
+  timelock sans effet (un opérateur pouvait changer la config en direct).
+- **refactor(governance)** — `do_propose`/`do_enact`/`ProposeOutcome`
+  ([governance.rs](crates/pms-server/src/api_fn/governance.rs)) extraits + `pub`,
+  partagés par les endpoints, le rewire admin, et la tâche auto-enact (un seul point
+  de vérité pour le forge + l'asymétrie).
+- **change(read-only)** — `POST /admin/config` passe de `admin_recovery` à
+  `admin_writable` (il produit un bloc) ; **GET** reste recovery. CLAUDE.md mis à jour.
+- **test(task)** — `governance_autoenact_test.rs` : le tick enacte une proposition
+  éligible (tighten, `max_mint`→1, Enacted) et IGNORE une proposition future (loosen,
+  reste Pending, config inchangée).
+- **test(e2e)** — `test_admin_config_governance_rewire` (dag_sandbox) : via HTTP,
+  tighten `/admin/config` → appliqué instantanément ; loosen → proposition timelockée,
+  **config inchangée (bypass fermé)**, visible dans `/v1/governance/pending`.
 
 ### Added — P2b (kill-switch `mint_enabled`)
 - **feat(emission)** — `EmissionGate::reserve`

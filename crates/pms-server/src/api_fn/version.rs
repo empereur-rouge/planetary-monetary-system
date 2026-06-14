@@ -12,6 +12,9 @@ use crate::api::AppState;
 /// timelock instantané ; un desserrage garde le délai plein du palier). Nouveau
 /// code `5031` (MintDisabled) : le kill-switch `mint_enabled=false` fait échouer
 /// les chemins de mint natif (on-ramp, conversion token→PMS, faucet) en 503.
+/// `POST /admin/config` ne s'applique PLUS instantanément (P2c) : il forge un
+/// `GovernanceProposal` (palier auto-assigné), appliqué immédiatement si
+/// resserrage (200 `applied`), sinon proposition timelockée (202 `proposed`).
 /// v19 (v0.15.0) : routes gouvernance timelock (plan §4) — `POST /admin/governance/{propose,enact,cancel}`
 /// + `GET /v1/governance/{pending,history}` (public).
 /// v18 (v0.14.0) : nouvelle route `POST /v1/wallet/token/burn` (burn de token

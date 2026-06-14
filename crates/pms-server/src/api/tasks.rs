@@ -2,9 +2,17 @@
 
 use super::state::AppState;
 use crate::read_only::ReadOnlyReason;
-use pms_storage::DagStorage;
+use pms_storage::{DagStorage, GovernanceStorage};
+use pms_wallet::SignerBackend;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Intervalle de scan de la tâche d'auto-enact de gouvernance (spec §6). Les
+/// timelocks sont en jours ; un scan par minute est largement assez fin et reste
+/// bon marché (listing d'un CF à faible cardinalité). Il assure aussi que les
+/// propositions *instantanées* (resserrage, `enact_after == announced_at`) faites
+/// hors `admin_update_config` soient appliquées sous une minute.
+const GOVERNANCE_ENACT_SCAN_SECS: u64 = 60;
 
 /// Spawns the fee distribution task if enabled in configuration.
 /// Public for testing integration.
@@ -222,6 +230,91 @@ pub fn spawn_reserve_snapshot_task(state: AppState) {
             }
         }
     });
+}
+
+/// Spawns the governance auto-enact task (plan §4 / spec §6).
+///
+/// Scanne le CF `governance_proposals` pour les propositions `Pending` dont le
+/// timelock est écoulé (`enact_after_ms <= now`) et forge un `GovernanceEnact`
+/// pour chacune. L'enact est **idempotent** : si une proposition a déjà été
+/// enactée (course avec l'endpoint manuel) ou annulée, `persist_block` la rejette
+/// (check de statut). L'opérateur peut toujours forcer l'enact dès l'expiration
+/// via `POST /admin/governance/enact/{id}` sans attendre le tick.
+///
+/// CRITICAL: produit des blocs → check `read_only.is_armed()` à chaque itération
+/// (le middleware HTTP ne couvre pas les boucles de fond — règle CLAUDE.md).
+pub fn spawn_governance_enact_task(state: AppState) {
+    let st = state.clone();
+    tokio::spawn(async move {
+        tracing::info!(
+            "🏛️ Governance auto-enact task started (interval: {}s)",
+            GOVERNANCE_ENACT_SCAN_SECS
+        );
+        let mut interval = tokio::time::interval(Duration::from_secs(GOVERNANCE_ENACT_SCAN_SECS));
+        interval.tick().await; // consume immediate first tick
+
+        loop {
+            interval.tick().await;
+            if st.read_only.is_armed() {
+                tracing::debug!(
+                    target = "governance",
+                    reason = st.read_only.reason().as_str(),
+                    "skipping governance auto-enact: engine is read-only"
+                );
+                continue;
+            }
+            governance_enact_tick(&st).await;
+        }
+    });
+}
+
+/// Un passage de scan : enacte toute proposition `Pending` dont le timelock est
+/// écoulé. `pub` pour être testable directement (sans attendre le tick).
+pub async fn governance_enact_tick(state: &AppState) {
+    // Coordinator-only — comme `perform_fee_distribution` / `perform_daily_inflation_mint`
+    // (tâches de fond qui produisent des blocs). Sans ce gate, un follower forgerait
+    // un `GovernanceEnact` à chaque tick, rejeté par le single-writer (persist) →
+    // warn-spam + dépendance à un backstop d'une autre couche. On co-localise le
+    // gate avec le producteur. En dev (pas de clé coordinateur) tout le monde forge.
+    let is_coordinator = match &state.settings.validation.coordinator_public_key {
+        Some(coord_pk) => state.node_wallet.encoded_public_key() == *coord_pk,
+        None => true, // dev mode
+    };
+    if !is_coordinator {
+        return;
+    }
+
+    let now = pms_utils::ts_ms();
+    let proposals = match state.store.list_governance_proposals() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(target = "governance", "auto-enact: list failed: {e}");
+            return;
+        }
+    };
+    for rec in proposals.iter().filter(|r| {
+        r.status == pms_config::GovernanceStatus::Pending && r.enact_after_ms <= now
+    }) {
+        match crate::api_fn::governance::do_enact(
+            state,
+            &rec.proposal_id,
+            "auto-enact (timelock elapsed)".to_string(),
+        )
+        .await
+        {
+            Ok(block_id) => tracing::info!(
+                target = "governance",
+                proposal_id = %rec.proposal_id,
+                %block_id,
+                "🏛️ auto-enacted proposal (timelock elapsed)"
+            ),
+            Err(e) => tracing::warn!(
+                target = "governance",
+                proposal_id = %rec.proposal_id,
+                "auto-enact failed (possibly enacted/cancelled concurrently): {e}"
+            ),
+        }
+    }
 }
 
 /// Spawns the activity-retention task (audit follow-up to v0.7.4).

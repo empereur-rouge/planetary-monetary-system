@@ -411,6 +411,12 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route("/admin/governance/propose", post(crate::api_fn::governance::admin_propose))
         .route("/admin/governance/enact/{proposal_id}", post(crate::api_fn::governance::admin_enact))
         .route("/admin/governance/cancel/{proposal_id}", post(crate::api_fn::governance::admin_cancel))
+        // Hot-swap config — DÉSORMAIS via gouvernance (forge un GovernanceProposal,
+        // + enact instantané si resserrage). Produit un bloc → admin_writable
+        // (gated read-only). GET reste en admin_recovery (lecture). Le timelock
+        // rend de toute façon les desserrages non-instantanés, donc ce n'est pas
+        // un outil de recovery read-only (≠ règle d'avant le rewire P2c).
+        .route("/admin/config", post(admin_update_config))
         // Admin Compliance API — write-producing operations
         .route("/admin/compliance/freeze", post(admin_freeze))
         .route("/admin/compliance/unfreeze", post(admin_unfreeze))
@@ -439,9 +445,9 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
             "/admin/wallet/restore/private-key",
             post(wallet_restore_private_key),
         )
-        // Admin Config API - Hot-Swap de la RuntimeConfig (no blocks)
+        // Admin Config API - lecture seule (GET). Le POST est passé en
+        // admin_writable (rewire gouvernance P2c : il forge un bloc).
         .route("/admin/config", get(admin_get_config))
-        .route("/admin/config", post(admin_update_config))
         // Admin Ledger API - read endpoints
         .route("/admin/ledgers", get(admin_list_ledgers))
         .route("/admin/ledgers/{ledger_id}", get(admin_get_ledger))

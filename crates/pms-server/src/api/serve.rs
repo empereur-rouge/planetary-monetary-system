@@ -2,7 +2,7 @@
 
 use super::routes::build_api_router;
 use super::state::{AppState, FeePoolRefundSink};
-use super::tasks::{spawn_activity_backfill_task, spawn_activity_retention_task, spawn_consolidation_task, spawn_fee_distributor_task, spawn_inflation_mint_task, spawn_metrics_sampler_task, spawn_reserve_snapshot_task, spawn_resource_guard_task};
+use super::tasks::{spawn_activity_backfill_task, spawn_activity_retention_task, spawn_consolidation_task, spawn_fee_distributor_task, spawn_governance_enact_task, spawn_inflation_mint_task, spawn_metrics_sampler_task, spawn_reserve_snapshot_task, spawn_resource_guard_task};
 use crate::Server;
 use crate::api_keys;
 use crate::helper::resolve_admin_token;
@@ -292,6 +292,10 @@ pub async fn serve_api(
 
     // Preuve de réserves ancrée (protocole 2.6) — no-op si [reserves] désactivé
     spawn_reserve_snapshot_task(state.clone());
+
+    // Auto-enact de gouvernance (plan §4) — applique les propositions dont le
+    // timelock est écoulé. Check read-only intégré.
+    spawn_governance_enact_task(state.clone());
 
     // ═══════════════════════════════════════════════════════════════════════
     // ACTIVITY ITEMS BACKFILL (one-time, 30s delayed)

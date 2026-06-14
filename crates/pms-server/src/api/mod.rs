@@ -21,4 +21,4 @@ pub use state::AppState;
 pub use state::FeePoolRefundSink;
 pub use routes::build_api_router;
 pub use serve::serve_api;
-pub use tasks::{spawn_fee_distributor_task, spawn_inflation_mint_task, spawn_reserve_snapshot_task, spawn_activity_backfill_task, spawn_metrics_sampler_task, spawn_activity_retention_task, spawn_consolidation_task, spawn_resource_guard_task, distribute_for_ledger};
+pub use tasks::{spawn_fee_distributor_task, spawn_inflation_mint_task, spawn_reserve_snapshot_task, spawn_governance_enact_task, governance_enact_tick, spawn_activity_backfill_task, spawn_metrics_sampler_task, spawn_activity_retention_task, spawn_consolidation_task, spawn_resource_guard_task, distribute_for_ledger};
