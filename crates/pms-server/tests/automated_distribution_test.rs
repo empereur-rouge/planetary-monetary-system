@@ -241,6 +241,9 @@ async fn test_automated_fee_distribution() {
             distribution_interval_sec: 1, // 1 second interval for test
             daily_inflation_enabled: false,
             daily_inflation_interval_sec: 86400,
+            annual_ceiling_percent: 10.0,
+            annual_floor_percent: 0.0,
+            emission_epoch_duration_sec: 86400,
             coord_shard_count: 0,
             burn_rate_bps: 0,
             gas_per_tx: None,
@@ -361,6 +364,7 @@ async fn test_automated_fee_distribution() {
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
         webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
+        emission_gate: Arc::new(pms_server::emission::EmissionGate::load(&rocks_store_arc)),
     };
 
     // 8. Spawn Distributor

@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.12.0] - Unreleased — Budget d'émission partagé (plan §3.1, phase 1)
+
+Première brique de la politique monétaire gouvernée : un **budget d'émission par
+période** que toutes les voies de mint de PMS natif sur le ledger main devront
+partager (« N voies de mint sans N planches à billets »). Cette phase 1 met en
+place le mécanisme et le câble sur le **baseline inflation mint** (taux cible),
+désormais borné par un **couloir dur**. Voir [pms-spec-emission-budget.md](pms-spec-emission-budget.md)
+et la fiche [[budget-emission]].
+
+### Added
+- **feat(emission)** — module [crates/pms-server/src/emission.rs](crates/pms-server/src/emission.rs) :
+  `EmissionGate` (gate partagé sous `tokio::Mutex`), `compute_epoch_budget`
+  (fonction pure `supply × clamp(taux, plancher, plafond) × frac_année`),
+  `effective_rate_pct` (clamp du couloir), `Voie` (baseline/onramp/bridge/faucet),
+  `EmissionEpochState` (compteur de période persisté). **P1 (plafond)** :
+  `reserve()` fait un check-and-decrement atomique sous le mutex — ferme le
+  TOCTOU que le chemin de forge concurrent (sans lock global) ne pouvait pas
+  garantir. **P2 (exactement-une-fois)** : le compteur est persisté *avant* le
+  forge (« counter-first »), un crash ne peut causer qu'une sous-émission
+  conservatrice auto-réparée au rollover.
+- **feat(storage)** — [crates/pms-storage/src/rocks_store/emission_storage.rs](crates/pms-storage/src/rocks_store/emission_storage.rs) :
+  persistance du singleton `emission_epoch_state` (clé dédiée dans le CF
+  `node_fee_pool`, pattern `reserve_snapshot` — **pas de nouveau CF ni de
+  migration `CURRENT_VER`**).
+- **feat(config)** — `FeesSettings` : `annual_ceiling_percent` (plafond dur,
+  défaut 10 %/an), `annual_floor_percent` (plancher, défaut 0), et
+  `emission_epoch_duration_sec` (durée d'epoch, défaut 86400 = 1 j). Tous
+  `#[serde(default)]` — rétro-compatibles. `annual_inflation_percent` existant
+  sert de taux cible.
+- **feat(metrics)** — `pms_emission_budget_total/consumed/remaining`,
+  `pms_emission_effective_rate` (canari du couloir : alerte si > plafond),
+  `pms_emission_minted_total{voie}`, `pms_emission_rejections_total{voie}`.
+- **test(emission)** — 5 tests purs (golden hardcodés : budget 2 % → `0.05479452`,
+  **couloir 50 %→clamp 10 % = `0.27397260`**, round-trip JSON) +
+  6 tests gate ([crates/pms-server/tests/emission_budget_test.rs](crates/pms-server/tests/emission_budget_test.rs) :
+  exhaustion→rejet, TOCTOU concurrent, crash-reload, rollover forward-only,
+  résidu, rollback). Prouvent P1 et P2 sur le vrai code.
+
+### Changed
+- **feat(server/inflation)** — `perform_daily_inflation_mint`
+  ([crates/pms-server/src/fee_distribution/inflation.rs](crates/pms-server/src/fee_distribution/inflation.rs))
+  passe désormais par le gate : il minte le **résidu** du budget
+  (`budget − déjà-émis-par-les-voies`) au lieu de `supply × taux / 365`
+  inconditionnel. **Conséquences** : (a) l'émission est plafonnée par le couloir
+  même si la config pousse le taux au-delà ; (b) l'émission devient
+  **proportionnelle au temps réel** (corrige le `/365` hardcodé découplé de
+  l'intervalle) ; (c) le `burn_percent` n'est **plus appliqué** à l'inflation —
+  le taux cible EST le taux de croissance net (le burn déflationniste reste dans
+  le chemin des fees via `burn_rate_bps`) ; la répartition creator:treasury est
+  renormalisée sur 100 % du montant minté.
+- **chore(config/testnet)** — `config.testnet.toml` pose `emission_epoch_duration_sec = 120`
+  pour conserver une émission fréquente (chaque tick de 120 s = un epoch),
+  sinon l'epoch par défaut (1 j) ne minterait qu'une fois par jour.
+
+### Notes
+- **AppState** : nouveau champ `emission_gate: Arc<EmissionGate>` (8 sites de
+  construction patchés : prod, internal API, testkit ×3, tests ×3).
+- **Versions** : `Cargo.toml` 0.11.3 → **0.12.0** (MINOR). **Pas** de bump
+  `DAG_VERSION` (bloc inchangé : `PlainPayload::Mint`), `CURRENT_VER` (CF réutilisé),
+  ni `API_VERSION` (aucune route — l'on-ramp viendra en phase suivante).
+- **Hors phase 1** (voir spec §9) : voies on-ramp/scrip gatées, orchestrateur
+  `emit_gated` partagé, couloir timelocké (option gouvernance).
+
+---
+
 ## [0.11.3] - Unreleased — Pruning DAG : protéger tous les tips actifs (audit S9, contrat durci)
 
 ### Changed

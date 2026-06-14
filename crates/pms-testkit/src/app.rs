@@ -171,6 +171,7 @@ async fn build_app_state(
         contract_event_bus: None,
         read_only: Arc::new(pms_server::read_only::ReadOnlyMode::new()),
         webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
+        emission_gate: Arc::new(pms_server::emission::EmissionGate::load(&store_for_return)),
     };
 
     Ok((state, store_for_return, meta, settings))
@@ -282,6 +283,7 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
         webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
+        emission_gate: Arc::new(pms_server::emission::EmissionGate::load(&store)),
     };
 
     // 10) Router
@@ -403,6 +405,7 @@ pub async fn make_test_ctx_with_admin(
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
         webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),
+        emission_gate: Arc::new(pms_server::emission::EmissionGate::load(&store)),
     };
 
     // 10) Router

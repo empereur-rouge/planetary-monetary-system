@@ -223,6 +223,10 @@ pub async fn serve_api(
         Vec::new()
     };
 
+    // Emission budget gate (plan §3.1) — recovered from the main store's
+    // persisted counter. Borrow `store` before it is moved into the literal.
+    let emission_gate = Arc::new(crate::emission::EmissionGate::load(&store));
+
     let state = AppState {
         srv,
         _cfg: cfg.clone(),
@@ -257,6 +261,7 @@ pub async fn serve_api(
         coord_shard_round_robin: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: Arc::new(crate::read_only::ReadOnlyMode::new()),
         webhook_store: crate::api_fn::webhooks::WebhookStore::new(),
+        emission_gate,
     };
 
     // ═══════════════════════════════════════════════════════════════════════

@@ -57,6 +57,7 @@ updated: 2026-05-04
 | [[protocol-primitives]] | Time-lock UTXO, MultiSig/HashLock, mint contraint, demurrage, preuve de réserves (v0.10.0) |
 | [[smart-contracts]] | Contrats déclaratifs (triggers: NFT burn, token burn) |
 | [[economics]] | Fee burn, gas pool, dynamic fees, storage fees, cross-ledger fee |
+| [[budget-emission]] | Budget d'émission partagé, couloir gouverné, gate anti-double-mint (v0.12.0) |
 | [[bridge]] | Transferts cross-ledger (lock/mint) |
 | [[activity-system]] | Index par adresse/type, pré-calcul, cache LRU, SSE streaming |
 | [[fee-distribution]] | Distribution automatique des frais, encrypted reward blocks |
