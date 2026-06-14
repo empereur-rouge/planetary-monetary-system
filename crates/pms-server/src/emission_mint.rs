@@ -20,6 +20,7 @@
 use crate::api::AppState;
 use crate::api_fn::tx_helpers;
 use crate::emission::{EmissionError, EmissionParams, Voie};
+use pms_config::RuntimeConfig;
 use pms_storage::PutResult;
 use pms_types::TxOutput;
 use pms_types_payload::{PayloadEnvelope, PlainPayload};
@@ -40,13 +41,41 @@ pub enum EmitOutcome {
     Nothing,
 }
 
-/// Construit les `EmissionParams` du couloir depuis la config de fees.
-pub(crate) fn params_from_settings(settings: &pms_config::Settings) -> EmissionParams {
+/// Construit les `EmissionParams` du couloir, **gouverné** (plan §4, P3).
+///
+/// Le couloir vit désormais dans `RuntimeConfig` (modifiable par gouvernance
+/// timelock). Chaque champ utilise la valeur gouvernée si présente (`Some`),
+/// sinon retombe sur la valeur de **boot** (`FeesSettings`) — seed au premier
+/// boot, avant tout `SetEmissionCorridor`. Les bps sont convertis en %/an
+/// (1000 bps → 10.0 %).
+///
+/// ⚠️ **Divergence config voulue** : une fois le couloir gouverné (`Some`), éditer
+/// `config.toml` (`annual_*_percent`, `emission_epoch_duration_sec`) est SANS effet
+/// — la valeur gouvernée gagne toujours. C'est le comportement correct (la
+/// gouvernance est la source de vérité, pas un fichier TOML qu'un opérateur peut
+/// éditer au reboot), mais un opérateur qui baisse le TOML et le voit ignoré doit
+/// savoir que la gouvernance possède déjà ce paramètre. `pub` pour les tests d'intégration (G9).
+pub fn params_from_runtime(
+    settings: &pms_config::Settings,
+    runtime: &RuntimeConfig,
+) -> EmissionParams {
+    let bps_to_pct = |bps: u32| bps as f64 / 100.0;
     EmissionParams {
-        target_pct: settings.fees.annual_inflation_percent,
-        ceiling_pct: settings.fees.annual_ceiling_percent,
-        floor_pct: settings.fees.annual_floor_percent,
-        epoch_duration_sec: settings.fees.emission_epoch_duration_sec,
+        target_pct: runtime
+            .emission_target_bps
+            .map(bps_to_pct)
+            .unwrap_or(settings.fees.annual_inflation_percent),
+        ceiling_pct: runtime
+            .emission_ceiling_bps
+            .map(bps_to_pct)
+            .unwrap_or(settings.fees.annual_ceiling_percent),
+        floor_pct: runtime
+            .emission_floor_bps
+            .map(bps_to_pct)
+            .unwrap_or(settings.fees.annual_floor_percent),
+        epoch_duration_sec: runtime
+            .emission_epoch_duration_sec
+            .unwrap_or(settings.fees.emission_epoch_duration_sec),
     }
 }
 
@@ -100,7 +129,13 @@ pub async fn emit_native_gated<F>(
 where
     F: FnOnce(Decimal) -> Vec<TxOutput>,
 {
-    let params = params_from_settings(&state.settings);
+    // Couloir gouverné : lu depuis RuntimeConfig (fallback boot). `unwrap_or_default`
+    // est sûr — get_runtime_config renvoie déjà le défaut si rien n'est persisté.
+    let runtime = {
+        use pms_storage::ConfigStorage;
+        state.store.get_runtime_config().unwrap_or_default()
+    };
+    let params = params_from_runtime(&state.settings, &runtime);
 
     // 1. Réservation atomique (P1, ferme le TOCTOU) — supply lue pour le rollover.
     let (supply, _) = state.srv.adapter_arc().circulating_supply().await;

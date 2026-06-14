@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use crate::api::AppState;
 
 /// Version de l'API REST — à incrémenter à chaque modification des routes/formats.
+/// v21 (v0.17.0) : gouvernance P3 — nouvelle variante `ConfigUpdate::SetEmissionCorridor`
+/// (couloir d'émission gouverné, palier Constitution) acceptée par `POST /admin/config`
+/// et `POST /admin/governance/propose`. Le couloir (ceiling/floor/target/epoch) est
+/// désormais modifiable par gouvernance timelock au lieu d'être boot-only.
 /// v20 (v0.16.0) : gouvernance P2 — `POST /admin/governance/propose` applique
 /// désormais le palier MINIMUM par paramètre (rejet `3071` si trop bas) et
 /// l'asymétrie tighten/loosen (un resserrage a `enact_after == announced_at`,
@@ -30,7 +34,7 @@ use crate::api::AppState;
 /// v13 (audit sécurité v0.9.0) : `POST /v1/wallet/tx/send` exige des unlocks
 /// valides (401 sinon) et la conservation par asset ; `POST /submit/block`
 /// rejette les tx sans autorisation de dépense et les block ids non canoniques.
-pub const API_VERSION: u32 = 20;
+pub const API_VERSION: u32 = 21;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -109,6 +113,7 @@ mod tests {
         // v0.14.0: 17 → 18 (POST /v1/wallet/token/burn + PlainPayload::TokenBurn).
         // v0.15.0: 18 → 19 (gouvernance timelock routes).
         // v0.16.0: 19 → 20 (gouvernance P2 : palier-min + asymétrie sur propose).
-        assert_eq!(parsed.api_version, 20);
+        // v0.17.0: 20 → 21 (gouvernance P3 : ConfigUpdate::SetEmissionCorridor).
+        assert_eq!(parsed.api_version, 21);
     }
 }

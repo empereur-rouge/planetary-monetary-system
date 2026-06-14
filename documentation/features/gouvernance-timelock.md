@@ -2,7 +2,7 @@
 tags: [feature]
 created: 2026-06-14
 updated: 2026-06-14
-version: v0.16.0
+version: v0.17.0
 ---
 
 # Gouvernance Timelock
@@ -84,8 +84,17 @@ Aucune activation requise : les routes sont montées en standard ; les `propose`
 ## Politique (P2) — palier-min + asymétrie
 
 - **Palier minimum** ([`min_tier`](../../crates/pms-config/src/governance_policy.rs)) :
-  fees = `Operator` ; burn / distribution / pouvoir-de-mint = `Policy` ; couloir
-  d'émission = `Constitution` (P3). La validation persist impose `tier ≥ min_tier`.
+  fees = `Operator` ; burn / distribution / pouvoir-de-mint = `Policy` ; **couloir
+  d'émission (`SetEmissionCorridor`) = `Constitution` (P3)**. La validation persist
+  impose `tier ≥ min_tier`.
+- **Couloir d'émission gouverné (P3)** : `ConfigUpdate::SetEmissionCorridor
+  { ceiling_bps, floor_bps, target_bps, epoch_duration_sec }` mirroré dans
+  `RuntimeConfig` (4 champs `Option`, `None` = fallback boot `FeesSettings`).
+  `EmissionGate` lit le couloir via `params_from_runtime`. Baisser ceiling+target =
+  resserrage (instantané) ; toute hausse = desserrage (45 j). Rend le plafond
+  10 %/an modifiable SEULEMENT par un processus Constitution annoncé + timelocké —
+  la promesse plan §2.1. ⚠️ une fois gouverné, le couloir du `config.toml` est
+  shadowé (la gouvernance est la source de vérité). Voir [[budget-emission]].
 - **Asymétrie tighten/loosen** : `direction(update, config)` ; un **resserrage**
   (couper/réduire le mint, baisser un plafond) a un timelock **nul**
   (`enact_after == announced_at`, enact immédiat) ; un **desserrage** garde le délai
@@ -129,6 +138,9 @@ Aucune activation requise : les routes sont montées en standard ; les `propose`
   4 voies), `governance_autoenact_test` (tick enacte l'éligible, ignore le futur),
   `dag_sandbox::test_governance_tighten_instant_endpoints` (asymétrie e2e),
   `dag_sandbox::test_admin_config_governance_rewire` (bypass fermé).
+- **(P3)** `pms-config` : `emission_corridor_is_constitution_and_directional` ;
+  `pms-server` : `emission_budget_test::t12` (**G9** couloir gouverné — 20 %→5 %
+  via `SetEmissionCorridor` change le budget de période).
 
 ## Interactions
 Liens : [[budget-emission]] (la politique monétaire que la gouvernance protège),

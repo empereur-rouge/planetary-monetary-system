@@ -22,8 +22,14 @@
 //! Le budget est `supply_ref × clamp(taux_cible, plancher, plafond) × frac_année`.
 //! Le `clamp` au plafond est la matérialisation en code de la promesse du plan
 //! §2.1 : même si la config pousse le taux cible à 50 %, le budget est plafonné
-//! au plafond (10 %/an par défaut). C'est inviolable sans changer la config de
-//! boot (pas de hot-swap tant que la gouvernance timelock n'existe pas).
+//! au plafond. Depuis v0.17.0 (gouvernance P3) le couloir est **gouverné** : il
+//! vit dans `RuntimeConfig` (via `ConfigUpdate::SetEmissionCorridor`) avec fallback
+//! sur les valeurs de boot (`FeesSettings`). Il n'est donc PLUS inviolable « tout
+//! court » — il l'est désormais via le **processus de gouvernance** : modifiable
+//! seulement par un `GovernanceProposal` de palier **Constitution** (timelock plein
+//! 45 j sur toute HAUSSE ; une baisse, qui réduit le risque, est instantanée),
+//! annoncé et ancré dans le DAG. Le `clamp` reste appliqué quelle que soit la
+//! source (runtime gouverné ou boot) — la garantie « budget ≤ plafond » tient.
 
 use pms_storage::ConfigStorage;
 use pms_storage::rocks_store::store::RocksStore;
@@ -91,8 +97,11 @@ impl EmissionEpochState {
 
 /// Paramètres du couloir d'émission (issus de `FeesSettings`).
 #[derive(Debug, Clone, Copy)]
+/// Paramètres du couloir d'émission. **Gouvernés** via `RuntimeConfig` (P3,
+/// `ConfigUpdate::SetEmissionCorridor`) avec fallback sur le boot (`FeesSettings`).
+/// Construits par `emission_mint::params_from_runtime`.
 pub struct EmissionParams {
-    /// Taux cible (% / an) — `annual_inflation_percent`.
+    /// Taux cible (% / an) — `annual_inflation_percent` (boot) ou `emission_target_bps` (gouverné).
     pub target_pct: f64,
     /// Plafond DUR du couloir (% / an) — `annual_ceiling_percent`.
     pub ceiling_pct: f64,
