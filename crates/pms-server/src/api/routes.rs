@@ -145,6 +145,13 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
         .route(
             "/v1/governance/blocks",
             get(crate::api_fn::governance::list_blocks),
+        )
+        // Semi-fongibles (catalogue public) — classes + détail + par collection.
+        .route("/v1/sft/classes", get(crate::api_fn::sft::list_sft_classes))
+        .route("/v1/sft/classes/{asset_id}", get(crate::api_fn::sft::get_sft_class))
+        .route(
+            "/v1/sft/collections/{collection}",
+            get(crate::api_fn::sft::list_sft_collection),
         );
 
     let token_routes = Router::new()
@@ -403,6 +410,9 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         // Admin Token API - Create and Mint custom tokens
         .route("/admin/tokens/create", post(admin_create_token))
         .route("/admin/tokens/mint", post(admin_mint_token))
+        // Admin SFT API - semi-fongibles (créer une classe + mint) — produit des blocs
+        .route("/admin/sft/classes", post(crate::api_fn::sft::admin_create_sft_class))
+        .route("/admin/sft/mint", post(crate::api_fn::sft::admin_mint_sft))
         // Admin Ledger API - block-producing operations only
         .route("/admin/ledgers/create", post(admin_create_ledger))
         .route("/admin/ledgers/{ledger_id}/transfer-ownership", post(transfer_ledger_ownership))

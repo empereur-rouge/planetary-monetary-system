@@ -15,6 +15,7 @@ pub mod nft_storage;
 pub mod node_rewards_storage;
 pub mod recent_blocks_bloom;
 mod reserve_snapshot;
+mod sft_storage;
 pub mod store;
 pub mod token_registry;
 pub mod utxo;

@@ -41,8 +41,8 @@ async fn get_v1_version_returns_full_version_payload() {
     // api_version : valeur réelle exposée par le handler (pas un self-compare).
     assert_eq!(
         json["api_version"].as_u64(),
-        Some(23),
-        "GET /v1/version must expose API_VERSION = 23"
+        Some(24),
+        "GET /v1/version must expose API_VERSION = 24"
     );
 
     // software_version = CARGO_PKG_VERSION (non vide, format X.Y.Z).

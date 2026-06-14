@@ -139,6 +139,12 @@ pub enum PlainPayload {
     },
     /// Enregistrement d'un nouveau token (Coordinator seulement)
     TokenCreate(TokenMetadata),
+    /// Enregistrement d'une nouvelle **classe semi-fongible** (SFT, façon
+    /// ERC-1155 — `pms-spec-semi-fungibles.md`). Coordinator seulement. La classe
+    /// est un asset fongible (`asset_id = "collection:class"`) porté par le moteur
+    /// UTXO, avec des métadonnées riches PUBLIQUES. Mint/transfert/burn réutilisent
+    /// `Mint`/`TxUtxo`/`TokenBurn`.
+    SftClassCreate(SftClass),
     /// Verrouille des UTXOs sur ce ledger pour un transfert cross-ledger.
     /// Les fonds sont détruits sur le ledger source. Coordinator seulement.
     BridgeLock {
@@ -383,4 +389,67 @@ pub struct TokenMetadata {
     /// `collateral_address` est défini (validé au registry).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collateral_ratio_bps: Option<u32>,
+}
+
+/// Métadonnées **publiques** d'une classe semi-fongible (SFT, façon ERC-1155 —
+/// `pms-spec-semi-fungibles.md`).
+///
+/// Une classe est un asset **fongible à l'intérieur de la classe** (quantité par
+/// détenteur, divisible selon `decimals`) et **distincte entre classes**. Son
+/// `asset_id` est `"{collection_id}:{class_id}"` — le `:` garantit qu'il ne peut
+/// jamais entrer en collision avec un token (dont l'`asset_id` ne contient PAS `:`) ni avec
+/// le PMS natif (`asset_id = None`). Les soldes vivent dans le moteur UTXO, donc
+/// la classe hérite gratuitement du time-lock, du demurrage et des spend-conditions.
+///
+/// Contrairement aux [`crate::NftMetadata`] (par-instance, chiffrées), les
+/// métadonnées de classe sont **un catalogue partagé par N détenteurs** → en clair.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SftClass {
+    /// Identifiant complet de la classe = `"{collection_id}:{class_id}"`. C'est
+    /// l'`asset_id` porté par les UTXO et la clé du registre `sft_classes`.
+    pub asset_id: String,
+    /// Collection (regroupe plusieurs classes), `[a-z0-9-]{1,32}`.
+    pub collection_id: String,
+    /// Classe au sein de la collection, `[a-z0-9-]{1,32}`.
+    pub class_id: String,
+    /// Nom affichable (ex: "Épée de fer"). Non vide, ≤ 128.
+    pub name: String,
+    /// URI vers l'asset (image, fichier). Optionnel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    /// Attributs de jeu libres (JSON sérialisé). Optionnel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<String>,
+    /// Décimales : `0` = items entiers (1 épée), `>0` = divisible. ≤ 18.
+    pub decimals: u8,
+    /// Supply maximum de la classe (None = illimité). Decimal string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_supply: Option<String>,
+    /// Adresse/pubkey du créateur (immuable).
+    pub creator: String,
+    /// Clé publique autorisée à mint cette classe.
+    pub mint_authority: String,
+}
+
+impl SftClass {
+    /// Vue `TokenMetadata` d'une classe SFT, pour réutiliser **telle quelle** la
+    /// validation de mint contraint des assets custom (`mint_authority`,
+    /// `max_supply`, granularité `decimals` — plan 2.3/2.4). Une classe SFT est,
+    /// pour le moteur UTXO, un asset fongible : ses contraintes de mint sont les
+    /// mêmes qu'un token. Pas de collatéral ni de demurrage en v1 (`None`).
+    pub fn to_token_metadata(&self) -> TokenMetadata {
+        TokenMetadata {
+            asset_id: self.asset_id.clone(),
+            symbol: self.class_id.clone(),
+            name: self.name.clone(),
+            decimals: self.decimals,
+            max_supply: self.max_supply.clone(),
+            creator: self.creator.clone(),
+            mint_authority: self.mint_authority.clone(),
+            demurrage_bps_per_day: None,
+            collateral_address: None,
+            collateral_asset_id: None,
+            collateral_ratio_bps: None,
+        }
+    }
 }

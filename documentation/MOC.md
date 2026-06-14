@@ -41,6 +41,7 @@ updated: 2026-05-04
 | [[payment-rail-integration]] | 4 endpoints REST conçus pour intégration SaaS : dag/status, estimate-fee, transaction lookup, blocks/range |
 | [[webhook-delivery]] | Watcher API : multi-address SSE (1 stream / N adresses) + webhook subscription HMAC-signée (CRUD + delivery worker) |
 | [[token-system]] | Tokens custom multi-asset, Amount (8 décimales), FeePolicy |
+| [[semi-fungibles]] | SFT façon ERC-1155 : classes `collection:class` sur le moteur UTXO, mint contraint, catalogue public (v0.19.0) |
 | [[block-payloads]] | 17 types de payload (PlainPayload), chiffrement X25519+AES-256-GCM |
 
 ## Protocole & Consensus

@@ -6138,3 +6138,99 @@ async fn test_governance_blocks_audit_trail() -> Result<()> {
     println!("\n   TEST PASSED: /v1/governance/blocks expose le journal d'audit (proposal+enact, proposal+cancel).");
     Ok(())
 }
+
+/// Semi-fongibles — cycle de vie e2e via les endpoints (spec semi-fungibles).
+///
+/// Prouve : création de classe (publique, listée), mint contraint par `max_supply`
+/// (S3 — un mint qui dépasse le cap est REJETÉ), et **fongibilité** sur le chemin
+/// UTXO générique (S5 — transfert partiel d'une classe via `send-simple`). Le
+/// transfert/burn ne sont PAS du code SFT-spécifique : c'est le moteur UTXO.
+///
+/// Run: `cargo test --release -p pms-server --test dag_sandbox \
+///   test_sft_lifecycle -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_sft_lifecycle() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+    let asset_id = "edenite-game:iron-sword";
+
+    // 1) Création de la classe (cap = 100, items entiers).
+    let (s, body) = sandbox
+        .admin_post(
+            "/admin/sft/classes",
+            json!({
+                "collection_id": "edenite-game",
+                "class_id": "iron-sword",
+                "name": "Épée de fer",
+                "uri": "https://example/sword.png",
+                "decimals": 0,
+                "max_supply": "100"
+            }),
+        )
+        .await;
+    println!("   create class → {} — {:?}", s, body);
+    assert!(s.is_success(), "create class must succeed: {s} {body:?}");
+    assert_eq!(body["asset_id"], asset_id);
+
+    // 2) Catalogue PUBLIC : la classe est listée + récupérable + groupée par collection.
+    let (_, list) = sandbox.public_get("/v1/sft/classes").await;
+    assert!(
+        list["classes"].as_array().unwrap().iter().any(|c| c["asset_id"] == asset_id),
+        "class must be listed: {list:?}"
+    );
+    let (s, one) = sandbox.public_get(&format!("/v1/sft/classes/{asset_id}")).await;
+    assert!(s.is_success() && one["name"] == "Épée de fer", "get class: {s} {one:?}");
+    let (_, coll) = sandbox.public_get("/v1/sft/collections/edenite-game").await;
+    assert_eq!(coll["count"].as_u64(), Some(1), "collection lists its class");
+
+    let owner = &sandbox.admin_addr.clone();
+
+    // 3) Mint 60 → balance 60.
+    let (s, _) = sandbox
+        .admin_post("/admin/sft/mint", json!({ "asset_id": asset_id, "to": owner, "amount": "60" }))
+        .await;
+    assert!(s.is_success(), "first mint must succeed: {s}");
+    let bal = sandbox.get_asset_balance("main", owner, Some(asset_id)).await?;
+    println!("   after mint 60: balance = {bal}");
+    assert_eq!(bal, dec_sft("60"), "balance after mint = 60");
+
+    // 4) S3 — mint 60 de plus (total 120 > cap 100) → REJETÉ ; balance inchangée.
+    let (s, body) = sandbox
+        .admin_post("/admin/sft/mint", json!({ "asset_id": asset_id, "to": owner, "amount": "60" }))
+        .await;
+    println!("   over-cap mint → {} — {:?}", s, body);
+    assert!(!s.is_success(), "mint exceeding max_supply MUST be rejected (got {s})");
+    assert!(
+        body["message"].as_str().unwrap_or_default().contains("max_supply"),
+        "operator must see WHY (max_supply), got: {:?}",
+        body["message"]
+    );
+    let bal = sandbox.get_asset_balance("main", owner, Some(asset_id)).await?;
+    assert_eq!(bal, dec_sft("60"), "rejected mint leaves balance at 60");
+
+    // 5) Mint 40 → balance 100 (cap atteint pile).
+    let (s, _) = sandbox
+        .admin_post("/admin/sft/mint", json!({ "asset_id": asset_id, "to": owner, "amount": "40" }))
+        .await;
+    assert!(s.is_success(), "mint up to the cap must succeed: {s}");
+    assert_eq!(sandbox.get_asset_balance("main", owner, Some(asset_id)).await?, dec_sft("100"));
+
+    // 6) S5 — FONGIBILITÉ : l'owner transfère 30 à B via le chemin UTXO générique.
+    let bob = Wallet::from_seed(&[209u8; 32], None).unwrap().get_address("8e");
+    sandbox
+        .send_asset("main", &sandbox.admin_wallet.private_key_b64, &bob, "30", asset_id)
+        .await?;
+    let bal_owner = sandbox.get_asset_balance("main", owner, Some(asset_id)).await?;
+    let bal_bob = sandbox.get_asset_balance("main", &bob, Some(asset_id)).await?;
+    println!("   after transfer 30: owner = {bal_owner}, bob = {bal_bob}");
+    assert_eq!(bal_owner, dec_sft("70"), "owner = 100 - 30");
+    assert_eq!(bal_bob, dec_sft("30"), "bob = 30 (fongible within class)");
+
+    println!("\n   TEST PASSED: SFT — création/catalogue, mint contraint par cap (S3), fongibilité e2e (S5).");
+    Ok(())
+}
+
+/// Helper local : parse un Decimal pour les assertions SFT.
+fn dec_sft(s: &str) -> rust_decimal::Decimal {
+    rust_decimal::Decimal::from_str_exact(s).unwrap()
+}

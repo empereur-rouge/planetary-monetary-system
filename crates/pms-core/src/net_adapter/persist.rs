@@ -290,7 +290,20 @@ where
                         // lookup registry est traitée comme « non enregistré »
                         // (contraintes per-asset skippées, gate Coordinator
                         // conservé). À durcir avec la migration ApiError.
-                        let meta = self.store.get_token(asset_id).unwrap_or(None);
+                        //
+                        // Un `asset_id` est SOIT un token (token_registry) SOIT une
+                        // classe SFT (sft_classes — namespace `:`, mutuellement
+                        // exclusifs). Si ce n'est pas un token, on tente la classe
+                        // SFT et on réutilise la MÊME validation de mint contraint
+                        // (mint_authority + max_supply) via sa vue TokenMetadata.
+                        let meta = match self.store.get_token(asset_id).unwrap_or(None) {
+                            Some(m) => Some(m),
+                            None => self
+                                .store
+                                .get_sft_class(asset_id)
+                                .unwrap_or(None)
+                                .map(|c| c.to_token_metadata()),
+                        };
                         // Le supply cache n'est interrogé que si une cap OU un
                         // collatéral existe — validate_custom_asset_mints
                         // traite une entrée absente comme ZERO.
@@ -627,6 +640,80 @@ where
             tracing::info!(
                 "🏛️ Governance proposal {} CANCELLED (block {})",
                 proposal_id,
+                wb.id
+            );
+        }
+
+        // 1.sft) Enregistrement d'une classe semi-fongible (SFT, spec semi-fungibles).
+        // Le registre est la source de vérité des métadonnées + contraintes de mint ;
+        // les soldes vivent dans le moteur UTXO (rien d'autre à appliquer ici).
+        if let Some(PayloadEnvelope::Plain(PlainPayload::SftClassCreate(class))) = &payload {
+            // Segment valide = [a-z0-9-], 1..=32 (collection / classe).
+            let valid_seg = |s: &str| {
+                !s.is_empty()
+                    && s.len() <= 32
+                    && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            };
+            if !valid_seg(&class.collection_id) || !valid_seg(&class.class_id) {
+                return Ok(PutResult::Rejected(
+                    "sft class: collection_id/class_id must be [a-z0-9-]{1,32}".to_string(),
+                ));
+            }
+            // L'asset_id DOIT être exactement "collection:class" (cohérence + namespace
+            // collision-free : un token ne peut pas contenir ':').
+            let expected_asset_id = format!("{}:{}", class.collection_id, class.class_id);
+            if class.asset_id != expected_asset_id {
+                return Ok(PutResult::Rejected(format!(
+                    "sft class: asset_id must equal \"{expected_asset_id}\" (got \"{}\")",
+                    class.asset_id
+                )));
+            }
+            if class.name.trim().is_empty() || class.name.len() > 128 {
+                return Ok(PutResult::Rejected(
+                    "sft class: name required (1..=128 chars)".to_string(),
+                ));
+            }
+            if class.decimals > 18 {
+                return Ok(PutResult::Rejected("sft class: decimals must be <= 18".to_string()));
+            }
+            if let Some(ms) = &class.max_supply {
+                // Doit être un décimal STRICTEMENT positif (parité avec
+                // `validate_token_metadata` : un cap nul/négatif n'a pas de sens).
+                match ms.parse::<rust_decimal::Decimal>() {
+                    Ok(d) if d > rust_decimal::Decimal::ZERO => {}
+                    _ => {
+                        return Ok(PutResult::Rejected(
+                            "sft class: max_supply must be a positive decimal".to_string(),
+                        ));
+                    }
+                }
+            }
+            if class.creator.trim().is_empty() || class.mint_authority.trim().is_empty() {
+                return Ok(PutResult::Rejected(
+                    "sft class: creator and mint_authority required".to_string(),
+                ));
+            }
+            // Unicité : une classe déjà enregistrée ne doit pas être écrasée
+            // silencieusement (anti-overwrite, comme la gouvernance).
+            match self.store.get_sft_class(&class.asset_id) {
+                Ok(Some(_)) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "sft class already exists: {}",
+                        class.asset_id
+                    )));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!("sft class lookup failed: {e}")));
+                }
+            }
+            if let Err(e) = self.store.put_sft_class(class) {
+                return Ok(PutResult::Rejected(format!("sft class store failed: {e}")));
+            }
+            tracing::info!(
+                "🎟️ SFT class registered: {} (\"{}\", block {})",
+                class.asset_id,
+                class.name,
                 wb.id
             );
         }

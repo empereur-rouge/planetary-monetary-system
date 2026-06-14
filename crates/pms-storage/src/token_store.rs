@@ -6,13 +6,27 @@
 //! sans dépendre du type concret `RocksStore`.
 
 use anyhow::Result;
-use pms_types_payload::TokenMetadata;
+use pms_types_payload::{SftClass, TokenMetadata};
 
 /// Lecture du token registry. Implémenté par `RocksStore`
 /// (CF `token_registry`, clé = `asset_id`, valeur = JSON `TokenMetadata`).
 pub trait TokenRegistryStorage: Send + Sync {
     /// Récupère les métadonnées d'un asset custom, `None` si non enregistré.
     fn get_token(&self, asset_id: &str) -> Result<Option<TokenMetadata>>;
+}
+
+/// Registre des classes semi-fongibles (SFT, `pms-spec-semi-fungibles.md`).
+/// Implémenté par `RocksStore` (CF `sft_classes`, clé = `asset_id` =
+/// `"collection:class"`, valeur = JSON [`SftClass`]).
+pub trait SftClassStorage: Send + Sync {
+    /// Enregistre (ou écrase) une classe SFT.
+    fn put_sft_class(&self, class: &SftClass) -> Result<()>;
+    /// Récupère une classe par son `asset_id`, `None` si non enregistrée.
+    fn get_sft_class(&self, asset_id: &str) -> Result<Option<SftClass>>;
+    /// Liste toutes les classes (tous collections).
+    fn list_sft_classes(&self) -> Result<Vec<SftClass>>;
+    /// Liste les classes d'une collection (préfixe `"{collection_id}:"`).
+    fn list_sft_classes_by_collection(&self, collection_id: &str) -> Result<Vec<SftClass>>;
 }
 
 /// Supertrait « moteur complet » : l'union des capacités de stockage que
@@ -29,6 +43,7 @@ pub trait EngineStorage:
     + crate::ComplianceStorage
     + crate::coordinator_key_store::CoordinatorKeyStorage
     + TokenRegistryStorage
+    + SftClassStorage
     + Send
     + Sync
     + 'static
@@ -44,6 +59,7 @@ impl<T> EngineStorage for T where
         + crate::ComplianceStorage
         + crate::coordinator_key_store::CoordinatorKeyStorage
         + TokenRegistryStorage
+        + SftClassStorage
         + Send
         + Sync
         + 'static
