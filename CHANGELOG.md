@@ -7,15 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.14.0] - Unreleased — Burn de token (primitive protocole, fondation voie B)
+## [0.14.0] - Unreleased — Voie B : burn de token + évaluation contrat OnTokenBurn
 
-Première brique de la **voie B** (conversion token custom→PMS, « scrip » = ex.
-edenite) en **smart contract** : un primitif de **burn de token** générique au
-niveau protocole. Conforme à l'invariant d'architecture (seul le PMS natif est
-codé en dur ; tout le custom passe par contrat) — le moteur ne connaît jamais
-« edenite ». Le câblage event→contrat→mint PMS arrive en phase suivante.
+Construction de la **voie B** (conversion token custom→PMS, « scrip » = ex.
+edenite) en **smart contract**, par phases. Conforme à l'invariant d'architecture
+(seul le PMS natif est codé en dur ; tout le custom passe par contrat) — le moteur
+ne connaît jamais « edenite ». **P1** : primitive de burn protocole. **P2** :
+évaluation contrat `OnTokenBurn` + action `MintNative` + event. **P3** (à venir) :
+câblage runtime burn→contrat→mint PMS sous budget.
 
-### Added
+### Added — P2 (évaluation contrat OnTokenBurn → mint natif)
+- **feat(contracts)** — action `ContractAction::MintNative { rate_numerator, rate_denominator }`
+  ([crates/pms-types-contract/src/lib.rs](crates/pms-types-contract/src/lib.rs)) +
+  validation (den≠0, num>0). Le contrat porte la POLITIQUE (le taux R) ; le mint
+  natif est exécuté par le moteur sous budget.
+- **feat(contracts)** — `evaluate_token_burn` + `MintNativeResult`
+  ([crates/pms-contracts/src/engine.rs](crates/pms-contracts/src/engine.rs)) :
+  miroir de `evaluate_nft_burn` pour les triggers `OnTokenBurn{asset_id}` →
+  instructions de mint PMS natif (`burn × R`). Évaluation `OnTokenBurn`
+  désormais implémentée (avant : « not yet implemented »). Endpoint
+  `/admin/contracts/simulate` dry-run la voie B.
+- **feat(storage)** — `ContractStorage::find_token_burn_contracts(asset_id, ledger_id)`
+  (trait + impls InMemory & RocksStore) — match exact sur `OnTokenBurn{asset_id}`.
+- **feat(event)** — `PmsEvent::TokenBurnProcessed { block_id, ledger_id, burner_address, asset_id, amount }`
+  ([crates/pms-event/src/events.rs](crates/pms-event/src/events.rs)), émis par le
+  handler de burn après persist (sur le bus contrat main, comme les burns NFT).
+- **test(contracts)** — `test_simulate_token_burn_mint_native` : `OnTokenBurn{edenite}`
+  + `MintNative 3/2` → 100 edenite ⇒ 150 PMS (golden). 27/27 pms-contracts verts.
+
+### Added — P1 (primitive de burn protocole)
 - **feat(protocol)** — nouvelle variante `PlainPayload::TokenBurn { tx, asset_id, amount, owner }`
   ([crates/pms-types-payload/src/payload.rs](crates/pms-types-payload/src/payload.rs)) :
   destruction permanente de token (la supply baisse). Owner-signé (le burner

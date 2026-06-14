@@ -99,6 +99,22 @@ pub enum ContractAction {
         /// Chaque split définit une adresse et sa part en basis points.
         splits: Vec<TransferFeeSplit>,
     },
+
+    /// Minte du **PMS natif** au burner, sur trigger `OnTokenBurn` (voie B,
+    /// plan §3.1 — conversion token custom → PMS). Montant = `montant_brûlé ×
+    /// rate_numerator / rate_denominator`.
+    ///
+    /// Le contrat ne porte que la **politique** (le taux R) ; le mint lui-même
+    /// est exécuté côté serveur **sous le budget d'émission partagé**
+    /// (`EmissionGate`) — c'est le moteur qui détient la primitive native, pas
+    /// le contrat. Garde l'invariant : tout le custom (quel token, quel taux)
+    /// est contract-driven ; seule la création de PMS natif est dans le moteur.
+    MintNative {
+        /// Numérateur du taux R = num/den (PMS minté = burn × num / den).
+        rate_numerator: u64,
+        /// Dénominateur du taux R (≠ 0).
+        rate_denominator: u64,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -161,6 +177,18 @@ impl ContractAction {
                             "TransferFee: split[{i}] has empty address"
                         ));
                     }
+                }
+                Ok(())
+            }
+            ContractAction::MintNative {
+                rate_numerator,
+                rate_denominator,
+            } => {
+                if *rate_denominator == 0 {
+                    return Err("MintNative: rate_denominator must be non-zero".into());
+                }
+                if *rate_numerator == 0 {
+                    return Err("MintNative: rate_numerator must be > 0".into());
                 }
                 Ok(())
             }

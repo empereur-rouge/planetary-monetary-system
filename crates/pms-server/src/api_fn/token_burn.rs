@@ -136,13 +136,28 @@ pub async fn wallet_burn_token(
     })?;
 
     match tx_helpers::persist_and_broadcast(&state, &wb).await {
-        Ok(PutResult::Inserted) => Ok(Json(json!({
-            "status": "ok",
-            "block_id": wb.id,
-            "burned": amount_dec.to_string(),
-            "asset_id": req.asset_id,
-            "owner": owner,
-        }))),
+        Ok(PutResult::Inserted) => {
+            // Émet TokenBurnProcessed sur le bus contrat (main) pour déclencher
+            // les contrats OnTokenBurn (voie B). Même bus que les burns NFT — le
+            // ContractListener n'écoute que le bus main, y compris pour les
+            // burns sur custom ledgers.
+            if let Some(bus) = &state.contract_event_bus {
+                bus.emit(pms_event::PmsEvent::token_burn_processed(
+                    wb.id.clone(),
+                    state.ledger_id.clone(),
+                    owner.clone(),
+                    req.asset_id.clone(),
+                    amount_dec.to_string(),
+                ));
+            }
+            Ok(Json(json!({
+                "status": "ok",
+                "block_id": wb.id,
+                "burned": amount_dec.to_string(),
+                "asset_id": req.asset_id,
+                "owner": owner,
+            })))
+        }
         Ok(PutResult::AlreadyExists) => Err(ApiError::AlreadyExists {
             kind: "block",
             id: wb.id,
