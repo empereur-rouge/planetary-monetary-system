@@ -7,11 +7,12 @@
 //! voie ré-écrirait le « dance » reserve/release et oublierait tôt ou tard un
 //! chemin de rollback → fuite ou double-comptage de budget (audit altitude).
 //!
-//! NOTE : le **pont scrip→PMS** (voie B) fait un lock-sur-source + mint-sur-dest
-//! couplé dans `BridgeEngine` — il ne passera PAS par `emit_native_gated` tel
-//! quel ; il aura besoin d'envelopper son propre forge avec
-//! `EmissionGate::reserve`/`release` directement (seam de bas niveau, à exposer
-//! quand la voie B atterrira).
+//! NOTE : la **voie B** (conversion token custom→PMS, déclenchée par un
+//! `OnTokenBurn`) NE passe PAS par `emit_native_gated` : elle doit réserver le
+//! budget AVANT de brûler (atomicité), donc elle enveloppe son propre forge avec
+//! `EmissionGate::reserve`/`release` directement dans `api_fn::token_burn`. Un
+//! refactor possible : extraire un `forge_reserved_mint` partagé (réutilisé par
+//! `emit_native_gated` ET la voie B) pour dédupliquer le tail forge+métriques.
 //!
 //! Le gate (`reserve`/`release`) reste découplé de `AppState` ; cet
 //! orchestrateur, lui, vit dans la couche serveur.

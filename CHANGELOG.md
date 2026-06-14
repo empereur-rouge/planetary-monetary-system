@@ -9,12 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.14.0] - Unreleased — Voie B : burn de token + évaluation contrat OnTokenBurn
 
-Construction de la **voie B** (conversion token custom→PMS, « scrip » = ex.
-edenite) en **smart contract**, par phases. Conforme à l'invariant d'architecture
-(seul le PMS natif est codé en dur ; tout le custom passe par contrat) — le moteur
-ne connaît jamais « edenite ». **P1** : primitive de burn protocole. **P2** :
-évaluation contrat `OnTokenBurn` + action `MintNative` + event. **P3** (à venir) :
-câblage runtime burn→contrat→mint PMS sous budget.
+**Voie B livrée et prouvée e2e** (conversion token custom→PMS, « scrip » = ex.
+edenite) en **smart contract**. Conforme à l'invariant d'architecture (seul le PMS
+natif est codé en dur ; tout le custom passe par contrat) — le moteur ne connaît
+jamais « edenite ». **P1** : primitive de burn protocole. **P2** : évaluation
+contrat `OnTokenBurn` + action `MintNative` + event. **P3** : câblage synchrone
+burn→contrat→mint PMS sous budget (réserve-avant-burn, sûreté des fonds).
+
+### Added — P3 (conversion synchrone burn→contrat→mint PMS)
+- **feat(emission/conversion)** — `wallet_burn_token`
+  ([crates/pms-server/src/api_fn/token_burn.rs](crates/pms-server/src/api_fn/token_burn.rs))
+  exécute la voie B **synchronement** : évalue `OnTokenBurn{asset}` → **réserve le
+  PMS sur le budget AVANT de brûler** (atomicité : budget épuisé ⇒ rejet complet,
+  aucun burn, zéro perte de fonds) → brûle → minte le PMS au burner via
+  `EmissionGate`. Gating read-only par la route. Réponse `{burned, converted_pms, mint_block_id}`.
+- **feat(emission)** — `Voie::BridgeScrip` → **`Voie::TokenConversion`** (label
+  métrique `token_conversion`) — la voie B est une conversion contract-driven, pas
+  un bridge.
+- **feat(metrics)** — `pms_emission_conversion_orphaned_total` : canari du cas rare
+  burn-réussi / mint-échoué (réconciliation opérateur ; doit rester à 0).
+- **test(sandbox)** — `test_voie_b_token_conversion` : token gold + contrat
+  `OnTokenBurn{gold}`→`MintNative 3/2` → burn 10 gold ⇒ **15 PMS mintés** au burner
+  sous budget ; gold supply −10. End-to-end HTTP, contract-driven.
+- **docs** — `plan.md` §3.3-3.4 reframé (voie B = smart contract, plus un bridge
+  hardcodé) ; conversion synchrone documentée (event `TokenBurnProcessed` =
+  observabilité, aucun listener ne re-déclenche → pas de double-mint).
 
 ### Added — P2 (évaluation contrat OnTokenBurn → mint natif)
 - **feat(contracts)** — action `ContractAction::MintNative { rate_numerator, rate_denominator }`

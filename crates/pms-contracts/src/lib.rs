@@ -27,7 +27,7 @@ pub mod engine;
 pub mod listener;
 
 pub use engine::{
-    ContractResult, ExistingContractMatch, SimulationEvent, SimulationResult,
-    TransferFeeResult, evaluate_nft_burn, evaluate_transfer, simulate_contract,
+    ContractResult, ExistingContractMatch, MintNativeResult, SimulationEvent, SimulationResult,
+    TransferFeeResult, evaluate_nft_burn, evaluate_token_burn, evaluate_transfer, simulate_contract,
 };
 pub use listener::{RefundSink, spawn_contract_listener};
