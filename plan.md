@@ -4,6 +4,7 @@
 > - `pms-spec-dag-implementation.md` (features protocole DAG + correctifs audit C-1/C-2)
 > - `pms-checklist-tests.md` (invariants de sécurité à tester)
 > - `pms-spec-emission-budget.md` (spec d'implémentation du **budget d'émission partagé**, §3.1 — ancrée dans le code v0.11.3)
+> - `pms-spec-governance-timelock.md` (spec d'implémentation de la **gouvernance timelock**, §4 — proposal→timelock→enact ancré DAG, ancrée dans le code v0.14.0)
 >
 > **Statut des valeurs chiffrées :** ce qui est **décidé** est marqué ✅ ; ce qui reste **à calibrer** (souvent avec des données réelles) est marqué 🔧. Rien n'est inventé à la place de décisions non prises.
 
@@ -178,6 +179,13 @@ on-ramp, faucet) restent des mints natifs directs sous le même budget. Voir
 ---
 
 ## 4. Gouvernance
+
+> 📐 **Spec d'implémentation : `pms-spec-governance-timelock.md`** — modèle
+> `GovernanceProposal → timelock → GovernanceEnact` ancré DAG, paliers 7/15/45 j
+> avec palier-minimum imposé par paramètre, asymétrie *tighten-now / loosen-later*
+> (resserrer vite, desserrer lent), kill-switch `mint_enabled` instantané (à
+> câbler — dormant aujourd'hui), couloir d'émission migré sous gouvernance
+> (Constitution 45 j), transparence publique (`GET /v1/governance/pending` = l'annonce).
 
 ### 4.1 Principe — gouvernée, pas figée
 

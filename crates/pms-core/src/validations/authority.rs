@@ -70,6 +70,17 @@ pub fn validate_payload_authority(
     match pp {
         PlainPayload::Milestone { .. } => require_coordinator(signer_pk, policy, "Milestone"),
         PlainPayload::ConfigUpdate(_) => require_coordinator(signer_pk, policy, "ConfigUpdate"),
+        // Gouvernance (plan §4) — coordinator-only ; le timelock + l'application
+        // sont validés dans le hot path persist (pas ici, qui ne gère que l'autorité).
+        PlainPayload::GovernanceProposal { .. } => {
+            require_coordinator(signer_pk, policy, "GovernanceProposal")
+        }
+        PlainPayload::GovernanceEnact { .. } => {
+            require_coordinator(signer_pk, policy, "GovernanceEnact")
+        }
+        PlainPayload::GovernanceCancel { .. } => {
+            require_coordinator(signer_pk, policy, "GovernanceCancel")
+        }
         PlainPayload::Reward { .. } => require_coordinator(signer_pk, policy, "Reward"),
         PlainPayload::EncryptedReward { .. } => {
             require_coordinator(signer_pk, policy, "EncryptedReward")

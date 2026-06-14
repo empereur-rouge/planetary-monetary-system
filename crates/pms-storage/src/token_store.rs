@@ -24,6 +24,7 @@ pub trait EngineStorage:
     crate::DagStorage
     + crate::NftStorage
     + crate::ConfigStorage
+    + crate::GovernanceStorage
     + crate::NodeRewardsStorage
     + crate::ComplianceStorage
     + crate::coordinator_key_store::CoordinatorKeyStorage
@@ -38,6 +39,7 @@ impl<T> EngineStorage for T where
     T: crate::DagStorage
         + crate::NftStorage
         + crate::ConfigStorage
+        + crate::GovernanceStorage
         + crate::NodeRewardsStorage
         + crate::ComplianceStorage
         + crate::coordinator_key_store::CoordinatorKeyStorage

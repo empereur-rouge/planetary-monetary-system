@@ -5,6 +5,7 @@ pub mod config_storage;
 pub mod contract_storage;
 pub mod coordinator_key_storage;
 mod emission_storage;
+mod governance_storage;
 pub mod retention;
 pub mod gas_pool_storage;
 pub mod ledger_storage;

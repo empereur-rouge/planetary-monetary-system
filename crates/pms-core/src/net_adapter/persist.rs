@@ -441,6 +441,132 @@ where
             }
         }
 
+        // 1.gov) Gouvernance timelock (plan §4). Proposal → stocke le record
+        // (Pending) ; Enact → vérifie timelock écoulé + statut Pending puis
+        // applique le ConfigUpdate (réutilise apply_config_update) ; Cancel →
+        // marque Cancelled. Les checks statut + timelock rendent l'enact
+        // idempotent ET inviolable (rejet avant expiration → aucun bloc forgé).
+        if let Some(PayloadEnvelope::Plain(PlainPayload::GovernanceProposal {
+            proposal_id,
+            update,
+            tier,
+            reason,
+            announced_at_ms,
+            enact_after_ms,
+        })) = &payload
+        {
+            let record = pms_config::GovernanceProposalRecord {
+                proposal_id: proposal_id.clone(),
+                update: update.clone(),
+                tier: *tier,
+                reason: reason.clone(),
+                announced_at_ms: *announced_at_ms,
+                enact_after_ms: *enact_after_ms,
+                status: pms_config::GovernanceStatus::Pending,
+            };
+            if let Err(e) = self.store.put_governance_proposal(&record) {
+                return Ok(PutResult::Rejected(format!(
+                    "governance proposal store failed: {e}"
+                )));
+            }
+            tracing::info!(
+                "🏛️ Governance proposal {} ({}) announced — enact_after={} (block {})",
+                proposal_id,
+                tier.as_str(),
+                enact_after_ms,
+                wb.id
+            );
+        }
+        if let Some(PayloadEnvelope::Plain(PlainPayload::GovernanceEnact {
+            proposal_id, ..
+        })) = &payload
+        {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let record = match self.store.get_governance_proposal(proposal_id) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "governance enact: unknown proposal {proposal_id}"
+                    )));
+                }
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "governance enact lookup failed: {e}"
+                    )));
+                }
+            };
+            if record.status != pms_config::GovernanceStatus::Pending {
+                return Ok(PutResult::Rejected(format!(
+                    "governance enact: proposal {proposal_id} not pending (status={})",
+                    record.status.as_str()
+                )));
+            }
+            // INVARIANT TIMELOCK (G2) — refus tant que le délai n'est pas écoulé.
+            if now_ms < record.enact_after_ms {
+                return Ok(PutResult::Rejected(format!(
+                    "governance enact: timelock not elapsed (now={now_ms}, enact_after={})",
+                    record.enact_after_ms
+                )));
+            }
+            if let Err(e) = self
+                .store
+                .apply_config_update(&record.update, &wb.id, now_ms as i64)
+            {
+                return Ok(PutResult::Rejected(format!(
+                    "governance enact apply failed: {e}"
+                )));
+            }
+            if let Err(e) = self
+                .store
+                .set_governance_status(proposal_id, pms_config::GovernanceStatus::Enacted)
+            {
+                tracing::warn!("governance status update failed: {e}");
+            }
+            tracing::info!(
+                "🏛️ Governance proposal {} ENACTED (block {})",
+                proposal_id,
+                wb.id
+            );
+        }
+        if let Some(PayloadEnvelope::Plain(PlainPayload::GovernanceCancel {
+            proposal_id, ..
+        })) = &payload
+        {
+            let record = match self.store.get_governance_proposal(proposal_id) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "governance cancel: unknown proposal {proposal_id}"
+                    )));
+                }
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "governance cancel lookup failed: {e}"
+                    )));
+                }
+            };
+            if record.status != pms_config::GovernanceStatus::Pending {
+                return Ok(PutResult::Rejected(format!(
+                    "governance cancel: proposal {proposal_id} not pending (status={})",
+                    record.status.as_str()
+                )));
+            }
+            if let Err(e) = self
+                .store
+                .set_governance_status(proposal_id, pms_config::GovernanceStatus::Cancelled)
+            {
+                return Ok(PutResult::Rejected(format!("governance cancel failed: {e}")));
+            }
+            tracing::info!(
+                "🏛️ Governance proposal {} CANCELLED (block {})",
+                proposal_id,
+                wb.id
+            );
+        }
+
         // 1.compliance) Apply compliance registry operations (Freeze / Unfreeze / Seize / Reverse)
         if let Some(PayloadEnvelope::Plain(PlainPayload::Freeze {
             ref address,

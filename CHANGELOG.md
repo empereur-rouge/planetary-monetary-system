@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.15.0] - Unreleased — Gouvernance timelock (plan §4, cœur protocole)
+
+Première phase de la gouvernance timelock (`pms-spec-governance-timelock.md`) :
+tout changement de config gouverné passe par `GovernanceProposal → timelock →
+GovernanceEnact`, **ancré dans le DAG** (annoncé, horodaté, signé Coordinator).
+Le délai est **inviolable au protocole** (un enact avant expiration est rejeté).
+**P1a (cette version)** : cœur protocole + storage + validation. P1b (à venir) :
+endpoints HTTP + rewire `admin_update_config` → propose + tâche auto-enact + e2e.
+
+### Added — P1a (cœur protocole)
+- **feat(protocol)** — variantes `PlainPayload::Governance{Proposal,Enact,Cancel}`
+  ([crates/pms-types-payload/src/payload.rs](crates/pms-types-payload/src/payload.rs)),
+  coordinator-only. Proposal porte `{update: ConfigUpdate, tier, reason,
+  announced_at, enact_after}` ; enact applique le `ConfigUpdate` après le délai ;
+  cancel annule une proposition `Pending`.
+- **feat(config)** — `GovernanceTier` (Operator 7 j / Policy 15 j / Constitution
+  45 j) + `GovernanceStatus` + `GovernanceProposalRecord`
+  ([crates/pms-config/src/governance.rs](crates/pms-config/src/governance.rs)).
+- **feat(storage)** — trait `GovernanceStorage` (CF `governance_proposals`,
+  ajouté à `EngineStorage`) : put/get/set_status/list. Migration `mig_10_to_11`,
+  `CURRENT_VER` 10→11.
+- **feat(core/validation)** — hot path persist
+  ([persist.rs](crates/pms-core/src/net_adapter/persist.rs)) : proposal → stocke
+  `Pending` ; **enact → REJETÉ si `now < enact_after`** (timelock inviolable) ou
+  statut ≠ Pending, sinon applique via `apply_config_update` + marque `Enacted` ;
+  cancel → `Cancelled`. Le check statut rend l'enact idempotent.
+- **test(storage)** — `governance_proposal_roundtrip_and_status` + `tier_durations_golden`
+  (durées 7/15/45 j golden ; round-trip + transitions de statut).
+- **chore(version)** — `DAG_VERSION` 3.3.0 → **3.4.0** (payloads additifs, pas de
+  wipe), `CURRENT_VER` 10 → **11** (CF), `Cargo.toml` 0.14.0 → **0.15.0**.
+
+### Notes
+- **Pas encore branché côté admin** : `admin_update_config` reste instantané pour
+  l'instant ; P1b le rewire en `propose` (timelocké) + ajoute les endpoints
+  `/admin/governance/{propose,enact,cancel}` + `/v1/governance/{pending,history}`
+  + la tâche d'auto-enact + le test e2e du timelock (G2/G3).
+- Spec : `pms-spec-governance-timelock.md` (§9 plan d'implémentation).
+
+---
+
 ## [0.14.0] - Unreleased — Voie B : burn de token + évaluation contrat OnTokenBurn
 
 **Voie B livrée et prouvée e2e** (conversion token custom→PMS, « scrip » = ex.
