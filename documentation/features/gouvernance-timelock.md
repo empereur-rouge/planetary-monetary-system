@@ -116,8 +116,9 @@ Aucune activation requise : les routes sont montées en standard ; les `propose`
 | POST | `/admin/governance/propose` | admin (gated) | Annonce un changement timelocké |
 | POST | `/admin/governance/enact/{id}` | admin (gated) | Applique après expiration (rejeté avant) |
 | POST | `/admin/governance/cancel/{id}` | admin (gated) | Annule une proposition `Pending` |
-| GET | `/v1/governance/pending` | **public** | Propositions en attente (l'annonce) |
-| GET | `/v1/governance/history` | **public** | Propositions enacted / cancelled (audit) |
+| GET | `/v1/governance/pending` | **public** | Propositions en attente (l'annonce) + block ids du cycle |
+| GET | `/v1/governance/history` | **public** | Propositions enacted / cancelled (audit) + block ids |
+| GET | `/v1/governance/blocks` | **public** | **Journal d'audit** : TOUS les blocs DAG de gouvernance (proposal/enact/cancel) avec `block_id`, `kind`, statut, update |
 | POST | `/admin/config` | admin (gated) | **(P2)** forge un `GovernanceProposal` (palier auto). Resserrage → appliqué (`applied`), desserrage → `proposed` timelocké. Plus d'application instantanée hors-DAG |
 | GET | `/admin/config` | admin (recovery) | Lecture de la `RuntimeConfig` courante |
 

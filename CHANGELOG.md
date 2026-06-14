@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.18.0] - Unreleased — API : journal d'audit des blocs de gouvernance
+
+### Added
+- **feat(api)** — nouvel endpoint **public** `GET /v1/governance/blocks`
+  ([governance.rs](crates/pms-server/src/api_fn/governance.rs)) : renvoie TOUS les
+  blocs DAG de gouvernance (proposal / enact / cancel), chacun avec son `block_id`,
+  `kind`, `proposal_id`, `tier`, `status`, `update`, `reason` — un journal d'audit
+  chronologique complet en un appel. Construit depuis l'index `governance_proposals`
+  (pas de scan du DAG). `block_id` → récupérable via `/v1/block/{id}` pour le bloc brut.
+- **feat(storage)** — `GovernanceProposalRecord` mémorise désormais les block ids du
+  cycle : `proposal_block_id` (toujours), `enact_block_id` / `cancel_block_id`
+  (`Option`, selon le statut). `set_governance_status(.., action_block_id)` enregistre
+  le bloc qui a provoqué la transition. Champs `#[serde(default)]` → rétro-compatible,
+  pas de migration.
+- **feat(api)** — `GET /v1/governance/{pending,history}` incluent maintenant les
+  `proposal_block_id` / `enact_block_id` / `cancel_block_id` (remonter au bloc DAG).
+- **test(e2e)** — `test_governance_blocks_audit_trail` (dag_sandbox) : un cycle
+  resserrage (proposal + enact) et un cycle annulé (proposal + cancel) → l'endpoint
+  liste les 4 blocs avec les bons `kind` et des `block_id` cohérents avec les réponses
+  des actions.
+- **chore(version)** — `Cargo.toml` 0.17.1 → **0.18.0** ; `API_VERSION` 21 → **22**.
+
+---
+
 ## [0.17.1] - Unreleased — Fix test rot : bridge e2e protocol_version
 
 ### Fixed

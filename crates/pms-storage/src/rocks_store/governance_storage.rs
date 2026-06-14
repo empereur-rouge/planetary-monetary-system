@@ -39,11 +39,21 @@ impl GovernanceStorage for RocksStore {
         &self,
         proposal_id: &str,
         status: GovernanceStatus,
+        action_block_id: &str,
     ) -> Result<()> {
         let mut record = self
             .get_governance_proposal(proposal_id)?
             .ok_or_else(|| anyhow::anyhow!("governance proposal not found: {proposal_id}"))?;
         record.status = status;
+        // Mémorise le bloc qui a provoqué la transition (audit + index des blocs de
+        // gouvernance) — l'enact ou le cancel selon le statut cible.
+        match status {
+            GovernanceStatus::Enacted => record.enact_block_id = Some(action_block_id.to_string()),
+            GovernanceStatus::Cancelled => {
+                record.cancel_block_id = Some(action_block_id.to_string())
+            }
+            GovernanceStatus::Pending => {}
+        }
         self.put_governance_proposal(&record)
     }
 
@@ -88,6 +98,9 @@ mod tests {
             announced_at_ms: 1000,
             enact_after_ms: 1000 + tier.default_duration_ms(),
             status,
+            proposal_block_id: format!("proposal-block-{id}"),
+            enact_block_id: None,
+            cancel_block_id: None,
         }
     }
 
@@ -110,20 +123,24 @@ mod tests {
         // enact_after = announced + 15 jours (Policy) — golden hardcodé
         assert_eq!(got.enact_after_ms, 1000 + 15 * 86_400_000);
 
-        // transition de statut
+        // transition de statut + mémorisation du bloc d'enact
         store
-            .set_governance_status("p1", GovernanceStatus::Enacted)
+            .set_governance_status("p1", GovernanceStatus::Enacted, "enact-block-p1")
             .unwrap();
+        let enacted = store.get_governance_proposal("p1").unwrap().unwrap();
+        assert_eq!(enacted.status, GovernanceStatus::Enacted);
         assert_eq!(
-            store.get_governance_proposal("p1").unwrap().unwrap().status,
-            GovernanceStatus::Enacted
+            enacted.enact_block_id.as_deref(),
+            Some("enact-block-p1"),
+            "le bloc d'enact est mémorisé dans le record"
         );
+        assert_eq!(enacted.cancel_block_id, None);
 
         // inconnu → None / erreur
         assert!(store.get_governance_proposal("nope").unwrap().is_none());
         assert!(
             store
-                .set_governance_status("nope", GovernanceStatus::Cancelled)
+                .set_governance_status("nope", GovernanceStatus::Cancelled, "x")
                 .is_err(),
             "status update on unknown proposal must error"
         );

@@ -140,6 +140,11 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
         .route(
             "/v1/governance/history",
             get(crate::api_fn::governance::list_history),
+        )
+        // Journal d'audit : TOUS les blocs DAG de gouvernance (proposal/enact/cancel).
+        .route(
+            "/v1/governance/blocks",
+            get(crate::api_fn::governance::list_blocks),
         );
 
     let token_routes = Router::new()

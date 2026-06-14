@@ -211,7 +211,9 @@ pub async fn admin_cancel(
     })))
 }
 
-/// Sérialise une proposition pour l'API publique.
+/// Sérialise une proposition pour l'API publique. Inclut les block ids du cycle
+/// (proposal toujours ; enact/cancel selon le statut) pour permettre de remonter
+/// au bloc DAG immuable correspondant.
 fn proposal_json(r: &pms_config::GovernanceProposalRecord) -> serde_json::Value {
     json!({
         "proposal_id": r.proposal_id,
@@ -221,7 +223,41 @@ fn proposal_json(r: &pms_config::GovernanceProposalRecord) -> serde_json::Value 
         "announced_at_ms": r.announced_at_ms,
         "enact_after_ms": r.enact_after_ms,
         "update": r.update,
+        "proposal_block_id": r.proposal_block_id,
+        "enact_block_id": r.enact_block_id,
+        "cancel_block_id": r.cancel_block_id,
     })
+}
+
+/// Construit les entrées « bloc de gouvernance » d'une proposition : le bloc
+/// `proposal` (toujours), puis `enact`/`cancel` si présents. Chaque entrée est
+/// dénormalisée (tier/status/update) pour faire un journal d'audit lisible en un
+/// seul appel ; `block_id` permet de récupérer le bloc DAG brut via `/block/{id}`.
+fn governance_block_entries(r: &pms_config::GovernanceProposalRecord) -> Vec<serde_json::Value> {
+    let base = |kind: &str, block_id: &str| {
+        json!({
+            "block_id": block_id,
+            "kind": kind,
+            "proposal_id": r.proposal_id,
+            "tier": r.tier.as_str(),
+            "status": r.status.as_str(),
+            "update": r.update,
+            "reason": r.reason,
+            "announced_at_ms": r.announced_at_ms,
+            "enact_after_ms": r.enact_after_ms,
+        })
+    };
+    let mut out = Vec::with_capacity(2);
+    if !r.proposal_block_id.is_empty() {
+        out.push(base("proposal", &r.proposal_block_id));
+    }
+    if let Some(id) = &r.enact_block_id {
+        out.push(base("enact", id));
+    }
+    if let Some(id) = &r.cancel_block_id {
+        out.push(base("cancel", id));
+    }
+    out
 }
 
 /// Liste les propositions gardées par `keep`, sous la clé JSON `key`.
@@ -254,4 +290,30 @@ pub async fn list_pending(State(state): State<AppState>) -> Result<impl IntoResp
 /// `GET /v1/governance/history` — **public** : propositions enacted / cancelled.
 pub async fn list_history(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     list_filtered(&state, "history", |r| r.status != GovernanceStatus::Pending)
+}
+
+/// `GET /v1/governance/blocks` — **public** : TOUS les blocs DAG de gouvernance.
+///
+/// Renvoie le journal d'audit complet : pour chaque proposition, le bloc
+/// `proposal` puis ses blocs `enact`/`cancel` éventuels, chacun avec son `block_id`
+/// (récupérable via `/v1/block/{id}` pour le bloc brut signé). Les entrées sont
+/// groupées **par proposition, dans l'ordre d'annonce** (`announced_at_ms`), le
+/// cycle d'une proposition restant contigu (proposal→enact/cancel) — ce n'est donc
+/// PAS un tri strictement chronologique par horodatage de bloc (un enact peut
+/// suivre une annonce plus récente). Chaque entrée porte `announced_at_ms`,
+/// `enact_after_ms` et le `block_id` immuable pour une reconstruction précise.
+///
+/// Construit depuis l'index `governance_proposals` (pas de scan du DAG) — voir
+/// [`list_filtered`] pour les notes de coût (faible QPS, faible cardinalité).
+pub async fn list_blocks(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+    let mut all = state
+        .store
+        .list_governance_proposals()
+        .map_err(|e| ApiError::StorageError {
+            reason: e.to_string(),
+        })?;
+    // Ordre chronologique stable par annonce (le cycle d'une proposition reste groupé).
+    all.sort_by_key(|r| r.announced_at_ms);
+    let blocks: Vec<_> = all.iter().flat_map(governance_block_entries).collect();
+    Ok(Json(json!({ "count": blocks.len(), "blocks": blocks })))
 }

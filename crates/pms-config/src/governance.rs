@@ -94,4 +94,15 @@ pub struct GovernanceProposalRecord {
     pub enact_after_ms: u64,
     /// Statut courant.
     pub status: GovernanceStatus,
+    /// Block id du bloc `GovernanceProposal` qui a annoncé ce changement. Permet
+    /// d'indexer les blocs de gouvernance sans scanner le DAG. (`#[serde(default)]`
+    /// pour rester compatible avec d'éventuels records antérieurs à ce champ.)
+    #[serde(default)]
+    pub proposal_block_id: String,
+    /// Block id du bloc `GovernanceEnact` (présent une fois enacté).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enact_block_id: Option<String>,
+    /// Block id du bloc `GovernanceCancel` (présent une fois annulé).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_block_id: Option<String>,
 }

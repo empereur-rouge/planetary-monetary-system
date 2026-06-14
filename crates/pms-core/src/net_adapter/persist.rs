@@ -522,6 +522,9 @@ where
                 announced_at_ms: *announced_at_ms,
                 enact_after_ms: *enact_after_ms,
                 status: pms_config::GovernanceStatus::Pending,
+                proposal_block_id: wb.id.clone(),
+                enact_block_id: None,
+                cancel_block_id: None,
             };
             if let Err(e) = self.store.put_governance_proposal(&record) {
                 return Ok(PutResult::Rejected(format!(
@@ -578,10 +581,11 @@ where
                     "governance enact apply failed: {e}"
                 )));
             }
-            if let Err(e) = self
-                .store
-                .set_governance_status(proposal_id, pms_config::GovernanceStatus::Enacted)
-            {
+            if let Err(e) = self.store.set_governance_status(
+                proposal_id,
+                pms_config::GovernanceStatus::Enacted,
+                &wb.id,
+            ) {
                 tracing::warn!("governance status update failed: {e}");
             }
             tracing::info!(
@@ -613,10 +617,11 @@ where
                     record.status.as_str()
                 )));
             }
-            if let Err(e) = self
-                .store
-                .set_governance_status(proposal_id, pms_config::GovernanceStatus::Cancelled)
-            {
+            if let Err(e) = self.store.set_governance_status(
+                proposal_id,
+                pms_config::GovernanceStatus::Cancelled,
+                &wb.id,
+            ) {
                 return Ok(PutResult::Rejected(format!("governance cancel failed: {e}")));
             }
             tracing::info!(

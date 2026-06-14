@@ -6059,3 +6059,82 @@ async fn test_admin_config_governance_rewire() -> Result<()> {
     println!("\n   TEST PASSED: /admin/config rewire — tighten instant, loosen timelocké (bypass fermé).");
     Ok(())
 }
+
+/// Gouvernance — journal d'audit `GET /v1/governance/blocks` (public).
+///
+/// Prouve que l'endpoint expose TOUS les blocs DAG de gouvernance, groupés par
+/// cycle : un resserrage (proposal + enact instantané) ⇒ 2 blocs ; une proposition
+/// annulée (proposal + cancel) ⇒ 2 blocs. Chaque entrée porte son `block_id` et
+/// son `kind`, et les block_ids correspondent à ceux renvoyés par les actions.
+///
+/// Run: `cargo test --release -p pms-server --test dag_sandbox \
+///   test_governance_blocks_audit_trail -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_governance_blocks_audit_trail() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // (A) Resserrage instantané : propose + enact → 2 blocs (proposal, enact).
+    let (s, p1) = sandbox
+        .admin_post(
+            "/admin/governance/propose",
+            json!({ "update": { "SetMaxMint": { "amount": 1 } }, "tier": "Policy", "reason": "tighten" }),
+        )
+        .await;
+    assert!(s.is_success(), "propose tighten: {s} {p1:?}");
+    let pid1 = p1["proposal_id"].as_str().unwrap().to_string();
+    let proposal_block_1 = p1["block_id"].as_str().unwrap().to_string();
+    let (s, e1) = sandbox
+        .admin_post(&format!("/admin/governance/enact/{pid1}"), json!({ "reason": "now" }))
+        .await;
+    assert!(s.is_success(), "enact tighten: {s} {e1:?}");
+    let enact_block_1 = e1["block_id"].as_str().unwrap().to_string();
+
+    // (B) Proposition annulée : propose (loosen) + cancel → 2 blocs (proposal, cancel).
+    let (s, p2) = sandbox
+        .admin_post(
+            "/admin/governance/propose",
+            json!({ "update": { "SetFeeRate": { "bps": 555 } }, "tier": "Operator", "reason": "loosen" }),
+        )
+        .await;
+    assert!(s.is_success(), "propose loosen: {s} {p2:?}");
+    let pid2 = p2["proposal_id"].as_str().unwrap().to_string();
+    let (s, c2) = sandbox
+        .admin_post(&format!("/admin/governance/cancel/{pid2}"), json!({ "reason": "abort" }))
+        .await;
+    assert!(s.is_success(), "cancel: {s} {c2:?}");
+    let cancel_block_2 = c2["block_id"].as_str().unwrap().to_string();
+
+    // (C) GET /v1/governance/blocks → journal complet.
+    let (s, body) = sandbox.public_get("/v1/governance/blocks").await;
+    println!("   /v1/governance/blocks → {} — {}", s, serde_json::to_string_pretty(&body).unwrap());
+    assert!(s.is_success());
+    let blocks = body["blocks"].as_array().expect("blocks array");
+
+    // Helper : trouve une entrée par (proposal_id, kind).
+    let find = |pid: &str, kind: &str| -> Option<serde_json::Value> {
+        blocks.iter().find(|b| b["proposal_id"] == pid && b["kind"] == kind).cloned()
+    };
+
+    // Cycle A : proposal + enact, block_ids cohérents avec les réponses des actions.
+    let a_prop = find(&pid1, "proposal").expect("cycle A proposal block listed");
+    let a_enact = find(&pid1, "enact").expect("cycle A enact block listed");
+    assert_eq!(a_prop["block_id"].as_str(), Some(proposal_block_1.as_str()), "proposal block_id match");
+    assert_eq!(a_enact["block_id"].as_str(), Some(enact_block_1.as_str()), "enact block_id match");
+    assert_eq!(a_enact["status"], "enacted");
+    assert!(find(&pid1, "cancel").is_none(), "no cancel block for an enacted proposal");
+
+    // Cycle B : proposal + cancel.
+    assert!(find(&pid2, "proposal").is_some(), "cycle B proposal block listed");
+    let b_cancel = find(&pid2, "cancel").expect("cycle B cancel block listed");
+    assert_eq!(b_cancel["block_id"].as_str(), Some(cancel_block_2.as_str()), "cancel block_id match");
+    assert_eq!(b_cancel["status"], "cancelled");
+    assert!(find(&pid2, "enact").is_none(), "no enact block for a cancelled proposal");
+
+    // count == nombre d'entrées (4 ici minimum : 2 cycles × 2 blocs).
+    assert_eq!(body["count"].as_u64(), Some(blocks.len() as u64));
+    assert!(blocks.len() >= 4, "at least 4 governance blocks (2 cycles × 2)");
+
+    println!("\n   TEST PASSED: /v1/governance/blocks expose le journal d'audit (proposal+enact, proposal+cancel).");
+    Ok(())
+}
