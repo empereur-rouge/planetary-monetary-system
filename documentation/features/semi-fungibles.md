@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-06-14
-updated: 2026-06-14
-version: v0.19.0
+updated: 2026-06-15
+version: v0.20.0
 ---
 
 # Semi-fongibles (SFT, façon ERC-1155)
@@ -19,8 +19,10 @@ identiques), ressources.
 **Modèle retenu** (`pms-spec-semi-fungibles.md`) : la classe est **posée sur le
 moteur UTXO existant** — son `asset_id` est `"{collection}:{class}"`, ses soldes
 vivent dans les UTXO comme un token fongible. Conséquence décisive : une classe
-SFT **hérite gratuitement** du time-lock (`locked_until`) et des spend-conditions
-(multisig/hashlock), qui sont per-UTXO. Le seul code neuf = un **registre de
+SFT **hérite** du time-lock (`locked_until`) et des spend-conditions
+(multisig/hashlock) — automatiques car per-UTXO — et peut activer le **demurrage**
+(`demurrage_bps_per_day`, opt-in par classe, v0.20.0) qui décote ses UTXO par le
+même mécanisme que les tokens (protocole 2.5). Le seul code neuf = un **registre de
 classes** + des handlers ; mint/transfert/burn réutilisent
 `Mint`/`TxUtxo`/`TokenBurn`.
 
@@ -64,7 +66,7 @@ les blocs Mint).
 
 | Méthode | Path | Accès | Description |
 |---------|------|-------|-------------|
-| POST | `/admin/sft/classes` | admin (gated) | Crée une classe (`collection_id`, `class_id`, `name`, `uri?`, `attributes?`, `decimals`, `max_supply?`) |
+| POST | `/admin/sft/classes` | admin (gated) | Crée une classe (`collection_id`, `class_id`, `name`, `uri?`, `attributes?`, `decimals`, `max_supply?`, `demurrage_bps_per_day?`) |
 | POST | `/admin/sft/mint` | admin (gated) | Mint `amount` d'une classe (`asset_id`, `to`) — contraint par `max_supply` |
 | GET | `/v1/sft/classes` | **public** | Toutes les classes |
 | GET | `/v1/sft/classes/{asset_id}` | **public** | Détail d'une classe (`asset_id = collection:class`) |

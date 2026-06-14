@@ -23,6 +23,23 @@ impl<S> CoreAdapter<S>
 where
     S: pms_storage::EngineStorage,
 {
+    /// Résout les métadonnées « asset custom » d'un `asset_id` : un token
+    /// (`token_registry`) OU une classe SFT (`sft_classes`, vue `TokenMetadata`
+    /// via [`pms_types::SftClass::to_token_metadata`]). Les deux registres sont
+    /// mutuellement exclusifs (namespace `:`), donc au plus un match. Fail-open à
+    /// `None` sur erreur store. Point unique de résolution pour la validation de
+    /// mint contraint ET la résolution du taux de demurrage.
+    fn resolve_asset_metadata(&self, asset_id: &str) -> Option<pms_types::TokenMetadata> {
+        match self.store.get_token(asset_id).unwrap_or(None) {
+            Some(m) => Some(m),
+            None => self
+                .store
+                .get_sft_class(asset_id)
+                .unwrap_or(None)
+                .map(|c| c.to_token_metadata()),
+        }
+    }
+
     /// Full block persistence pipeline.
     ///
     /// Etapes:
@@ -291,19 +308,10 @@ where
                         // (contraintes per-asset skippées, gate Coordinator
                         // conservé). À durcir avec la migration ApiError.
                         //
-                        // Un `asset_id` est SOIT un token (token_registry) SOIT une
-                        // classe SFT (sft_classes — namespace `:`, mutuellement
-                        // exclusifs). Si ce n'est pas un token, on tente la classe
-                        // SFT et on réutilise la MÊME validation de mint contraint
-                        // (mint_authority + max_supply) via sa vue TokenMetadata.
-                        let meta = match self.store.get_token(asset_id).unwrap_or(None) {
-                            Some(m) => Some(m),
-                            None => self
-                                .store
-                                .get_sft_class(asset_id)
-                                .unwrap_or(None)
-                                .map(|c| c.to_token_metadata()),
-                        };
+                        // Token OU classe SFT (mutuellement exclusifs, namespace `:`)
+                        // → MÊME validation de mint contraint (mint_authority +
+                        // max_supply). Résolution centralisée.
+                        let meta = self.resolve_asset_metadata(asset_id);
                         // Le supply cache n'est interrogé que si une cap OU un
                         // collatéral existe — validate_custom_asset_mints
                         // traite une entrée absente comme ZERO.
@@ -693,6 +701,13 @@ where
                     "sft class: creator and mint_authority required".to_string(),
                 ));
             }
+            if let Some(bps) = class.demurrage_bps_per_day {
+                if bps > 10_000 {
+                    return Ok(PutResult::Rejected(
+                        "sft class: demurrage_bps_per_day must be <= 10000".to_string(),
+                    ));
+                }
+            }
             // Unicité : une classe déjà enregistrée ne doit pas être écrasée
             // silencieusement (anti-overwrite, comme la gouvernance).
             match self.store.get_sft_class(&class.asset_id) {
@@ -1027,13 +1042,13 @@ where
                 .iter()
                 .filter_map(|o| o.asset_id.as_deref())
                 .collect();
+            // Le taux de demurrage est résolu pour un token OU une classe SFT
+            // (même mécanisme : les soldes SFT sont des UTXO). `resolve_asset_metadata`
+            // centralise le lookup token-ou-SFT.
             let demurrage_rates: std::collections::HashMap<String, u32> = assets
                 .into_iter()
                 .filter_map(|asset| {
-                    self.store
-                        .get_token(asset)
-                        .ok()
-                        .flatten()
+                    self.resolve_asset_metadata(asset)
                         .and_then(|m| m.demurrage_bps_per_day.filter(|bps| *bps > 0))
                         .map(|bps| (asset.to_string(), bps))
                 })

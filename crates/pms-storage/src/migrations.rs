@@ -27,6 +27,10 @@ pub const CURRENT_VER: i64 = 12;
 /// canonique du contenu. Des blocs acceptés sous 2.x (unlocks invalides,
 /// ids forgés) sont rejetés sous 3.x ; un re-sync depuis zéro peut refuser
 /// un historique 2.x → wipe testnet requis.
+/// v3.8.0 (semi-fongibles, demurrage) : champ additif `demurrage_bps_per_day` sur
+/// `SftClass` (payload `SftClassCreate`) — une classe SFT peut décoter ses UTXO par
+/// le même mécanisme que les tokens (protocole 2.5). Additif (serde default) → MINOR,
+/// pas de wipe.
 /// v3.7.0 (semi-fongibles, `pms-spec-semi-fungibles.md`) : nouvelle variante
 /// `PlainPayload::SftClassCreate` (registre de classes SFT façon ERC-1155 ;
 /// soldes portés par le moteur UTXO existant, `asset_id = "collection:class"`).
@@ -51,7 +55,7 @@ pub const CURRENT_VER: i64 = 12;
 /// (burn de token owner-signé, la supply baisse, trigger des contrats
 /// `OnTokenBurn`). Backward-compatible : les blocs existants parsent toujours ;
 /// un nœud à jour accepte le nouveau type. MINOR → migration auto, pas de wipe.
-pub const DAG_VERSION: &str = "3.7.0";
+pub const DAG_VERSION: &str = "3.8.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

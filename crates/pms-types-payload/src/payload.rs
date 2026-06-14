@@ -425,6 +425,12 @@ pub struct SftClass {
     /// Supply maximum de la classe (None = illimité). Decimal string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_supply: Option<String>,
+    /// Demurrage opt-in (protocole 2.5) : décote en basis points par JOUR PLEIN
+    /// écoulé depuis la création de l'UTXO. `None`/`0` = pas de demurrage. Identique
+    /// au champ homonyme de [`TokenMetadata`] — les soldes SFT étant des UTXO, la
+    /// décote s'applique par le MÊME mécanisme (≤ 10000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demurrage_bps_per_day: Option<u32>,
     /// Adresse/pubkey du créateur (immuable).
     pub creator: String,
     /// Clé publique autorisée à mint cette classe.
@@ -436,7 +442,7 @@ impl SftClass {
     /// validation de mint contraint des assets custom (`mint_authority`,
     /// `max_supply`, granularité `decimals` — plan 2.3/2.4). Une classe SFT est,
     /// pour le moteur UTXO, un asset fongible : ses contraintes de mint sont les
-    /// mêmes qu'un token. Pas de collatéral ni de demurrage en v1 (`None`).
+    /// mêmes qu'un token. Le demurrage est repris tel quel ; pas de collatéral en v1.
     pub fn to_token_metadata(&self) -> TokenMetadata {
         TokenMetadata {
             asset_id: self.asset_id.clone(),
@@ -446,7 +452,7 @@ impl SftClass {
             max_supply: self.max_supply.clone(),
             creator: self.creator.clone(),
             mint_authority: self.mint_authority.clone(),
-            demurrage_bps_per_day: None,
+            demurrage_bps_per_day: self.demurrage_bps_per_day,
             collateral_address: None,
             collateral_asset_id: None,
             collateral_ratio_bps: None,

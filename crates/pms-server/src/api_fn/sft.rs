@@ -39,6 +39,9 @@ pub struct CreateSftClassRequest {
     pub decimals: u8,
     #[serde(default)]
     pub max_supply: Option<String>,
+    /// Demurrage opt-in (bps/jour, ≤ 10000). `None`/`0` = pas de décote.
+    #[serde(default)]
+    pub demurrage_bps_per_day: Option<u32>,
 }
 
 /// Requête de mint d'une classe.
@@ -97,6 +100,7 @@ pub async fn admin_create_sft_class(
         attributes: req.attributes,
         decimals: req.decimals,
         max_supply: req.max_supply,
+        demurrage_bps_per_day: req.demurrage_bps_per_day,
         creator: coordinator_pk.clone(),
         mint_authority: coordinator_pk,
     };
