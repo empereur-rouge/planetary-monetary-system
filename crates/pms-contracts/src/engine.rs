@@ -252,12 +252,113 @@ pub fn evaluate_nft_burn(
                         contract.name
                     );
                 }
-                // TransferFee n'est pas applicable aux burns NFT
-                ContractAction::TransferFee { .. } => {}
+                // Non applicables aux burns NFT (TransferFee = transferts ;
+                // MintNative = burns de TOKEN fongible, cf. evaluate_token_burn).
+                ContractAction::TransferFee { .. } | ContractAction::MintNative { .. } => {}
             }
         }
     }
 
+    results
+}
+
+/// Résultat de l'évaluation d'un `OnTokenBurn` → mint de PMS natif (voie B).
+///
+/// Produit par [`evaluate_token_burn`]. Le mint réel n'est PAS fait ici : le
+/// serveur exécute le mint **sous le budget d'émission partagé** (`EmissionGate`)
+/// — le contrat ne porte que la politique (le taux R).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MintNativeResult {
+    /// ID du contrat déclenché.
+    pub contract_id: String,
+    /// Nom du contrat.
+    pub contract_name: String,
+    /// Bénéficiaire du mint (le burner).
+    pub recipient: String,
+    /// Montant de PMS natif à minter (= `burn × R`).
+    pub amount: Decimal,
+    /// Détails (audit / logging).
+    pub details: String,
+}
+
+/// Évalue les contrats `OnTokenBurn{asset_id}` déclenchés par un burn de token
+/// (voie B, plan §3.1). Miroir de [`evaluate_nft_burn`].
+///
+/// Retourne des instructions de **mint de PMS natif** (action [`ContractAction::MintNative`]
+/// → `burn_amount × rate_numerator / rate_denominator`). Le mint réel est exécuté
+/// par l'appelant SOUS le budget d'émission partagé (`EmissionGate`) — le moteur
+/// de contrats ne connaît jamais le mint natif, seulement le taux. `EmitEvent`
+/// est loggé ; `AccumulateRefund` sur un burn de token (refund token→token) et
+/// `TransferFee` ne sont pas traités ici (extensions futures).
+pub fn evaluate_token_burn(
+    contract_store: &dyn ContractStorage,
+    ledger_id: &str,
+    burner_address: &str,
+    asset_id: &str,
+    burn_amount: Decimal,
+) -> Vec<MintNativeResult> {
+    let contracts = match contract_store.find_token_burn_contracts(asset_id, ledger_id) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("ContractEngine: failed to find token-burn contracts: {e}");
+            return vec![];
+        }
+    };
+    if contracts.is_empty() {
+        return vec![];
+    }
+
+    let mut results = Vec::new();
+    for contract in &contracts {
+        for action in &contract.actions {
+            match action {
+                ContractAction::MintNative {
+                    rate_numerator,
+                    rate_denominator,
+                } => {
+                    if *rate_denominator == 0 {
+                        tracing::error!(
+                            "ContractEngine: MintNative rate_denominator is zero in contract '{}'",
+                            contract.name
+                        );
+                        continue;
+                    }
+                    let amount = (burn_amount * Decimal::from(*rate_numerator)
+                        / Decimal::from(*rate_denominator))
+                    .round_dp(8);
+                    if amount > Decimal::ZERO {
+                        let details = format!(
+                            "Contract '{}' v{}: {} {} burned → {} PMS mint (R={}/{})",
+                            contract.name,
+                            contract.version,
+                            burn_amount,
+                            asset_id,
+                            amount,
+                            rate_numerator,
+                            rate_denominator,
+                        );
+                        tracing::info!("ContractEngine: {details}");
+                        results.push(MintNativeResult {
+                            contract_id: contract.contract_id.clone(),
+                            contract_name: contract.name.clone(),
+                            recipient: burner_address.to_string(),
+                            amount,
+                            details,
+                        });
+                    }
+                }
+                ContractAction::EmitEvent { event_type } => {
+                    tracing::info!(
+                        "ContractEngine: event '{}' from token-burn contract '{}'",
+                        event_type,
+                        contract.name
+                    );
+                }
+                // Non applicables / non traités sur un burn de token (voie B).
+                ContractAction::AccumulateRefund { .. } | ContractAction::TransferFee { .. } => {}
+            }
+        }
+    }
     results
 }
 
@@ -512,7 +613,7 @@ pub fn simulate_contract(
     // ── 4. Évaluer selon le type d'événement ───────────────────────────
     let mut burn_results = Vec::new();
     let mut transfer_fee_results = Vec::new();
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
 
     match event {
         SimulationEvent::NftBurn {
@@ -558,13 +659,32 @@ pub fn simulate_contract(
                 .collect();
         }
 
-        SimulationEvent::TokenBurn { .. } => {
-            warnings.push(
-                "OnTokenBurn evaluation is not yet implemented in the contract engine. \
-                 The contract definition is valid, but simulation cannot produce results \
-                 for this trigger type."
-                    .to_string(),
-            );
+        SimulationEvent::TokenBurn {
+            ledger_id,
+            asset_id,
+            burn_amount,
+        } => {
+            let amount = Decimal::from_str(burn_amount).map_err(|e| {
+                anyhow::anyhow!("Invalid burn_amount '{}': {}", burn_amount, e)
+            })?;
+            // burner_address est sans importance en dry-run (on montre juste le
+            // montant de PMS qui serait minté).
+            let all_results =
+                evaluate_token_burn(&ephemeral, ledger_id, "simulation", asset_id, amount);
+            // MintNativeResult → ContractResult pour l'affichage (asset None =
+            // PMS natif minté au burner).
+            burn_results = all_results
+                .into_iter()
+                .filter(|r| r.contract_id == candidate.contract_id)
+                .map(|r| ContractResult {
+                    contract_id: r.contract_id,
+                    contract_name: r.contract_name,
+                    refund_address: r.recipient,
+                    refund_amount: r.amount,
+                    asset_id: None,
+                    details: r.details,
+                })
+                .collect();
         }
     }
 
@@ -605,7 +725,25 @@ pub fn simulate_contract(
                 vec![]
             }
         }
-        SimulationEvent::TokenBurn { .. } => vec![],
+        SimulationEvent::TokenBurn {
+            ledger_id,
+            asset_id,
+            burn_amount,
+        } => {
+            if let Ok(amount) = Decimal::from_str(burn_amount) {
+                let orig_results =
+                    evaluate_token_burn(existing_store, ledger_id, "simulation", asset_id, amount);
+                dedup_existing_matches(
+                    &orig_results
+                        .iter()
+                        .map(|r| (&r.contract_id, &r.contract_name))
+                        .collect::<Vec<_>>(),
+                    &existing_contracts,
+                )
+            } else {
+                vec![]
+            }
+        }
     };
 
     Ok(SimulationResult {
@@ -1383,16 +1521,20 @@ mod tests {
     }
 
     #[test]
-    fn test_simulate_token_burn_warning() {
+    fn test_simulate_token_burn_mint_native() {
+        // OnTokenBurn{edenite} → MintNative R=3/2 : brûler 100 edenite donne
+        // 150 PMS natif (voie B). Golden hardcodé (pas re-dérivé).
         let store = InMemoryContractStore::new();
         let candidate = Contract {
-            contract_id: "token-burn".into(),
-            name: "token-burn-refund".into(),
+            contract_id: "edenite-to-pms".into(),
+            name: "edenite-to-pms".into(),
             scope: ContractScope::Global,
-            trigger: ContractTrigger::OnTokenBurn { asset_id: "edenite".into() },
-            actions: vec![ContractAction::AccumulateRefund {
-                asset_id: None,
-                formula: MintFormula::FixedAmount { amount: "1.0".into() },
+            trigger: ContractTrigger::OnTokenBurn {
+                asset_id: "edenite".into(),
+            },
+            actions: vec![ContractAction::MintNative {
+                rate_numerator: 3,
+                rate_denominator: 2,
             }],
             enabled: true,
             version: 1,
@@ -1405,14 +1547,31 @@ mod tests {
         };
 
         let result = simulate_contract(&store, &candidate, &event).unwrap();
-        println!("TokenBurn simulation result: {result:?}");
+        println!("TokenBurn (MintNative) simulation result: {result:?}");
 
-        assert!(result.matched);
-        assert!(!result.warnings.is_empty());
-        assert!(result.warnings[0].contains("not yet implemented"));
-        assert!(result.burn_results.is_empty());
-        assert!(result.transfer_fee_results.is_empty());
-        println!("TokenBurn warning: {}: OK", result.warnings[0]);
+        assert!(result.matched, "OnTokenBurn{{edenite}} matches the edenite burn");
+        assert_eq!(
+            result.burn_results.len(),
+            1,
+            "MintNative produces exactly one mint instruction"
+        );
+        assert_eq!(
+            result.burn_results[0].refund_amount,
+            Decimal::from(150),
+            "100 edenite × 3/2 = 150 PMS"
+        );
+        assert_eq!(
+            result.burn_results[0].asset_id, None,
+            "the minted asset is native PMS (None)"
+        );
+        assert!(
+            result.warnings.is_empty(),
+            "OnTokenBurn is now implemented — no warning"
+        );
+        println!(
+            "100 edenite burned → {} PMS (R=3/2): OK",
+            result.burn_results[0].refund_amount
+        );
     }
 
     #[test]

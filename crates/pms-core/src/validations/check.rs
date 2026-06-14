@@ -329,6 +329,20 @@ pub fn validate_block(
                     utxo_sufficient_funds(dag, tx)?;
                 }
             }
+            PlainPayload::TokenBurn { tx, .. } => {
+                // Owner-signé : le burner autorise la dépense de ses propres
+                // UTXOs. Checks de base ici (chemin sync RAM DAG / tests) ; la
+                // conservation-burn (amount = inputs − change), l'ownership et
+                // l'anti-double-spend autoritaires sont dans le hot path
+                // (`validate_token_burn_async`), comme TxUtxo via
+                // `validate_transaction_full`.
+                verify_tx_signatures(tx, &policy.network_id)?;
+                crate::validations::conditions::validate_output_conditions(&tx.outputs)?;
+                if !policy.skip_utxo_checks {
+                    utxo_no_double_spend(dag, tx)?;
+                    utxo_sufficient_funds(dag, tx)?;
+                }
+            }
             PlainPayload::Nft(_action) => {
                 // ═══════════════════════════════════════════════════════════
                 // NFT VALIDATION : Vérification basique dans le flow sync

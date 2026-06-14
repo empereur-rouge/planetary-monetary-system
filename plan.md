@@ -136,32 +136,44 @@ Phase 3 : + Contribution      → quand il y a une infra à soutenir
 Phase 4 : + Contenu vendu     → quand l'écosystème créateur existe
 ```
 
-### 3.3 Le pont scrip→PMS (voie B, Option A retenue)
+### 3.3 La conversion scrip→PMS (voie B) — **smart contract**, pas un bridge hardcodé
 
-Le farm produit du scrip ; la conversion scrip→PMS est le **goulot contrôlé** où se pilote l'économie.
+Le « scrip » est un **token custom** (ex : l'**edenite** sur le ledger eden) — pas
+une chose codée en dur. La conversion scrip→PMS est le **goulot contrôlé** de
+l'économie, et conformément à l'invariant du projet (*seul le PMS natif est
+hardcodé ; tout le custom passe par contrat*), elle est implémentée comme un
+**smart contract**, pas comme un mécanisme moteur dédié.
 
 ```
-Ledger SCRIP                         Ledger PMS
-────────────                         ──────────
-BurnScrip {            ──preuve──>   MintPms {
-  amount: X,                           amount: X × R,   (sous budget d'émission)
-}                                      source_burn: <id>,
-                                       rate_applied: R }
+Burn de token custom (ex: edenite)            Mint PMS natif (sous budget)
+──────────────────────────────────            ───────────────────────────
+TokenBurn { asset_id, amount: X }  ──fire──>   contrat OnTokenBurn{asset_id}
+  (la supply du token baisse)                   → action MintNative{ R }
+                                                → mint  X × R  PMS au burner
+                                                   (réservé sur le budget §3.1)
 ```
 
-Décisions de design du pont :
+Le moteur ne connaît jamais « edenite » : il fournit la **primitive** (burn de
+token générique + mint PMS natif sous budget via `EmissionGate`) ; le **contrat**
+porte la **politique** (quel token, le taux R, le trigger).
 
 | Question | Décision | Statut |
 |---|---|---|
-| Qui fixe le taux R ? | **Formule à bornes** (R se dégrade quand le volume de conversion monte), paramètres pilotés par l'opérateur | ✅ principe / 🔧 formule |
-| Le scrip est-il brûlé à la conversion ? | **Brûlé** (consommable, pas un actif à thésauriser) | ✅ |
-| Émission PMS plafonnée ? | **Oui** — bornée par le budget d'émission §3.1, quelle que soit la demande de conversion | ✅ |
+| Qui fixe le taux R ? | **Le contrat** (`MintNative{ rate_num/rate_den }`), piloté par l'opérateur via `/admin/contracts` | ✅ (taux fixe livré ; R dégressif = 🔧) |
+| Le scrip est-il brûlé à la conversion ? | **Brûlé** (`PlainPayload::TokenBurn` — destruction réelle, la supply baisse) | ✅ |
+| Émission PMS plafonnée ? | **Oui** — `EmissionGate::reserve` AVANT le burn ; budget épuisé ⇒ conversion refusée, aucun burn (sûreté des fonds) | ✅ |
 
-> Piège acté à éviter absolument : « le scrip se burn pour minter du PMS sans limite » = planche à billets via le scrip. Le pont **doit** être plafonné par le budget d'émission.
+> Piège acté à éviter : « le scrip se burn pour minter du PMS sans limite » = planche à billets via le scrip. La conversion **réserve le budget d'émission §3.1 avant de brûler** — atomique, jamais de dépassement.
 
-### 3.4 Implémentation DAG
+### 3.4 Implémentation DAG (livrée, v0.14.0)
 
-Chaque voie est une variante de `MintPms` validée par le Coordinator contre : (a) sa preuve spécifique, (b) le budget d'émission de la période non dépassé, (c) la règle d'émission en vigueur. Le pont B réutilise le mécanisme `BridgeLock`/`BridgeMint` existant, mais **asymétrique** (avec taux R, pas 1:1). Voir `pms-spec-dag-implementation.md` §2.3 pour le mint contraint.
+La voie B est un **smart contract** (`OnTokenBurn{asset_id}` → `MintNative{R}`),
+pas une variante hardcodée. Flux : `POST /v1/wallet/token/burn` → `PlainPayload::TokenBurn`
+(burn owner-signé) → `evaluate_token_burn` (le contrat donne R) → `EmissionGate::reserve`
+(budget) → mint `PlainPayload::Mint` de PMS natif au burner. **Réserve-avant-burn**
+pour l'atomicité (budget épuisé ⇒ rejet complet). Les autres voies natives (baseline,
+on-ramp, faucet) restent des mints natifs directs sous le même budget. Voir
+[pms-spec-emission-budget.md](pms-spec-emission-budget.md) + la fiche [[budget-emission]].
 
 ---
 

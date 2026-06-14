@@ -27,6 +27,52 @@ pub enum PlainPayload {
         outputs: Vec<TxOutput>,
     },
     TxUtxo(Transaction),
+    /// Brûle des tokens : destruction permanente (la supply baisse). Le burner
+    /// dépense ses UTXOs via `tx.inputs` (signés par ses `tx.unlocks`, comme
+    /// `TxUtxo`) ; `tx.outputs` est le change (même asset, renvoyé à `owner`).
+    /// `amount = Σ(inputs[asset_id]) − Σ(outputs[asset_id])` est DÉTRUIT (aucun
+    /// output créé pour cette part → la supply baisse).
+    ///
+    /// **Owner-signé** (l'utilisateur brûle ses propres fonds — autorité comme
+    /// `TxUtxo`, pas coordinator-only ; le bloc reste forgé/signé par le
+    /// Coordinator en single-writer).
+    ///
+    /// **Payload PLAIN par choix** (pas chiffré comme les transferts) : un burn
+    /// est public-by-design (proof-of-burn auditable, supply vérifiable), comme
+    /// `BridgeLock`/`Seize`. Conséquence assumée : l'adresse du burner et le
+    /// montant sont en clair on-DAG.
+    ///
+    /// **Destiné à déclencher les contrats `OnTokenBurn{asset_id}`** — le
+    /// câblage event→listener→mint (voie B complète) arrive en phase suivante ;
+    /// aujourd'hui le burn est inerte côté contrats (aucun mint déclenché).
+    TokenBurn {
+        /// Transaction portant les `inputs` (UTXOs consommés), le change
+        /// (`outputs`), et les `unlocks` (signatures du owner).
+        ///
+        /// **INVARIANTS** (vérifiés par `validate_token_burn_async`) : `tx.fee`
+        /// DOIT être `"0"` (un burn ne paie pas de frais) ; `tx.outputs` est
+        /// UNIQUEMENT du change vers `owner` (pas de tiers, même `asset_id`).
+        /// Ces contraintes sont structurellement absentes du type `Transaction`
+        /// réutilisé — elles sont imposées à la validation, pas par le schéma.
+        tx: Transaction,
+        /// Asset brûlé (`None` = PMS natif). **Dérivation épinglée par le
+        /// validateur** (cf. ci-dessous).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asset_id: Option<String>,
+        /// Montant détruit (= Σ inputs − Σ change, pour `asset_id`). Réduit la supply.
+        amount: String,
+        /// Adresse du burner (routage + trigger contrat + activité).
+        ///
+        /// **`owner`, `amount`, `asset_id` ne sont PAS couverts par la signature
+        /// du burner** (`signing_message` ne commit que `{network_id, inputs,
+        /// outputs, fee}`). Ce sont des dénormalisations de commodité (les
+        /// chemins sans accès UTXO — classify, block_id — en ont besoin) que
+        /// `validate_token_burn_async` RE-DÉRIVE et ÉPINGLE contre l'état signé +
+        /// le UTXO set (tous les inputs/change appartiennent à `owner`, même
+        /// asset, `amount == inputs − change`). Sûr UNIQUEMENT grâce à ce
+        /// re-check ; ne jamais l'affaiblir.
+        owner: String,
+    },
     Milestone {
         approved: Vec<String>,
         /// Si true, distribue le pool de fees aux nœuds proportionnellement à leurs blocs
@@ -247,6 +293,9 @@ impl PlainPayload {
             PlainPayload::BridgeMint { outputs, .. } => Some(outputs.clone()),
             PlainPayload::Seize { outputs, .. } => Some(outputs.clone()),
             PlainPayload::Reverse { outputs, .. } => Some(outputs.clone()),
+            // TokenBurn: only the CHANGE outputs are created UTXOs; the burned
+            // amount creates nothing (supply drops). Indexer/balance must see change.
+            PlainPayload::TokenBurn { tx, .. } => Some(tx.outputs.clone()),
             // No UTXO creation: Genesis, Milestone, ConfigUpdate, EncryptedReward,
             // TokenCreate, BridgeLock, Freeze, Unfreeze, ContractRegister,
             // ContractUpdate, LedgerOwnershipTransfer, CoordinatorKeyRotate, Nft.

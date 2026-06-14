@@ -47,6 +47,25 @@ pub enum PmsEvent {
         metadata: Option<NftMetadata>,
     },
 
+    /// Burn de **token fongible** traité avec succès (plan §3.1, voie B).
+    ///
+    /// Émis par le handler de burn APRÈS persist du bloc `TokenBurn`. Le listener
+    /// contrat le consomme pour évaluer les contrats `OnTokenBurn{asset_id}`
+    /// (`evaluate_token_burn` → mint de PMS natif au taux R sous budget). Analogue
+    /// fongible de [`PmsEvent::NftBurnProcessed`].
+    TokenBurnProcessed {
+        /// ID du bloc contenant le `TokenBurn`.
+        block_id: String,
+        /// ID du ledger où le burn a eu lieu.
+        ledger_id: String,
+        /// Adresse bech32 du burner (bénéficiaire d'un éventuel mint).
+        burner_address: String,
+        /// Asset brûlé (`None` = PMS natif).
+        asset_id: Option<String>,
+        /// Montant brûlé (string décimale).
+        amount: String,
+    },
+
     // ═══════════════════════════════════════════════════════════════════
     // SMART CONTRACT EVENTS (FUTURE)
     // ═══════════════════════════════════════════════════════════════════
@@ -118,6 +137,7 @@ impl PmsEvent {
                 NftAction::BatchBurn { .. } => "nft_batch_burned",
             },
             PmsEvent::NftBurnProcessed { .. } => "nft_burn_processed",
+            PmsEvent::TokenBurnProcessed { .. } => "token_burn_processed",
             PmsEvent::ContractFulfilled { .. } => "contract_fulfilled",
             PmsEvent::ContractFailed { .. } => "contract_failed",
             PmsEvent::MilestoneConfirmed { .. } => "milestone_confirmed",
@@ -132,6 +152,7 @@ impl PmsEvent {
         match self {
             PmsEvent::Nft { block_id, .. } => block_id,
             PmsEvent::NftBurnProcessed { block_id, .. } => block_id,
+            PmsEvent::TokenBurnProcessed { block_id, .. } => block_id,
             PmsEvent::ContractFulfilled { block_id, .. } => block_id,
             PmsEvent::ContractFailed { block_id, .. } => block_id,
             PmsEvent::MilestoneConfirmed { block_id, .. } => block_id,
@@ -160,6 +181,23 @@ impl PmsEvent {
             burner_address,
             token_ids,
             metadata,
+        }
+    }
+
+    /// Helper pour créer un événement de burn de token fongible traité (voie B).
+    pub fn token_burn_processed(
+        block_id: String,
+        ledger_id: String,
+        burner_address: String,
+        asset_id: Option<String>,
+        amount: String,
+    ) -> Self {
+        PmsEvent::TokenBurnProcessed {
+            block_id,
+            ledger_id,
+            burner_address,
+            asset_id,
+            amount,
         }
     }
 }

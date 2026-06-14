@@ -46,7 +46,7 @@ sur le **ledger main**. C'est l'augmentation de la supply native (`asset_id = No
 |---|---|---|---|---|
 | Baseline taux cible (résidu, §2.3) | `perform_daily_inflation_mint` — [inflation.rs:20](crates/pms-server/src/fee_distribution/inflation.rs#L20) | tâche `spawn_inflation_mint_task` ([tasks.rs:129](crates/pms-server/src/api/tasks.rs#L129)) | ✅ Phase 1 | Aujourd'hui : `supply × rate / 365` non borné par un couloir |
 | Voie A — on-ramp fiat→PMS | `admin_onramp` — [onramp.rs](crates/pms-server/src/api_fn/onramp.rs) (v0.13.0) | `POST /admin/onramp` | ✅ **livré** | Montant explicite via `emit_native_gated`, refusé si > budget (code 5030) |
-| Voie B — pont scrip→PMS | réutilise `BridgeMint` — [pms-bridge/src/engine.rs:291](crates/pms-bridge/src/engine.rs#L291), **vers main, asset natif** | route `/admin/bridge/transfer` | 🔧 Phase 2 | Mint asymétrique (taux R) ; R dégrade quand le budget se vide (§5) |
+| Voie B — conversion token custom→PMS (« scrip », ex: **edenite**) | **SMART CONTRACT**, pas du code moteur — `OnTokenBurn{asset_id}` → action « mint PMS natif au taux R sous budget ». Le moteur ne connaît jamais « edenite » | déclenchée par un burn de token custom | 🔧 Phase 2 | `OnTokenBurn` pas encore évalué ([engine.rs:563](crates/pms-contracts/src/engine.rs#L563)) + action mint-natif-sous-budget à créer ; R dégradant (§5) |
 | Faucet (main, natif) | `faucet_mint` — [wallet_factory.rs:257](crates/pms-server/src/api_fn/wallet_factory.rs#L257) | `POST /admin/faucet` | ✅ | Dev/testnet uniquement (rejeté en prod) — gater pour cohérence des tests |
 
 ### 1.2 Voies HORS budget (ne décrémentent PAS)
@@ -388,10 +388,15 @@ assertions sur **valeurs golden hardcodées**, exécutés isolés `--nocapture`.
    `emit_native_gated` (baseline refactorisée dessus), code `ApiError` 5030, test sandbox e2e
    `test_onramp_voie_a_emission_budget`.
 5. **Métriques + alertes** (livré v0.12.0). Gauges/counters §7, alerte canari `effective_rate > ceiling`.
-6. *(Phase 2)* Voie B (pont scrip, taux R dégradant) + Signal 1 (burn). Hors scope de cette spec.
-   **NOTE** : la voie B ne passe PAS par `emit_native_gated` (mint `Mint`-sur-main) — elle enveloppera
-   son propre forge bridge avec `EmissionGate::reserve`/`release` directement.
-   (option « scrip ledger + farm »).
+6. *(Phase 2)* Voie B — conversion token custom→PMS (« scrip » = ex: **edenite**) + Signal 1 (burn).
+   **= SMART CONTRACT, pas du code moteur** (invariant : seul le PMS natif est hardcodé ; tout le
+   custom passe par contrat). Travail : (a) implémenter l'évaluation `OnTokenBurn`
+   ([engine.rs:563](crates/pms-contracts/src/engine.rs#L563), aujourd'hui « not yet implemented ») ;
+   (b) ajouter une **action de contrat générique** « mint PMS natif au taux R sous budget » qui
+   appelle `EmissionGate::reserve`/`release` (la primitive native du moteur) — paramétrée par
+   token/taux dans le contrat, jamais « edenite » en dur. La voie B ne passe donc PAS par
+   `emit_native_gated` (orchestrateur `Mint`-sur-main des voies natives) : c'est le moteur de
+   contrats qui orchestre, en s'appuyant sur le seam bas-niveau `reserve`/`release` du gate.
 
 Bumps attendus : `Cargo.toml` (MINOR — feature), `API_VERSION` (route on-ramp à l'étape 4),
 **pas** de `DAG_VERSION`/`CURRENT_VER` (réutilisation de CF, payloads inchangés en Phase 1). La

@@ -246,6 +246,25 @@ pub(crate) async fn classify_activity(
             }]
         }
 
+        PlainPayload::TokenBurn {
+            owner,
+            amount,
+            asset_id,
+            ..
+        } if owner == addr => {
+            vec![ActivityItem {
+                block_id: String::new(),
+                ts_ms: 0,
+                activity_type: "token_burn".to_string(),
+                direction: "out".to_string(),
+                amount: Some(amount.clone()),
+                asset_id: asset_id.clone(),
+                counterparty: None,
+                ledger_id: None,
+                payload: serde_json::to_value(plain).unwrap_or_default(),
+            }]
+        }
+
         PlainPayload::BridgeLock {
             dest_address,
             amount,
@@ -650,6 +669,25 @@ pub(crate) fn classify_activity_sync(plain: &PlainPayload, addr: &str) -> Vec<Ac
                 counterparty: None,
                 ledger_id: None,
                 payload: serde_json::to_value(meta).unwrap_or_default(),
+            }]
+        }
+
+        PlainPayload::TokenBurn {
+            owner,
+            amount,
+            asset_id,
+            ..
+        } if owner == addr => {
+            vec![ActivityItem {
+                block_id: String::new(),
+                ts_ms: 0,
+                activity_type: "token_burn".to_string(),
+                direction: "out".to_string(),
+                amount: Some(amount.clone()),
+                asset_id: asset_id.clone(),
+                counterparty: None,
+                ledger_id: None,
+                payload: serde_json::to_value(plain).unwrap_or_default(),
             }]
         }
 

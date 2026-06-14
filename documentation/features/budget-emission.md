@@ -2,7 +2,7 @@
 tags: [feature]
 created: 2026-06-14
 updated: 2026-06-14
-version: v0.13.0
+version: v0.14.0
 ---
 
 # Budget d'Émission Partagé
@@ -10,8 +10,8 @@ version: v0.13.0
 ## Résumé
 
 Politique monétaire gouvernée du PMS natif (plan §3.1). **Toutes les voies de mint
-de PMS natif sur le ledger `main`** (baseline taux cible, on-ramp fiat, pont
-scrip→PMS, faucet) puisent dans **un seul budget d'émission par période** — la
+de PMS natif sur le ledger `main`** (baseline taux cible, on-ramp fiat, conversion
+token→PMS, faucet) puisent dans **un seul budget d'émission par période** — la
 règle non-négociable « N voies de mint sans N planches à billets ». Le budget est
 borné par un **couloir dur** : `supply × clamp(taux_cible, plancher, plafond) ×
 frac_année`. Même si la config pousse le taux cible au-delà du plafond, le budget
@@ -31,8 +31,13 @@ minte désormais le **résidu** du budget, `budget − déjà-émis`).
 **Phase 2 (v0.13.0)** : **voie A on-ramp** fiat→PMS (`POST /admin/onramp`) — 2e
 voie branchée sur le **même** budget (preuve qu'il est partagé), via
 l'orchestrateur partagé `emit_native_gated` (baseline + on-ramp y passent).
-Voies scrip/contribution/contenu à venir. Voir `pms-spec-emission-budget.md`
-(racine du repo) pour la spec complète.
+**Phase 3 (v0.14.0)** : **voie B conversion token→PMS** en **smart contract** —
+un burn de token custom (`POST /v1/wallet/token/burn`) déclenche un contrat
+`OnTokenBurn{asset}` → action `MintNative{R}` → mint PMS au taux R, **sous le même
+budget**. Synchrone dans le handler, **réserve-avant-burn** (atomicité / sûreté
+des fonds). Le moteur ne hardcode jamais le token — le contrat porte la politique.
+Voies contribution/contenu à venir. Voir `pms-spec-emission-budget.md` (spec) et
+[[smart-contracts]] (le système de contrats).
 
 ## Configuration
 
@@ -62,6 +67,8 @@ instantané.
 | `pms-server` | `src/emission.rs` | `EmissionGate`, `compute_epoch_budget`, `effective_rate_pct`, `EmissionEpochState`, `Voie` |
 | `pms-server` | `src/emission_mint.rs` | Orchestrateur partagé `emit_native_gated` (reserve→forge→persist→release+jauges) |
 | `pms-server` | `src/api_fn/onramp.rs` | Handler `POST /admin/onramp` (voie A fiat→PMS) |
+| `pms-server` | `src/api_fn/token_burn.rs` | Handler `POST /v1/wallet/token/burn` (voie B : burn + conversion contract-driven) |
+| `pms-contracts` | `src/engine.rs` | `evaluate_token_burn` + action `MintNative` (voie B : politique du taux R) |
 | `pms-server` | `src/fee_distribution/inflation.rs` | Baseline mint en résidu, via l'orchestrateur |
 | `pms-server` | `src/api_error.rs` | Code `5030` `EmissionBudgetExhausted` |
 | `pms-server` | `src/api/state.rs` | Champ `emission_gate: Arc<EmissionGate>` sur `AppState` |
@@ -88,6 +95,7 @@ instantané.
 | Méthode | Path | Description |
 |---------|------|-------------|
 | `POST` | `/admin/onramp` | Mint PMS natif (voie A fiat→PMS), montant explicite sous budget. `{to, amount, payment_ref}` → `{block_id, minted}` ; `503/5030` si budget épuisé. `admin_writable`. |
+| `POST` | `/v1/wallet/token/burn` | Burn de token (voie B) : `{private_key_b64, asset_id?, amount}` → burn + (si contrat `OnTokenBurn`) conversion en PMS au taux R sous budget. Réponse `{burned, converted_pms, mint_block_id}`. `auth_write`. |
 
 ## Métriques
 

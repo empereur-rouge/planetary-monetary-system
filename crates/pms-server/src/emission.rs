@@ -1,7 +1,7 @@
 //! Budget d'émission partagé du PMS natif (plan §3.1 — la règle non-négociable).
 //!
 //! Toutes les voies de mint de PMS natif sur le ledger **main** (baseline taux
-//! cible, on-ramp fiat, pont scrip→PMS, faucet) puisent dans **un seul** budget
+//! cible, on-ramp fiat, conversion token→PMS, faucet) puisent dans **un seul** budget
 //! par période. Sans ce budget commun, N voies de mint = N planches à billets ;
 //! avec lui, on peut en ouvrir autant qu'on veut sans risque inflationniste.
 //!
@@ -109,8 +109,9 @@ pub enum Voie {
     Baseline,
     /// On-ramp fiat→PMS (voie A) : montant explicite.
     OnRamp,
-    /// Pont scrip→PMS (voie B) vers main : montant explicite.
-    BridgeScrip,
+    /// Conversion token custom→PMS (voie B) : un burn de token déclenche un
+    /// contrat `OnTokenBurn` qui minte du PMS natif au taux R. Montant explicite.
+    TokenConversion,
     /// Faucet (dev/testnet) : montant explicite.
     Faucet,
 }
@@ -121,7 +122,7 @@ impl Voie {
         match self {
             Voie::Baseline => "baseline",
             Voie::OnRamp => "onramp",
-            Voie::BridgeScrip => "bridge_scrip",
+            Voie::TokenConversion => "token_conversion",
             Voie::Faucet => "faucet",
         }
     }

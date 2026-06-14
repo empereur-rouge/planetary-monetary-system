@@ -47,6 +47,21 @@ pub trait ContractStorage: Send + Sync {
         ledger_id: &str,
     ) -> Result<Vec<Contract>>;
 
+    /// Recherche les contrats activés qui matchent un trigger `OnTokenBurn`
+    /// (voie B, plan §3.1).
+    ///
+    /// Retourne les contrats dont :
+    /// - `enabled == true`
+    /// - `scope` matche le `ledger_id`
+    /// - `trigger` est `OnTokenBurn { asset_id }` ÉGAL à l'asset brûlé
+    ///   (`asset_id` du trigger est requis — pas de wildcard, contrairement à
+    ///   `OnTransfer`).
+    fn find_token_burn_contracts(
+        &self,
+        asset_id: &str,
+        ledger_id: &str,
+    ) -> Result<Vec<Contract>>;
+
     /// Met à jour un contrat existant (actions, scope, enabled, etc.).
     ///
     /// Le `contract_id` doit correspondre à un contrat existant.
@@ -151,6 +166,28 @@ impl ContractStorage for InMemoryContractStore {
                     },
                     _ => false,
                 }
+            })
+            .cloned()
+            .collect();
+        Ok(results)
+    }
+
+    fn find_token_burn_contracts(
+        &self,
+        asset_id: &str,
+        ledger_id: &str,
+    ) -> Result<Vec<Contract>> {
+        let map = self.contracts.read().unwrap_or_else(|p| p.into_inner());
+        let results = map
+            .values()
+            .filter(|c| {
+                c.enabled
+                    && c.scope.matches(ledger_id)
+                    && matches!(
+                        &c.trigger,
+                        pms_types_contract::ContractTrigger::OnTokenBurn { asset_id: f }
+                            if f == asset_id
+                    )
             })
             .cloned()
             .collect();

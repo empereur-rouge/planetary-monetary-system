@@ -110,6 +110,35 @@ impl ContractStorage for RocksStore {
         Ok(results)
     }
 
+    fn find_token_burn_contracts(
+        &self,
+        asset_id: &str,
+        ledger_id: &str,
+    ) -> Result<Vec<Contract>> {
+        let cf = self.cf("contracts");
+        let mut results = Vec::new();
+        for kv in self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
+            let (_k, v) = kv?;
+            let contract: Contract = serde_json::from_slice(&v)?;
+
+            if !contract.enabled {
+                continue;
+            }
+            if !contract.scope.matches(ledger_id) {
+                continue;
+            }
+            // `OnTokenBurn.asset_id` est requis (pas de wildcard) → match exact.
+            if let pms_types_contract::ContractTrigger::OnTokenBurn { asset_id: filter } =
+                &contract.trigger
+            {
+                if filter == asset_id {
+                    results.push(contract);
+                }
+            }
+        }
+        Ok(results)
+    }
+
     fn update_contract(&self, contract_id: &str, contract: &Contract) -> Result<()> {
         let cf = self.cf("contracts");
         // Vérifie que le contrat existe

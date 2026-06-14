@@ -5673,3 +5673,167 @@ async fn test_onramp_voie_a_emission_budget() -> Result<()> {
     );
     Ok(())
 }
+
+/// TokenBurn primitive (plan §3.1, voie B foundation) end-to-end: burning a
+/// token TRULY destroys it — circulating supply drops by the burned amount, the
+/// change returns to the burner, and an over-burn (more than owned) is rejected
+/// with no supply change. Proves the new `PlainPayload::TokenBurn` protocol
+/// primitive through the real HTTP route + hot-path validation.
+///
+/// Run: `cargo test --release -p pms-server --test dag_sandbox \
+///   test_token_burn_reduces_supply -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_token_burn_reduces_supply() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    let user = Wallet::generate();
+    let user_addr = user.get_address("8e");
+
+    // 1. Fund the burner with 1000 PMS (faucet, ungated → single UTXO).
+    sandbox.faucet_mint(None, &user_addr, "1000").await?;
+    let bal0 = sandbox.get_balance("main", &user_addr).await?;
+    let supply0 = Decimal::from_str(
+        sandbox.get_supply("main", None).await?["circulating_supply"]
+            .as_str()
+            .unwrap_or("0"),
+    )
+    .unwrap_or(Decimal::ZERO);
+    println!("   Before burn: balance={}, supply={}", bal0, supply0);
+    assert_eq!(bal0, Decimal::from(1000), "faucet credited 1000 PMS");
+
+    // 2. Burn 100 PMS (asset_id omitted = native PMS).
+    let (status, body) = sandbox
+        .post(
+            None,
+            "/v1/wallet/token/burn",
+            json!({ "private_key_b64": user.private_key_b64, "amount": "100" }),
+        )
+        .await;
+    println!("   Burn 100 PMS → {} — {:?}", status, body);
+    assert!(status.is_success(), "burn must succeed: {} {:?}", status, body);
+    assert_eq!(body["burned"].as_str(), Some("100"), "reports burned amount");
+
+    // 3. Balance dropped by 100 (change returned); supply dropped by 100.
+    let bal1 = sandbox.get_balance("main", &user_addr).await?;
+    let supply1 = Decimal::from_str(
+        sandbox.get_supply("main", None).await?["circulating_supply"]
+            .as_str()
+            .unwrap_or("0"),
+    )
+    .unwrap_or(Decimal::ZERO);
+    println!("   After burn:  balance={}, supply={}", bal1, supply1);
+    assert_eq!(bal1, Decimal::from(900), "burner keeps the 900 change");
+    assert_eq!(
+        supply0 - supply1,
+        Decimal::from(100),
+        "circulating supply dropped by exactly the burned amount"
+    );
+
+    // 4. Over-burn (more than owned) → rejected; balance unchanged.
+    let (status2, body2) = sandbox
+        .post(
+            None,
+            "/v1/wallet/token/burn",
+            json!({ "private_key_b64": user.private_key_b64, "amount": "100000" }),
+        )
+        .await;
+    println!("   Over-burn 100000 → {} — {:?}", status2, body2);
+    assert!(!status2.is_success(), "over-burn must be rejected");
+    let bal2 = sandbox.get_balance("main", &user_addr).await?;
+    assert_eq!(bal2, Decimal::from(900), "rejected burn leaves balance unchanged");
+
+    println!("\n   TEST PASSED: token burn destroys supply, returns change, rejects over-burn.");
+    Ok(())
+}
+
+/// Voie B end-to-end (plan §3.1): burning a CUSTOM token fires an `OnTokenBurn`
+/// smart contract that mints native PMS at rate R, UNDER the shared emission
+/// budget. Proves the full contract-driven conversion: burn → evaluate contract
+/// → reserve budget → mint PMS, atomically in the burn handler. The engine never
+/// hardcodes the token — the contract holds the policy (token + rate).
+///
+/// Run: `cargo test --release -p pms-server --test dag_sandbox \
+///   test_voie_b_token_conversion -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_voie_b_token_conversion() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // 1. Bootstrap PMS supply (faucet, ungated) so the emission budget is > 0.
+    //    Budget ≈ 1M × 3%/365 ≈ 82 PMS/epoch — comfortably covers our 15 PMS mint.
+    let boot = Wallet::generate();
+    sandbox.faucet_mint(None, &boot.get_address("8e"), "1000000").await?;
+
+    // 2. Create token "gold" on main + mint 1000 to the user.
+    let (s, b) = sandbox
+        .admin_post(
+            "/admin/tokens/create",
+            json!({ "asset_id": "gold", "symbol": "GOLD", "name": "Gold", "decimals": 8, "max_supply": "1000000" }),
+        )
+        .await;
+    anyhow::ensure!(s.is_success(), "token create failed: {} {:?}", s, b);
+    let user = Wallet::generate();
+    let user_addr = user.get_address("8e");
+    let (s, b) = sandbox
+        .admin_post(
+            "/admin/tokens/mint",
+            json!({ "asset_id": "gold", "to": user_addr, "amount": "1000" }),
+        )
+        .await;
+    anyhow::ensure!(s.is_success(), "token mint failed: {} {:?}", s, b);
+
+    // 3. Register the conversion contract: OnTokenBurn{gold} → MintNative R=3/2,
+    //    then toggle it enabled (contracts register disabled in sandbox mode).
+    let cid = sandbox
+        .register_contract(json!({
+            "name": "gold-to-pms",
+            "scope": "Global",
+            "trigger": { "OnTokenBurn": { "asset_id": "gold" } },
+            "actions": [{ "MintNative": { "rate_numerator": 3, "rate_denominator": 2 } }]
+        }))
+        .await?;
+    let (s, _) = sandbox
+        .admin_post(
+            &format!("/admin/contracts/{}/toggle", cid),
+            json!({ "enabled": true, "reason": "e2e voie B" }),
+        )
+        .await;
+    anyhow::ensure!(s.is_success(), "contract toggle failed: {}", s);
+
+    let gold0 = sandbox.get_asset_balance("main", &user_addr, Some("gold")).await?;
+    let pms0 = sandbox.get_balance("main", &user_addr).await?;
+    let gold_supply0 = Decimal::from_str(
+        sandbox.get_supply("main", Some("gold")).await?["circulating_supply"].as_str().unwrap_or("0"),
+    ).unwrap_or(Decimal::ZERO);
+    println!("   Before: user gold={}, user PMS={}, gold supply={}", gold0, pms0, gold_supply0);
+    assert_eq!(gold0, Decimal::from(1000));
+    assert_eq!(pms0, Decimal::ZERO, "user starts with no PMS");
+
+    // 4. Burn 10 gold → contract fires → mint 10 × 3/2 = 15 PMS to the user.
+    let (s, body) = sandbox
+        .post(
+            None,
+            "/v1/wallet/token/burn",
+            json!({ "private_key_b64": user.private_key_b64, "asset_id": "gold", "amount": "10" }),
+        )
+        .await;
+    println!("   Burn 10 gold → {} — {:?}", s, body);
+    assert!(s.is_success(), "burn+convert must succeed: {} {:?}", s, body);
+    assert_eq!(body["converted_pms"].as_str(), Some("15"), "10 gold × 3/2 = 15 PMS");
+    assert!(body["mint_block_id"].as_str().is_some(), "conversion produced a mint block");
+
+    // 5. Assert: gold burned (−10), PMS minted (+15), gold supply dropped (−10).
+    let gold1 = sandbox.get_asset_balance("main", &user_addr, Some("gold")).await?;
+    let pms1 = sandbox.get_balance("main", &user_addr).await?;
+    let gold_supply1 = Decimal::from_str(
+        sandbox.get_supply("main", Some("gold")).await?["circulating_supply"].as_str().unwrap_or("0"),
+    ).unwrap_or(Decimal::ZERO);
+    println!("   After:  user gold={}, user PMS={}, gold supply={}", gold1, pms1, gold_supply1);
+    assert_eq!(gold1, Decimal::from(990), "user keeps 990 gold change (burned 10)");
+    assert_eq!(pms1, Decimal::from(15), "user received 15 PMS from the conversion");
+    assert_eq!(gold_supply0 - gold_supply1, Decimal::from(10), "gold supply dropped by the burned 10");
+
+    println!("\n   TEST PASSED: voie B — burn 10 gold → OnTokenBurn contract → 15 PMS minted under budget.");
+    Ok(())
+}

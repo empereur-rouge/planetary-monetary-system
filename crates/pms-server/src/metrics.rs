@@ -292,6 +292,19 @@ pub static EMISSION_REJECTIONS: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Conversions token→PMS (voie B) où le **burn a réussi mais le mint de PMS a
+/// échoué** (orphelin). Doit rester à 0 : le flux réserve-avant-burn rejette une
+/// conversion sans budget AVANT de brûler ; un incrément = un cas rare
+/// (échec de forge/persist du mint après le burn) qui exige une réconciliation
+/// opérateur (l'utilisateur a brûlé sans recevoir son PMS). **Alerte = critique.**
+pub static EMISSION_CONVERSION_ORPHANED: Lazy<IntCounter> = Lazy::new(|| {
+    prometheus::register_int_counter!(
+        "pms_emission_conversion_orphaned_total",
+        "Conversions token→PMS où le burn a réussi mais le mint PMS a échoué (réconciliation requise)"
+    )
+    .unwrap()
+});
+
 /// Render ALL metrics in standard Prometheus text format (with labels).
 /// Used by `/metrics/all` for ops/Grafana scraping.
 pub fn render() -> String {

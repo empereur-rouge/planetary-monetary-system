@@ -40,6 +40,7 @@ pub fn compute_block_id(
                 PlainPayload::Genesis => "Genesis",
                 PlainPayload::Mint { .. } => "Mint",
                 PlainPayload::TxUtxo(_) => "Transaction",
+                PlainPayload::TokenBurn { .. } => "TokenBurn",
                 PlainPayload::Milestone { .. } => "Milestone",
                 PlainPayload::Nft(_) => "Nft",
                 PlainPayload::ConfigUpdate(_) => "ConfigUpdate",

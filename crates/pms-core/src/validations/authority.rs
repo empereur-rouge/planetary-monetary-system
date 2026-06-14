@@ -238,9 +238,14 @@ pub fn validate_payload_authority(
             Ok(())
         }
         // Payloads à validation dédiée ailleurs (hot path + legacy).
+        // TokenBurn est owner-signé (l'utilisateur brûle ses propres fonds) :
+        // pas coordinator-only. Son autorisation (unlocks des inputs) +
+        // conservation-burn sont vérifiées par `validate_token_burn_async` dans
+        // le hot path, comme TxUtxo via `validate_transaction_full`.
         PlainPayload::Genesis
         | PlainPayload::Mint { .. }
         | PlainPayload::TxUtxo(_)
+        | PlainPayload::TokenBurn { .. }
         | PlainPayload::Nft(_) => Ok(()),
     }
 }
