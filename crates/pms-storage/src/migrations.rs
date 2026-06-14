@@ -15,7 +15,7 @@ use thiserror::Error;
 
 /// Version logique du schéma attendu par ce binaire.
 /// Incrémentez lorsqu'une nouvelle migration est introduite.
-pub const CURRENT_VER: i64 = 11;
+pub const CURRENT_VER: i64 = 12;
 
 /// Version du protocole DAG (SemVer).
 /// - MAJOR : changement incompatible (refus de démarrer, migration manuelle requise)
@@ -27,6 +27,12 @@ pub const CURRENT_VER: i64 = 11;
 /// canonique du contenu. Des blocs acceptés sous 2.x (unlocks invalides,
 /// ids forgés) sont rejetés sous 3.x ; un re-sync depuis zéro peut refuser
 /// un historique 2.x → wipe testnet requis.
+/// v3.7.0 (semi-fongibles, `pms-spec-semi-fungibles.md`) : nouvelle variante
+/// `PlainPayload::SftClassCreate` (registre de classes SFT façon ERC-1155 ;
+/// soldes portés par le moteur UTXO existant, `asset_id = "collection:class"`).
+/// Additif : les blocs/CFs existants restent valides, nouveau CF `sft_classes`
+/// (CURRENT_VER 11→12, auto-migrating). MINOR → pas de wipe. (Mixed-version P2P :
+/// un nœud 3.6.0 ne sait pas désérialiser un `SftClassCreate`.)
 /// v3.6.0 (plan §4 gouvernance, P3) : nouvelle variante `ConfigUpdate::SetEmissionCorridor`
 /// (couloir d'émission gouverné — ceiling/floor/target/epoch en bps). Additive : un
 /// nœud à jour parse le nouveau variant ; les anciens blocs/configs restent valides.
@@ -45,7 +51,7 @@ pub const CURRENT_VER: i64 = 11;
 /// (burn de token owner-signé, la supply baisse, trigger des contrats
 /// `OnTokenBurn`). Backward-compatible : les blocs existants parsent toujours ;
 /// un nœud à jour accepte le nouveau type. MINOR → migration auto, pas de wipe.
-pub const DAG_VERSION: &str = "3.6.0";
+pub const DAG_VERSION: &str = "3.7.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

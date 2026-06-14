@@ -86,6 +86,7 @@ pub fn validate_payload_authority(
             require_coordinator(signer_pk, policy, "EncryptedReward")
         }
         PlainPayload::TokenCreate(_) => require_coordinator(signer_pk, policy, "TokenCreate"),
+        PlainPayload::SftClassCreate(_) => require_coordinator(signer_pk, policy, "SftClassCreate"),
         PlainPayload::BridgeLock {
             inputs,
             dest_ledger_id,

@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.19.0] - Unreleased — Semi-fongibles (SFT façon ERC-1155) — P1 protocole
+
+Nouveau modèle d'asset (`pms-spec-semi-fungibles.md`), entre le token fongible et
+le NFT : une **classe semi-fongible** a des métadonnées riches PUBLIQUES (nom, URI,
+attributs) et est **fongible à l'intérieur de la classe** (quantité par détenteur,
+divisible). Modèle retenu : **posé sur le moteur UTXO existant** (`asset_id =
+"collection:class"`) — la classe hérite GRATUITEMENT du time-lock, demurrage et
+spend-conditions. P1 = couche protocole (pas encore branchée sur l'admin).
+
+### Added — P1 (protocole)
+- **feat(protocol)** — `PlainPayload::SftClassCreate(SftClass)` (coordinator-only) +
+  type `SftClass` ([payload.rs](crates/pms-types-payload/src/payload.rs)) :
+  `asset_id` = `"{collection_id}:{class_id}"`, name/uri/attributs, decimals,
+  max_supply, creator, mint_authority. Métadonnées **publiques** (≠ NFT chiffrés) :
+  une classe est un catalogue partagé par N détenteurs.
+- **feat(storage)** — trait `SftClassStorage` (CF `sft_classes`, ajouté à
+  `EngineStorage`) : put / get / list / list_by_collection (scan par préfixe
+  `"{collection}:"`). `mig_11_to_12`, `CURRENT_VER` 11→12.
+- **feat(core/validation)** — arm `SftClassCreate` dans `persist_block`
+  ([persist.rs](crates/pms-core/src/net_adapter/persist.rs)) : segments
+  `[a-z0-9-]{1,32}`, `asset_id == "collection:class"`, name 1..=128, decimals ≤18,
+  max_supply décimal **strictement positif**, creator/mint_authority non vides, et
+  **unicité** (anti-overwrite). Enregistrement APRÈS persist du bloc (traçabilité DAG).
+- **feat(namespace)** — `asset_id` SFT avec `:` → collision-free avec les tokens
+  (`[A-Za-z0-9_-]`, sans `:`) et le PMS natif (`None`) ; le préfixe avant `:` = la
+  collection (regroupement gratuit).
+- **test(storage)** — `sft_class_roundtrip_and_listing` (S1 : round-trip + listing
+  global + par collection).
+- **test(protocole)** — `sft_class_test.rs` (S2 : classe valide enregistrée ;
+  asset_id incohérent / decimals>18 / segment invalide / max_supply≤0 / doublon →
+  rejetés avec la bonne raison ; record d'origine intact).
+- **chore(version)** — `Cargo.toml` 0.18.1 → **0.19.0** ; `DAG_VERSION` 3.6.0 →
+  **3.7.0** (payload additif, pas de wipe) ; `CURRENT_VER` 11 → **12** (CF).
+
+### Notes
+- **Pas encore branché côté admin** : P2 ajoutera create / mint (valide classe +
+  cap + authority) / list / supply. Transfert & burn réutiliseront le chemin UTXO
+  générique + `TokenBurn` (zéro code neuf). P3 = SDK + docs.
+
+---
+
 ## [0.18.1] - Unreleased — API : tolérance de casse du `tier` de gouvernance
 
 ### Fixed
