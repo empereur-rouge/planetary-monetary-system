@@ -16,8 +16,14 @@ pub trait GovernanceStorage: Send + Sync {
     fn get_governance_proposal(&self, proposal_id: &str)
     -> Result<Option<GovernanceProposalRecord>>;
 
-    /// Mute le statut d'une proposition existante (erreur si inconnue).
-    fn set_governance_status(&self, proposal_id: &str, status: GovernanceStatus) -> Result<()>;
+    /// Mute le statut d'une proposition existante (erreur si inconnue) et mémorise
+    /// le bloc qui a provoqué la transition (`action_block_id` = bloc enact/cancel).
+    fn set_governance_status(
+        &self,
+        proposal_id: &str,
+        status: GovernanceStatus,
+        action_block_id: &str,
+    ) -> Result<()>;
 
     /// Liste toutes les propositions (tous statuts).
     fn list_governance_proposals(&self) -> Result<Vec<GovernanceProposalRecord>>;
