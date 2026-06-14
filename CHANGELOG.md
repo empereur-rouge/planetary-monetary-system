@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.0] - Unreleased — SFT : demurrage opt-in par classe
+
+### Added
+- **feat(sft/demurrage)** — `SftClass` gagne `demurrage_bps_per_day: Option<u32>`
+  ([payload.rs](crates/pms-types-payload/src/payload.rs)) — une classe SFT peut
+  désormais décoter ses UTXO (protocole 2.5) par le **même mécanisme** que les
+  tokens (les soldes SFT étant des UTXO). `to_token_metadata()` reporte le champ ;
+  la validation `SftClassCreate` rejette `> 10000`. `POST /admin/sft/classes`
+  accepte `demurrage_bps_per_day`.
+- **refactor(core)** — la résolution « token OU classe SFT » est centralisée dans
+  `CoreAdapter::resolve_asset_metadata` ([persist.rs](crates/pms-core/src/net_adapter/persist.rs)),
+  utilisée par **la validation de mint contraint ET la résolution du taux de
+  demurrage** (DRY ; le mint utilisait déjà ce lookup inline). Le demurrage d'une
+  classe SFT est donc pris en compte dans la conservation `out <= effective_in`.
+- **test** — `sft_class_test` : demurrage>10000 rejeté + `to_token_metadata` reporte
+  le demurrage (la décote elle-même est prouvée par `demurrage_validation.rs`, même
+  mécanisme).
+- **chore(version)** — `Cargo` 0.19.0 → **0.20.0** ; `DAG_VERSION` 3.7.0 → **3.8.0**
+  (champ additif, pas de wipe) ; `API_VERSION` 24 → **25**.
+
+---
+
 ## [0.19.0] - Unreleased — Semi-fongibles (SFT façon ERC-1155) — P1 protocole
 
 Nouveau modèle d'asset (`pms-spec-semi-fungibles.md`), entre le token fongible et

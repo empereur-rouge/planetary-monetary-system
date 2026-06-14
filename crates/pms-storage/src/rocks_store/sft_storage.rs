@@ -85,6 +85,7 @@ mod tests {
             attributes: None,
             decimals: 0,
             max_supply: Some("1000".into()),
+            demurrage_bps_per_day: None,
             creator: "creator_pk".into(),
             mint_authority: "minter_pk".into(),
         }

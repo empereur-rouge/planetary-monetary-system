@@ -53,6 +53,7 @@ fn valid_class() -> SftClass {
         attributes: Some("{\"atk\":5}".into()),
         decimals: 0,
         max_supply: Some("500".into()),
+        demurrage_bps_per_day: None,
         creator: "creator_pk".into(),
         mint_authority: "minter_pk".into(),
     }
@@ -140,6 +141,18 @@ async fn sft_class_create_validation_and_uniqueness() -> anyhow::Result<()> {
         "max_supply<=0 must be Rejected, got {r:?}"
     );
 
+    // 4c) demurrage_bps_per_day > 10000 → rejet.
+    let mut bad_dem = valid_class();
+    bad_dem.asset_id = "edenite-game:elixir".into();
+    bad_dem.class_id = "elixir".into();
+    bad_dem.demurrage_bps_per_day = Some(10_001);
+    let r = persist_class(&adapter, &meta, &wallet, genesis.clone(), 7, bad_dem).await?;
+    println!("demurrage=10001 → {r:?}");
+    assert!(
+        matches!(r, PutResult::Rejected(ref s) if s.contains("demurrage_bps_per_day must be <= 10000")),
+        "demurrage>10000 must be Rejected, got {r:?}"
+    );
+
     // 5) Doublon d'asset_id (re-create de iron-sword) → rejet, record d'origine intact.
     let mut dup = valid_class();
     dup.name = "Tentative d'écrasement".into();
@@ -154,4 +167,25 @@ async fn sft_class_create_validation_and_uniqueness() -> anyhow::Result<()> {
 
     println!("\n   S2 PASSED: validation (asset_id/decimals/segment) + unicité OK, record intact.");
     Ok(())
+}
+
+/// `to_token_metadata` reporte le demurrage de la classe → la résolution de taux
+/// (`resolve_asset_metadata`, partagée avec la validation de mint déjà testée)
+/// le voit. C'est ce qui fait qu'une classe SFT décote ses UTXO par le MÊME
+/// mécanisme que les tokens (protocole 2.5). La décote elle-même est prouvée par
+/// `tests/demurrage_validation.rs`.
+#[tokio::test]
+async fn sft_to_token_metadata_carries_demurrage() {
+    let mut c = valid_class();
+    c.demurrage_bps_per_day = Some(250); // 2.5%/jour
+    let tm = c.to_token_metadata();
+    println!("SftClass.demurrage=Some(250) → TokenMetadata.demurrage={:?}", tm.demurrage_bps_per_day);
+    assert_eq!(tm.demurrage_bps_per_day, Some(250), "le demurrage de la classe doit passer dans la vue TokenMetadata");
+    // sanity : asset_id + cap aussi reportés (même vue utilisée par la validation de mint).
+    assert_eq!(tm.asset_id, c.asset_id);
+    assert_eq!(tm.max_supply, c.max_supply);
+    // sans demurrage → None (pas de décote).
+    let mut c0 = valid_class();
+    c0.demurrage_bps_per_day = None;
+    assert_eq!(c0.to_token_metadata().demurrage_bps_per_day, None);
 }
