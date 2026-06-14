@@ -16,6 +16,7 @@ pub mod memory_profile;
 pub mod milestone;
 pub mod nft;
 pub mod nodes;
+pub mod onramp;
 pub mod reserves;
 pub mod stream_blocks;
 pub mod supply;

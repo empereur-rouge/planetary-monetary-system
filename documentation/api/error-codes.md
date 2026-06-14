@@ -108,6 +108,7 @@ Certains codes ajoutent des champs additionnels pour ergonomie SDK :
 | `5001` | 429 | `RateLimited` | `Rate limit exceeded` | `rate limit exceeded` |
 | `5010` | 503 | `GasPoolEmpty(ledger_id)` | `Service temporarily unavailable` | `gas pool empty for ledger: <id>` |
 | `5020` | 503 | `SubscriptionInactive(ledger_id)` | `Subscription required` | `subscription inactive: <id>` |
+| `5030` | 503 | `EmissionBudgetExhausted{reason}` | `Emission budget exhausted for this period` | `voie=<v> requested=<x> remaining=<y> budget=<z>` (montants jamais publics) |
 
 ### 9xxx — Internal (jamais explicite)
 

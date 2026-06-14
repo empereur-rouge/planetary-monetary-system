@@ -9,6 +9,7 @@ pub mod api;
 pub mod api_error;
 pub mod api_fn;
 pub mod emission;
+pub mod emission_mint;
 pub mod fee_distribution;
 pub mod fee_pool;
 pub mod node_registry;

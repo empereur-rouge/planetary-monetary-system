@@ -45,7 +45,7 @@ sur le **ledger main**. C'est l'augmentation de la supply native (`asset_id = No
 | Voie | Chemin code | Trigger | Statut | Notes |
 |---|---|---|---|---|
 | Baseline taux cible (résidu, §2.3) | `perform_daily_inflation_mint` — [inflation.rs:20](crates/pms-server/src/fee_distribution/inflation.rs#L20) | tâche `spawn_inflation_mint_task` ([tasks.rs:129](crates/pms-server/src/api/tasks.rs#L129)) | ✅ Phase 1 | Aujourd'hui : `supply × rate / 365` non borné par un couloir |
-| Voie A — on-ramp fiat→PMS | *net-new* (Phase 1) | route admin/SDK on-ramp | ✅ cible Phase 1 | À créer ; doit décrémenter le budget |
+| Voie A — on-ramp fiat→PMS | `admin_onramp` — [onramp.rs](crates/pms-server/src/api_fn/onramp.rs) (v0.13.0) | `POST /admin/onramp` | ✅ **livré** | Montant explicite via `emit_native_gated`, refusé si > budget (code 5030) |
 | Voie B — pont scrip→PMS | réutilise `BridgeMint` — [pms-bridge/src/engine.rs:291](crates/pms-bridge/src/engine.rs#L291), **vers main, asset natif** | route `/admin/bridge/transfer` | 🔧 Phase 2 | Mint asymétrique (taux R) ; R dégrade quand le budget se vide (§5) |
 | Faucet (main, natif) | `faucet_mint` — [wallet_factory.rs:257](crates/pms-server/src/api_fn/wallet_factory.rs#L257) | `POST /admin/faucet` | ✅ | Dev/testnet uniquement (rejeté en prod) — gater pour cohérence des tests |
 
@@ -289,7 +289,7 @@ Le `plan.md` §3.1 liste trois options sans trancher. **Décision par voie :**
 | Voie | Politique à l'épuisement | Statut |
 |---|---|---|
 | Baseline (résidu) | N'épuise jamais par construction : minte `min(résidu, budget_restant)`, donc ≤ budget | ✅ |
-| Voie A — on-ramp fiat | **Rejet** propre : `503 {"code": 5xxx, "message": "emission budget exhausted"}` + `Retry-After`. L'utilisateur a payé du fiat → la couche applicative met en file/rembourse hors-DAG (jamais de mint au-delà du couloir) | ✅ principe / 🔧 code 5xxx |
+| Voie A — on-ramp fiat | **Rejet** propre : `503 {"code": 5030, "message": "Emission budget exhausted for this period"}`. L'utilisateur a payé du fiat → la couche applicative met en file/rembourse hors-DAG (jamais de mint au-delà du couloir) | ✅ **livré** (code 5030, v0.13.0) |
 | Voie B — pont scrip→PMS | **Dégradation du taux R** : R chute quand `budget_restant` baisse (déjà prévu plan §3.3 « R se dégrade quand le volume de conversion monte »). À budget nul, R→0 = conversion gelée jusqu'au prochain epoch | 🔧 forme de la courbe |
 
 - **Reject = défaut baseline Phase 1.** Pas de file durable (complexité) au lancement ; la mise
@@ -369,10 +369,11 @@ assertions sur **valeurs golden hardcodées**, exécutés isolés `--nocapture`.
 
 > Chaque commit compile, ses tests passent, `/simplify` entre chaque, bump de version.
 >
-> **Statut : étapes 1-3 + 5 livrées ensemble en v0.12.0** (un seul incrément cohérent — gate +
-> baseline + métriques + tests). L'atomicité a été implémentée en **counter-first dans le forge
-> path** (Alpha, §3.2), pas dans le `WriteBatch` (Beta) : plus simple, P1-safe, garde la politique
-> hors du stockage. Étape 4 (on-ramp) et l'orchestrateur `emit_gated` partagé restent à venir.
+> **Statut : étapes 1-5 livrées (v0.12.0 + v0.13.0).** v0.12.0 = gate + baseline + métriques +
+> tests (étapes 1-3, 5). v0.13.0 = voie A on-ramp (étape 4) + extraction de l'orchestrateur partagé
+> `emit_native_gated` (baseline ET on-ramp y passent). L'atomicité est en **counter-first dans le
+> forge path** (Alpha, §3.2), pas dans le `WriteBatch` (Beta) : plus simple, P1-safe, garde la
+> politique hors du stockage.
 
 1. **Compteur + persistance + calcul + gate baseline (v0.12.0).** `EmissionEpochState`,
    `record/latest_emission_epoch_state` (clé `node_fee_pool/emission_epoch_state`, pattern
@@ -383,10 +384,13 @@ assertions sur **valeurs golden hardcodées**, exécutés isolés `--nocapture`.
 3. **Gate d'enforcement (mutex) sur la baseline.** `emission_gate` sur `AppState`, brancher
    `perform_daily_inflation_mint` comme résidu (§2.3). Tests T3, T5, T9, T10. **La baseline est
    désormais bornée par le couloir** — c'est le gain de sécurité principal, livrable seul.
-4. **Voie A (on-ramp) gatée + rejet.** Nouvelle route on-ramp, code `ApiError` 5xxx, métriques
-   rejections. Test T4.
-5. **Métriques + alertes** (peut fusionner avec 3). Gauges/counters §7, alerte canari `effective_rate > ceiling`.
-6. *(Phase 2)* Voie B (pont scrip, taux R dégradant) + Signal 1 (burn). Hors scope de cette spec
+4. **Voie A (on-ramp) gatée + rejet (v0.13.0).** Route `POST /admin/onramp`, orchestrateur partagé
+   `emit_native_gated` (baseline refactorisée dessus), code `ApiError` 5030, test sandbox e2e
+   `test_onramp_voie_a_emission_budget`.
+5. **Métriques + alertes** (livré v0.12.0). Gauges/counters §7, alerte canari `effective_rate > ceiling`.
+6. *(Phase 2)* Voie B (pont scrip, taux R dégradant) + Signal 1 (burn). Hors scope de cette spec.
+   **NOTE** : la voie B ne passe PAS par `emit_native_gated` (mint `Mint`-sur-main) — elle enveloppera
+   son propre forge bridge avec `EmissionGate::reserve`/`release` directement.
    (option « scrip ledger + farm »).
 
 Bumps attendus : `Cargo.toml` (MINOR — feature), `API_VERSION` (route on-ramp à l'étape 4),

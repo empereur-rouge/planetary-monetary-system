@@ -2,7 +2,7 @@
 tags: [feature]
 created: 2026-06-14
 updated: 2026-06-14
-version: v0.12.0
+version: v0.13.0
 ---
 
 # Budget d'Émission Partagé
@@ -27,9 +27,12 @@ Deux propriétés de sécurité :
   auto-réparée au rollover d'epoch — jamais de dépassement.
 
 **Phase 1 (v0.12.0)** : mécanisme + câblage du **baseline inflation mint** (qui
-minte désormais le **résidu** du budget, `budget − déjà-émis`). Les voies
-on-ramp/scrip viendront ensuite. Voir `pms-spec-emission-budget.md` (racine du
-repo) pour la spec complète.
+minte désormais le **résidu** du budget, `budget − déjà-émis`).
+**Phase 2 (v0.13.0)** : **voie A on-ramp** fiat→PMS (`POST /admin/onramp`) — 2e
+voie branchée sur le **même** budget (preuve qu'il est partagé), via
+l'orchestrateur partagé `emit_native_gated` (baseline + on-ramp y passent).
+Voies scrip/contribution/contenu à venir. Voir `pms-spec-emission-budget.md`
+(racine du repo) pour la spec complète.
 
 ## Configuration
 
@@ -57,7 +60,10 @@ instantané.
 | Crate | Fichier | Rôle |
 |-------|---------|------|
 | `pms-server` | `src/emission.rs` | `EmissionGate`, `compute_epoch_budget`, `effective_rate_pct`, `EmissionEpochState`, `Voie` |
-| `pms-server` | `src/fee_distribution/inflation.rs` | Baseline mint en résidu, via le gate |
+| `pms-server` | `src/emission_mint.rs` | Orchestrateur partagé `emit_native_gated` (reserve→forge→persist→release+jauges) |
+| `pms-server` | `src/api_fn/onramp.rs` | Handler `POST /admin/onramp` (voie A fiat→PMS) |
+| `pms-server` | `src/fee_distribution/inflation.rs` | Baseline mint en résidu, via l'orchestrateur |
+| `pms-server` | `src/api_error.rs` | Code `5030` `EmissionBudgetExhausted` |
 | `pms-server` | `src/api/state.rs` | Champ `emission_gate: Arc<EmissionGate>` sur `AppState` |
 | `pms-server` | `src/metrics.rs` | Gauges/counters `pms_emission_*` |
 | `pms-storage` | `src/rocks_store/emission_storage.rs` | Persistance `emission_epoch_state` (CF `node_fee_pool`) |
@@ -73,7 +79,15 @@ instantané.
 | `EmissionGate::release` | `emission.rs` | Rollback de réservation si le forge échoue |
 | `EmissionGate::load` | `emission.rs` | Recovery au boot depuis le store (jamais re-sommé) |
 | `record/latest_emission_epoch_state` | `emission_storage.rs` | Persistance du singleton (clé dédiée, pas de nouveau CF) |
+| `emit_native_gated` | `emission_mint.rs` | Orchestrateur partagé : reserve→forge→persist→release |
 | `perform_daily_inflation_mint` | `inflation.rs` | Baseline : minte le résidu, split creator:treasury |
+| `admin_onramp` | `onramp.rs` | Voie A : mint fiat→PMS sous budget, code 5030 si épuisé |
+
+## Endpoints API
+
+| Méthode | Path | Description |
+|---------|------|-------------|
+| `POST` | `/admin/onramp` | Mint PMS natif (voie A fiat→PMS), montant explicite sous budget. `{to, amount, payment_ref}` → `{block_id, minted}` ; `503/5030` si budget épuisé. `admin_writable`. |
 
 ## Métriques
 
@@ -93,6 +107,11 @@ instantané.
 - **Gate** (`crates/pms-server/tests/emission_budget_test.rs`) : exhaustion→rejet,
   TOCTOU concurrent (exactement 1 réussit), crash-reload, rollover forward-only,
   résidu, rollback. Lancer : `cargo test -p pms-server --test emission_budget_test -- --nocapture`.
+- **On-ramp e2e** (`crates/pms-server/tests/dag_sandbox.rs::test_onramp_voie_a_emission_budget`) :
+  faucet bootstrap → on-ramp 10 PMS (balance créditée) → on-ramp > budget → 503/5030,
+  balance inchangée. Lancer : `cargo test --release -p pms-server --test dag_sandbox test_onramp_voie_a_emission_budget -- --ignored --nocapture`.
+- **ApiError** (`api_error::tests`) : `codes_are_unique` (5030 unique) +
+  `public_message_never_leaks_internal_detail` (montants jamais publics).
 
 ## Interactions
 

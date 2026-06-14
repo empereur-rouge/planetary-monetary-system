@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.13.0] - Unreleased — Voie A on-ramp fiat→PMS (plan §3.2, sous budget partagé)
+
+Deuxième voie de mint, branchée sur le **même** budget d'émission que la baseline
+(v0.12.0) — la preuve que le budget est bien *partagé* (« N voies sans N planches
+à billets »). Au passage, extraction de l'orchestrateur partagé `emit_native_gated`
+(réclamé par l'audit altitude) que la baseline ET l'on-ramp utilisent.
+
+### Added
+- **feat(emission/onramp)** — `POST /admin/onramp` ([crates/pms-server/src/api_fn/onramp.rs](crates/pms-server/src/api_fn/onramp.rs)) :
+  mint de PMS natif fiat→PMS (voie A) à travers le budget partagé. Montant
+  **explicite**, refusé si > budget restant (P1). `payment_ref` = preuve de
+  paiement attestée par l'opérateur (fiat encaissé hors-DAG, plan §6/§9),
+  inscrite dans les métadonnées du bloc pour l'audit. Route `admin_writable`
+  (gated read-only).
+- **feat(emission)** — orchestrateur partagé `emit_native_gated`
+  ([crates/pms-server/src/emission_mint.rs](crates/pms-server/src/emission_mint.rs)) :
+  réserve (P1) → publie les jauges → forge → persiste → **release** sur tout
+  échec. Réutilise `tx_helpers::{get_block_parents, forge_and_sign_block,
+  persist_and_broadcast}`. Baseline et on-ramp y passent tous deux — un seul
+  endroit pour le « dance » reserve/release (plus de copier-coller par voie).
+- **feat(api-error)** — code stable `5030` `EmissionBudgetExhausted` (503,
+  tranche resource/quota, message public vague, montants jamais exposés). Grille
+  mise à jour dans [documentation/api/error-codes.md](documentation/api/error-codes.md).
+- **test(sandbox)** — `test_onramp_voie_a_emission_budget` ([crates/pms-server/tests/dag_sandbox.rs](crates/pms-server/tests/dag_sandbox.rs)) :
+  bootstrap faucet → on-ramp 10 PMS (balance créditée) → on-ramp > budget → 503
+  code `5030`, balance inchangée (pas de sur-émission). End-to-end HTTP.
+
+### Changed
+- **refactor(server/inflation)** — `perform_daily_inflation_mint`
+  ([crates/pms-server/src/fee_distribution/inflation.rs](crates/pms-server/src/fee_distribution/inflation.rs))
+  passe par `emit_native_gated` (−200 lignes de forge hand-rollé). Comportement
+  inchangé (résidu du budget, split creator:treasury), mais gagne au passage
+  `pms_blocks_total` + `tps_tracker.record_block()` que l'ancien chemin oubliait.
+- **chore(version)** — `API_VERSION` 16 → **17** (nouvelle route `/admin/onramp`
+  + code `5030`). `Cargo.toml` 0.12.0 → **0.13.0** (MINOR). Pas de bump
+  `DAG_VERSION`/`CURRENT_VER` (bloc `Mint` inchangé, CF inchangé).
+
+### Notes
+- **Faucet non gaté** : le faucet (dev/testnet) reste hors budget — utile pour
+  amorcer la supply (le budget % est nul à supply 0). Sur mainnet le faucet est
+  refusé, donc pas un trou.
+- **Hors phase** (note-for-later des revues) : closure `build_outputs` faillible
+  (`Result`), seam bas-niveau reserve/release pour la voie B (pont scrip, qui ne
+  passe pas par `emit_native_gated`), couloir timelocké.
+
+---
+
 ## [0.12.0] - Unreleased — Budget d'émission partagé (plan §3.1, phase 1)
 
 Première brique de la politique monétaire gouvernée : un **budget d'émission par
