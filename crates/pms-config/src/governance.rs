@@ -14,14 +14,24 @@ use serde::{Deserialize, Serialize};
 /// L'ordre des variants (`Operator < Policy < Constitution`) est **signifiant** :
 /// `derive(PartialOrd, Ord)` l'utilise pour la comparaison `tier >= palier-min`
 /// ([`crate::governance_policy::min_tier`]). Ne jamais réordonner les variants.
+///
+/// **Tolérance de casse en entrée** : la désérialisation accepte la forme
+/// PascalCase (nom de variant : `"Operator"`) ET la forme lowercase (`"operator"`,
+/// via `serde(alias)`). C'est volontaire : l'API publique RENVOIE les paliers en
+/// lowercase (`as_str`, cf. `/v1/governance/*`), donc un client peut relire un
+/// `tier` de réponse et le renvoyer tel quel dans un `propose` sans renormaliser.
+/// La SÉRIALISATION reste PascalCase (inchangée : payload DAG + record stockés).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GovernanceTier {
     /// Calibrage opérationnel (fees, anti-spam) — délai court.
+    #[serde(alias = "operator")]
     Operator,
     /// Politique (ouvrir une voie, burn rate, taux cible) — délai moyen.
+    #[serde(alias = "policy")]
     Policy,
     /// Constitution (le couloir d'émission, le pouvoir de mint, qui gouverne) —
     /// délai long, la classe « règle inviolable ».
+    #[serde(alias = "constitution")]
     Constitution,
 }
 
@@ -105,4 +115,39 @@ pub struct GovernanceProposalRecord {
     /// Block id du bloc `GovernanceCancel` (présent une fois annulé).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_block_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Le `tier` se désérialise depuis PascalCase ET lowercase (tolérance d'entrée),
+    /// mais se sérialise toujours en PascalCase (forme canonique du payload/record).
+    /// Garantit qu'un client peut relire un `tier` de réponse (lowercase) et le
+    /// renvoyer dans un `propose` sans renormaliser.
+    #[test]
+    fn tier_deserializes_both_cases_serializes_pascal() {
+        // lowercase (forme renvoyée par l'API publique) accepté en entrée
+        assert_eq!(
+            serde_json::from_str::<GovernanceTier>("\"operator\"").unwrap(),
+            GovernanceTier::Operator
+        );
+        assert_eq!(
+            serde_json::from_str::<GovernanceTier>("\"constitution\"").unwrap(),
+            GovernanceTier::Constitution
+        );
+        // PascalCase (nom de variant) reste accepté → rétro-compat
+        assert_eq!(
+            serde_json::from_str::<GovernanceTier>("\"Policy\"").unwrap(),
+            GovernanceTier::Policy
+        );
+        // sérialisation inchangée = PascalCase (payload DAG + record stables)
+        assert_eq!(
+            serde_json::to_string(&GovernanceTier::Operator).unwrap(),
+            "\"Operator\""
+        );
+        // label public stable = lowercase
+        assert_eq!(GovernanceTier::Operator.as_str(), "operator");
+        println!("tier: deser(operator|Operator)=ok, ser=Operator, as_str=operator ✓");
+    }
 }

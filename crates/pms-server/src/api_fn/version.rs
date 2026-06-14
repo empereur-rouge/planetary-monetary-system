@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::api::AppState;
 
 /// Version de l'API REST — à incrémenter à chaque modification des routes/formats.
+/// v23 (v0.18.1) : `POST /admin/governance/propose` accepte désormais le `tier` en
+/// lowercase (`"operator"`) EN PLUS du PascalCase (`"Operator"`) — symétrie avec les
+/// réponses publiques qui renvoient le palier en lowercase. Rétro-compatible.
 /// v22 (v0.18.0) : nouvel endpoint **public** `GET /v1/governance/blocks` (journal
 /// d'audit de TOUS les blocs DAG de gouvernance : proposal/enact/cancel avec leurs
 /// block_ids). `/v1/governance/{pending,history}` exposent désormais aussi les
@@ -38,7 +41,7 @@ use crate::api::AppState;
 /// v13 (audit sécurité v0.9.0) : `POST /v1/wallet/tx/send` exige des unlocks
 /// valides (401 sinon) et la conservation par asset ; `POST /submit/block`
 /// rejette les tx sans autorisation de dépense et les block ids non canoniques.
-pub const API_VERSION: u32 = 22;
+pub const API_VERSION: u32 = 23;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -119,6 +122,7 @@ mod tests {
         // v0.16.0: 19 → 20 (gouvernance P2 : palier-min + asymétrie sur propose).
         // v0.17.0: 20 → 21 (gouvernance P3 : ConfigUpdate::SetEmissionCorridor).
         // v0.18.0: 21 → 22 (GET /v1/governance/blocks + block_ids dans pending/history).
-        assert_eq!(parsed.api_version, 22);
+        // v0.18.1: 22 → 23 (propose accepte tier lowercase).
+        assert_eq!(parsed.api_version, 23);
     }
 }
