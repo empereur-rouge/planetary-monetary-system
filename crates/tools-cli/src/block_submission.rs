@@ -11,11 +11,10 @@ use pms_interface::NetDagAdapter;
 use pms_storage::DagStorage;
 use pms_storage::rocks_store::store::RocksStore;
 use pms_types::{
-    EncryptedPayload, OutputId, PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput,
-    Unlock,
+    OutputId, PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput, Unlock,
 };
 use pms_types_block::Block;
-use pms_utils::{compute_block_id, submit_block_http};
+use pms_utils::{compute_block_id, send_tx_http, submit_block_http};
 use pms_wallet::signing_wire::canonical_wireblock_message;
 use pms_wallet::utxo_store::{gather_wallet_utxos_dec, select_utxos_dec};
 use pms_wallet::{SignerBackend, Wallet, decode_address, make_address};
@@ -53,6 +52,37 @@ pub async fn reload_dag_after_submit(dag: &Arc<ConcurrentDag>, store: &Arc<Rocks
         "{}",
         "⚠️  Reload DAG inplace not supported with ConcurrentDag yet.".yellow()
     );
+}
+
+/// Soumet une transaction **déjà signée par l'utilisateur** au COORDINATEUR via
+/// `POST /wallet/tx/send`.
+///
+/// Pourquoi cette voie et pas `/submit/block` : seul le coordinateur peut signer
+/// un bloc. Si le CLI auto-signe un bloc avec la clé de l'utilisateur A (ce que
+/// faisait [`submit_block_from_cli`]), le nœud le rejette via le
+/// `single_writer_gate` (« signer is not in the active coordinator key set »)
+/// dès que `enforce_single_writer` est actif (testnet/mainnet). Ici on n'envoie
+/// que la **tx signée** : le coordinateur vérifie les signatures d'inputs de A
+/// (autorisation de dépense C-1/C-2), chiffre le payload pour `sender`+`dest`,
+/// puis l'emballe dans un bloc qu'IL signe. La clé privée de A ne quitte jamais
+/// ce process — voie non-custodiale, identique au flux du SDK (`client.send`).
+async fn submit_tx_via_coordinator(tx: &Transaction, sender_xpk: &str, dest_addr: &str) -> Result<()> {
+    let (_h20, dest_xpk) = decode_address(dest_addr)
+        .map_err(|e| anyhow::anyhow!("Adresse destinataire invalide: {e}"))?;
+    let recipients_xpk = vec![sender_xpk.to_string(), dest_xpk];
+
+    let (status, id_opt) = send_tx_http(tx, &recipients_xpk).await?;
+    if !status.is_success() {
+        return Err(anyhow::anyhow!(
+            "le coordinateur a refusé la transaction (HTTP {status})"
+        ));
+    }
+    println!(
+        "✅ {} (bloc id={})",
+        "Transaction emballée par le coordinateur".green().bold(),
+        id_opt.as_deref().unwrap_or("?").cyan()
+    );
+    Ok(())
 }
 
 /// Forge un bloc avec un payload chiffré, signe le WireBlock avec le `wallet`,
@@ -222,7 +252,9 @@ pub async fn action_make_mint(
 
 pub async fn action_send_tokens(
     state: &Arc<Mutex<CliState>>,
-    dag: &DagRef,
+    // Plus utilisé depuis le passage à la soumission via coordinateur
+    // (`submit_tx_via_coordinator`) : on ne forge plus de bloc localement.
+    _dag: &DagRef,
     store: &Arc<RocksStore>,
 ) -> Result<()> {
     // 1) Wallet courant + HRP + X25519 SK + settings
@@ -310,38 +342,29 @@ pub async fn action_send_tokens(
         tx.unlocks = vec![Unlock::new(w.public_key_hex.clone(), sig_b64)];
     }
 
-    // 8) Chiffrement du payload (destinataires = nous + destinataire)
-    let (_h20, dest_xpk) = decode_address(&dest_addr)
-        .map_err(|e| anyhow::anyhow!("Adresse destinataire invalide: {e}"))?;
+    // 8) Soumission via le COORDINATEUR (voie non-custodiale).
+    //    On envoie la tx signée par l'utilisateur ; le coordinateur la chiffre
+    //    pour [nous + destinataire], l'emballe dans un bloc qu'IL signe, et
+    //    applique le delta UTXO (cf. `wallet_send_tx`). On n'auto-signe plus de
+    //    bloc côté CLI (rejeté par `single_writer_gate` sur testnet/mainnet).
+    submit_tx_via_coordinator(&tx, &w_xpk, &dest_addr).await?;
 
-    let plain = PlainPayload::TxUtxo(tx);
-    let enc = EncryptedPayload::encrypt_for_plain(&plain, &[w_xpk.clone(), dest_xpk])
-        .map_err(|e| anyhow::anyhow!(e))?;
+    // 9) Le store local est secondaire (vue lecture) : on le resynchronise pour
+    //    que la prochaine sélection d'UTXO de cette session REPL ne re-pioche
+    //    pas les inputs qui viennent d'être dépensés.
+    if let Err(e) = store.refresh_from_primary() {
+        eprintln!("[CLI][REFRESH][ERR] {e:#}");
+    }
 
-    // 9) Forge + sign + submit + reload via helper unifié
-    submit_block_from_cli(
-        dag,
-        store,
-        &w,
-        PayloadEnvelope::Encrypted(enc),
-        "TxUtxo",
-        &settings.network.network_id,
-        settings.network.protocol_version as u16,
-    )
-    .await?;
-
-    println!(
-        "{} {}",
-        "✅ Transaction soumise, bloc id:".green().bold(),
-        "voir logs ci-dessus".cyan()
-    );
     wait_enter();
     Ok(())
 }
 // ... (existing code)
 
 pub async fn action_send_tokens_headless(
-    dag: &DagRef,
+    // Plus utilisé depuis le passage à la soumission via coordinateur
+    // (`submit_tx_via_coordinator`) : on ne forge plus de bloc localement.
+    _dag: &DagRef,
     store: &Arc<RocksStore>,
     wallet_private_key: &str,
     dest_addr: &str,
@@ -406,25 +429,14 @@ pub async fn action_send_tokens_headless(
         tx.unlocks = vec![Unlock::new(w.public_key_hex.clone(), sig_b64)];
     }
 
-    // 6) Encrypt Payload
-    let (_h20, dest_xpk_decoded) =
-        decode_address(dest_addr).map_err(|e| anyhow::anyhow!("Invalid dest addr: {e}"))?;
-
-    let plain = PlainPayload::TxUtxo(tx);
-    let enc = EncryptedPayload::encrypt_for_plain(&plain, &[w_xpk.clone(), dest_xpk_decoded])
-        .map_err(|e| anyhow::anyhow!(e))?;
-
-    // 7) Submit
-    submit_block_from_cli(
-        dag,
-        store,
-        &w,
-        PayloadEnvelope::Encrypted(enc),
-        "TxUtxo-Headless",
-        &settings.network.network_id,
-        settings.network.protocol_version as u16,
-    )
-    .await?;
+    // 6) Soumission via le COORDINATEUR (voie non-custodiale).
+    //    Auparavant le CLI auto-signait un bloc et le POSTait sur
+    //    `/submit/block` — rejeté par `single_writer_gate` dès que
+    //    `enforce_single_writer` est actif (testnet/mainnet), car la clé de
+    //    l'utilisateur n'est pas dans le coordinator key set. On envoie
+    //    désormais la tx signée au coordinateur, qui la chiffre, l'emballe dans
+    //    un bloc qu'IL signe et applique le delta UTXO (cf. `wallet_send_tx`).
+    submit_tx_via_coordinator(&tx, &w_xpk, dest_addr).await?;
 
     println!("✅ Headless Transaction Submitted Successfully");
     Ok(())

@@ -6,7 +6,16 @@
 
 ## POST `/submit/block`
 
-Soumet un bloc signé au DAG. C'est le point d'entrée principal pour toutes les opérations qui modifient l'état du réseau.
+Soumet un bloc **déjà signé** au DAG.
+
+> ⚠️ **Réservé au coordinateur.** Sur testnet/mainnet (`enforce_single_writer = true`),
+> seul un bloc signé par une clé du *coordinator key set* est accepté ; un bloc
+> signé par la clé d'un utilisateur normal est rejeté par le `single_writer_gate`
+> (« signer is not in the active coordinator key set »). **Un utilisateur qui veut
+> transférer des fonds ne passe PAS par ici** : il utilise le flux non-custodial
+> [`/v1/tx/prepare`](#post-v1txprepare) → signature locale → [`/wallet/tx/send`](#post-wallettxsend),
+> où le coordinateur emballe la tx dans un bloc qu'il signe. C'est aussi ce que fait
+> `tools-cli tx` et le SDK `client.send`.
 
 ### Request Body
 
@@ -308,9 +317,32 @@ events.onerror = (e) => {
 
 ## POST `/wallet/tx/send`
 
-Endpoint helper pour envoyer une transaction. Le client fournit un `WireBlock` pré-signé.
+Voie **non-custodiale** : le client fournit une **transaction signée par l'utilisateur**
+(pas un bloc). Le coordinateur vérifie les signatures d'inputs, chiffre le payload pour
+les destinataires, puis emballe la tx dans un bloc qu'**il** signe et applique le delta UTXO.
 
-> 📝 **Note**: Voir [Wallet API](./wallet.md) pour plus de détails.
+### Request Body
+
+```json
+{
+  "tx": {
+    "inputs":  [ { "out": { "txid": "...", "index": 0 } } ],
+    "outputs": [ { "address": "8e1...", "amount": "40", "asset_id": null } ],
+    "fee": "1.2000001",
+    "unlocks": [ { "pubkey_hex": "04...", "signature_b64": "..." } ]
+  },
+  "recipients_xpk": ["<xpk_sender_hex>", "<xpk_dest_hex>"]
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `tx` | Transaction | Transaction signée (un `unlock` par input, signature ECDSA sur `tx.signing_message(network_id)`) |
+| `recipients_xpk` | string[] | Clés X25519 (hex) pour le chiffrement du payload (émetteur + destinataire) |
+
+Consommé par `tools-cli tx`, le SDK `client.send`, et le helper `pms_utils::send_tx_http`.
+
+> 📝 **Note**: Voir [Wallet API](./wallet.md) pour le détail des validations (C-1/C-2, conservation).
 
 ---
 

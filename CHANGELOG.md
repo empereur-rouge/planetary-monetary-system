@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.21.0] - Unreleased — CLI : transfert non-custodial via le coordinateur
+
+### Fixed
+- **fix(tools-cli/tx)** — `tools-cli tx` (headless) et l'action REPL « send » routent
+  désormais la transaction **signée par l'utilisateur** vers le COORDINATEUR via
+  `POST /wallet/tx/send`, au lieu d'auto-signer un bloc et de le POSTer sur
+  `/submit/block`. Un bloc signé par la clé d'un utilisateur normal A était rejeté
+  par le `single_writer_gate` (« signer is not in the active coordinator key set »)
+  dès que `enforce_single_writer` est actif (testnet/mainnet) — le transfert initié
+  par A échouait. Le coordinateur vérifie maintenant les signatures d'inputs de A
+  (autorisation de dépense C-1/C-2), chiffre le payload, puis emballe la tx dans un
+  bloc qu'**IL** signe (voie non-custodiale : la clé de A ne quitte jamais le client,
+  identique au flux du SDK `client.send`). Le payload passe de Plain à **chiffré**,
+  cohérent avec le reste de la chaîne.
+
+### Added
+- **feat(pms-utils)** — helpers HTTP réutilisables `send_tx_http` / `send_tx_http_to`
+  ([http.rs](crates/pms-utils/src/http.rs)) : POST d'une transaction signée sur
+  `/wallet/tx/send`. Partagés par le CLI (`tools-cli`) et le test e2e — pas de
+  duplication du chemin de soumission.
+- **test(pms-server)** — `wallet_send_tx_e2e` ([tests/wallet_send_tx_e2e.rs](crates/pms-server/tests/wallet_send_tx_e2e.rs)) :
+  prouve A→B end-to-end **à travers le coordinateur** — engine réel servi sur port
+  éphémère, vrai `send_tx_http_to` (le chemin exact du CLI), assertions de
+  conservation de la valeur (A = financé − montant − frais, B = montant,
+  admin = frais, somme = financé).
+
+### Changed
+- **chore(version)** — `Cargo` 0.20.0 → **0.21.0** (feature CLI). Aucun changement
+  `DAG_VERSION` / `API_VERSION` / schéma DB / P2P : les formats `Transaction` et
+  `Block` sont inchangés et les endpoints `/wallet/tx/send` & `/v1/tx/prepare`
+  préexistaient — seul l'outillage CLI change de chemin de soumission.
+
+---
+
 ## [0.20.0] - Unreleased — SFT : demurrage opt-in par classe
 
 ### Added
