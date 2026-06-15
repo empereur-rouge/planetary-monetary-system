@@ -689,3 +689,104 @@ async fn timelocked_input_cannot_be_spent_early_via_encrypted_path() {
         "Bob must not receive funds from a premature time-locked spend"
     );
 }
+
+/// **Double-dépense concurrente (TOCTOU)** — deux transferts signés par A,
+/// dépensant le MÊME UTXO vers deux destinataires différents, soumis EN
+/// PARALLÈLE. L'invariant : exactement UN est accepté, l'autre rejeté, et la
+/// supply est conservée (pas d'inflation). Avant le guard de claim atomique,
+/// les deux pouvaient passer la validation (lecture lock-free du UTXO set) puis
+/// appliquer leur delta → A dépensé une fois mais B ET C crédités.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_double_spend_is_rejected() {
+    let (base, http, hrp, network_id) = spawn_engine().await;
+    let alice = Wallet::from_seed(&[61u8; 32], None).unwrap();
+    let bob = Wallet::from_seed(&[62u8; 32], None).unwrap();
+    let charlie = Wallet::from_seed(&[63u8; 32], None).unwrap();
+    let alice_addr = alice.get_address(&hrp);
+    let bob_addr = bob.get_address(&hrp);
+    let charlie_addr = charlie.get_address(&hrp);
+
+    let faucet_amount = Decimal::from(100u32);
+    faucet(&http, &base, &alice_addr, "100", None).await;
+    assert_eq!(
+        poll_balance(&http, &base, &alice_addr, faucet_amount).await,
+        faucet_amount
+    );
+
+    // Prepare two transfers that both select Alice's single 100-PMS UTXO.
+    let amount = Decimal::from(40u32);
+    let prep_b: serde_json::Value = http
+        .post(format!("{base}/v1/tx/prepare"))
+        .json(&json!({ "from": alice_addr, "to": bob_addr, "amount": amount.to_string() }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let prep_c: serde_json::Value = http
+        .post(format!("{base}/v1/tx/prepare"))
+        .json(&json!({ "from": alice_addr, "to": charlie_addr, "amount": amount.to_string() }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let fee = Decimal::from_str(prep_b["fee"].as_str().expect("fee")).expect("fee dec");
+
+    let tx_b = sign_tx_inputs(
+        &alice,
+        &serde_json::from_value(prep_b["unsigned_tx"].clone()).unwrap(),
+        &network_id,
+    );
+    let tx_c = sign_tx_inputs(
+        &alice,
+        &serde_json::from_value(prep_c["unsigned_tx"].clone()).unwrap(),
+        &network_id,
+    );
+
+    let (_h, bob_xpk) = decode_address(&bob_addr).unwrap();
+    let (_h, charlie_xpk) = decode_address(&charlie_addr).unwrap();
+    let axpk = alice.x25519_pub_hex.clone();
+
+    // Fire BOTH concurrently — they race on Alice's single UTXO.
+    let xpks_b = [axpk.clone(), bob_xpk];
+    let xpks_c = [axpk, charlie_xpk];
+    let (rb, rc) = tokio::join!(
+        pms_utils::send_tx_http_to(&base, &tx_b, &xpks_b, true),
+        pms_utils::send_tx_http_to(&base, &tx_c, &xpks_c, true),
+    );
+    let status_b = rb.unwrap().0;
+    let status_c = rc.unwrap().0;
+    println!("[CONCURRENT-DS] B → {status_b}   C → {status_c}");
+
+    let created = [status_b, status_c]
+        .iter()
+        .filter(|s| **s == StatusCode::CREATED)
+        .count();
+    assert_eq!(
+        created, 1,
+        "exactly ONE of two concurrent same-UTXO spends may be accepted (got {created})"
+    );
+
+    // No inflation: only one recipient is paid; Alice spent her UTXO once.
+    // The winner's transfer applies async — poll until Alice's change settles.
+    let expected_alice = faucet_amount - amount - fee;
+    poll_balance(&http, &base, &alice_addr, expected_alice).await;
+    let bob_bal = get_balance(&http, &base, &bob_addr).await;
+    let charlie_bal = get_balance(&http, &base, &charlie_addr).await;
+    let alice_bal = get_balance(&http, &base, &alice_addr).await;
+    println!(
+        "[CONCURRENT-DS] FINAL: alice={alice_bal} bob={bob_bal} charlie={charlie_bal} (fee={fee})"
+    );
+    assert_eq!(
+        bob_bal + charlie_bal,
+        amount,
+        "exactly ONE transfer of {amount} may land (no inflation: B+C must == amount)"
+    );
+    assert_eq!(
+        alice_bal, expected_alice,
+        "Alice's UTXO must be spent EXACTLY once (single change output)"
+    );
+}
