@@ -1420,6 +1420,37 @@ where
         // Uses apply_diff() which groups operations by shard for minimal lock
         // acquisitions instead of sequential per-UTXO awaits.
         if let Some(d) = &delta {
+            // ── Double-spend guard (atomic, lock-free) ──────────────────────
+            // Claim every spent outpoint in the authoritative spent-set BEFORE
+            // applying the UTXO delta. `try_mark_spent` is an atomic DashSet
+            // test-and-set: when two concurrent blocks race on the same input,
+            // the first claims it, the rest get `false` and are rejected here.
+            // This is the commit point that closes the validate→apply TOCTOU —
+            // validation reads the UTXO set lock-free and is only an early
+            // reject; THIS is authoritative. Covers BOTH the plain hot-path and
+            // the encrypted `external_delta` path. On a multi-input block that
+            // conflicts mid-way, roll back the claims already made so
+            // legitimately-unspent inputs are not locked up.
+            let mut claimed: Vec<(&str, u32)> = Vec::with_capacity(d.spend.len());
+            for (txid, idx) in &d.spend {
+                if self.dag.try_mark_spent(txid, *idx) {
+                    claimed.push((txid.as_str(), *idx));
+                } else {
+                    for (t, i) in &claimed {
+                        self.dag.unmark_spent(t, *i);
+                    }
+                    tracing::warn!(
+                        "🚫 double-spend rejected on block {}: outpoint {}:{} already spent",
+                        &sb.id[..16.min(sb.id.len())],
+                        txid,
+                        idx
+                    );
+                    return Ok(PutResult::Rejected(format!(
+                        "double-spend: outpoint {txid}:{idx} already spent"
+                    )));
+                }
+            }
+
             let spends: Vec<pms_types::OutputId> = d
                 .spend
                 .iter()
@@ -1477,12 +1508,8 @@ where
             .map(|p| (p.clone(), self.dag.get_children_count(p)))
             .collect();
 
-        // Mark spent outpoints in concurrent DAG (for double-spend detection)
-        if let Some(d) = &delta {
-            for (txid, idx) in &d.spend {
-                self.dag.mark_spent(txid, *idx);
-            }
-        }
+        // Spent outpoints were already claimed atomically BEFORE `apply_diff`
+        // (double-spend guard above), so there is nothing to mark here anymore.
 
         // ============================================================
         // 6) FINALITY UPDATE (Milestone + k-depth)

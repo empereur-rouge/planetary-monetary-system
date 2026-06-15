@@ -5,10 +5,25 @@ use anyhow::Result;
 use pms_storage::DagStorage;
 
 impl ConcurrentDag {
-    /// Mark an outpoint as spent (bounded FIFO eviction when limit > 0)
+    /// Mark an outpoint as spent (bounded FIFO eviction when limit > 0).
+    /// Idempotent; ignores whether it was already spent. For the live persist
+    /// path use [`ConcurrentDag::try_mark_spent`] instead, which reports
+    /// double-spends.
     pub fn mark_spent(&self, txid: &str, index: u32) {
+        let _ = self.try_mark_spent(txid, index);
+    }
+
+    /// **Atomic double-spend claim.** Inserts the outpoint into the spent-set and
+    /// returns `true` if it was **newly** claimed (this caller owns the spend),
+    /// `false` if it was **already** spent. `DashSet::insert` is atomic, so when
+    /// concurrent blocks race on the same outpoint exactly one gets `true` — this
+    /// is the authoritative commit point that closes the validate→apply TOCTOU on
+    /// the live persist path (`do_persist_block_internal`). Validation (which
+    /// reads the UTXO set lock-free) is only an early reject; THIS decides.
+    pub fn try_mark_spent(&self, txid: &str, index: u32) -> bool {
         let key = (txid.to_string(), index);
-        if self.spent_outpoints.insert(key.clone()) && self.max_spent_outpoints > 0 {
+        let newly = self.spent_outpoints.insert(key.clone());
+        if newly && self.max_spent_outpoints > 0 {
             let mut order = self.spent_order.lock();
             order.push_back(key);
             while order.len() > self.max_spent_outpoints {
@@ -17,6 +32,16 @@ impl ConcurrentDag {
                 }
             }
         }
+        newly
+    }
+
+    /// Undo a [`ConcurrentDag::try_mark_spent`] claim — used to roll back a
+    /// multi-input block that is rejected AFTER claiming some of its inputs, so
+    /// legitimately-unspent inputs are not locked up. Removes the key from the
+    /// RAM set; a stale `spent_order` entry is harmless (its later FIFO `remove`
+    /// is a no-op).
+    pub fn unmark_spent(&self, txid: &str, index: u32) {
+        self.spent_outpoints.remove(&(txid.to_string(), index));
     }
 
     /// Best-effort RAM check — **do not use for financial validation alone**.

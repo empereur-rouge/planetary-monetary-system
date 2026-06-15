@@ -205,7 +205,11 @@ Le rang 1 (cause A) est corrigé et committé (validation partagée
 `/code-review` haute-recall sur ce diff a confirmé **aucune régression** (refactor
 strict-superset) mais a remonté un finding **plus profond, pré-existant** :
 
-### NOUVEAU — Rang 1-bis (HAUTE, à vérifier/fermer avant mainnet) : TOCTOU concurrent sur l'application du delta chiffré
+### ✅ CORRIGÉ (v0.23.0) — Rang 1-bis : TOCTOU concurrent sur l'application du delta chiffré
+> **Statut : fermé.** Guard de claim atomique (`try_mark_spent`) avant `apply_diff`
+> dans `do_persist_block_internal` (plain + chiffré) + test de concurrence
+> `concurrent_double_spend_is_rejected`. Détails ci-dessous.
+
 `persist_block_with_delta` appelle `do_persist_block_internal` **directement** (pas
 via un channel sérialisé) → une requête par tâche axum, concurrentes. Pour un
 payload **chiffré**, la validation (double-spend inclus, via la lecture du

@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.23.0] - Unreleased — Sécurité : guard atomique anti double-dépense concurrente (audit cause A-bis)
+
+### Security
+- **fix(security/double-spend-toctou)** — fermeture d'un **TOCTOU validate→apply**
+  pré-existant : `persist_block_with_delta` appelle `do_persist_block_internal`
+  **directement** (une tâche par requête, concurrentes) ; sur le chemin chiffré
+  la validation (dont la lecture du UTXO set) tournait dans le handler, puis le
+  delta était appliqué plus tard par `apply_diff` — qui **ne rejette pas** un
+  input déjà dépensé. Deux sends concurrents dépensant le même UTXO pouvaient
+  donc tous deux passer puis tous deux appliquer → **double-dépense / inflation**.
+  **Correctif (bonne altitude, plain + chiffré)** : nouveau `ConcurrentDag::try_mark_spent`
+  (test-and-set atomique via `DashSet::insert`) — `do_persist_block_internal`
+  **claim** chaque input dans le spent-set **avant** `apply_diff` ; si un input
+  est déjà claimé (concurrent ou antérieur) le bloc est rejeté (avec rollback des
+  claims partiels via `unmark_spent`). La validation reste un early-reject ; le
+  claim est le point de commit autoritaire. Découvert par le `/code-review` du
+  rang 1. ([spent.rs](crates/pms-core/src/concurrent_dag/spent.rs),
+  [persist.rs](crates/pms-core/src/net_adapter/persist.rs)).
+
+### Added
+- **test(security)** — `concurrent_double_spend_is_rejected` : deux transferts
+  signés par A sur le MÊME UTXO, soumis en parallèle (`tokio::join!`) → exactement
+  un accepté (201), l'autre rejeté (400), supply conservée (B+C == montant,
+  émetteur dépensé une seule fois). Régression : spent_fallback, concurrent_dag,
+  encrypted_utxo_delta, submit_block_auth, wallet_send_fees, tx_validation,
+  multi_token — tous verts.
+
+### Changed
+- **chore(version)** — `Cargo` 0.22.0 → **0.23.0** ; `API_VERSION` 26 → **27**
+  (comportement de `/submit/block`, `/wallet/tx/send`, `/v1/wallet/send-simple`
+  durci : rejet fiable des double-dépenses concurrentes). Aucun changement
+  `DAG_VERSION`/DB/P2P : la règle de validité (un input ne se dépense qu'une fois)
+  est inchangée — seule son **application sous concurrence** est corrigée ; format
+  `Transaction`/`Block` inchangé, pas de migration.
+
+---
+
 ## [0.22.0] - Unreleased — Sécurité : le chemin chiffré valide comme le hot-path (audit cause A)
 
 ### Security

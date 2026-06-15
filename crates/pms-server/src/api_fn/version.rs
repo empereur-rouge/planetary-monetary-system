@@ -51,7 +51,11 @@ use crate::api::AppState;
 /// fonction que le hot-path (gel compliance, time-locks, MultiSig/HashLock,
 /// dédup d'inputs anti-inflation, conservation) — une tx invalide est rejetée
 /// (400) au lieu d'être emballée chiffrée et appliquée.
-pub const API_VERSION: u32 = 26;
+/// v27 (audit sécurité 2026-06, cause A-bis) : `POST /submit/block`,
+/// `POST /wallet/tx/send` et `POST /v1/wallet/send-simple` rejettent de façon
+/// fiable les **double-dépenses concurrentes** (claim atomique des inputs avant
+/// application du delta) — ferme un TOCTOU validate→apply.
+pub const API_VERSION: u32 = 27;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -137,6 +141,8 @@ mod tests {
         // v0.20.0: 24 → 25 (SFT demurrage : champ demurrage_bps_per_day sur create).
         // v0.22.0: 25 → 26 (audit cause A : /wallet/tx/send & /v1/wallet/send-simple
         //          valident le plaintext — gel/time-lock/MultiSig/dédup/conservation).
-        assert_eq!(parsed.api_version, 26);
+        // v0.23.0: 26 → 27 (audit cause A-bis : rejet fiable des double-dépenses
+        //          concurrentes — claim atomique avant apply, ferme un TOCTOU).
+        assert_eq!(parsed.api_version, 27);
     }
 }
