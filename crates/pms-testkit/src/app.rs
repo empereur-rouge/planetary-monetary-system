@@ -298,11 +298,26 @@ pub async fn make_test_ctx() -> anyhow::Result<TestCtx> {
     })
 }
 
-/// Version of make_test_ctx that allows configuring admin wallet addresses and signers
+/// Version of make_test_ctx that allows configuring admin wallet addresses and signers.
 /// This is needed for fee-related tests where admin addresses must be pre-configured.
+/// Coordinator fee-output sharding is disabled (delegates to the sharded variant
+/// with `coord_shard_count = 0`).
 pub async fn make_test_ctx_with_admin(
     admin_wallet_addresses: Vec<String>,
     admin_signer_pubkeys: Vec<String>,
+) -> anyhow::Result<TestCtx> {
+    make_test_ctx_with_admin_sharded(admin_wallet_addresses, admin_signer_pubkeys, 0).await
+}
+
+/// Like [`make_test_ctx_with_admin`] but also configures the coordinator
+/// fee-output shard count. When `coord_shard_count > 0`, the same number of
+/// coordinator shard wallets is derived from `node_wallet` (exactly like
+/// production `serve.rs`), so tests can exercise the sharded fee-recipient path
+/// where `prepare_tx` sends the fee output to a shard address.
+pub async fn make_test_ctx_with_admin_sharded(
+    admin_wallet_addresses: Vec<String>,
+    admin_signer_pubkeys: Vec<String>,
+    coord_shard_count: u32,
 ) -> anyhow::Result<TestCtx> {
     // 0) charge config (tip_limit, hrp, etc.)
     let mut settings = load_config()?;
@@ -310,6 +325,8 @@ pub async fn make_test_ctx_with_admin(
     // Override admin wallet addresses and signer pubkeys
     settings.admin.wallet_addresses = admin_wallet_addresses;
     settings.admin.signer_pubkeys = admin_signer_pubkeys;
+    // Coordinator fee-output sharding (0 = disabled → legacy admin/treasury chain).
+    settings.fees.coord_shard_count = coord_shard_count;
 
     // 1) RocksStore temporaire
     let tmp = tempfile::tempdir()?;
@@ -343,6 +360,18 @@ pub async fn make_test_ctx_with_admin(
 
     // 5) Wallet node (en mémoire) - use same seed as make_test_ctx
     let node_wallet = Arc::new(Wallet::from_seed(&[7u8; 32], None).unwrap());
+
+    // Coordinator shard wallets, derived from node_wallet exactly like
+    // production (`serve.rs`) when `[fees].coord_shard_count > 0`.
+    let coord_shard_wallets: Vec<Wallet> = if settings.fees.coord_shard_count > 0 {
+        pms_wallet::shard_derivation::derive_coord_shard_set(
+            &node_wallet,
+            settings.fees.coord_shard_count,
+        )
+        .expect("derive coord shard set")
+    } else {
+        Vec::new()
+    };
 
     // 6) Serveur
     let srv = Server::new(
@@ -401,7 +430,7 @@ pub async fn make_test_ctx_with_admin(
         contract_event_bus: None,
         contract_store: store.clone(),
         compliance_lock: Arc::new(tokio::sync::Mutex::new(())),
-        coord_shard_wallets: std::sync::Arc::new(Vec::new()),
+        coord_shard_wallets: std::sync::Arc::new(coord_shard_wallets),
         coord_shard_round_robin: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         read_only: std::sync::Arc::new(pms_server::read_only::ReadOnlyMode::new()),
         webhook_store: pms_server::api_fn::webhooks::WebhookStore::new(),

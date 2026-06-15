@@ -183,6 +183,34 @@ impl AppState {
             .cloned()
             .or_else(|| self.settings.fees.treasury_addresses.first().cloned())
     }
+
+    /// The set of ALL coordinator-side addresses that may legitimately receive a
+    /// transaction-fee output — the union of every source
+    /// [`fee_recipient_address`](Self::fee_recipient_address) can select from:
+    /// coordinator shards, admin wallets, and treasury addresses.
+    ///
+    /// `prepare_tx` picks exactly ONE of these per transaction, and with
+    /// sharding the choice is round-robin (non-deterministic across calls).
+    /// `wallet_send_tx` must therefore recognise the fee output sent to ANY of
+    /// them — otherwise a fee paid to a *shard* address (which is not in
+    /// `admin.wallet_addresses` / `treasury_addresses`) is mistaken for a
+    /// taxable transfer and the tx is wrongly rejected with "insufficient fees".
+    ///
+    /// Addresses are lowercased for case-insensitive membership tests.
+    pub fn fee_recipient_addresses(&self) -> std::collections::HashSet<String> {
+        let hrp = &self.settings.address.hrp;
+        let mut set = std::collections::HashSet::new();
+        for w in self.coord_shard_wallets.iter() {
+            set.insert(w.get_address(hrp).to_ascii_lowercase());
+        }
+        for a in &self.settings.admin.wallet_addresses {
+            set.insert(a.to_ascii_lowercase());
+        }
+        for a in &self.settings.fees.treasury_addresses {
+            set.insert(a.to_ascii_lowercase());
+        }
+        set
+    }
 }
 
 /// Sync the PMS_BLOCKS_TOTAL gauge with the actual in-memory DAG size for the default ledger.

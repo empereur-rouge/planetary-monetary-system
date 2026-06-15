@@ -161,32 +161,26 @@ pub async fn wallet_send_tx(
     //    et ownership-vérifié dans la boucle ci-dessus).
     let sender_address: Option<String> = input_outputs.first().map(|u| u.address.clone());
 
-    // c) Identifier les outputs de frais (vers un wallet admin ou treasury)
-    //    On tolère n'importe quel admin ou treasury de la liste
+    // c) Identifier les outputs de frais. Un output de frais peut viser
+    //    n'importe quel destinataire coordinateur que `prepare_tx` peut choisir
+    //    via `fee_recipient_address()` : un SHARD coordinateur (round-robin),
+    //    un wallet admin, ou une treasury. On utilise donc le MÊME ensemble de
+    //    sources que la sélection (`fee_recipient_addresses`) — sinon un frais
+    //    payé à une adresse de shard (absente d'admin/treasury) serait compté
+    //    comme transfert taxable → faux "insufficient fees" quand le sharding
+    //    coordinateur est actif (testnet/mainnet).
+    let fee_recipients = state.fee_recipient_addresses();
     let mut provided_fee = Decimal::ZERO;
     let mut taxable_amount = Decimal::ZERO;
 
     for out in &tx.outputs {
-        // 1. Check Admin or Treasury (Fee)
-        let is_admin = settings
-            .admin
-            .wallet_addresses
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case(&out.address));
-
-        let is_treasury = settings
-            .fees
-            .treasury_addresses
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case(&out.address));
-
-        if is_admin || is_treasury {
+        if fee_recipients.contains(&out.address.to_ascii_lowercase()) {
+            // 1. Output de frais (shard / admin / treasury).
             if let Ok(amt) = Decimal::from_str_exact(&out.amount) {
                 provided_fee += amt;
             }
-        }
-        // 2. Check Sender (Change/Self) - compare address directly
-        else {
+        } else {
+            // 2. Sinon : change (retour vers soi) ou transfert taxable.
             let is_sender = sender_address
                 .as_ref()
                 .map(|s| s.eq_ignore_ascii_case(&out.address))
@@ -222,26 +216,19 @@ pub async fn wallet_send_tx(
     }
 
     // ============================================================
-    // 3) Chiffrement (recipients_xpk de base + AUTO-ADD ADMINS)
+    // 3) Chiffrement (recipients_xpk de base + AUTO-ADD FEE RECIPIENTS)
     // ============================================================
-    // Si des frais sont payés vers une adresse admin, on DOIT ajouter
-    // la clé publique (X25519) de cet admin dans la liste des destinataires
-    // pour qu'il puisse déchiffrer et voir l'UTXO (et donc son solde).
+    // Si des frais sont payés vers un destinataire coordinateur (shard, admin
+    // ou treasury), on ajoute sa clé publique X25519 à la liste des
+    // destinataires pour qu'il puisse déchiffrer et voir l'UTXO de frais. On
+    // réutilise le MÊME ensemble `fee_recipients` que la validation ci-dessus
+    // (source unique : `fee_recipient_addresses`).
     let mut recipients_xpk = body.recipients_xpk.clone();
 
-    // On parcourt les outputs pour repérer les adresses admin
     for out in &tx.outputs {
-        // Vérifie si c'est une adresse admin connue
-        if settings
-            .admin
-            .wallet_addresses
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case(&out.address))
-        {
-            // On décode l'adresse pour extraire la X25519 PubKey
-            // Format Bech32 : (H20, XPK_Hex)
+        if fee_recipients.contains(&out.address.to_ascii_lowercase()) {
+            // On décode l'adresse pour extraire la X25519 PubKey (Bech32: H20+XPK).
             if let Ok((_h20, xpk)) = pms_wallet::decode_address(&out.address) {
-                // On l'ajoute si elle n'est pas déjà présente
                 if !recipients_xpk.contains(&xpk) {
                     recipients_xpk.push(xpk);
                 }
