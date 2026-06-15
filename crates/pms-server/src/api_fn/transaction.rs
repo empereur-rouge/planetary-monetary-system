@@ -95,8 +95,8 @@ pub async fn wallet_send_tx(
     let (fee_policy, _ratio_dec) = tx_helpers::load_fee_policy(&state.store);
 
     // c) Identifier Sender Address pour exclure le Change
-    //    L'adresse du sender = celle du premier UTXO input (déjà fetché
-    //    et ownership-vérifié dans la boucle ci-dessus).
+    //    L'adresse du sender = celle du premier UTXO input, déjà résolu et
+    //    ownership/autorisation-vérifié par `validate_txutxo_full` ci-dessus.
     let sender_address: Option<String> = input_outputs.first().map(|u| u.address.clone());
 
     // c) Identifier les outputs de frais. Un output de frais peut viser
@@ -199,7 +199,7 @@ pub async fn wallet_send_tx(
     // ============================================================
     // 5) Forge bloc + WireBlock + signature
     // ============================================================
-    let adapter = state.srv.adapter_arc();
+    // `adapter` déjà lié plus haut (validation) — on le réutilise.
     let wb = match tx_helpers::forge_and_sign_block(
         payload,
         parents,
@@ -222,23 +222,11 @@ pub async fn wallet_send_tx(
     // ============================================================
     // 6) Persist + UTXO delta + broadcast + reward
     // ============================================================
-    // Resolve sender BEFORE the persist call — once the delta is applied
-    // atomically inside `persist_block_with_delta`, `get_utxo` on the
-    // inputs returns `None` because they've been consumed.
-    let sender_addr = if let PlainPayload::TxUtxo(ref tx) = plain {
-        if let Some(first_input) = tx.inputs.first() {
-            state
-                .srv
-                .adapter_arc()
-                .get_utxo(&first_input.out)
-                .await
-                .map(|u| u.address)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    // Sender address for activity indexing — réutilise la valeur déjà résolue
+    // par `validate_txutxo_full` (premier input). Évite un second `get_utxo`
+    // qui, après l'application du delta, renverrait `None` (input consommé) et
+    // raterait l'indexation de l'émetteur.
+    let sender_addr = sender_address.clone();
 
     // For encrypted TxUtxo payloads we hand the plaintext delta to the
     // adapter so it's applied in the same critical section as the block

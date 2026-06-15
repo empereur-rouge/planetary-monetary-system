@@ -52,14 +52,24 @@ where
     /// Override (vs le défaut fail-closed du trait) : valide le plaintext d'un
     /// `TxUtxo` via la MÊME logique que le hot-path (`validate_plain_txutxo`),
     /// pour que les handlers de payload chiffré appliquent exactement les mêmes
-    /// contrôles. Utilise `self.policy` (base) — l'override de rotation ne touche
-    /// que `coordinator_public_key`, non lu par la validation TxUtxo.
+    /// contrôles.
+    ///
+    /// Construit la MÊME policy effective que le hot-path (`do_persist_block_internal`) :
+    /// `self.policy` (base) + `update_from_runtime_config` (hot-swap). On omet
+    /// seulement l'override de rotation `coordinator_public_key`, qui n'est pas
+    /// lu par la validation TxUtxo — ainsi le chemin chiffré valide sous une
+    /// policy identique au chemin plain, même si un champ runtime devient un jour
+    /// pertinent pour la validation des tx.
     async fn validate_txutxo_full(
         &self,
         tx: &pms_types::Transaction,
         now_ms: u64,
     ) -> std::result::Result<Vec<pms_types::TxOutput>, String> {
-        self.validate_plain_txutxo(tx, &self.policy, now_ms).await
+        let mut policy = self.policy.clone();
+        if let Ok(runtime_config) = self.store.get_runtime_config() {
+            policy.update_from_runtime_config(&runtime_config);
+        }
+        self.validate_plain_txutxo(tx, &policy, now_ms).await
     }
 
     async fn broadcast_block(&self, wb: &WireBlock) -> Result<()> {

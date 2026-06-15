@@ -195,3 +195,42 @@ par block-id ; pas de spoof XFF pour l'auth (IP via ConnectInfo TCP only).
 Phase 1 (bloquant mainnet) : rangs 1-3 — un commit par cause racine, chacun avec son test
 de conservation/bypass. Phase 2 : rangs 4-6. Phase 3 : durcissement 7-8. `/simplify` entre
 chaque phase.
+
+---
+
+## Addendum 2026-06-16 — post `/code-review` du rang 1
+
+Le rang 1 (cause A) est corrigé et committé (validation partagée
+`validate_plain_txutxo` / `validate_txutxo_full`, 6 tests e2e verts). Le
+`/code-review` haute-recall sur ce diff a confirmé **aucune régression** (refactor
+strict-superset) mais a remonté un finding **plus profond, pré-existant** :
+
+### NOUVEAU — Rang 1-bis (HAUTE, à vérifier/fermer avant mainnet) : TOCTOU concurrent sur l'application du delta chiffré
+`persist_block_with_delta` appelle `do_persist_block_internal` **directement** (pas
+via un channel sérialisé) → une requête par tâche axum, concurrentes. Pour un
+payload **chiffré**, la validation (double-spend inclus, via la lecture du
+`ShardedUtxoSet`) tourne dans le **handler**, puis le delta est appliqué plus tard
+par `apply_diff` ([utxo.rs:350](../../crates/pms-core/src/utxo.rs)) — qui retourne
+`()` et **ne rejette pas** un input déjà dépensé (seul l'idempotence par block-id
+est vérifiée, [persist.rs:1412](../../crates/pms-core/src/net_adapter/persist.rs)).
+Deux sends chiffrés concurrents dépensant le même UTXO peuvent donc tous deux
+passer la validation (input vu vivant) puis tous deux appliquer leur delta →
+**double-dépense / inflation**. Le chemin plain est moins exposé (validation +
+apply dans le même `do_persist_block_internal`) mais mérite la même vérification
+(deux `do_persist` concurrents). Non introduit par le fix du rang 1 ; le fix
+améliore au contraire la validation.
+**Correctif** : re-vérifier l'existence/non-gel des inputs **au moment de
+l'apply**, sous le verrou, OU faire que `apply_diff` rejette une dépense d'input
+absent (et propager le rejet). Test : deux sends concurrents sur le même UTXO →
+un seul accepté, supply inchangée. *À traiter avant ou avec le rang 2.*
+
+### Fixes de revue appliqués (dans le commit de suivi du rang 1)
+- `wallet_send_simple` : auto-ajout xpk via `fee_recipient_addresses` (shards inclus).
+- `wallet_send_tx` : réutilise l'émetteur validé (supprime un `get_utxo` redondant).
+- `validate_txutxo_full` : applique la runtime-config (parité policy avec le hot-path).
+
+### Findings BAS notés (non bloquants)
+- Time-lock validé à l'instant de l'appel (handler) vs persist — fenêtre = latence
+  d'une requête, ne matère qu'au bord exact du lock.
+- `is_frozen` fail-open sur erreur store (pré-existant) — pour un gate compliance
+  bancaire, envisager fail-closed.

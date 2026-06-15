@@ -618,14 +618,15 @@ pub async fn wallet_send_simple(
     // ════════════════════════════════════════════════════════════════════
     let mut recipients_xpk = vec![sender_wallet.x25519_pub_hex.clone()];
 
-    // Auto-add admin X25519 keys
+    // Auto-add the X25519 key of every coordinator fee recipient (shard, admin,
+    // OR treasury) so it can decrypt its fee UTXO. Uses the SAME shared predicate
+    // as the fee output selection (`fee_recipient_addresses`) — sinon, sous
+    // sharding, le frais part vers une adresse de shard absente d'admin et sa clé
+    // n'est jamais ajoutée (UTXO de frais indéchiffrable). Cohérent avec
+    // `wallet_send_tx`.
+    let fee_recipients = state.fee_recipient_addresses();
     for out in &signed_tx.outputs {
-        if settings
-            .admin
-            .wallet_addresses
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case(&out.address))
-        {
+        if fee_recipients.contains(&out.address.to_ascii_lowercase()) {
             if let Ok((_h20, xpk)) = pms_wallet::decode_address(&out.address) {
                 if !recipients_xpk.contains(&xpk) {
                     recipients_xpk.push(xpk);
