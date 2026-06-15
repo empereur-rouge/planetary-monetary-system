@@ -342,6 +342,13 @@ les destinataires, puis emballe la tx dans un bloc qu'**il** signe et applique l
 
 Consommé par `tools-cli tx`, le SDK `client.send`, et le helper `pms_utils::send_tx_http`.
 
+> 💰 **Frais** : l'output de frais (construit par `/v1/tx/prepare`) peut viser
+> n'importe quel destinataire coordinateur — **shard** (round-robin quand
+> `[fees].coord_shard_count > 0`), **admin** (`admin.wallet_addresses`), ou
+> **treasury** (`fees.treasury_addresses`). `wallet_send_tx` accepte les trois
+> (prédicat `AppState::fee_recipient_addresses`) ; un frais payé à un shard n'est
+> donc PAS compté comme transfert taxable.
+
 > 📝 **Note**: Voir [Wallet API](./wallet.md) pour le détail des validations (C-1/C-2, conservation).
 
 ---

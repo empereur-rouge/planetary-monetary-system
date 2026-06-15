@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
-use pms_testkit::make_test_ctx_with_admin;
+use pms_testkit::{make_test_ctx_with_admin, make_test_ctx_with_admin_sharded};
 use pms_types::{Transaction, Unlock};
 use pms_wallet::{SignerBackend, Wallet, decode_address};
 use reqwest::{Client, StatusCode};
@@ -238,5 +238,165 @@ async fn a_to_b_through_coordinator_via_send_tx_http() {
         alice_final + bob_final + admin_final,
         faucet_amount,
         "value conservation: nothing created or destroyed"
+    );
+}
+
+/// Same A→B flow but with COORDINATOR SHARDING enabled (`coord_shard_count > 0`).
+///
+/// `prepare_tx` then routes the fee output to a derived coordinator **shard**
+/// address (round-robin) — which is NOT in `admin.wallet_addresses` /
+/// `treasury_addresses`. Before the fix, `wallet_send_tx` only recognised
+/// admin/treasury as fee recipients, so the shard fee output was counted as a
+/// taxable transfer → wrong "insufficient fees" (HTTP 400). This test exercises
+/// exactly that path (the testnet config) and asserts it now succeeds, with the
+/// fee landing on a shard and full value conservation. It is the regression
+/// guard for the prepare↔send fee-recipient inconsistency.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_to_b_with_coordinator_sharding_fee_to_shard() {
+    let settings0 = pms_config::load_config().expect("load config");
+    let hrp = settings0.address.hrp.clone();
+
+    let alice = Wallet::from_seed(&[33u8; 32], None).expect("alice");
+    let bob = Wallet::from_seed(&[44u8; 32], None).expect("bob");
+    let alice_addr = alice.get_address(&hrp);
+    let bob_addr = bob.get_address(&hrp);
+
+    // node_wallet == coordinator; authorize it as minter (faucet) as in dev tests.
+    let node_wallet = Wallet::from_seed(&[7u8; 32], None).expect("node_wallet");
+    let node_pk = node_wallet.encoded_public_key();
+    unsafe {
+        std::env::set_var("PMS_TEST_ADMIN_PUBKEY", &node_pk);
+    }
+
+    const SHARDS: u32 = 4;
+    // Derive the SAME shard addresses the engine will use (deterministic from
+    // node_wallet), so we can assert where the fee lands.
+    let shard_wallets =
+        pms_wallet::shard_derivation::derive_coord_shard_set(&node_wallet, SHARDS)
+            .expect("derive coord shards");
+    let shard_addrs: Vec<String> = shard_wallets.iter().map(|w| w.get_address(&hrp)).collect();
+    println!("[E2E-shard] {} coordinator shard addresses derived", shard_addrs.len());
+
+    // Sharding ON. No admin fee address needed — the fee goes to a shard.
+    let ctx = make_test_ctx_with_admin_sharded(vec![], vec![node_pk], SHARDS)
+        .await
+        .expect("sharded ctx");
+    let network_id = ctx.settings.network.network_id.clone();
+    let app = ctx.app.clone();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    sleep(Duration::from_millis(150)).await;
+    println!("[E2E-shard] engine serving at {base}");
+
+    let http = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap();
+
+    // Fund Alice.
+    let faucet_amount = Decimal::from(100u32);
+    let r = http
+        .post(format!("{base}/admin/faucet"))
+        .json(&json!({ "to": alice_addr, "amount": faucet_amount.to_string() }))
+        .send()
+        .await
+        .unwrap();
+    println!("[E2E-shard] faucet → {}", r.status());
+    assert!(r.status().is_success(), "faucet must succeed");
+    let funded = poll_balance(&http, &base, &alice_addr, faucet_amount).await;
+    assert_eq!(funded, faucet_amount, "alice funded");
+
+    // Prepare → the fee output must target a coordinator shard address.
+    let amount = Decimal::from(40u32);
+    let prep_resp = http
+        .post(format!("{base}/v1/tx/prepare"))
+        .json(&json!({ "from": alice_addr, "to": bob_addr, "amount": amount.to_string() }))
+        .send()
+        .await
+        .unwrap();
+    let prep: serde_json::Value = prep_resp.json().await.unwrap();
+    println!("[E2E-shard] prepare body={prep}");
+    let fee = Decimal::from_str(prep["fee"].as_str().expect("fee")).expect("fee dec");
+
+    // Confirm the bug's trigger: prepare routes the fee to a shard address.
+    let outputs = prep["unsigned_tx"]["outputs"].as_array().expect("outputs");
+    let fee_to_shard = outputs.iter().any(|o| {
+        let a = o["address"].as_str().unwrap_or("");
+        shard_addrs.iter().any(|s| s.eq_ignore_ascii_case(a))
+    });
+    assert!(
+        fee_to_shard,
+        "prepare_tx must route the fee output to a coordinator shard address (sharding on)"
+    );
+    println!("[E2E-shard] confirmed: fee output targets a coordinator shard");
+
+    // Alice signs locally.
+    let mut tx: Transaction =
+        serde_json::from_value(prep["unsigned_tx"].clone()).expect("unsigned_tx");
+    let msg = tx.signing_message(&network_id).expect("signing_message");
+    let sig = alice.sign(&msg).expect("sign");
+    tx.unlocks = tx
+        .inputs
+        .iter()
+        .map(|_| Unlock::new(alice.public_key_hex.clone(), sig.clone()))
+        .collect();
+
+    // Submit via the real CLI helper.
+    let alice_xpk = alice.x25519_pub_hex.clone();
+    let (_h, bob_xpk) = decode_address(&bob_addr).expect("decode bob");
+    let (status, block_id) =
+        pms_utils::send_tx_http_to(&base, &tx, &[alice_xpk, bob_xpk], true)
+            .await
+            .expect("send_tx_http_to");
+    println!("[E2E-shard] send_tx_http_to → {status} block={block_id:?}");
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "with sharding, the coordinator MUST accept the fee-to-shard tx \
+         (regression guard for the shard-blind 'insufficient fees' bug)"
+    );
+
+    // Balances: Bob=40, Alice=100-40-fee, fee total on the shards, conservation.
+    let bob_final = poll_balance(&http, &base, &bob_addr, amount).await;
+    let alice_final = get_balance(&http, &base, &alice_addr).await;
+    let mut shard_total = Decimal::ZERO;
+    for s in &shard_addrs {
+        shard_total += get_balance(&http, &base, s).await;
+    }
+    let expected_alice = faucet_amount - amount - fee;
+    println!("─────────────────────────────────────────────");
+    println!("[E2E-shard] FINAL BALANCES (sharding on)");
+    println!("[E2E-shard]   bob          = {bob_final}  (expected {amount})");
+    println!("[E2E-shard]   alice        = {alice_final}  (expected {expected_alice})");
+    println!("[E2E-shard]   shards total = {shard_total}  (expected {fee})");
+    println!(
+        "[E2E-shard]   sum          = {}  (expected {faucet_amount})",
+        alice_final + bob_final + shard_total
+    );
+    println!("─────────────────────────────────────────────");
+
+    assert_eq!(bob_final, amount, "Bob must receive exactly the sent amount");
+    assert_eq!(
+        alice_final, expected_alice,
+        "Alice's change must equal funded − amount − fee"
+    );
+    assert_eq!(
+        shard_total, fee,
+        "the fee must land on a coordinator shard address"
+    );
+    assert_eq!(
+        alice_final + bob_final + shard_total,
+        faucet_amount,
+        "value conservation across A, B and the coordinator shards"
     );
 }

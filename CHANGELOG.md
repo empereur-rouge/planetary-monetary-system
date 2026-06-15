@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.21.0] - Unreleased — CLI : transfert non-custodial via le coordinateur
 
 ### Fixed
+- **fix(fees/coord-sharding)** — incohérence `prepare_tx` ↔ `wallet_send_tx` sur le
+  destinataire des frais quand le **sharding coordinateur** est actif
+  (`[fees].coord_shard_count > 0`, cas testnet/mainnet). `prepare_tx` envoie
+  l'output de frais vers une **adresse de shard** (round-robin), mais
+  `wallet_send_tx` ne créditait `provided_fee` que pour `admin.wallet_addresses`
+  / `fees.treasury_addresses` → le frais payé à un shard était compté comme
+  transfert taxable → faux **« insufficient fees »** (tout transfert utilisateur
+  initié rejeté). Nouveau prédicat partagé `AppState::fee_recipient_addresses()`
+  (shards ∪ admin ∪ treasury, [state.rs](crates/pms-server/src/api/state.rs)),
+  miroir de `fee_recipient_address()`, utilisé par `wallet_send_tx` pour la
+  validation **et** l'auto-ajout des clés X25519. Le sharding reste actif.
+  ([transaction.rs](crates/pms-server/src/api_fn/transaction.rs)).
+  *Note : la 2ᵉ couche `validate_fee_recipient_output` (core, gated par
+  `enforce_fee_recipient`, basée sur la liste statique `allowed_fee_addresses`)
+  n'est invoquée que pour les payloads PLAIN dans `check_block_semantics`
+  (chemin legacy/sync) — ni le hot-path prod (`validate_transaction_full`) ni le
+  chemin encrypted de `wallet_send_tx` — et ne connaît pas les shards dérivés à
+  l'exécution ; elle n'affecte donc pas les transferts utilisateur.*
 - **fix(tools-cli/tx)** — `tools-cli tx` (headless) et l'action REPL « send » routent
   désormais la transaction **signée par l'utilisateur** vers le COORDINATEUR via
   `POST /wallet/tx/send`, au lieu d'auto-signer un bloc et de le POSTer sur
