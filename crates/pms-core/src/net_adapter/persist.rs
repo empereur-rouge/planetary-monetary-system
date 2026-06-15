@@ -40,6 +40,79 @@ where
         }
     }
 
+    /// **Validation complète du plaintext d'un `TxUtxo`** — SOURCE UNIQUE de
+    /// vérité partagée par le hot-path (payload `Plain`) ET les handlers qui
+    /// chiffrent le payload (`wallet_send_tx`, `wallet_send_simple`).
+    ///
+    /// Exécute :
+    ///   - [`validate_transaction_full`] : appariement input/unlock, signatures
+    ///     ECDSA, binding ownership (C-1), autorisation des conditions de dépense
+    ///     (MultiSig quorum / HashLock préimage), time-locks des inputs, **dédup
+    ///     des inputs dupliqués** (anti-inflation), conservation par-asset
+    ///     (demurrage-aware) ;
+    ///   - **gel compliance** sur chaque adresse propriétaire d'input ET chaque
+    ///     adresse de sortie.
+    ///
+    /// Retourne les outputs des inputs résolus (utile aux appelants pour dériver
+    /// l'émetteur / le change).
+    ///
+    /// # Sécurité
+    /// Un payload `TxUtxo` **chiffré** est opaque pour `persist_block` : le
+    /// hot-path saute `validate_transaction_full`. Les handlers qui chiffrent un
+    /// `TxUtxo` DOIVENT donc appeler cette fonction sur le plaintext AVANT
+    /// chiffrement, sinon TOUS ces contrôles sont contournés (audit 2026-06,
+    /// cause A : bypass compliance/time-lock/MultiSig + inflation par input
+    /// dupliqué). Les deux chemins appelant cette MÊME fonction ne peuvent pas
+    /// diverger.
+    pub(crate) async fn validate_plain_txutxo(
+        &self,
+        tx: &pms_types::Transaction,
+        policy: &crate::ValidatePolicy,
+        now_ms: u64,
+    ) -> Result<Vec<pms_types::TxOutput>, String> {
+        use crate::validations::transactions::validate_transaction_full;
+
+        // Résout les taux de demurrage des assets custom touchés (cf. hot-path).
+        let assets: std::collections::HashSet<&str> = tx
+            .outputs
+            .iter()
+            .filter_map(|o| o.asset_id.as_deref())
+            .collect();
+        let demurrage_rates: std::collections::HashMap<String, u32> = assets
+            .into_iter()
+            .filter_map(|asset| {
+                self.resolve_asset_metadata(asset)
+                    .and_then(|m| m.demurrage_bps_per_day.filter(|bps| *bps > 0))
+                    .map(|bps| (asset.to_string(), bps))
+            })
+            .collect();
+
+        let tx_input_outputs =
+            validate_transaction_full(&self.utxos, tx, policy, now_ms, &demurrage_rates)
+                .await
+                .map_err(|e| format!("utxo validation failed: {e}"))?;
+
+        // Compliance : ni un input gelé, ni une sortie vers une adresse gelée.
+        for out in &tx_input_outputs {
+            if self.store.is_frozen(&out.address).unwrap_or(false) {
+                return Err(format!(
+                    "compliance: sender address is frozen: {}",
+                    out.address
+                ));
+            }
+        }
+        for out in &tx.outputs {
+            if self.store.is_frozen(&out.address).unwrap_or(false) {
+                return Err(format!(
+                    "compliance: recipient address is frozen: {}",
+                    out.address
+                ));
+            }
+        }
+
+        Ok(tx_input_outputs)
+    }
+
     /// Full block persistence pipeline.
     ///
     /// Etapes:
@@ -1027,66 +1100,13 @@ where
         // des UTXOs créés — toute divergence fausserait le calcul de décote.
         let now_ms = now_ms_for_signers.max(0) as u64;
         if let Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) = &block.payload {
-            use crate::validations::transactions::validate_transaction_full;
-
-            // Demurrage 2.5 : résout les taux des assets custom touchés par
-            // la tx. Un point read RocksDB par asset distinct — négligeable
-            // vs l'ECDSA. INVARIANT de résolution : les assets sont pris des
-            // OUTPUTS — la conservation exigeant un output par asset d'input,
-            // tout asset dépensé a son taux résolu. Corollaire assumé : un
-            // « full-burn » d'un asset à demurrage sans aucun output de cet
-            // asset retombe sur la règle stricte (rejeté) — il faut toujours
-            // au moins un output de l'asset dépensé.
-            let assets: std::collections::HashSet<&str> = tx
-                .outputs
-                .iter()
-                .filter_map(|o| o.asset_id.as_deref())
-                .collect();
-            // Le taux de demurrage est résolu pour un token OU une classe SFT
-            // (même mécanisme : les soldes SFT sont des UTXO). `resolve_asset_metadata`
-            // centralise le lookup token-ou-SFT.
-            let demurrage_rates: std::collections::HashMap<String, u32> = assets
-                .into_iter()
-                .filter_map(|asset| {
-                    self.resolve_asset_metadata(asset)
-                        .and_then(|m| m.demurrage_bps_per_day.filter(|bps| *bps > 0))
-                        .map(|bps| (asset.to_string(), bps))
-                })
-                .collect();
-
-            let tx_input_outputs = match validate_transaction_full(
-                &self.utxos,
-                tx,
-                policy,
-                now_ms,
-                &demurrage_rates,
-            )
-            .await
-            {
-                Ok(outs) => outs,
-                Err(e) => {
-                    return Ok(PutResult::Rejected(format!("utxo validation failed: {e}")));
-                }
-            };
-
-            // 4.compliance) Freeze check: reject transactions involving frozen
-            // addresses. Reuses the input outputs fetched during validation
-            // (no second ShardedUtxoSet lookup).
-            for out in &tx_input_outputs {
-                if self.store.is_frozen(&out.address).unwrap_or(false) {
-                    return Ok(PutResult::Rejected(format!(
-                        "compliance: sender address is frozen: {}",
-                        out.address
-                    )));
-                }
-            }
-            for out in &tx.outputs {
-                if self.store.is_frozen(&out.address).unwrap_or(false) {
-                    return Ok(PutResult::Rejected(format!(
-                        "compliance: recipient address is frozen: {}",
-                        out.address
-                    )));
-                }
+            // SOURCE UNIQUE de validation TxUtxo (validate_transaction_full +
+            // gel compliance inputs/outputs), partagée avec les handlers de
+            // payload CHIFFRÉ via `validate_txutxo_full` — pour qu'aucun contrôle
+            // ne puisse exister sur un chemin et manquer sur l'autre (audit
+            // 2026-06, cause A). Mêmes messages de rejet qu'avant.
+            if let Err(e) = self.validate_plain_txutxo(tx, policy, now_ms).await {
+                return Ok(PutResult::Rejected(e));
             }
         }
         if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock {

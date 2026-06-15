@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.22.0] - Unreleased — Sécurité : le chemin chiffré valide comme le hot-path (audit cause A)
+
+### Security
+- **fix(security/encrypted-path)** — `POST /wallet/tx/send` et
+  `POST /v1/wallet/send-simple` (payloads **chiffrés**) sautaient TOUTE la
+  validation du hot-path : celle-ci est gardée derrière
+  `Plain(PlainPayload::TxUtxo)` dans `persist_block`, jamais atteinte pour un
+  payload chiffré ([persist.rs](crates/pms-core/src/net_adapter/persist.rs)).
+  Conséquences (joignables par tout détenteur d'API-key postant une tx forgée,
+  en contournant `prepare_tx`) :
+  - **Inflation par input dupliqué** (`[A,A] → 2×valeur` : conservation comptait
+    2×A, le delta ne dépensait A qu'une fois → création de monnaie) ;
+  - bypass **compliance/gel** (émetteur ou destinataire gelé) ;
+  - bypass **time-lock** (UTXO vesting/escrow/collatéral dépensable avant terme) ;
+  - bypass **MultiSig/HashLock** (quorum / préimage jamais vérifiés).
+  **Correctif (bonne altitude, source unique)** : nouvelle fonction partagée
+  `CoreAdapter::validate_plain_txutxo` (= `validate_transaction_full` + gel
+  compliance inputs/outputs), appelée par le hot-path ET exposée via
+  `NetDagAdapter::validate_txutxo_full` (défaut **fail-closed**) que les deux
+  handlers appellent sur le plaintext **avant chiffrement**. Les deux chemins
+  exécutant la MÊME fonction ne peuvent plus diverger.
+  ([transaction.rs](crates/pms-server/src/api_fn/transaction.rs),
+  [wallet_factory.rs](crates/pms-server/src/api_fn/wallet_factory.rs),
+  [net_adapter](crates/pms-core/src/net_adapter/),
+  [net_adapter.rs](crates/pms-interface/src/net_adapter.rs)).
+
+### Added
+- **test(security)** — `wallet_send_tx_e2e` gagne 4 tests de régression prouvant
+  que les bypasses sont fermés sur le chemin chiffré : input dupliqué (inflation),
+  émetteur gelé, destinataire gelé, input time-locké — tous rejetés (400) sans
+  effet de solde. Le hot-path plain et le happy-path A→B restent verts (refactor
+  behavior-preserving).
+- **docs(security)** — [documentation/security/security-audit-2026-06-15.md](documentation/security/security-audit-2026-06-15.md) :
+  rapport d'audit complet (6 domaines) + plan de remédiation priorisé. Ce
+  changement traite le **rang 1** (cause A). Addendum post-`/code-review` (TOCTOU
+  concurrent sur le chemin chiffré) consigné dans le même doc.
+- **fix(review)** — suite au `/code-review` du rang 1 : `wallet_send_simple`
+  ajoute la clé X25519 de TOUT destinataire de frais (shards inclus) via le
+  prédicat partagé `fee_recipient_addresses` (UTXO de frais de shard désormais
+  déchiffrable, cohérent avec `wallet_send_tx`) ; `wallet_send_tx` réutilise
+  l'émetteur déjà résolu par la validation (supprime un `get_utxo` redondant qui
+  ratait l'indexation activity après consommation des inputs) ; l'override
+  `validate_txutxo_full` applique la runtime-config (parité policy stricte avec
+  le hot-path).
+
+### Changed
+- **chore(version)** — `Cargo` 0.21.0 → **0.22.0** ; `API_VERSION` 25 → **26**
+  (comportement de `/wallet/tx/send` & `/v1/wallet/send-simple` durci). Aucun
+  changement `DAG_VERSION`/DB/P2P : format `Transaction`/`Block` inchangé, la
+  validation plain on-DAG est refactorée à l'identique.
+
+---
+
 ## [0.21.0] - Unreleased — CLI : transfert non-custodial via le coordinateur
 
 ### Fixed

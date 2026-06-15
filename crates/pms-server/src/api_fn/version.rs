@@ -46,7 +46,12 @@ use crate::api::AppState;
 /// v13 (audit sécurité v0.9.0) : `POST /v1/wallet/tx/send` exige des unlocks
 /// valides (401 sinon) et la conservation par asset ; `POST /submit/block`
 /// rejette les tx sans autorisation de dépense et les block ids non canoniques.
-pub const API_VERSION: u32 = 25;
+/// v26 (audit sécurité 2026-06, cause A) : `POST /wallet/tx/send` et
+/// `POST /v1/wallet/send-simple` valident désormais le plaintext via la MÊME
+/// fonction que le hot-path (gel compliance, time-locks, MultiSig/HashLock,
+/// dédup d'inputs anti-inflation, conservation) — une tx invalide est rejetée
+/// (400) au lieu d'être emballée chiffrée et appliquée.
+pub const API_VERSION: u32 = 26;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -130,6 +135,8 @@ mod tests {
         // v0.18.1: 22 → 23 (propose accepte tier lowercase).
         // v0.19.0: 23 → 24 (semi-fongibles SFT : routes /admin/sft + /v1/sft).
         // v0.20.0: 24 → 25 (SFT demurrage : champ demurrage_bps_per_day sur create).
-        assert_eq!(parsed.api_version, 25);
+        // v0.22.0: 25 → 26 (audit cause A : /wallet/tx/send & /v1/wallet/send-simple
+        //          valident le plaintext — gel/time-lock/MultiSig/dédup/conservation).
+        assert_eq!(parsed.api_version, 26);
     }
 }

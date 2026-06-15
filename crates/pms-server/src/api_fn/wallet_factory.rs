@@ -592,18 +592,41 @@ pub async fn wallet_send_simple(
     };
 
     // ════════════════════════════════════════════════════════════════════
+    // 7.b) VALIDATION COMPLÈTE DU PLAINTEXT (audit 2026-06, cause A)
+    // ════════════════════════════════════════════════════════════════════
+    // Custodial, mais le payload est CHIFFRÉ → `persist_block` saute
+    // `validate_transaction_full`. On valide donc le plaintext via la MÊME
+    // fonction que le hot-path (gel compliance inputs/outputs, time-locks,
+    // autorisation MultiSig/HashLock, dédup d'inputs, conservation) AVANT
+    // chiffrement. Crucial : un émetteur GELÉ ne doit pas pouvoir dépenser via
+    // cet endpoint (sinon bypass compliance).
+    if let Err(e) = state
+        .srv
+        .adapter_arc()
+        .validate_txutxo_full(&signed_tx, pms_utils::ts_ms())
+        .await
+    {
+        tracing::warn!("wallet_send_simple: plaintext validation rejected: {e}");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "transaction validation failed" })),
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════
     // 8) Encrypt payload
     // ════════════════════════════════════════════════════════════════════
     let mut recipients_xpk = vec![sender_wallet.x25519_pub_hex.clone()];
 
-    // Auto-add admin X25519 keys
+    // Auto-add the X25519 key of every coordinator fee recipient (shard, admin,
+    // OR treasury) so it can decrypt its fee UTXO. Uses the SAME shared predicate
+    // as the fee output selection (`fee_recipient_addresses`) — sinon, sous
+    // sharding, le frais part vers une adresse de shard absente d'admin et sa clé
+    // n'est jamais ajoutée (UTXO de frais indéchiffrable). Cohérent avec
+    // `wallet_send_tx`.
+    let fee_recipients = state.fee_recipient_addresses();
     for out in &signed_tx.outputs {
-        if settings
-            .admin
-            .wallet_addresses
-            .iter()
-            .any(|a| a.eq_ignore_ascii_case(&out.address))
-        {
+        if fee_recipients.contains(&out.address.to_ascii_lowercase()) {
             if let Ok((_h20, xpk)) = pms_wallet::decode_address(&out.address) {
                 if !recipients_xpk.contains(&xpk) {
                     recipients_xpk.push(xpk);
