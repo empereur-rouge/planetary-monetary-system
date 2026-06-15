@@ -592,6 +592,28 @@ pub async fn wallet_send_simple(
     };
 
     // ════════════════════════════════════════════════════════════════════
+    // 7.b) VALIDATION COMPLÈTE DU PLAINTEXT (audit 2026-06, cause A)
+    // ════════════════════════════════════════════════════════════════════
+    // Custodial, mais le payload est CHIFFRÉ → `persist_block` saute
+    // `validate_transaction_full`. On valide donc le plaintext via la MÊME
+    // fonction que le hot-path (gel compliance inputs/outputs, time-locks,
+    // autorisation MultiSig/HashLock, dédup d'inputs, conservation) AVANT
+    // chiffrement. Crucial : un émetteur GELÉ ne doit pas pouvoir dépenser via
+    // cet endpoint (sinon bypass compliance).
+    if let Err(e) = state
+        .srv
+        .adapter_arc()
+        .validate_txutxo_full(&signed_tx, pms_utils::ts_ms())
+        .await
+    {
+        tracing::warn!("wallet_send_simple: plaintext validation rejected: {e}");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "transaction validation failed" })),
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════
     // 8) Encrypt payload
     // ════════════════════════════════════════════════════════════════════
     let mut recipients_xpk = vec![sender_wallet.x25519_pub_hex.clone()];

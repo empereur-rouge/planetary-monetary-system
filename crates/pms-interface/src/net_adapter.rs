@@ -199,6 +199,30 @@ pub trait NetDagAdapter: Send + Sync {
     /// Retourne None si l'UTXO n'existe pas (déjà dépensé ou inexistant).
     async fn get_utxo(&self, output_id: &pms_types::OutputId) -> Option<pms_types::TxOutput>;
 
+    /// **Validation complète du plaintext d'un `TxUtxo`** avant soumission via un
+    /// payload CHIFFRÉ : signatures, appariement input/unlock, binding ownership
+    /// (C-1), autorisation MultiSig/HashLock, time-locks des inputs, **dédup des
+    /// inputs dupliqués** (anti-inflation), conservation par-asset, ET gel
+    /// compliance (inputs + outputs). Retourne les outputs des inputs résolus.
+    ///
+    /// Un payload chiffré est opaque pour `persist_block` (qui saute
+    /// `validate_transaction_full`) : tout handler qui chiffre un `TxUtxo` DOIT
+    /// appeler ceci sur le plaintext AVANT chiffrement. C'est la MÊME logique
+    /// que le hot-path (`CoreAdapter::validate_plain_txutxo`), donc les deux
+    /// chemins ne peuvent pas diverger (audit 2026-06, cause A).
+    ///
+    /// # Default
+    /// **FAIL-CLOSED** : rejette par défaut. Tout adaptateur réel DOIT l'override
+    /// (CoreAdapter le fait). Le défaut n'existe que pour que les mocks de test
+    /// (qui ne soumettent jamais de tx) compilent sans bypasser silencieusement.
+    async fn validate_txutxo_full(
+        &self,
+        _tx: &pms_types::Transaction,
+        _now_ms: u64,
+    ) -> std::result::Result<Vec<pms_types::TxOutput>, String> {
+        Err("validate_txutxo_full not implemented for this adapter (fail-closed)".to_string())
+    }
+
     /// Retourne l'EventBus pour s'abonner aux événements (SSE streaming).
     /// Default: None (mocks de test n'ont pas besoin d'event bus).
     fn event_bus(&self) -> Option<pms_event::EventBus> {

@@ -23,8 +23,8 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
-use pms_testkit::{make_test_ctx_with_admin, make_test_ctx_with_admin_sharded};
-use pms_types::{Transaction, Unlock};
+use pms_testkit::{make_test_ctx_with_admin, make_test_ctx_with_admin_sharded, sign_tx_inputs};
+use pms_types::{OutputId, Transaction, TxInput, TxOutput, Unlock};
 use pms_wallet::{SignerBackend, Wallet, decode_address};
 use reqwest::{Client, StatusCode};
 use rust_decimal::Decimal;
@@ -398,5 +398,294 @@ async fn a_to_b_with_coordinator_sharding_fee_to_shard() {
         alice_final + bob_final + shard_total,
         faucet_amount,
         "value conservation across A, B and the coordinator shards"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SECURITY: the encrypted `/wallet/tx/send` path must enforce the SAME validation
+// as the plain hot-path (audit 2026-06, cause A). A client can craft a tx and
+// POST it directly (bypassing `prepare_tx`), so these tests assert the bypasses
+// are CLOSED: duplicate-input inflation, frozen sender/recipient, and time-locks.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Admin bearer token for the spawned engine (dev config reads it from
+/// `env:PMS_ADMIN_TOKEN_DEV`). `admin_*` handlers do their own
+/// `is_admin_authorized` header check (no loopback bypass), so admin requests
+/// must carry it.
+const TEST_ADMIN_TOKEN: &str = "audit-test-admin-token";
+
+/// Spin up the real engine on an ephemeral port; node_wallet (seed [7]) is
+/// authorised as minter so the faucet works. Returns (base_url, http, hrp, network_id).
+async fn spawn_engine() -> (String, Client, String, String) {
+    let node_wallet = Wallet::from_seed(&[7u8; 32], None).expect("node_wallet");
+    let node_pk = node_wallet.encoded_public_key();
+    unsafe {
+        std::env::set_var("PMS_TEST_ADMIN_PUBKEY", &node_pk);
+        std::env::set_var("PMS_ADMIN_TOKEN_DEV", TEST_ADMIN_TOKEN);
+    }
+    let ctx = make_test_ctx_with_admin(vec![], vec![node_pk])
+        .await
+        .expect("ctx");
+    let hrp = ctx.settings.address.hrp.clone();
+    let network_id = ctx.settings.network.network_id.clone();
+    let app = ctx.app.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    sleep(Duration::from_millis(150)).await;
+    let http = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap();
+    (base, http, hrp, network_id)
+}
+
+/// Faucet `amount` PMS to `addr` (optionally time-locked); returns the faucet
+/// block id, which is also the txid of the single minted UTXO (index 0).
+async fn faucet(
+    http: &Client,
+    base: &str,
+    addr: &str,
+    amount: &str,
+    locked_until: Option<u64>,
+) -> String {
+    let body = match locked_until {
+        Some(t) => json!({ "to": addr, "amount": amount, "locked_until": t }),
+        None => json!({ "to": addr, "amount": amount }),
+    };
+    let r = http
+        .post(format!("{base}/admin/faucet"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "faucet must succeed: {}", r.status());
+    let j: serde_json::Value = r.json().await.unwrap();
+    j["block_id"].as_str().unwrap().to_string()
+}
+
+/// Submit a signed tx via the real CLI helper; returns the HTTP status.
+async fn submit(base: &str, tx: &Transaction, xpks: &[String]) -> StatusCode {
+    let (status, _id) = pms_utils::send_tx_http_to(base, tx, xpks, true)
+        .await
+        .expect("send_tx_http_to");
+    status
+}
+
+/// **Inflation par input dupliqué** — une tx référençant le même UTXO deux fois,
+/// payant 2× sa valeur, DOIT être rejetée (dédup d'inputs dans
+/// `validate_transaction_full`). Avant le fix, le chemin chiffré la passait
+/// (conservation comptait 2×A, le delta ne dépensait A qu'une fois → monnaie créée).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn duplicate_input_cannot_inflate_via_encrypted_path() {
+    let (base, http, hrp, network_id) = spawn_engine().await;
+    let alice = Wallet::from_seed(&[51u8; 32], None).unwrap();
+    let bob = Wallet::from_seed(&[52u8; 32], None).unwrap();
+    let alice_addr = alice.get_address(&hrp);
+    let bob_addr = bob.get_address(&hrp);
+
+    let faucet_id = faucet(&http, &base, &alice_addr, "100", None).await;
+    assert_eq!(
+        poll_balance(&http, &base, &alice_addr, Decimal::from(100u32)).await,
+        Decimal::from(100u32)
+    );
+
+    // Reference Alice's single 100-PMS UTXO TWICE, paying Bob 200.
+    let utxo = OutputId {
+        txid: faucet_id,
+        index: 0,
+    };
+    let tx = Transaction {
+        inputs: vec![
+            TxInput { out: utxo.clone() },
+            TxInput { out: utxo.clone() },
+        ],
+        outputs: vec![TxOutput::new(bob_addr.clone(), "200".to_string(), None)],
+        fee: "0".to_string(),
+        unlocks: vec![],
+    };
+    let tx = sign_tx_inputs(&alice, &tx, &network_id);
+    let (_h, bob_xpk) = decode_address(&bob_addr).unwrap();
+
+    let status = submit(&base, &tx, &[alice.x25519_pub_hex.clone(), bob_xpk]).await;
+    println!("[DUP-INPUT] send → {status} (expect rejection)");
+    assert!(
+        !status.is_success(),
+        "duplicate-input tx MUST be rejected (anti-inflation), got {status}"
+    );
+
+    sleep(Duration::from_millis(300)).await;
+    let bob_bal = get_balance(&http, &base, &bob_addr).await;
+    let alice_bal = get_balance(&http, &base, &alice_addr).await;
+    println!("[DUP-INPUT] after: alice={alice_bal} (expect 100)  bob={bob_bal} (expect 0)");
+    assert_eq!(bob_bal, Decimal::ZERO, "Bob must NOT receive inflated funds");
+    assert_eq!(
+        alice_bal,
+        Decimal::from(100u32),
+        "Alice's UTXO must be untouched (no spend, no inflation)"
+    );
+}
+
+/// **Émetteur gelé** — une tx valide (préparée AVANT le gel) mais dont l'émetteur
+/// est gelé DOIT être rejetée au POST `/wallet/tx/send` (gel non vérifié sur ce
+/// chemin avant le fix).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn frozen_sender_cannot_spend_via_encrypted_path() {
+    let (base, http, hrp, network_id) = spawn_engine().await;
+    let alice = Wallet::from_seed(&[53u8; 32], None).unwrap();
+    let bob = Wallet::from_seed(&[54u8; 32], None).unwrap();
+    let alice_addr = alice.get_address(&hrp);
+    let bob_addr = bob.get_address(&hrp);
+
+    faucet(&http, &base, &alice_addr, "100", None).await;
+    assert_eq!(
+        poll_balance(&http, &base, &alice_addr, Decimal::from(100u32)).await,
+        Decimal::from(100u32)
+    );
+
+    // Prepare a VALID tx BEFORE freezing (prepare itself rejects frozen senders),
+    // so the only reason a later send can fail is the freeze.
+    let prep: serde_json::Value = http
+        .post(format!("{base}/v1/tx/prepare"))
+        .json(&json!({ "from": alice_addr, "to": bob_addr, "amount": "10" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut tx: Transaction = serde_json::from_value(prep["unsigned_tx"].clone()).unwrap();
+    tx = sign_tx_inputs(&alice, &tx, &network_id);
+
+    // Freeze Alice (loopback bypasses admin token in dev).
+    let fr = http
+        .post(format!("{base}/admin/compliance/freeze"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .json(&json!({ "address": alice_addr, "reason": "audit-test" }))
+        .send()
+        .await
+        .unwrap();
+    println!("[FROZEN-SENDER] freeze → {}", fr.status());
+    assert!(fr.status().is_success(), "freeze must succeed");
+    sleep(Duration::from_millis(300)).await;
+
+    let (_h, bob_xpk) = decode_address(&bob_addr).unwrap();
+    let status = submit(&base, &tx, &[alice.x25519_pub_hex.clone(), bob_xpk]).await;
+    println!("[FROZEN-SENDER] send → {status} (expect rejection)");
+    assert!(
+        !status.is_success(),
+        "frozen sender MUST NOT spend via /wallet/tx/send, got {status}"
+    );
+    assert_eq!(
+        get_balance(&http, &base, &bob_addr).await,
+        Decimal::ZERO,
+        "Bob must not receive funds from a frozen sender"
+    );
+}
+
+/// **Destinataire gelé** — une tx vers une adresse gelée DOIT être rejetée au POST.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn frozen_recipient_rejected_via_encrypted_path() {
+    let (base, http, hrp, network_id) = spawn_engine().await;
+    let alice = Wallet::from_seed(&[55u8; 32], None).unwrap();
+    let bob = Wallet::from_seed(&[56u8; 32], None).unwrap();
+    let alice_addr = alice.get_address(&hrp);
+    let bob_addr = bob.get_address(&hrp);
+
+    faucet(&http, &base, &alice_addr, "100", None).await;
+    assert_eq!(
+        poll_balance(&http, &base, &alice_addr, Decimal::from(100u32)).await,
+        Decimal::from(100u32)
+    );
+
+    // Prepare BEFORE freezing Bob (prepare rejects frozen recipients too).
+    let prep: serde_json::Value = http
+        .post(format!("{base}/v1/tx/prepare"))
+        .json(&json!({ "from": alice_addr, "to": bob_addr, "amount": "10" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut tx: Transaction = serde_json::from_value(prep["unsigned_tx"].clone()).unwrap();
+    tx = sign_tx_inputs(&alice, &tx, &network_id);
+
+    let fr = http
+        .post(format!("{base}/admin/compliance/freeze"))
+        .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+        .json(&json!({ "address": bob_addr, "reason": "audit-test" }))
+        .send()
+        .await
+        .unwrap();
+    println!("[FROZEN-RECIPIENT] freeze(bob) → {}", fr.status());
+    assert!(fr.status().is_success(), "freeze must succeed");
+    sleep(Duration::from_millis(300)).await;
+
+    let (_h, bob_xpk) = decode_address(&bob_addr).unwrap();
+    let status = submit(&base, &tx, &[alice.x25519_pub_hex.clone(), bob_xpk]).await;
+    println!("[FROZEN-RECIPIENT] send → {status} (expect rejection)");
+    assert!(
+        !status.is_success(),
+        "tx to a frozen recipient MUST be rejected, got {status}"
+    );
+    assert_eq!(
+        get_balance(&http, &base, &bob_addr).await,
+        Decimal::ZERO,
+        "frozen Bob must not receive funds"
+    );
+}
+
+/// **Time-lock** — un UTXO `locked_until` dans le futur ne doit PAS être
+/// dépensable via le chemin chiffré (check `check_input_time_locks`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn timelocked_input_cannot_be_spent_early_via_encrypted_path() {
+    let (base, http, hrp, network_id) = spawn_engine().await;
+    let alice = Wallet::from_seed(&[57u8; 32], None).unwrap();
+    let bob = Wallet::from_seed(&[58u8; 32], None).unwrap();
+    let alice_addr = alice.get_address(&hrp);
+    let bob_addr = bob.get_address(&hrp);
+
+    // Faucet a UTXO locked 1h in the future.
+    let locked_until = pms_utils::ts_ms() + 3_600_000;
+    let faucet_id = faucet(&http, &base, &alice_addr, "100", Some(locked_until)).await;
+    assert_eq!(
+        poll_balance(&http, &base, &alice_addr, Decimal::from(100u32)).await,
+        Decimal::from(100u32)
+    );
+
+    // Try to spend the locked UTXO now.
+    let tx = Transaction {
+        inputs: vec![TxInput {
+            out: OutputId {
+                txid: faucet_id,
+                index: 0,
+            },
+        }],
+        outputs: vec![TxOutput::new(bob_addr.clone(), "100".to_string(), None)],
+        fee: "0".to_string(),
+        unlocks: vec![],
+    };
+    let tx = sign_tx_inputs(&alice, &tx, &network_id);
+    let (_h, bob_xpk) = decode_address(&bob_addr).unwrap();
+
+    let status = submit(&base, &tx, &[alice.x25519_pub_hex.clone(), bob_xpk]).await;
+    println!("[TIMELOCK] send → {status} (expect rejection)");
+    assert!(
+        !status.is_success(),
+        "time-locked UTXO MUST NOT be spendable early, got {status}"
+    );
+    assert_eq!(
+        get_balance(&http, &base, &bob_addr).await,
+        Decimal::ZERO,
+        "Bob must not receive funds from a premature time-locked spend"
     );
 }

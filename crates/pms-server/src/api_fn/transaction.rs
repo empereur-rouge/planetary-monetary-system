@@ -60,101 +60,39 @@ pub async fn wallet_send_tx(
     }
 
     // ============================================================
-    // 1.b) AUTORISATION DE DÉPENSE (audit C-1/C-2)
+    // 1.b) VALIDATION COMPLÈTE DU PLAINTEXT (audit 2026-06, cause A)
     // ============================================================
-    // Ce handler chiffre le payload avant persistance : le hot path
-    // (`validate_transaction_full` dans persist_block) ne voit que le
-    // ciphertext et ne peut PAS vérifier les unlocks. La preuve
-    // d'autorisation doit donc être vérifiée ICI, sur le plaintext,
-    // avant toute application de delta UTXO :
-    //   - appariement strict input[i] ↔ unlock[i],
-    //   - signature ECDSA de chaque unlock sur le message canonique
-    //     {network_id, inputs, outputs, fee},
-    //   - binding pubkey ↔ adresse propriétaire de chaque UTXO (plus bas,
-    //     dans la boucle de fetch des inputs).
-    // Messages publics volontairement vagues (anti-enumeration).
-    if tx.inputs.len() != tx.unlocks.len() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "transaction authorization invalid" })),
-        );
-    }
-    if let Err(e) = pms_core::validations::signature::verify_tx_signatures(
-        &tx,
-        &settings.network.network_id,
-    ) {
-        tracing::warn!("wallet_send_tx: tx signature verification failed: {e}");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "transaction authorization invalid" })),
-        );
-    }
-
-    // ============================================================
-    // 2) Validation des frais (Calcul strict)
-    // ============================================================
-    // On n'injecte PLUS rien (cela casserait la signature client).
-    // On VÉRIFIE que le client a bien inclus l'output de frais vers un admin.
-
-    // a) Charger la policy (Runtime Config - Dynamic)
-    let (fee_policy, _ratio_dec) = tx_helpers::load_fee_policy(&state.store);
-
-    // b) STRICT: fetch des inputs + binding ownership (audit C-1)
-    //    FIX: Use adapter RAM cache (ShardedUtxoSet) instead of store (RocksDB)
-    //    to match prepareTx behavior and avoid desync with async persistence.
+    // Ce handler chiffre le payload : le hot path (`persist_block`) ne voit que
+    // le ciphertext et SAUTE `validate_transaction_full`. Toute la validation
+    // DOIT donc se faire ICI, sur le plaintext, avant chiffrement. On appelle la
+    // MÊME fonction que le hot path (`adapter.validate_txutxo_full`), qui couvre :
+    //   - appariement input/unlock + signatures ECDSA,
+    //   - binding ownership C-1 + autorisation MultiSig/HashLock,
+    //   - time-locks des inputs,
+    //   - dédup des inputs dupliqués (anti-inflation : `[A,A]` rejeté),
+    //   - conservation par-asset,
+    //   - gel compliance (inputs + outputs).
+    // Source unique → aucune dérive possible entre les deux chemins. Message
+    // public volontairement vague (anti-enumeration) ; détail loggé.
     let adapter = state.srv.adapter_arc();
-    let mut input_outputs: Vec<TxOutput> = Vec::with_capacity(tx.inputs.len());
-    for (i, input) in tx.inputs.iter().enumerate() {
-        let output_id = pms_types::OutputId {
-            txid: input.out.txid.clone(),
-            index: input.out.index,
-        };
-        match adapter.get_utxo(&output_id).await {
-            Some(u) => {
-                // AUDIT C-1 : binding ownership — la pubkey de l'unlock
-                // apparié doit dériver l'adresse propriétaire de l'UTXO.
-                if !pms_core::validations::ownership::unlock_matches_address(
-                    &tx.unlocks[i].pubkey_hex,
-                    &u.address,
-                ) {
-                    tracing::warn!(
-                        "wallet_send_tx: ownership mismatch on input {} ({}:{})",
-                        i,
-                        input.out.txid,
-                        input.out.index
-                    );
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        Json(json!({ "error": "transaction authorization invalid" })),
-                    );
-                }
-                input_outputs.push(u);
-            }
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(
-                        json!({ "error": format!("input utxo not found (double spend?): {}:{}", input.out.txid, input.out.index) }),
-                    ),
-                );
-            }
+    let input_outputs = match adapter.validate_txutxo_full(&tx, pms_utils::ts_ms()).await {
+        Ok(outs) => outs,
+        Err(e) => {
+            tracing::warn!("wallet_send_tx: plaintext validation rejected: {e}");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "transaction validation failed" })),
+            );
         }
-    }
+    };
 
-    // AUDIT M-7 : conservation stricte PAR ASSET. Subsume l'ancien check
-    // global `total_inputs == total_outputs` (si chaque asset conserve son
-    // total, la somme globale est conservée) et rejette en plus les
-    // conversions cross-asset (10 PMS in → 10 EDN out) ainsi que les
-    // montants non-décimaux des deux côtés.
-    if let Err(e) =
-        pms_core::validations::transactions::check_asset_conservation(&tx, &input_outputs)
-    {
-        tracing::warn!("wallet_send_tx: asset conservation failed: {e}");
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "asset conservation invalid" })),
-        );
-    }
+    // ============================================================
+    // 2) Validation des FRAIS (règle métier : destinataire + suffisance)
+    // ============================================================
+    // `validate_txutxo_full` a déjà prouvé la conservation par-asset ; ici on
+    // vérifie la règle métier des frais (output vers un destinataire coordinateur
+    // valide, montant >= attendu) — non couverte par la conservation.
+    let (fee_policy, _ratio_dec) = tx_helpers::load_fee_policy(&state.store);
 
     // c) Identifier Sender Address pour exclure le Change
     //    L'adresse du sender = celle du premier UTXO input (déjà fetché
