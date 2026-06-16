@@ -6,7 +6,7 @@ use pms_bridge::types::{
 };
 use pms_config::LedgerDef;
 use pms_ledger::LedgerManager;
-use pms_storage::DagStorage;
+use pms_storage::{DagStorage, PutResult};
 use pms_types_payload::{PayloadEnvelope, PlainPayload};
 use pms_types_transaction::TxOutput;
 use pms_utils::compute_block_id;
@@ -17,6 +17,7 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::{Arc, Once};
 use tempfile::tempdir;
+use tokio::time::{Duration, sleep};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HELPERS
@@ -448,6 +449,149 @@ async fn bridge_full_lifecycle() -> Result<()> {
         .map(|(_, o)| Decimal::from_str(&o.amount).unwrap())
         .sum();
     assert_eq!(total, Decimal::from_str("150.00000000")?);
+
+    Ok(())
+}
+
+/// **Bridge-mint anti-replay (audit rang 3, B3).**
+///
+/// The legacy "Step 7" in `bridge_full_lifecycle` does NOT test replay: it
+/// re-runs the same transfer, which forges a *new* lock and fails on
+/// insufficient balance. The real attack is re-submitting a coordinator-signed
+/// `BridgeMint` that reuses an already-minted `lock_block_id` — which, before
+/// this fix, re-minted funds out of nothing (inflation). Here we:
+///   1. run a legit transfer and capture its `lock_block_id` / `mint_block_id`;
+///   2. assert the destination ledger recorded the lock as consumed in the
+///      DURABLE `bridge_consumed` column family (survives restarts);
+///   3. forge a SECOND BridgeMint reusing that `lock_block_id` (different nonce
+///      ⇒ different block id, so it is NOT mere idempotent dedup) and assert it
+///      is REJECTED with "already consumed";
+///   4. assert the receiver balance did NOT double.
+#[tokio::test]
+async fn bridge_mint_replay_is_rejected() -> Result<()> {
+    let (mgr, engine, coordinator, _dir) = setup_e2e().await?;
+
+    let sender = Wallet::generate();
+    let sender_addr = sender.get_address("8e");
+    let receiver = Wallet::generate();
+    let receiver_addr = receiver.get_address("8e");
+
+    // Mint 500 PMS to sender on "main", enable the bridge, transfer 100 → nft.
+    mint_on_ledger(&mgr, &coordinator, "main", &sender_addr, "500.00000000").await?;
+    engine.enable_bridge(
+        &BridgeEnableRequest {
+            ledger_a: "main".into(),
+            ledger_b: "nft".into(),
+            direction: BridgeDirection::Bidirectional,
+        },
+        true,
+        None,
+    )?;
+
+    let req = BridgeTransferRequest {
+        from_ledger: "main".into(),
+        to_ledger: "nft".into(),
+        from_address: sender_addr.clone(),
+        to_address: receiver_addr.clone(),
+        amount: "100.00000000".into(),
+        asset_id: None,
+    };
+    let resp = engine.execute_transfer(&req).await?;
+    println!(
+        "✅ legit transfer: lock_block_id={} mint_block_id={}",
+        resp.lock_block_id, resp.mint_block_id
+    );
+
+    let nft_inst = mgr.get("nft").unwrap();
+    let before: Decimal = nft_inst
+        .adapter
+        .utxos_by_address(&receiver_addr)
+        .await
+        .iter()
+        .map(|(_, o)| Decimal::from_str(&o.amount).unwrap())
+        .sum();
+    println!("receiver balance after legit mint: {before}");
+    assert_eq!(before, Decimal::from_str("100.00000000")?);
+
+    // (2) DURABLE record: poll the on-disk `bridge_consumed` CF (written by the
+    // async persist consumer in the same atomic batch as the mint block).
+    let mut durable = false;
+    for _ in 0..40 {
+        if nft_inst.store.is_bridge_lock_consumed(&resp.lock_block_id).await? {
+            durable = true;
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    println!(
+        "durable bridge_consumed[{}] = {durable}",
+        resp.lock_block_id
+    );
+    assert!(
+        durable,
+        "the source lock must be recorded in the durable bridge_consumed CF after the mint"
+    );
+
+    // (3) REPLAY: forge a 2nd BridgeMint reusing the SAME lock_block_id.
+    let nft_meta = WireMeta {
+        network_id: nft_inst.def.network_id.clone(),
+        protocol_version: nft_inst.def.protocol_version,
+    };
+    let tips = nft_inst.adapter.top_tips(1).await?;
+    let parents = if tips.is_empty() {
+        vec![nft_inst.store.all_block_ids().await?[0].clone()]
+    } else {
+        vec![tips[0].clone()]
+    };
+    let replay_payload = PayloadEnvelope::Plain(PlainPayload::BridgeMint {
+        outputs: vec![TxOutput::new(
+            receiver_addr.clone(),
+            "100.00000000".to_string(),
+            None,
+        )],
+        lock_block_id: resp.lock_block_id.clone(),
+        source_ledger_id: "main".to_string(),
+    });
+    // nonce 999 ⇒ a different block id than the original mint: this is a genuine
+    // replay, not the idempotent same-block dedup path.
+    let replay_wb = forge_signed_wire_block(parents, &nft_meta, &coordinator, 999, Some(replay_payload));
+    println!(
+        "replay block id={} (original mint id={})",
+        replay_wb.id, resp.mint_block_id
+    );
+    assert_ne!(
+        replay_wb.id, resp.mint_block_id,
+        "replay must be a DIFFERENT block id (else it's just idempotent dedup, not a replay)"
+    );
+
+    let replay_res = nft_inst.adapter.persist_block(&replay_wb).await?;
+    println!("replay persist result: {replay_res:?}");
+    match &replay_res {
+        PutResult::Rejected(r) => {
+            assert!(
+                r.contains("already consumed"),
+                "replay must be rejected as an already-consumed bridge lock, got: {r}"
+            );
+            println!("✅ replayed BridgeMint rejected: {r}");
+        }
+        other => panic!("replayed BridgeMint MUST be rejected, got {other:?}"),
+    }
+
+    // (4) No inflation: the receiver balance must be unchanged (still 100).
+    sleep(Duration::from_millis(100)).await;
+    let after: Decimal = nft_inst
+        .adapter
+        .utxos_by_address(&receiver_addr)
+        .await
+        .iter()
+        .map(|(_, o)| Decimal::from_str(&o.amount).unwrap())
+        .sum();
+    println!("receiver balance after replay attempt: {after}");
+    assert_eq!(
+        after,
+        Decimal::from_str("100.00000000")?,
+        "a replayed BridgeMint must NOT inflate the receiver balance"
+    );
 
     Ok(())
 }

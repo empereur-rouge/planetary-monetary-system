@@ -62,7 +62,16 @@ pub const CURRENT_VER: i64 = 12;
 /// (`in == out`) toujours valides ; nouveaux blocs (`in > out`) acceptés. MINOR
 /// → migration auto, pas de wipe. (Mixed-version P2P : un nœud 3.8.0 REJETTE un
 /// bloc 3.9.0 qui brûle un frais — mise à niveau coordonnée requise.)
-pub const DAG_VERSION: &str = "3.9.0";
+///
+/// v3.10.0 (audit rang 3 — B3) : anti-replay durable des `BridgeMint`. Chaque
+/// `lock_block_id` (BridgeLock source) ne peut être minté QU'UNE FOIS sur le
+/// ledger destination — marqueur durable dans la CF `bridge_consumed` écrit dans
+/// le MÊME batch atomique que le bloc mint ; un BridgeMint rejouant un lock déjà
+/// consommé est rejeté à la persistance. Règle additive : anciens blocs valides,
+/// le 1er mint d'un lock toujours accepté. MINOR → migration auto, pas de wipe.
+/// (Mixed-version P2P : un nœud 3.9.0 ré-appliquerait un BridgeMint rejoué — mise
+/// à niveau coordonnée requise pour fermer l'inflation par replay.)
+pub const DAG_VERSION: &str = "3.10.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

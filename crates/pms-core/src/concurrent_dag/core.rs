@@ -35,6 +35,7 @@ impl ConcurrentDag {
             spent_order: Mutex::new(VecDeque::new()),
             max_spent_outpoints,
             tips: DashSet::new(),
+            consumed_bridge_locks: DashSet::new(),
         }
     }
 

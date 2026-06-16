@@ -310,6 +310,13 @@ impl RocksStore {
             "node_fee_pool", // Fee pool: single key "pool" -> amount (u64)
             "node_reward_addresses", // Reward addresses: node_pk -> address
             "token_registry", // Token registry: asset_id -> TokenMetadata (JSON)
+            // Bridge CFs — MUST mirror CF_NAMES (multi-prefix open list). They
+            // were historically only in CF_NAMES, so a single-prefix store
+            // opened via `RocksStore::new` lacked them and any `cf("bridge_*")`
+            // panicked. `bridge_consumed` is the durable BridgeMint anti-replay
+            // marker (audit rang 3, B3); `bridge_links` the enabled bridge set.
+            "bridge_consumed", // BridgeMint anti-replay: lock_block_id -> mint_block_id
+            "bridge_links",    // Enabled bridges: "a|b" -> BridgeLink (JSON)
             "compliance_frozen", // Frozen addresses: address -> FrozenEntry (JSON)
             "compliance_log", // Compliance audit trail: block_id -> ComplianceLogEntry (JSON)
             "addr_activity", // Per-address activity index: [addr][0x00][ts:8][block_id] -> ""

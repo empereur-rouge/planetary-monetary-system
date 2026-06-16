@@ -194,6 +194,26 @@ pub trait DagStorage: Send + Sync {
         Ok(false)
     }
 
+    /// Authoritative bridge-mint anti-replay check: has the source-ledger
+    /// `BridgeLock` identified by `lock_block_id` already been minted on THIS
+    /// ledger?
+    ///
+    /// A `BridgeMint` creates funds on the destination ledger "backed by" a
+    /// `BridgeLock` that removed equal funds on the source ledger. Each source
+    /// lock must be minted **at most once** — otherwise a re-signed/replayed
+    /// `BridgeMint` reusing the same `lock_block_id` re-mints out of nothing
+    /// (inflation). `RocksStore` reads the on-disk `bridge_consumed` column
+    /// family (written in the same atomic batch as the mint block), which is the
+    /// single source of truth across restarts and independent of any in-RAM
+    /// tracker. The default returns `Ok(false)` so mocks stay simple — backends
+    /// that cannot track consumed locks must never be trusted for bridge flows.
+    ///
+    /// See [`ConcurrentDag::try_consume_bridge_lock`] for the in-process atomic
+    /// claim that pairs with this durable record (audit rang 3, B3).
+    async fn is_bridge_lock_consumed(&self, _lock_block_id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Paginated reverse-chronological scan of block IDs involving a specific
     /// address.  Returns `(block_ids, next_cursor)`.
     /// Default no-op returns empty results (used by non-RocksDB backends).

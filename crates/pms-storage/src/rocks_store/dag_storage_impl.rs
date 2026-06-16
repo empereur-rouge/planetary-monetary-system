@@ -14,6 +14,23 @@ use rocksdb::{Direction, IteratorMode};
 
 use super::activity_index::iter_cf_all;
 
+/// Extract the `lock_block_id` claimed by a `BridgeMint` block, if any.
+///
+/// Used to record the durable bridge-mint anti-replay marker (`bridge_consumed`
+/// CF) in the SAME atomic `WriteBatch` as the block itself, so the consumed-lock
+/// record can never diverge from the mint it backs (audit rang 3, B3). Returns
+/// `None` for any non-`BridgeMint` block (including encrypted payloads, which a
+/// bridge mint never is — it is always a Plain coordinator-signed block).
+fn bridge_mint_lock_id(b: &StoredBlock) -> Option<String> {
+    let pjson = b.payload_json.as_ref()?;
+    match serde_json::from_str::<pms_types_payload::PayloadEnvelope>(pjson) {
+        Ok(pms_types_payload::PayloadEnvelope::Plain(
+            pms_types_payload::PlainPayload::BridgeMint { lock_block_id, .. },
+        )) => Some(lock_block_id),
+        _ => None,
+    }
+}
+
 #[async_trait::async_trait]
 impl DagStorage for RocksStore {
     async fn put_block(&self, b: &StoredBlock) -> Result<PutResult> {
@@ -586,6 +603,16 @@ impl DagStorage for RocksStore {
             }
         }
 
+        // 1.a-bis) Bridge-mint anti-replay (audit rang 3, B3) — record the
+        // source lock consumed by this BridgeMint in the SAME atomic batch, so
+        // the durable `bridge_consumed` marker can never diverge from the mint.
+        // A replayed BridgeMint reusing this `lock_block_id` is rejected at
+        // validation (`DagStorage::is_bridge_lock_consumed`) before re-minting.
+        if let Some(lock_block_id) = bridge_mint_lock_id(b) {
+            let cf_bridge_consumed = self.cf("bridge_consumed");
+            batch.put_cf(&cf_bridge_consumed, lock_block_id.as_bytes(), b.id.as_bytes());
+        }
+
         // 1.b) Indices DAG
         self.apply_dag_indices(&mut batch, b)?;
 
@@ -773,6 +800,16 @@ impl DagStorage for RocksStore {
                 }
             }
 
+            // Bridge-mint anti-replay (audit rang 3, B3) — same atomic batch as
+            // the block, mirrors the single-block path. Records the source lock
+            // this BridgeMint consumes so a replay reusing it is rejected. The CF
+            // handle is resolved lazily (bridge mints are rare) so non-bridge
+            // batches never touch it.
+            if let Some(lock_block_id) = bridge_mint_lock_id(b) {
+                let cf_bridge_consumed = self.cf("bridge_consumed");
+                batch.put_cf(&cf_bridge_consumed, lock_block_id.as_bytes(), b.id.as_bytes());
+            }
+
             // ── DAG indices (inlined from apply_dag_indices, using
             // the pre-resolved CF handles + producer-supplied counts).
             let time_key = key_time_index(now_ts, &b.id);
@@ -894,6 +931,18 @@ impl DagStorage for RocksStore {
         let cf_utxo_spent = self.cf("utxo_spent");
         let key = make_utxo_key(txid, index);
         Ok(self.db.get_cf(&cf_utxo_spent, &key)?.is_some())
+    }
+
+    async fn is_bridge_lock_consumed(&self, lock_block_id: &str) -> Result<bool> {
+        // Durable anti-replay record: `bridge_consumed[lock_block_id] = mint_block_id`.
+        // Written in the atomic batch alongside the BridgeMint block (see
+        // `append_block_atomic_with_utxo` / `append_blocks_batch`). Survives
+        // restarts and FIFO eviction of any RAM tracker (audit rang 3, B3).
+        let cf_bridge_consumed = self.cf("bridge_consumed");
+        Ok(self
+            .db
+            .get_cf(&cf_bridge_consumed, lock_block_id.as_bytes())?
+            .is_some())
     }
 
     async fn block_ts_ms(&self, id: &str) -> Result<Option<i64>> {
