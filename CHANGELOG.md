@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.24.2] - Unreleased — Émission : interdit le mint natif via contrat de refund (audit rang 3 / B2)
+
+### Security / Economics
+- **fix(emission/contract-refund)** — `ContractAction::AccumulateRefund` en **PMS
+  natif** (`asset_id = None`) est désormais **rejeté à l'enregistrement** du
+  contrat ([lib.rs](crates/pms-types-contract/src/lib.rs), `validate()` appelée
+  par `/admin/contracts`). Avant : un contrat `OnNftBurn → AccumulateRefund{None}`
+  mintait du PMS natif via le distributeur **sans `EmissionGate`** = primitive de
+  mint natif **illimité** (audit B2, CRITIQUE latent). L'émission native ne passe
+  que par les voies budgétées (faucet/on-ramp/inflation/token-burn) ; un refund de
+  contrat ne peut rembourser qu'en **asset custom** (le jeu Edenite utilise
+  `Some("edenite")`, inchangé).
+
+### Added
+- **test** — `pms-types-contract` : `AccumulateRefund{None}` rejeté, `Some(asset)`
+  accepté. Suites pms-types-contract / pms-core / pms-contracts vertes.
+
+### Changed
+- **chore(version)** — `Cargo` 0.24.1 → **0.24.2** ; `API_VERSION` 28 → **29**
+  (`/admin/contracts` durci). Pas de `DAG_VERSION` (les contrats sont des écritures
+  CF, pas des blocs DAG).
+
+### À suivre (rang 3 — restant)
+- **B3 (bridge)** : `BridgeMint` natif non gaté + non réconcilié au `BridgeLock`
+  (montant/asset/anti-replay). Admin-gated + off par défaut. Fix plus large
+  (réconciliation lock↔mint) — à traiter à part.
+- **Faucet** : mint natif non gaté mais **testnet-only** (désactivé mainnet) ; le
+  gater par le corridor risquerait d'affamer le testnet — décision produit séparée.
+
+---
+
 ## [0.24.1] - Unreleased — Frais : le pool est crédité du burn réel (audit rang 2c)
 
 ### Security / Economics

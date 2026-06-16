@@ -192,6 +192,21 @@ impl ContractAction {
                 }
                 Ok(())
             }
+            ContractAction::AccumulateRefund { asset_id, .. } => {
+                // Audit rang 3 (B2) : un refund en PMS natif (`asset_id = None`)
+                // mintait du PMS NON gaté par `EmissionGate` (primitive de mint
+                // natif illimité). L'émission de PMS natif DOIT passer par les
+                // voies budgétées (faucet/on-ramp/inflation/token-burn) ; un
+                // contrat de refund ne peut rembourser QU'EN asset custom.
+                if asset_id.is_none() {
+                    return Err(
+                        "AccumulateRefund: native PMS (asset_id=None) refunds are not allowed \
+                         — native issuance is gated by EmissionGate; use a custom asset"
+                            .into(),
+                    );
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -391,13 +406,22 @@ mod tests {
         println!("Empty address rejected: {err}");
         assert!(err.contains("empty address"));
 
-        // AccumulateRefund always valid
-        let refund = ContractAction::AccumulateRefund {
+        // AccumulateRefund: native (asset_id=None) is REJECTED (audit rang 3/B2);
+        // custom-asset refunds are allowed.
+        let native_refund = ContractAction::AccumulateRefund {
             asset_id: None,
             formula: MintFormula::FixedAmount { amount: "1".into() },
         };
-        assert!(refund.validate().is_ok());
-        println!("Non-TransferFee actions always valid: OK");
+        let err = native_refund.validate().unwrap_err();
+        println!("Native AccumulateRefund rejected: {err}");
+        assert!(err.contains("native"), "got: {err}");
+
+        let custom_refund = ContractAction::AccumulateRefund {
+            asset_id: Some("edenite".into()),
+            formula: MintFormula::FixedAmount { amount: "1".into() },
+        };
+        assert!(custom_refund.validate().is_ok());
+        println!("Custom-asset AccumulateRefund valid: OK");
     }
 
     #[test]

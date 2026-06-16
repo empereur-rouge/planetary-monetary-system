@@ -59,7 +59,10 @@ use crate::api::AppState;
 /// plus d'output de frais ; `/wallet/tx/send` & `/v1/wallet/send-simple` brûlent
 /// le frais de gas (`in − out`) au lieu de l'envoyer au coordinateur. Le frais
 /// implicite doit couvrir le minimum (sinon `insufficient fees`).
-pub const API_VERSION: u32 = 28;
+/// v29 (audit rang 3 — B2) : l'enregistrement de contrat (`/admin/contracts`)
+/// rejette une action `AccumulateRefund` en PMS natif (`asset_id=None`) —
+/// l'émission native ne passe jamais par un refund de contrat (anti mint illimité).
+pub const API_VERSION: u32 = 29;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -149,6 +152,8 @@ mod tests {
         //          concurrentes — claim atomique avant apply, ferme un TOCTOU).
         // v0.24.0: 27 → 28 (audit rang 2 : frais brûlés à la source — prepare sans
         //          output de frais, /wallet/tx/send & send-simple brûlent in−out).
-        assert_eq!(parsed.api_version, 28);
+        // v0.24.2: 28 → 29 (audit rang 3/B2 : /admin/contracts rejette les refunds
+        //          AccumulateRefund en PMS natif — anti mint natif illimité).
+        assert_eq!(parsed.api_version, 29);
     }
 }
