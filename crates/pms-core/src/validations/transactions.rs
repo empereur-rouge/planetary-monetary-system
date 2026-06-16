@@ -226,9 +226,16 @@ pub fn check_asset_conservation_with_demurrage(
             .copied()
             .unwrap_or(0)
             > 0;
-        // Demurrage : la décote (et tout surplus volontaire) est brûlée —
-        // out <= effective_in. Sinon : égalité stricte (M-7).
-        let violated = if has_demurrage {
+        // Conservation par asset :
+        //  - PMS natif (`asset_id == None`) : le frais de gas est BRÛLÉ à la
+        //    source → `out ≤ in` ; la différence `in − out` est le frais détruit
+        //    (finance les récompenses gatées ; invariant supply = genesis +
+        //    Σémis − Σbrûlé). C'est le modèle UTXO standard (fee = in − out).
+        //  - asset à demurrage : `out ≤ in` (la décote est brûlée).
+        //  - token custom sans demurrage : égalité stricte (M-7) — le gas se
+        //    paie en PMS, jamais dans le token.
+        //  Dans TOUS les cas `out > in` reste interdit (création d'asset).
+        let violated = if has_demurrage || asset_id.is_none() {
             out_sum > *in_sum
         } else {
             *in_sum != out_sum
