@@ -9,7 +9,7 @@
 //!
 //! Run: `cargo test -p pms-server --test wallet_send_fees -- --nocapture`
 
-use pms_testkit::{make_test_ctx_with_admin, mint_to_wallet_and_get_inputs, post_json};
+use pms_testkit::{get_json, make_test_ctx_with_admin, mint_to_wallet_and_get_inputs, post_json};
 use pms_token::fee::FeePolicy;
 use pms_types::{Transaction, TxInput, TxOutput, Unlock};
 use pms_wallet::{SignerBackend, Wallet};
@@ -152,6 +152,83 @@ async fn underpaying_implicit_fee_is_rejected() -> anyhow::Result<()> {
     assert!(
         !status.is_success(),
         "a transfer burning 0 fee must be rejected (insufficient fees), got {status}"
+    );
+    Ok(())
+}
+
+/// Phase 2c — the reward pool is credited the **actual burned** fee (`in − out`),
+/// NOT the client-declared `tx.fee`. Otherwise a client over-declaring `tx.fee`
+/// above the real burn would make the distributor re-mint more than was burned →
+/// inflation. Here the client over-declares `tx.fee = "5.0"` while the real burn
+/// is `compute_fee(amount)`; we assert supply drops by the REAL burn and the pool
+/// is credited the REAL burn (not 5).
+#[tokio::test]
+async fn pool_is_credited_actual_burn_not_overdeclared_fee() -> anyhow::Result<()> {
+    let (ctx, hrp, nid) = ctx_with_minter().await;
+
+    let alice = Wallet::from_seed(&[75u8; 32], None).unwrap();
+    let bob = Wallet::from_seed(&[76u8; 32], None).unwrap();
+    let bob_addr = bob.get_address(&hrp);
+    let alice_addr = alice.get_address(&hrp);
+
+    let (inputs, _minted) = mint_to_wallet_and_get_inputs(&ctx, &alice, "100").await?;
+    let in_id = inputs[0].id.clone();
+    let input_dec = Decimal::from_str("100")?;
+
+    let (supply_before, _) = ctx.srv.adapter_arc().circulating_supply().await;
+
+    // Real burn = compute_fee(amount). Declared tx.fee is OVER-stated ("5.0").
+    let amount = Decimal::from_str("40")?;
+    let fee_policy = FeePolicy::new(&ctx.settings.fees.base_fee, &ctx.settings.fees.ratio);
+    let real_burn = fee_policy
+        .compute_fee(&amount.to_string())
+        .expect("fee")
+        .inner();
+    let change = input_dec - amount - real_burn; // → in − out = real_burn
+    assert!(
+        Decimal::from_str("5.0")? > real_burn,
+        "test premise: declared fee must exceed the real burn"
+    );
+
+    let tx = sign(
+        &alice,
+        Transaction {
+            inputs: vec![TxInput { out: in_id }],
+            outputs: vec![
+                TxOutput::new(bob_addr.clone(), amount.to_string(), None),
+                TxOutput::new(alice_addr.clone(), change.to_string(), None),
+            ],
+            fee: "5.0".to_string(), // OVER-DECLARED (real burn is ~1.2)
+            unlocks: vec![],
+        },
+        &nid,
+    );
+
+    let body = serde_json::json!({
+        "tx": tx,
+        "recipients_xpk": [alice.x25519_pub_hex, bob.x25519_pub_hex],
+    });
+    let (status, json) = post_json(&ctx.app, "/wallet/tx/send", body).await;
+    println!("[FEE-BURN] over-declared send → {status} body={json}");
+    assert!(status.is_success(), "tx must be accepted (real burn covers the minimum): {json}");
+
+    // Supply dropped by the REAL burn (in − out), independent of declared tx.fee.
+    let (supply_after, _) = ctx.srv.adapter_arc().circulating_supply().await;
+    println!("[FEE-BURN] supply: before={supply_before} after={supply_after} (real burn={real_burn})");
+    assert_eq!(
+        supply_after,
+        supply_before - real_burn,
+        "supply must drop by the REAL burn (in − out), not the over-declared tx.fee"
+    );
+
+    // THE 2c PROOF: the reward pool is credited the REAL burn, not the declared 5.
+    let (_s, pool) = get_json(&ctx.app, "/v1/fee_pool").await;
+    let pool_total = Decimal::from_str(pool["total_fees"].as_str().expect("total_fees"))?;
+    println!("[FEE-BURN] fee_pool.total_fees = {pool_total} (expected {real_burn}, NOT 5)");
+    assert_eq!(
+        pool_total, real_burn,
+        "pool must be credited the ACTUAL burned fee, not the over-declared tx.fee \
+         (else the distributor would re-mint more than was burned → inflation)"
     );
     Ok(())
 }

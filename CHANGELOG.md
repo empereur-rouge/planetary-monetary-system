@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.24.1] - Unreleased — Frais : le pool est crédité du burn réel (audit rang 2c)
+
+### Security / Economics
+- **fix(fees/recycle-accounting)** — `wallet_send_tx` crédite le pool de
+  récompenses du frais **réellement brûlé** (`in − out`) au lieu du `tx.fee`
+  **déclaré** par le client ([transaction.rs](crates/pms-server/src/api_fn/transaction.rs)).
+  Sans ça, un client sur-déclarant `tx.fee` au-dessus du burn réel ferait
+  reminter au distributeur plus que ce qui a été détruit → inflation. Garantit
+  `Σ minted == Σ burned` (net-zéro). `wallet_send_simple` construit la tx
+  côté serveur (déclaré == burn), déjà correct.
+
+### Added
+- **test** — `pool_is_credited_actual_burn_not_overdeclared_fee` : une tx avec
+  `tx.fee="5"` sur-déclaré (burn réel ~1.2) → la supply baisse du burn réel et
+  `GET /v1/fee_pool` montre `total_fees == burn réel` (pas 5). Prouve l'absence
+  d'inflation via sur-déclaration. Suite pms-server verte.
+
+### Changed
+- **chore(version)** — `Cargo` 0.24.0 → **0.24.1** (durcissement ; pas de
+  changement `DAG_VERSION`/`API_VERSION` : accounting interne, contrat d'endpoint
+  inchangé).
+
+### À suivre (rang 2)
+- Test d'invariant de supply **end-to-end** (transfert + distribution → net-zéro,
+  nécessite node/treasury configuré) ; retrait du fee-sharding inutilisé.
+- **2d (= rang 3)** : gating `EmissionGate` des mints natifs (faucet, refund NFT
+  natif, bridge).
+
+---
+
 ## [0.24.0] - Unreleased — Économie : frais brûlés à la source (audit rang 2, cœur)
 
 ### Security / Economics

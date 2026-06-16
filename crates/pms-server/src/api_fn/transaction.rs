@@ -251,8 +251,12 @@ pub async fn wallet_send_tx(
                 }
             }
 
-            // Accumulate fee in pool for periodic consolidated distribution
-            tx_helpers::accumulate_tx_fee(&state, fee_dec).await;
+            // Accumulate the ACTUAL burned fee (`in − out`), NOT the client-
+            // declared `tx.fee`. The distributor re-mints the pool to nodes, so
+            // crediting more than was burned would over-mint (inflation) if a
+            // client over-declares `tx.fee` above the real burn. Crediting the
+            // real burn keeps `Σ minted == Σ burned` → net-zero (audit rang 2c).
+            tx_helpers::accumulate_tx_fee(&state, burned_fee).await;
 
             (
                 StatusCode::CREATED,
