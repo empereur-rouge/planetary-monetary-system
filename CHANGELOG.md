@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.26.1] - Unreleased — Simplify post-revue (réconciliation bridge)
+
+### Changed
+- **refactor(ledger/bridge)** — `/simplify` après revue sécurité (sémantique
+  inchangée) : `LedgerManager` tient désormais **un seul** `bridge_resolver`
+  (construit une fois sur `bridge_sources` partagé) au lieu d'en réallouer un par
+  `add_ledger` ; extraction du helper `register_bridge_source(id, instance)`
+  (dédup de l'enregistrement `(dag, store)` entre bootstrap et add_ledger). Suite
+  pms-bridge (7+14) verte.
+- **chore(version)** — `Cargo` 0.26.0 → **0.26.1** (refactor uniquement ;
+  `DAG_VERSION`/`API_VERSION` inchangés).
+
+---
+
 ## [0.26.0] - Unreleased — Bridge : réconciliation cross-ledger des BridgeMint (audit rang 3 / B3)
 
 ### Security / Economics
