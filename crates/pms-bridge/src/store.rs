@@ -76,9 +76,16 @@ impl BridgeStore {
         Ok(links)
     }
 
-    // --- Bridge Consumed (anti-replay) ---
+    // --- Bridge transfer-status index (lock → mint) ---
+    //
+    // NOTE (audit rang 3, B3) : ces entrées (CF `bridge_consumed` du store `main`)
+    // ne sont PLUS le mécanisme anti-replay autoritaire. L'anti-replay est enforced
+    // au niveau persist du `BridgeMint` (claim atomique RAM + CF `bridge_consumed`
+    // du store DESTINATION), et la réconciliation montant/asset/destinataire/ledger
+    // l'est aussi. Ici il ne s'agit que de l'index de statut lock→mint qui sert à
+    // `BridgeEngine::transfer_status` (et au unit-test du store).
 
-    /// Vérifie si un BridgeLock a déjà été consommé par un BridgeMint.
+    /// Vérifie si un lock a une entrée de statut (consommé) — index, pas l'autorité.
     pub fn is_bridge_lock_consumed(&self, lock_block_id: &str) -> Result<bool> {
         let cf = self.store.cf("bridge_consumed");
         Ok(self

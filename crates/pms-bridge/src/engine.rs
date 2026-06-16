@@ -276,10 +276,15 @@ impl BridgeEngine {
             "BridgeLock persisted"
         );
 
-        // 5) Anti-replay check
-        if self.bridge_store.is_bridge_lock_consumed(&lock_block_id)? {
-            bail!("BridgeLock {} already consumed", lock_block_id);
-        }
+        // 5) Anti-replay : AUCUN pré-check ici — il est redondant et était mort
+        // (execute_transfer forge un lock_block_id FRAIS à chaque appel, donc
+        // jamais "déjà consommé"). L'anti-replay AUTORITATIF est enforced au
+        // niveau persist du BridgeMint (claim atomique RAM + CF `bridge_consumed`
+        // du store destination), et la réconciliation montant/asset/destinataire/
+        // ledger l'est aussi — un mint rejoué/mal formé est rejeté par
+        // `persist_block` ci-dessous (audit rang 3, B3). Le marqueur
+        // `bridge_consumed` du `BridgeStore` (store `main`) n'est plus qu'un
+        // INDEX DE STATUT lock→mint pour `transfer_status` (étape 7).
 
         // 6) Construire et persister le BridgeMint sur le ledger destination
         let mint_outputs = vec![TxOutput::new(
@@ -319,7 +324,10 @@ impl BridgeEngine {
             "BridgeMint persisted"
         );
 
-        // 7) Marquer le lock comme consommé
+        // 7) Index de statut (NON autoritaire) : enregistrer quel BridgeMint a
+        // consommé ce lock, pour `transfer_status`. L'anti-replay autoritaire est
+        // au persist (cf. étape 5). `lock_block_id` étant frais, ce put ne peut
+        // pas échouer sur "déjà consommé".
         self.bridge_store
             .mark_bridge_lock_consumed(&lock_block_id, &mint_block_id)?;
 

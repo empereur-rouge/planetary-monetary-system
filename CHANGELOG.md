@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.26.2] - Unreleased — Cleanup : marqueur bridge_consumed de l'engine = index de statut (audit rang 3 / B3)
+
+### Removed / Changed
+- **refactor(bridge/engine)** — suppression du **pré-check anti-replay mort** dans
+  `BridgeEngine::execute_transfer` (`is_bridge_lock_consumed` sur le store `main`) :
+  il était redondant (l'anti-replay autoritaire + la réconciliation sont au niveau
+  persist du `BridgeMint` depuis v0.25.0/0.26.0) ET inopérant (un `lock_block_id`
+  frais est forgé à chaque transfert, donc jamais "déjà consommé"). Un mint
+  rejoué/mal formé est désormais rejeté par `persist_block`.
+- **docs(bridge/store)** — le marqueur `bridge_consumed` du `BridgeStore` (store
+  `main`) est re-documenté comme **index de statut lock→mint** (pour
+  `transfer_status`), PAS le mécanisme anti-replay (qui vit sur la CF
+  `bridge_consumed` du store DESTINATION + claim RAM au persist). Lève la confusion
+  signalée par la revue sécurité (MEDIUM). Comportement inchangé.
+- **chore(version)** — `Cargo` 0.26.1 → **0.26.2** (cleanup/docs ; `DAG_VERSION`/
+  `API_VERSION` inchangés). Suite pms-bridge (7+14) verte.
+
+---
+
 ## [0.26.1] - Unreleased — Simplify post-revue (réconciliation bridge)
 
 ### Changed
