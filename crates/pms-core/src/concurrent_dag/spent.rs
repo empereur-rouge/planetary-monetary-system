@@ -75,4 +75,34 @@ impl ConcurrentDag {
         }
         store.is_outpoint_spent(txid, index).await
     }
+
+    /// **Atomic bridge-mint anti-replay claim.** A `BridgeMint` creates funds on
+    /// this ledger backed by a `BridgeLock` on the source ledger; each source
+    /// lock may be minted AT MOST ONCE. Inserts `lock_block_id` into the
+    /// consumed-set and returns `true` if it was **newly** claimed (this mint
+    /// owns the lock), `false` if it was **already** consumed (a replay).
+    /// `DashSet::insert` is atomic, so two concurrent replays of the same lock
+    /// resolve to exactly one winner — the in-process commit point that mirrors
+    /// [`ConcurrentDag::try_mark_spent`] for double-spends. The cross-restart
+    /// record lives in the durable `bridge_consumed` column family; the early
+    /// reject for already-persisted replays is
+    /// [`DagStorage::is_bridge_lock_consumed`] (audit rang 3, B3).
+    pub fn try_consume_bridge_lock(&self, lock_block_id: &str) -> bool {
+        self.consumed_bridge_locks.insert(lock_block_id.to_string())
+    }
+
+    /// Undo a [`ConcurrentDag::try_consume_bridge_lock`] claim — used to roll
+    /// back a BridgeMint that is rejected AFTER claiming its lock, so a
+    /// legitimately-unconsumed lock is not locked out of a later valid mint.
+    pub fn unconsume_bridge_lock(&self, lock_block_id: &str) {
+        self.consumed_bridge_locks.remove(lock_block_id);
+    }
+
+    /// RAM fast-path check for bridge-lock consumption. Pair with the durable
+    /// [`DagStorage::is_bridge_lock_consumed`] for an authoritative answer — the
+    /// RAM set is empty after a restart until each lock is re-claimed, so it
+    /// only covers the in-flight window before the durable batch write lands.
+    pub fn is_bridge_lock_consumed_ram(&self, lock_block_id: &str) -> bool {
+        self.consumed_bridge_locks.contains(lock_block_id)
+    }
 }

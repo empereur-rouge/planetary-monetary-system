@@ -62,7 +62,10 @@ use crate::api::AppState;
 /// v29 (audit rang 3 — B2) : l'enregistrement de contrat (`/admin/contracts`)
 /// rejette une action `AccumulateRefund` en PMS natif (`asset_id=None`) —
 /// l'émission native ne passe jamais par un refund de contrat (anti mint illimité).
-pub const API_VERSION: u32 = 29;
+/// v30 (audit rang 3 — B3) : `POST /submit/block` rejette un `BridgeMint` qui
+/// rejoue un `lock_block_id` déjà minté (anti-replay durable, CF `bridge_consumed`)
+/// — ferme une inflation par re-soumission de bridge mint.
+pub const API_VERSION: u32 = 30;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -154,6 +157,8 @@ mod tests {
         //          output de frais, /wallet/tx/send & send-simple brûlent in−out).
         // v0.24.2: 28 → 29 (audit rang 3/B2 : /admin/contracts rejette les refunds
         //          AccumulateRefund en PMS natif — anti mint natif illimité).
-        assert_eq!(parsed.api_version, 29);
+        // v0.25.0: 29 → 30 (audit rang 3/B3 : /submit/block rejette un BridgeMint
+        //          rejouant un lock déjà consommé — anti-replay durable).
+        assert_eq!(parsed.api_version, 30);
     }
 }

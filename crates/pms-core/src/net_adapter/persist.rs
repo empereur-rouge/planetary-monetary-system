@@ -1139,6 +1139,39 @@ where
             }
         }
 
+        // BridgeMint anti-replay (audit rang 3, B3) — DURABLE early reject. A
+        // BridgeMint creates funds backed by a source-ledger BridgeLock; each
+        // lock may be minted AT MOST ONCE. A replayed/re-signed BridgeMint
+        // reusing an already-minted `lock_block_id` would re-mint out of nothing
+        // (inflation). The authoritative cross-restart record is the
+        // `bridge_consumed` CF (written atomically with the original mint); the
+        // RAM fast-path catches replays still in their in-flight window before
+        // the durable write lands. The atomic CLAIM (commit point) is below,
+        // just before `apply_diff`, mirroring the double-spend guard.
+        if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeMint { lock_block_id, .. })) =
+            &block.payload
+        {
+            match self.store.is_bridge_lock_consumed(lock_block_id).await {
+                Ok(true) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "bridge lock already consumed (replay): {lock_block_id}"
+                    )));
+                }
+                Ok(false) => {
+                    if self.dag.is_bridge_lock_consumed_ram(lock_block_id) {
+                        return Ok(PutResult::Rejected(format!(
+                            "bridge lock already consumed (replay): {lock_block_id}"
+                        )));
+                    }
+                }
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "bridge_consumed lookup failed: {e}"
+                    )));
+                }
+            }
+        }
+
         // TokenBurn (plan §3.1, voie B) : validation complète owner-signée +
         // conservation-burn (inputs = change + amount détruit). Hot path, comme
         // TxUtxo/BridgeLock.
@@ -1411,6 +1444,24 @@ where
         // lui, est gated par ce même early-return, donc jamais ré-écrit).
         if self.dag.contains_block(&sb.id) {
             return Ok(PutResult::AlreadyExists);
+        }
+
+        // ── Bridge-mint anti-replay CLAIM (atomic, in-process commit point) ──
+        // The durable early reject above (validation section) catches replays of
+        // already-persisted locks; THIS atomic claim is the authoritative commit
+        // point that closes the validate→apply window for two concurrent mints
+        // of the SAME source lock racing before either's durable write lands.
+        // `try_consume_bridge_lock` is an atomic DashSet test-and-set: exactly
+        // one wins, the rest are rejected here (mirrors the double-spend guard).
+        // (audit rang 3, B3)
+        if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeMint { lock_block_id, .. })) =
+            &payload
+        {
+            if !self.dag.try_consume_bridge_lock(lock_block_id) {
+                return Ok(PutResult::Rejected(format!(
+                    "bridge lock already consumed (replay): {lock_block_id}"
+                )));
+            }
         }
 
         let t0 = std::time::Instant::now();

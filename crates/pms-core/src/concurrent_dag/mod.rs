@@ -103,6 +103,18 @@ pub struct ConcurrentDag {
     /// by `insert_block` / `bootstrap_insert` / `prune_oldest` to avoid O(n)
     /// full scans in `find_tips()`.
     pub(super) tips: DashSet<BlockId>,
+
+    /// Consumed bridge-lock ids for `BridgeMint` anti-replay (audit rang 3, B3).
+    ///
+    /// A `BridgeMint` creates funds on this ledger backed by a `BridgeLock` on
+    /// the source ledger; each source `lock_block_id` may be minted AT MOST
+    /// ONCE. This is the in-process atomic claim set (mirrors
+    /// [`spent_outpoints`](Self::spent_outpoints)); the cross-restart record is
+    /// the durable `bridge_consumed` column family. Unbounded: bridge mints are
+    /// rare (admin-gated, off by default) and the durable CF is authoritative
+    /// for anything past its batch write — the RAM set only needs to cover the
+    /// in-flight window, so eviction is unnecessary.
+    pub consumed_bridge_locks: DashSet<String>,
 }
 
 impl Default for ConcurrentDag {

@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.25.0] - Unreleased — Bridge : anti-replay durable des BridgeMint (audit rang 3 / B3)
+
+### Security / Economics
+- **fix(bridge/anti-replay)** — un `BridgeMint` rejouant un `lock_block_id` déjà
+  minté est désormais **rejeté à la persistance** (`do_persist_block_internal`).
+  Avant : un BridgeMint re-signé/rejoué réutilisant le même lock re-créait des
+  fonds **sans contrepartie** (inflation, audit B3). Modèle calqué sur le garde
+  anti-double-dépense (rang 1-bis) :
+  - **claim RAM atomique** (`ConcurrentDag::try_consume_bridge_lock`, `DashSet`
+    test-and-set) au commit point, avant `apply_diff` — deux replays concurrents
+    du même lock : un seul gagne, l'autre est rejeté ;
+  - **marqueur durable** dans la CF `bridge_consumed` (`lock_block_id →
+    mint_block_id`), écrit dans le **même batch atomique** que le bloc mint (les
+    deux chemins : single `append_block_atomic_with_utxo` + batch
+    `append_blocks_batch`) → survit au restart, indépendant de l'éviction RAM ;
+  - **reject anticipé** en validation via `DagStorage::is_bridge_lock_consumed`
+    (durable) puis RAM.
+  Crash-consistant : bloc + UTXO + marqueur partagent un seul `WriteBatch` (jamais
+  de divergence mint/marqueur). Revue sécurité dédiée : aucun contournement, pas
+  de TOCTOU, pas de leak de claim (les BridgeMint n'ont pas d'inputs).
+
+### Fixed
+- **fix(storage/cf)** — `bridge_consumed` + `bridge_links` ajoutés à la liste
+  d'ouverture single-prefix `required` (ils n'étaient que dans `CF_NAMES`
+  multi-prefix) : un store ouvert via `RocksStore::new` paniquait sur
+  `cf("bridge_*")`. CF auto-créées sur les DB existantes (`create_missing_column_families`).
+
+### Added
+- **test(bridge)** — `bridge_mint_replay_is_rejected` (pms-bridge e2e) : transfert
+  légit → marqueur durable on-disk vérifié → replay du `lock_block_id` (block id
+  distinct) **rejeté** "already consumed" → solde destinataire inchangé (pas
+  d'inflation). Remplace le faux "Step 7 anti-replay" (qui ne testait qu'un solde
+  insuffisant). Suites pms-bridge (5+14), pms-storage, pms-core vertes.
+
+### Changed
+- **chore(version)** — `Cargo` 0.24.2 → **0.25.0** ; `DAG_VERSION` 3.9.0 →
+  **3.10.0** (nouvelle règle consensus additive — upgrade P2P coordonné requis) ;
+  `API_VERSION` 29 → **30** (`/submit/block` rejette les BridgeMint rejoués). Pas
+  de `CURRENT_VER` (CF additives auto-créées, aucune migration).
+
+### À suivre (rang 3 — restant)
+- **B3 — réconciliation cross-ledger** (`mint.amount == lock.amount`, asset, lock
+  existe) : non faisable au persist du ledger destination (pas d'accès au lock
+  source). Aujourd'hui garantie par le producteur (`engine.execute_transfer` mint
+  = lock, coordinateur-signé). L'anti-replay est sound indépendamment.
+- **Cleanup** : le marqueur `bridge_consumed` de l'engine (`BridgeStore` sur le
+  store `main`) est désormais redondant avec celui du persist (store destination,
+  autoritaire) — pointer `BridgeStore` sur le store par-ledger ou retirer le check
+  engine (revue sécurité, MEDIUM non-bloquant).
+- **Faucet** : mint natif non gaté mais testnet-only (décision produit).
+
+---
+
 ## [0.24.2] - Unreleased — Émission : interdit le mint natif via contrat de refund (audit rang 3 / B2)
 
 ### Security / Economics
