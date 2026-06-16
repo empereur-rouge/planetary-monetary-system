@@ -158,7 +158,6 @@ async fn encrypted_tx_updates_utxo_cache_correctly() -> anyhow::Result<()> {
         }],
         outputs: vec![
             TxOutput::new(bob_addr.clone(), send_amount.to_string(), None),
-            TxOutput::new(admin_addr.clone(), fee.clone(), None),
             TxOutput::new(alice_addr.clone(), change.clone(), None),
         ],
         fee: fee.clone(),
@@ -326,7 +325,6 @@ async fn encrypted_tx_chain_works_correctly() -> anyhow::Result<()> {
         }],
         outputs: vec![
             TxOutput::new(bob_addr.clone(), send1.to_string(), None),
-            TxOutput::new(admin_addr.clone(), fee1.clone(), None),
             TxOutput::new(alice_addr.clone(), change1.clone(), None),
         ],
         fee: fee1.clone(),
@@ -377,7 +375,6 @@ async fn encrypted_tx_chain_works_correctly() -> anyhow::Result<()> {
         }],
         outputs: vec![
             TxOutput::new(charlie_addr.clone(), send2.to_string(), None),
-            TxOutput::new(admin_addr.clone(), fee2.clone(), None),
             TxOutput::new(bob_addr.clone(), change2.clone(), None),
         ],
         fee: fee2.clone(),

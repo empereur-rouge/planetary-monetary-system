@@ -525,29 +525,16 @@ pub async fn wallet_send_simple(
         tx_outputs.push(TxOutput::new(fee_result.beneficiary_address.clone(), fee_result.fee_amount.to_string(), req.asset_id.clone()));
     }
 
-    // Change
+    // Change. `total_needed` includes `fee_dec` (native), so the change is
+    // minored by the fee → `in − out = fee` (BURNED at source, phase 2b). No
+    // gas-fee output to the coordinator/admin/shard anymore.
     let change = selected_sum - total_needed;
     if change > Decimal::ZERO {
         tx_outputs.push(TxOutput::new(from_address.clone(), change.to_string(), req.asset_id.clone()));
     }
 
-    // Fee to admin (round-robin'd across coord shards when sharding is
-    // enabled — see audit follow-up to v0.7.4 + AppState::fee_recipient_address).
-    if fee_dec > Decimal::ZERO {
-        let admin_addr = match state.fee_recipient_address() {
-            Some(addr) => addr,
-            None => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "no admin wallet configured for fees" })),
-                );
-            }
-        };
-
-        tx_outputs.push(TxOutput::new(admin_addr, fee_dec.to_string(), None));
-    }
-
-    // PMS change (custom token)
+    // PMS change (custom token). `pms_change = pms_sum − fee_dec`: the PMS gas
+    // fee is burned (no fee output).
     if pms_change > Decimal::ZERO {
         tx_outputs.push(TxOutput::new(from_address.clone(), pms_change.to_string(), None));
     }
