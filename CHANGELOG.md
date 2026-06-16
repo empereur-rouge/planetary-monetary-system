@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.24.0] - Unreleased — Économie : frais brûlés à la source (audit rang 2, cœur)
+
+### Security / Economics
+- **fix(fees/double-mint)** — fin de la **double-matérialisation des frais**
+  (sur-émission en fonctionnement normal). Avant : chaque tx payait un output de
+  frais on-chain au coordinateur (jamais dépensé) ET le distributeur re-mintait
+  le même montant aux nodes → inflation. Désormais le frais de gas est **brûlé à
+  la source** (`Σ inputs − Σ outputs`, détruit) puis reminté par le distributeur
+  → **net-zéro** sur un cycle, et plus d'accumulation d'UTXO de frais (scalable).
+  - **2a — consensus** : conservation PMS natif `in == out` → **`out ≤ in`**
+    ([transactions.rs](crates/pms-core/src/validations/transactions.rs)) ; `out > in`
+    (création de monnaie) reste rejeté ; tokens custom restent stricts.
+  - **2b — production** : `prepare_tx` / `wallet_send_simple` n'émettent plus
+    d'output de frais ; `wallet_send_tx` valide le frais implicite (`in − out ≥
+    minimum`). ([transaction.rs](crates/pms-server/src/api_fn/transaction.rs),
+    [wallet_factory.rs](crates/pms-server/src/api_fn/wallet_factory.rs)).
+
+### Added
+- **test** — `fee_burn_conservation` (règle `out ≤ in`) ; `wallet_send_fees`
+  réécrit : la supply native **baisse exactement du frais brûlé**, sous-paiement
+  rejeté. Tests `wallet_send_tx_e2e` / `encrypted_utxo_delta` / `activity_e2e`
+  adaptés au modèle burn. Suites pms-core + pms-server vertes.
+
+### Changed
+- **chore(version)** — `Cargo` 0.23.0 → **0.24.0** ; `DAG_VERSION` 3.8.0 →
+  **3.9.0** (règle consensus, auto-migrant, pas de wipe ; nœud 3.8.0 rejette un
+  bloc 3.9.0 qui brûle un frais → MAJ coordonnée) ; `API_VERSION` 27 → **28**.
+
+### À suivre (rang 2 — durcissement, non bloquant pour le net-zéro)
+- **2c** : gating/accounting du Mint du distributeur (mint ≤ frais brûlés) + test
+  d'invariant de supply end-to-end (transfert+distribution) + retrait du
+  fee-sharding désormais inutilisé.
+- **2d (= rang 3)** : gating `EmissionGate` des autres mints natifs (faucet,
+  refund NFT natif, bridge mint).
+
+---
+
 ## [0.23.0] - Unreleased — Sécurité : guard atomique anti double-dépense concurrente (audit cause A-bis)
 
 ### Security

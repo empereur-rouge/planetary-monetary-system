@@ -55,7 +55,14 @@ pub const CURRENT_VER: i64 = 12;
 /// (burn de token owner-signé, la supply baisse, trigger des contrats
 /// `OnTokenBurn`). Backward-compatible : les blocs existants parsent toujours ;
 /// un nœud à jour accepte le nouveau type. MINOR → migration auto, pas de wipe.
-pub const DAG_VERSION: &str = "3.8.0";
+///
+/// v3.9.0 (audit rang 2 — frais brûlés à la source) : la conservation du PMS
+/// natif passe de l'égalité stricte (`in == out`) à `out ≤ in` — le frais de gas
+/// est la différence `in − out`, détruite (modèle UTXO standard). Anciens blocs
+/// (`in == out`) toujours valides ; nouveaux blocs (`in > out`) acceptés. MINOR
+/// → migration auto, pas de wipe. (Mixed-version P2P : un nœud 3.8.0 REJETTE un
+/// bloc 3.9.0 qui brûle un frais — mise à niveau coordonnée requise.)
+pub const DAG_VERSION: &str = "3.9.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

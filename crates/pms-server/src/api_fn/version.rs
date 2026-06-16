@@ -55,7 +55,11 @@ use crate::api::AppState;
 /// `POST /wallet/tx/send` et `POST /v1/wallet/send-simple` rejettent de façon
 /// fiable les **double-dépenses concurrentes** (claim atomique des inputs avant
 /// application du delta) — ferme un TOCTOU validate→apply.
-pub const API_VERSION: u32 = 27;
+/// v28 (audit rang 2 — frais brûlés à la source) : `/v1/tx/prepare` ne renvoie
+/// plus d'output de frais ; `/wallet/tx/send` & `/v1/wallet/send-simple` brûlent
+/// le frais de gas (`in − out`) au lieu de l'envoyer au coordinateur. Le frais
+/// implicite doit couvrir le minimum (sinon `insufficient fees`).
+pub const API_VERSION: u32 = 28;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -143,6 +147,8 @@ mod tests {
         //          valident le plaintext — gel/time-lock/MultiSig/dédup/conservation).
         // v0.23.0: 26 → 27 (audit cause A-bis : rejet fiable des double-dépenses
         //          concurrentes — claim atomique avant apply, ferme un TOCTOU).
-        assert_eq!(parsed.api_version, 27);
+        // v0.24.0: 27 → 28 (audit rang 2 : frais brûlés à la source — prepare sans
+        //          output de frais, /wallet/tx/send & send-simple brûlent in−out).
+        assert_eq!(parsed.api_version, 28);
     }
 }

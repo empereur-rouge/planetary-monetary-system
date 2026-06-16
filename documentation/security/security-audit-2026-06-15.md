@@ -175,7 +175,7 @@ par block-id ; pas de spoof XFF pour l'auth (IP via ConnectInfo TCP only).
 | Rang | Cause racine | Gravité | Confiance | Effort | Bloque mainnet ? |
 |---|---|---|---|---|---|
 | 1 | **A** — validation/freeze sur le delta (chemin chiffré) | CRITIQUE | vérifié | M | **OUI** |
-| 2 | **B1** — distribution de frais conservatrice | CRITIQUE | vérifié | M | **OUI** |
+| 2 | **B1** — frais brûlés à la source (net-zéro) | CRITIQUE | ✅ **cœur fait v0.24.0** (2a+2b) ; 2c/2d à suivre | M | **OUI** |
 | 3 | **B2/B3/B4** — gater tout mint natif par EmissionGate + réconcilier bridge | CRITIQUE (latent/mitigé) | agent | M-L | **OUI** |
 | 4 | **C1** — fermer `/internal/*` public + denylist gateway | HAUTE | agent | S | oui |
 | 5 | **C2** — migrer handlers vers ApiError (anti-énumération) | HAUTE | agent | M | recommandé |
