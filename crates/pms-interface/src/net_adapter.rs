@@ -4,6 +4,40 @@ use pms_storage::UtxoDelta;
 use pms_storage::store::PutResult;
 use pms_types::{TxInput, TxOutput};
 use pms_wire::WireBlock;
+use std::sync::Arc;
+
+/// Committed fields of a source-ledger `BridgeLock`, resolved cross-ledger so a
+/// `BridgeMint` on the destination ledger can be reconciled against the lock it
+/// claims to back (audit rang 3, B3 — réconciliation cross-ledger).
+#[derive(Debug, Clone)]
+pub struct BridgeLockInfo {
+    /// Amount the source lock committed (decimal string).
+    pub amount: String,
+    /// Asset the lock committed (`None` = native PMS).
+    pub asset_id: Option<String>,
+    /// Destination ledger the lock was addressed to.
+    pub dest_ledger_id: String,
+    /// Destination address the lock was addressed to.
+    pub dest_address: String,
+}
+
+/// Resolves a source-ledger `BridgeLock` so the destination ledger's persist
+/// path can reconcile a `BridgeMint` against it (amount / asset / recipient).
+///
+/// The destination `CoreAdapter` only sees its own prefix-scoped store; the
+/// implementor (the `LedgerManager`, which sees every ledger) bridges that gap.
+/// Returns `Ok(None)` when no such `BridgeLock` exists on `source_ledger_id`
+/// (unknown ledger, missing block, or the block is not a `BridgeLock`).
+#[async_trait]
+pub trait BridgeLockResolver: Send + Sync {
+    /// Resolve the committed fields of the `BridgeLock` `lock_block_id` on
+    /// `source_ledger_id`.
+    async fn resolve_bridge_lock(
+        &self,
+        source_ledger_id: &str,
+        lock_block_id: &str,
+    ) -> Result<Option<BridgeLockInfo>>;
+}
 
 /// Trait que le serveur réseau utilisera pour interagir avec le core.
 #[async_trait]
@@ -254,5 +288,21 @@ pub trait NetDagAdapter: Send + Sync {
     /// the storage layer.
     async fn utxo_set_size(&self) -> Option<usize> {
         None
+    }
+
+    /// Inject the cross-ledger [`BridgeLockResolver`] **and this adapter's own
+    /// ledger id** used to reconcile a `BridgeMint` against its source
+    /// `BridgeLock` (amount / asset / recipient / destination ledger). Wired
+    /// together by `LedgerManager` after bootstrap so every ledger adapter can
+    /// see all ledgers AND knows which ledger it is (so it can assert a mint is
+    /// applied on the lock's intended destination ledger). Default no-op for
+    /// mocks. A production adapter that receives `BridgeMint` blocks but has NO
+    /// resolver wired rejects them (fail-closed; see `CoreAdapter`).
+    /// (audit rang 3, B3)
+    fn set_bridge_resolver(
+        &self,
+        _resolver: Arc<dyn BridgeLockResolver>,
+        _ledger_id: String,
+    ) {
     }
 }

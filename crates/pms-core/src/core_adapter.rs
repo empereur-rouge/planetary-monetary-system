@@ -169,6 +169,16 @@ pub struct CoreAdapter<
     /// block signer is authorised; refreshed whenever a
     /// `CoordinatorKeyRotate` block lands.
     pub(crate) key_rotation_state: Arc<RwLock<KeyRotationState>>,
+    /// Cross-ledger `BridgeMint` reconciliation resolver + THIS adapter's ledger
+    /// id (audit rang 3, B3). Injected together post-bootstrap by `LedgerManager`
+    /// via `set_bridge_resolver` so a `BridgeMint` on THIS (destination) ledger
+    /// can verify the source `BridgeLock` it claims to back (amount / asset /
+    /// recipient) AND that the lock was destined for THIS ledger — the adapter's
+    /// own store is prefix-scoped and can't read the source ledger. `None` until
+    /// wired; a `BridgeMint` persisted while `None` is REJECTED (fail-closed —
+    /// never allow a silent, unreconciled bridge mint).
+    pub(crate) bridge_resolver:
+        Arc<RwLock<Option<(Arc<dyn pms_interface::BridgeLockResolver>, String)>>>,
 }
 
 impl<
@@ -240,6 +250,7 @@ impl<
             settings,
             wire_meta,
             key_rotation_state,
+            bridge_resolver: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -350,6 +361,7 @@ impl<
             settings,
             wire_meta,
             key_rotation_state,
+            bridge_resolver: Arc::new(RwLock::new(None)),
         })
     }
 

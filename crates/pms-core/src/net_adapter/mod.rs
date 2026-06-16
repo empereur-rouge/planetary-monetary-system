@@ -86,6 +86,18 @@ where
         Some(self.utxos.total_len().await)
     }
 
+    fn set_bridge_resolver(
+        &self,
+        resolver: std::sync::Arc<dyn pms_interface::BridgeLockResolver>,
+        ledger_id: String,
+    ) {
+        // Interior mutability (parking_lot::RwLock) so the LedgerManager can wire
+        // the cross-ledger resolver + this adapter's ledger id AFTER the adapter
+        // is already upcast to `Arc<dyn NetDagAdapter>` inside a LedgerInstance
+        // (audit rang 3, B3).
+        *self.bridge_resolver.write() = Some((resolver, ledger_id));
+    }
+
     async fn top_tips(&self, limit: usize) -> Result<Vec<String>> {
         self.do_top_tips(limit).await
     }

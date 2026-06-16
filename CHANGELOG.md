@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.26.0] - Unreleased — Bridge : réconciliation cross-ledger des BridgeMint (audit rang 3 / B3)
+
+### Security / Economics
+- **fix(bridge/reconciliation)** — un `BridgeMint` est désormais **réconcilié avec
+  son `BridgeLock` source** à la persistance (`do_persist_block_internal`). Avant :
+  seul l'anti-replay existait ; un mint coordinateur-signé pouvait sur-émettre
+  (montant > verrouillé = inflation), payer un autre destinataire (vol), ou
+  référencer un lock inexistant. Désormais (fail-closed) le mint est rejeté sauf
+  si : montant total des outputs **== montant verrouillé**, asset == asset du lock,
+  **tous** les outputs vont au `dest_address` du lock, le lock existe, ET le lock
+  est destiné à CE ledger (`dest_ledger_id`).
+  - L'adapter destination (store prefix-scoped) ne peut pas lire le ledger source,
+    donc il délègue à un **`BridgeLockResolver`** injecté (le `LedgerManager`,
+    qui voit tous les ledgers). Lecture **RAM DAG d'abord** (le lock y est dès le
+    retour de `persist_block`, avant son écriture durable async) puis fallback
+    store (post-restart). Pas de cycle `Arc` (le resolver ne tient que dag+store,
+    jamais l'adapter).
+  - Ferme aussi le **double-mint cross-ledger** (finding #6 de la revue) : le
+    marqueur anti-replay `bridge_consumed` étant par-ledger-destination, sans la
+    vérification `dest_ledger_id` un même lock aurait pu être minté une fois PAR
+    ledger. Le `ledger_id` de l'adapter est câblé avec le resolver.
+  - **Fail-closed** : un `BridgeMint` sur un adapter sans resolver câblé est rejeté
+    (jamais de mint non-réconcilié silencieux). Tous les chemins de prod utilisent
+    un adapter câblé par `LedgerManager` (bootstrap + add_ledger).
+  Revue sécurité dédiée : aucun bypass d'inflation/vol (multi-output split-theft +
+  inflation testés), fail-closed correct, pas de TOCTOU, pas de cycle Arc.
+
+### Added
+- **pms-interface** : trait `BridgeLockResolver` + struct `BridgeLockInfo` ;
+  `NetDagAdapter::set_bridge_resolver(resolver, ledger_id)`.
+- **pms-ledger** : `LedgerStoreResolver` (résout un `BridgeLock` via map partagée
+  `ledger_id → (dag, store)`), câblé sur chaque adapter au bootstrap + add_ledger.
+- **test(bridge)** — `bridge_mint_reconciliation_rejects_mismatches` (wrong amount /
+  wrong recipient / unknown lock / wrong dest ledger rejetés ; mint correct accepté ;
+  replay-après-consommation rejeté) + `bridge_mint_multi_output_split_and_inflation_rejected`
+  (split-theft + inflation multi-output + outputs vides). Suites pms-bridge (7+14),
+  pms-core, pms-ledger, pms-server vertes.
+
+### Changed
+- **chore(version)** — `Cargo` 0.25.1 → **0.26.0** ; `DAG_VERSION` 3.10.0 →
+  **3.11.0** (règle consensus additive — upgrade P2P coordonné requis) ;
+  `API_VERSION` 30 → **31** (`/submit/block` réconcilie les BridgeMint).
+
+### À suivre (rang 3 — restant)
+- **Cleanup** : le marqueur `bridge_consumed` de l'engine (`BridgeStore` sur le
+  store `main`) reste redondant avec celui du persist (autoritaire) — à retirer.
+- **Faucet** : mint natif non gaté mais testnet-only (décision produit).
+
+---
+
 ## [0.25.1] - Unreleased — Simplify post-revue (anti-replay bridge)
 
 ### Changed

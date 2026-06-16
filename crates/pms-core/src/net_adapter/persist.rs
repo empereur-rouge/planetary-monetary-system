@@ -28,6 +28,62 @@ fn bridge_replay_rejected(lock_block_id: &str) -> PutResult {
     ))
 }
 
+/// Reconcile a `BridgeMint`'s outputs against the source `BridgeLock` it claims
+/// to back: the lock must be destined for `dest_ledger` (THIS ledger), and every
+/// output must go to the lock's `dest_address` in the lock's `asset_id`, with the
+/// outputs summing to EXACTLY the locked `amount`. Prevents minting more than was
+/// locked (inflation), to the wrong recipient (theft), or onto a ledger other
+/// than the lock's destination (cross-ledger double-mint — the `bridge_consumed`
+/// anti-replay marker is per-destination-ledger, so without this check a single
+/// lock could be minted once per ledger). (audit rang 3, B3)
+fn reconcile_bridge_mint(
+    outputs: &[pms_types::TxOutput],
+    lock: &pms_interface::BridgeLockInfo,
+    dest_ledger: &str,
+) -> std::result::Result<(), String> {
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+    if lock.dest_ledger_id != dest_ledger {
+        return Err(format!(
+            "bridge mint applied on ledger {dest_ledger} but lock is destined for {}",
+            lock.dest_ledger_id
+        ));
+    }
+    if outputs.is_empty() {
+        return Err("bridge mint has no outputs".to_string());
+    }
+    let lock_amount = Decimal::from_str(&lock.amount)
+        .map_err(|e| format!("bridge lock amount '{}' unparseable: {e}", lock.amount))?;
+    let mut sum = Decimal::ZERO;
+    for o in outputs {
+        if o.asset_id != lock.asset_id {
+            return Err(format!(
+                "bridge mint asset {:?} != locked asset {:?}",
+                o.asset_id, lock.asset_id
+            ));
+        }
+        if o.address != lock.dest_address {
+            return Err(format!(
+                "bridge mint output address {} != locked dest_address {}",
+                o.address, lock.dest_address
+            ));
+        }
+        let amt = Decimal::from_str(&o.amount).map_err(|e| {
+            format!("bridge mint output amount '{}' unparseable: {e}", o.amount)
+        })?;
+        if amt < Decimal::ZERO {
+            return Err("bridge mint output amount is negative".to_string());
+        }
+        sum += amt;
+    }
+    if sum != lock_amount {
+        return Err(format!(
+            "bridge mint total {sum} != locked amount {lock_amount} (inflation guard)"
+        ));
+    }
+    Ok(())
+}
+
 impl<S> CoreAdapter<S>
 where
     S: pms_storage::EngineStorage,
@@ -1171,6 +1227,50 @@ where
             };
             if durably_consumed || self.dag.is_bridge_lock_consumed_ram(lock_block_id) {
                 return Ok(bridge_replay_rejected(lock_block_id));
+            }
+        }
+
+        // BridgeMint cross-ledger reconciliation (audit rang 3, B3). The mint must
+        // EXACTLY back a real source `BridgeLock`: same total amount, same asset,
+        // same recipient. Without this a coordinator BUG (or key compromise) could
+        // mint MORE than was locked (inflation) or to the WRONG recipient (theft).
+        // This (destination) adapter's store is prefix-scoped and can't read the
+        // source ledger, so it delegates to the injected cross-ledger
+        // `BridgeLockResolver` (the LedgerManager). FAIL-CLOSED: a BridgeMint with
+        // no resolver wired, or referencing a non-existent lock, is rejected.
+        if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeMint {
+            outputs,
+            lock_block_id,
+            source_ledger_id,
+        })) = &block.payload
+        {
+            // Clone the (resolver, ledger_id) pair and drop the lock guard BEFORE
+            // awaiting the resolver (parking_lot guards are not Send and must not
+            // be held across .await).
+            let wired = self.bridge_resolver.read().clone();
+            let Some((resolver, my_ledger_id)) = wired else {
+                return Ok(PutResult::Rejected(
+                    "bridge mint reconciliation unavailable: no resolver wired".to_string(),
+                ));
+            };
+            let lock = match resolver
+                .resolve_bridge_lock(source_ledger_id, lock_block_id)
+                .await
+            {
+                Ok(Some(l)) => l,
+                Ok(None) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "bridge mint references unknown lock {lock_block_id} on source ledger {source_ledger_id}"
+                    )));
+                }
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "bridge lock resolution failed: {e}"
+                    )));
+                }
+            };
+            if let Err(e) = reconcile_bridge_mint(outputs, &lock, &my_ledger_id) {
+                return Ok(PutResult::Rejected(e));
             }
         }
 

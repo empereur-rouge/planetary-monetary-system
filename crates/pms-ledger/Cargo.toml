@@ -15,6 +15,7 @@ pms-utils = { path = "../pms-utils" }
 pms-wire = { path = "../pms-wire" }
 pms-wallet = { path = "../pms-wallet" }
 anyhow = "1.0.100"
+async-trait = "0.1"
 dashmap = "6"
 rocksdb = "0.24.0"
 tracing = "0.1"
