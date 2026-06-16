@@ -91,9 +91,12 @@ impl ConcurrentDag {
         self.consumed_bridge_locks.insert(lock_block_id.to_string())
     }
 
-    /// Undo a [`ConcurrentDag::try_consume_bridge_lock`] claim — used to roll
-    /// back a BridgeMint that is rejected AFTER claiming its lock, so a
-    /// legitimately-unconsumed lock is not locked out of a later valid mint.
+    /// Undo a [`ConcurrentDag::try_consume_bridge_lock`] claim. Reserved for
+    /// symmetry with [`ConcurrentDag::unmark_spent`]: there is **no current
+    /// caller** because a BridgeMint claims exactly one lock and has no
+    /// post-claim reject path (its UTXO delta has no `spend`, so the
+    /// double-spend guard is a no-op for it). Kept as cheap insurance for any
+    /// future multi-claim bridge flow that could reject after claiming.
     pub fn unconsume_bridge_lock(&self, lock_block_id: &str) {
         self.consumed_bridge_locks.remove(lock_block_id);
     }

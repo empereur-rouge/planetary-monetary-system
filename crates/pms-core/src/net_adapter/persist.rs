@@ -19,6 +19,15 @@ use pms_storage::{StoredBlock, UtxoDelta};
 use pms_types::{Block, PayloadEnvelope, PlainPayload};
 use pms_wire::WireBlock;
 
+/// Single source for the BridgeMint replay reject reason, used by both the early
+/// (durable + RAM) check and the authoritative atomic claim so the reject reason
+/// can never drift by path (audit rang 3, B3).
+fn bridge_replay_rejected(lock_block_id: &str) -> PutResult {
+    PutResult::Rejected(format!(
+        "bridge lock already consumed (replay): {lock_block_id}"
+    ))
+}
+
 impl<S> CoreAdapter<S>
 where
     S: pms_storage::EngineStorage,
@@ -1139,36 +1148,29 @@ where
             }
         }
 
-        // BridgeMint anti-replay (audit rang 3, B3) — DURABLE early reject. A
-        // BridgeMint creates funds backed by a source-ledger BridgeLock; each
-        // lock may be minted AT MOST ONCE. A replayed/re-signed BridgeMint
-        // reusing an already-minted `lock_block_id` would re-mint out of nothing
-        // (inflation). The authoritative cross-restart record is the
-        // `bridge_consumed` CF (written atomically with the original mint); the
-        // RAM fast-path catches replays still in their in-flight window before
-        // the durable write lands. The atomic CLAIM (commit point) is below,
-        // just before `apply_diff`, mirroring the double-spend guard.
+        // BridgeMint anti-replay (audit rang 3, B3) — EARLY reject (optimization).
+        // A BridgeMint creates funds backed by a source-ledger BridgeLock; each
+        // lock may be minted AT MOST ONCE. A replayed/re-signed BridgeMint reusing
+        // an already-minted `lock_block_id` would re-mint out of nothing
+        // (inflation). This skips the expensive UTXO validation below for a replay
+        // we can already see: the `bridge_consumed` CF (authoritative across
+        // restarts) OR the in-flight RAM claim. The AUTHORITATIVE guard is the
+        // atomic `try_consume_bridge_lock` at the commit point (just before
+        // `apply_diff`, mirroring the double-spend guard) — this is purely an
+        // early-out.
         if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeMint { lock_block_id, .. })) =
             &block.payload
         {
-            match self.store.is_bridge_lock_consumed(lock_block_id).await {
-                Ok(true) => {
-                    return Ok(PutResult::Rejected(format!(
-                        "bridge lock already consumed (replay): {lock_block_id}"
-                    )));
-                }
-                Ok(false) => {
-                    if self.dag.is_bridge_lock_consumed_ram(lock_block_id) {
-                        return Ok(PutResult::Rejected(format!(
-                            "bridge lock already consumed (replay): {lock_block_id}"
-                        )));
-                    }
-                }
+            let durably_consumed = match self.store.is_bridge_lock_consumed(lock_block_id).await {
+                Ok(c) => c,
                 Err(e) => {
                     return Ok(PutResult::Rejected(format!(
                         "bridge_consumed lookup failed: {e}"
                     )));
                 }
+            };
+            if durably_consumed || self.dag.is_bridge_lock_consumed_ram(lock_block_id) {
+                return Ok(bridge_replay_rejected(lock_block_id));
             }
         }
 
@@ -1458,9 +1460,7 @@ where
             &payload
         {
             if !self.dag.try_consume_bridge_lock(lock_block_id) {
-                return Ok(PutResult::Rejected(format!(
-                    "bridge lock already consumed (replay): {lock_block_id}"
-                )));
+                return Ok(bridge_replay_rejected(lock_block_id));
             }
         }
 
