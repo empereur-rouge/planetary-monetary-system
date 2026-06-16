@@ -1,8 +1,9 @@
-use crate::LedgerInstance;
+use crate::{LedgerInstance, LedgerLockSource, LedgerStoreResolver};
 use anyhow::{Context, Result, bail};
 use dashmap::DashMap;
 use pms_config::LedgerDef;
 use pms_config::Settings;
+use pms_interface::BridgeLockResolver;
 use pms_storage::rocks_store::store::{PmsDb, RocksMemoryConfig, RocksStore};
 use rocksdb::Options;
 use std::sync::Arc;
@@ -16,6 +17,11 @@ pub struct LedgerManager {
     global_max_dag_blocks: usize,
     global_max_spent_outpoints: usize,
     global_max_utxos: usize,
+    /// Shared `ledger_id -> (dag, store)` map backing the cross-ledger
+    /// [`LedgerStoreResolver`] used for `BridgeMint` reconciliation (audit rang 3,
+    /// B3). Holds DAGs + stores only (no adapters) → no `Arc` cycle. Updated in
+    /// lockstep with `ledgers` so dynamically-added ledgers are resolvable.
+    bridge_sources: Arc<DashMap<String, LedgerLockSource>>,
 }
 
 impl LedgerManager {
@@ -56,6 +62,7 @@ impl LedgerManager {
             global_max_dag_blocks: settings.rocks.max_dag_blocks,
             global_max_spent_outpoints: settings.rocks.max_spent_outpoints,
             global_max_utxos: settings.rocks.max_utxos,
+            bridge_sources: Arc::new(DashMap::new()),
         };
 
         // Bootstrap each ledger
@@ -72,7 +79,29 @@ impl LedgerManager {
             .with_context(|| format!("bootstrapping ledger '{}'", def.id))?;
 
             tracing::info!(ledger = %def.id, prefix = %def.prefix, "Ledger ready");
-            manager.ledgers.insert(def.id.clone(), Arc::new(instance));
+            let instance = Arc::new(instance);
+            manager.bridge_sources.insert(
+                def.id.clone(),
+                LedgerLockSource {
+                    dag: instance.dag.clone(),
+                    store: instance.store.clone(),
+                },
+            );
+            manager.ledgers.insert(def.id.clone(), instance);
+        }
+
+        // Wire the cross-ledger BridgeMint reconciliation resolver into every
+        // adapter (audit rang 3, B3). Done AFTER all ledgers are registered so
+        // each adapter can resolve a source `BridgeLock` on ANY ledger. The
+        // resolver shares `bridge_sources`, so later `add_ledger` calls remain
+        // resolvable without re-wiring existing adapters.
+        let resolver: Arc<dyn BridgeLockResolver> =
+            Arc::new(LedgerStoreResolver::new(manager.bridge_sources.clone()));
+        for entry in manager.ledgers.iter() {
+            entry
+                .value()
+                .adapter
+                .set_bridge_resolver(resolver.clone(), entry.key().clone());
         }
 
         Ok(manager)
@@ -165,6 +194,21 @@ impl LedgerManager {
         .with_context(|| format!("bootstrapping ledger '{}'", def.id))?;
 
         let instance = Arc::new(instance);
+        // Register the source + wire the reconciliation resolver on the new
+        // adapter (audit rang 3, B3). The resolver shares `bridge_sources`, so the
+        // new ledger is also resolvable from every previously-wired adapter.
+        self.bridge_sources.insert(
+            def.id.clone(),
+            LedgerLockSource {
+                dag: instance.dag.clone(),
+                store: instance.store.clone(),
+            },
+        );
+        let resolver: Arc<dyn BridgeLockResolver> =
+            Arc::new(LedgerStoreResolver::new(self.bridge_sources.clone()));
+        instance
+            .adapter
+            .set_bridge_resolver(resolver, def.id.clone());
         self.ledgers.insert(def.id.clone(), instance.clone());
         tracing::info!(ledger = %def.id, "Ledger added dynamically");
         Ok(instance)

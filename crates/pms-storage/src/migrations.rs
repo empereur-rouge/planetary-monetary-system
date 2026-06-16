@@ -71,7 +71,17 @@ pub const CURRENT_VER: i64 = 12;
 /// le 1er mint d'un lock toujours accepté. MINOR → migration auto, pas de wipe.
 /// (Mixed-version P2P : un nœud 3.9.0 ré-appliquerait un BridgeMint rejoué — mise
 /// à niveau coordonnée requise pour fermer l'inflation par replay.)
-pub const DAG_VERSION: &str = "3.10.0";
+///
+/// v3.11.0 (audit rang 3 — B3 réconciliation cross-ledger) : un `BridgeMint` est
+/// réconcilié avec son `BridgeLock` source — montant total == verrouillé, asset
+/// identique, destinataire == `dest_address` du lock, et le lock doit être
+/// destiné à CE ledger. Un mint qui sur-émet (inflation), paie le mauvais
+/// destinataire (vol), référence un lock inexistant, ou est appliqué sur le
+/// mauvais ledger destination est rejeté. Règle additive : un mint légitime
+/// (montant == lock) reste accepté. MINOR → migration auto, pas de wipe.
+/// (Mixed-version P2P : un nœud 3.10.0 ne réconcilie pas les montants — upgrade
+/// coordonné requis pour fermer l'inflation par mint mal formé.)
+pub const DAG_VERSION: &str = "3.11.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

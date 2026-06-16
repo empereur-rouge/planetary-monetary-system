@@ -65,7 +65,11 @@ use crate::api::AppState;
 /// v30 (audit rang 3 — B3) : `POST /submit/block` rejette un `BridgeMint` qui
 /// rejoue un `lock_block_id` déjà minté (anti-replay durable, CF `bridge_consumed`)
 /// — ferme une inflation par re-soumission de bridge mint.
-pub const API_VERSION: u32 = 30;
+/// v31 (audit rang 3 — B3 réconciliation cross-ledger) : `POST /submit/block`
+/// réconcilie un `BridgeMint` avec son `BridgeLock` source (montant == verrouillé,
+/// asset, destinataire, ledger destination) — rejette sur-émission, vol,
+/// lock inexistant, ou mauvais ledger destination.
+pub const API_VERSION: u32 = 31;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -159,6 +163,8 @@ mod tests {
         //          AccumulateRefund en PMS natif — anti mint natif illimité).
         // v0.25.0: 29 → 30 (audit rang 3/B3 : /submit/block rejette un BridgeMint
         //          rejouant un lock déjà consommé — anti-replay durable).
-        assert_eq!(parsed.api_version, 30);
+        // v0.26.0: 30 → 31 (audit rang 3/B3 : réconciliation cross-ledger du
+        //          BridgeMint avec son BridgeLock — montant/asset/destinataire/ledger).
+        assert_eq!(parsed.api_version, 31);
     }
 }

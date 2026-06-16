@@ -8,7 +8,7 @@ use pms_config::LedgerDef;
 use pms_ledger::LedgerManager;
 use pms_storage::{DagStorage, PutResult};
 use pms_types_payload::{PayloadEnvelope, PlainPayload};
-use pms_types_transaction::TxOutput;
+use pms_types_transaction::{TxInput, TxOutput};
 use pms_utils::compute_block_id;
 use pms_wallet::utils::signing_wire::canonical_wireblock_message;
 use pms_wallet::{SignerBackend, Wallet};
@@ -591,6 +591,375 @@ async fn bridge_mint_replay_is_rejected() -> Result<()> {
         after,
         Decimal::from_str("100.00000000")?,
         "a replayed BridgeMint must NOT inflate the receiver balance"
+    );
+
+    Ok(())
+}
+
+/// **Bridge-mint cross-ledger reconciliation (audit rang 3, B3).**
+///
+/// A `BridgeMint` must EXACTLY back a real source `BridgeLock`
+/// (amount / asset / recipient) — otherwise a coordinator bug or compromise
+/// could mint more than was locked (inflation) or to the wrong recipient
+/// (theft). We forge an UNCONSUMED `BridgeLock` on `main`, then submit several
+/// mismatched `BridgeMint`s on `nft` referencing it — each must be rejected —
+/// and finally a correct one, which is accepted. Using an unconsumed lock
+/// isolates the reconciliation guard from the anti-replay guard (which only
+/// fires once a lock has actually been minted).
+#[tokio::test]
+async fn bridge_mint_reconciliation_rejects_mismatches() -> Result<()> {
+    let (mgr, engine, coordinator, _dir) = setup_e2e().await?;
+
+    let sender = Wallet::generate();
+    let sender_addr = sender.get_address("8e");
+    let receiver = Wallet::generate();
+    let receiver_addr = receiver.get_address("8e");
+    let attacker_addr = Wallet::generate().get_address("8e");
+
+    mint_on_ledger(&mgr, &coordinator, "main", &sender_addr, "500.00000000").await?;
+    engine.enable_bridge(
+        &BridgeEnableRequest {
+            ledger_a: "main".into(),
+            ledger_b: "nft".into(),
+            direction: BridgeDirection::Bidirectional,
+        },
+        true,
+        None,
+    )?;
+
+    let main_inst = mgr.get("main").unwrap();
+    let nft_inst = mgr.get("nft").unwrap();
+
+    // ── Forge + persist an UNCONSUMED BridgeLock on main: 100 PMS → nft/receiver.
+    let utxos = main_inst.adapter.utxos_by_address(&sender_addr).await;
+    assert!(!utxos.is_empty(), "sender must have a UTXO to lock");
+    let inputs: Vec<TxInput> = utxos
+        .iter()
+        .map(|(oid, _)| TxInput { out: oid.clone() })
+        .collect();
+    let lock_payload = PayloadEnvelope::Plain(PlainPayload::BridgeLock {
+        inputs,
+        amount: "100.00000000".to_string(),
+        asset_id: None,
+        dest_ledger_id: "nft".to_string(),
+        dest_address: receiver_addr.clone(),
+    });
+    let main_meta = WireMeta {
+        network_id: main_inst.def.network_id.clone(),
+        protocol_version: main_inst.def.protocol_version,
+    };
+    let main_tips = main_inst.adapter.top_tips(1).await?;
+    let main_parents = if main_tips.is_empty() {
+        vec![main_inst.store.all_block_ids().await?[0].clone()]
+    } else {
+        vec![main_tips[0].clone()]
+    };
+    let lock_wb = forge_signed_wire_block(main_parents, &main_meta, &coordinator, 1, Some(lock_payload));
+    let lock_block_id = lock_wb.id.clone();
+    let lock_res = main_inst.adapter.persist_block(&lock_wb).await?;
+    println!("BridgeLock persist: {lock_res:?} (id={lock_block_id})");
+    assert!(
+        matches!(lock_res, PutResult::Inserted),
+        "BridgeLock must persist, got {lock_res:?}"
+    );
+
+    // Forge a BridgeMint on nft reusing `lock_id` (fresh nonce ⇒ distinct id).
+    let nft_meta = WireMeta {
+        network_id: nft_inst.def.network_id.clone(),
+        protocol_version: nft_inst.def.protocol_version,
+    };
+    let nft_tips = nft_inst.adapter.top_tips(1).await?;
+    let nft_parents = if nft_tips.is_empty() {
+        vec![nft_inst.store.all_block_ids().await?[0].clone()]
+    } else {
+        vec![nft_tips[0].clone()]
+    };
+    let forge_mint = |nonce: u64, addr: &str, amount: &str, lock_id: &str| -> WireBlock {
+        let payload = PayloadEnvelope::Plain(PlainPayload::BridgeMint {
+            outputs: vec![TxOutput::new(addr.to_string(), amount.to_string(), None)],
+            lock_block_id: lock_id.to_string(),
+            source_ledger_id: "main".to_string(),
+        });
+        forge_signed_wire_block(nft_parents.clone(), &nft_meta, &coordinator, nonce, Some(payload))
+    };
+
+    // ── (1) WRONG AMOUNT (999 vs locked 100) → rejected (inflation guard).
+    let r1 = nft_inst
+        .adapter
+        .persist_block(&forge_mint(101, &receiver_addr, "999.00000000", &lock_block_id))
+        .await?;
+    println!("wrong-amount mint: {r1:?}");
+    assert!(
+        matches!(&r1, PutResult::Rejected(m) if m.contains("inflation guard")),
+        "wrong amount must be rejected (inflation guard), got {r1:?}"
+    );
+
+    // ── (2) WRONG RECIPIENT (right amount, attacker address) → rejected.
+    let r2 = nft_inst
+        .adapter
+        .persist_block(&forge_mint(102, &attacker_addr, "100.00000000", &lock_block_id))
+        .await?;
+    println!("wrong-recipient mint: {r2:?}");
+    assert!(
+        matches!(&r2, PutResult::Rejected(m) if m.contains("dest_address")),
+        "wrong recipient must be rejected (dest_address), got {r2:?}"
+    );
+
+    // ── (3) UNKNOWN LOCK (right amount/recipient, fabricated lock id) → rejected.
+    let fake_lock = "0".repeat(64);
+    let r3 = nft_inst
+        .adapter
+        .persist_block(&forge_mint(103, &receiver_addr, "100.00000000", &fake_lock))
+        .await?;
+    println!("unknown-lock mint: {r3:?}");
+    assert!(
+        matches!(&r3, PutResult::Rejected(m) if m.contains("unknown lock")),
+        "unknown lock must be rejected, got {r3:?}"
+    );
+
+    // ── (3-bis) WRONG DESTINATION LEDGER (audit rang 3, B3 — finding #6). The
+    // lock is destined for "nft"; applying it on "main" (right amount/recipient)
+    // must be rejected. Otherwise a single source lock could be minted once PER
+    // ledger, because the `bridge_consumed` anti-replay marker is per-destination
+    // -ledger (prefix-scoped CF).
+    let main_tips2 = main_inst.adapter.top_tips(1).await?;
+    let main_parents2 = if main_tips2.is_empty() {
+        vec![main_inst.store.all_block_ids().await?[0].clone()]
+    } else {
+        vec![main_tips2[0].clone()]
+    };
+    let wrong_ledger_payload = PayloadEnvelope::Plain(PlainPayload::BridgeMint {
+        outputs: vec![TxOutput::new(
+            receiver_addr.clone(),
+            "100.00000000".to_string(),
+            None,
+        )],
+        lock_block_id: lock_block_id.clone(),
+        source_ledger_id: "main".to_string(),
+    });
+    let wrong_ledger_wb =
+        forge_signed_wire_block(main_parents2, &main_meta, &coordinator, 107, Some(wrong_ledger_payload));
+    let r35 = main_inst.adapter.persist_block(&wrong_ledger_wb).await?;
+    println!("wrong-dest-ledger mint (applied on main): {r35:?}");
+    assert!(
+        matches!(&r35, PutResult::Rejected(m) if m.contains("destined for")),
+        "mint on the wrong destination ledger must be rejected, got {r35:?}"
+    );
+
+    // The lock is STILL unconsumed (all 4 rejected before the commit-point claim).
+    // ── (4) CORRECT mint → accepted, receiver credited 100.
+    let r4 = nft_inst
+        .adapter
+        .persist_block(&forge_mint(104, &receiver_addr, "100.00000000", &lock_block_id))
+        .await?;
+    println!("correct mint: {r4:?}");
+    assert!(
+        matches!(r4, PutResult::Inserted),
+        "correct mint must be accepted, got {r4:?}"
+    );
+    sleep(Duration::from_millis(50)).await;
+    let bal: Decimal = nft_inst
+        .adapter
+        .utxos_by_address(&receiver_addr)
+        .await
+        .iter()
+        .map(|(_, o)| Decimal::from_str(&o.amount).unwrap())
+        .sum();
+    println!("receiver balance after correct mint: {bal}");
+    assert_eq!(bal, Decimal::from_str("100.00000000")?);
+
+    // ── (5) Now the lock is consumed → replay rejected by the anti-replay guard.
+    let r5 = nft_inst
+        .adapter
+        .persist_block(&forge_mint(105, &receiver_addr, "100.00000000", &lock_block_id))
+        .await?;
+    println!("replay-after-consume mint: {r5:?}");
+    assert!(
+        matches!(&r5, PutResult::Rejected(m) if m.contains("already consumed")),
+        "replay of a consumed lock must be rejected, got {r5:?}"
+    );
+
+    Ok(())
+}
+
+/// **Bridge-mint MULTI-OUTPUT split-theft / inflation (audit rang 3, B3).**
+///
+/// The single-output test (`bridge_mint_reconciliation_rejects_mismatches`) does
+/// not exercise the crafted multi-output attacks that `reconcile_bridge_mint`'s
+/// per-output loop + SUM check are specifically meant to stop:
+///
+///   - **Split theft**: outputs sum to EXACTLY the locked amount, one goes to the
+///     legit recipient, the rest are diverted to an attacker address. A naive
+///     "outputs[0] matches" check would pass this. Must be REJECTED (every output
+///     address must equal `dest_address`).
+///   - **Inflation by extra output**: a correct full-amount output to the
+///     recipient PLUS an extra output (to anyone). Sum exceeds the lock → must be
+///     REJECTED (inflation guard).
+///   - **Empty outputs**: a BridgeMint with zero outputs claiming a lock. Must be
+///     REJECTED (no outputs).
+///
+/// Each attack reuses the SAME unconsumed lock; because every variant is rejected
+/// BEFORE the commit-point claim, the lock survives and a final correct mint still
+/// succeeds — proving the guard rejects fraud without bricking the legit path.
+#[tokio::test]
+async fn bridge_mint_multi_output_split_and_inflation_rejected() -> Result<()> {
+    let (mgr, engine, coordinator, _dir) = setup_e2e().await?;
+
+    let sender = Wallet::generate();
+    let sender_addr = sender.get_address("8e");
+    let receiver = Wallet::generate();
+    let receiver_addr = receiver.get_address("8e");
+    let attacker_addr = Wallet::generate().get_address("8e");
+
+    mint_on_ledger(&mgr, &coordinator, "main", &sender_addr, "500.00000000").await?;
+    engine.enable_bridge(
+        &BridgeEnableRequest {
+            ledger_a: "main".into(),
+            ledger_b: "nft".into(),
+            direction: BridgeDirection::Bidirectional,
+        },
+        true,
+        None,
+    )?;
+
+    let main_inst = mgr.get("main").unwrap();
+    let nft_inst = mgr.get("nft").unwrap();
+
+    // Forge + persist an UNCONSUMED BridgeLock on main: 100 PMS → nft/receiver.
+    let utxos = main_inst.adapter.utxos_by_address(&sender_addr).await;
+    assert!(!utxos.is_empty(), "sender must have a UTXO to lock");
+    let inputs: Vec<TxInput> = utxos
+        .iter()
+        .map(|(oid, _)| TxInput { out: oid.clone() })
+        .collect();
+    let lock_payload = PayloadEnvelope::Plain(PlainPayload::BridgeLock {
+        inputs,
+        amount: "100.00000000".to_string(),
+        asset_id: None,
+        dest_ledger_id: "nft".to_string(),
+        dest_address: receiver_addr.clone(),
+    });
+    let main_meta = WireMeta {
+        network_id: main_inst.def.network_id.clone(),
+        protocol_version: main_inst.def.protocol_version,
+    };
+    let main_tips = main_inst.adapter.top_tips(1).await?;
+    let main_parents = if main_tips.is_empty() {
+        vec![main_inst.store.all_block_ids().await?[0].clone()]
+    } else {
+        vec![main_tips[0].clone()]
+    };
+    let lock_wb =
+        forge_signed_wire_block(main_parents, &main_meta, &coordinator, 1, Some(lock_payload));
+    let lock_block_id = lock_wb.id.clone();
+    let lock_res = main_inst.adapter.persist_block(&lock_wb).await?;
+    println!("BridgeLock persist: {lock_res:?} (id={lock_block_id})");
+    assert!(matches!(lock_res, PutResult::Inserted));
+
+    let nft_meta = WireMeta {
+        network_id: nft_inst.def.network_id.clone(),
+        protocol_version: nft_inst.def.protocol_version,
+    };
+    let nft_tips = nft_inst.adapter.top_tips(1).await?;
+    let nft_parents = if nft_tips.is_empty() {
+        vec![nft_inst.store.all_block_ids().await?[0].clone()]
+    } else {
+        vec![nft_tips[0].clone()]
+    };
+    let forge_multi = |nonce: u64, outputs: Vec<TxOutput>| -> WireBlock {
+        let payload = PayloadEnvelope::Plain(PlainPayload::BridgeMint {
+            outputs,
+            lock_block_id: lock_block_id.clone(),
+            source_ledger_id: "main".to_string(),
+        });
+        forge_signed_wire_block(nft_parents.clone(), &nft_meta, &coordinator, nonce, Some(payload))
+    };
+
+    // ── (A) SPLIT THEFT: 60 → receiver + 40 → attacker. Sum == 100 (== lock).
+    // A naive "first output matches" check would pass this; the per-output
+    // address check must reject it on the attacker output.
+    let split = forge_multi(
+        201,
+        vec![
+            TxOutput::new(receiver_addr.clone(), "60.00000000".to_string(), None),
+            TxOutput::new(attacker_addr.clone(), "40.00000000".to_string(), None),
+        ],
+    );
+    let ra = nft_inst.adapter.persist_block(&split).await?;
+    println!("split-theft mint (60→receiver, 40→attacker, sum=100): {ra:?}");
+    assert!(
+        matches!(&ra, PutResult::Rejected(m) if m.contains("dest_address")),
+        "split-theft must be rejected on the attacker output (dest_address), got {ra:?}"
+    );
+
+    // ── (B) INFLATION via extra output: 100 → receiver + 50 → receiver. Sum=150.
+    // Both outputs go to the legit recipient, but the total exceeds the lock.
+    let inflate = forge_multi(
+        202,
+        vec![
+            TxOutput::new(receiver_addr.clone(), "100.00000000".to_string(), None),
+            TxOutput::new(receiver_addr.clone(), "50.00000000".to_string(), None),
+        ],
+    );
+    let rb = nft_inst.adapter.persist_block(&inflate).await?;
+    println!("inflation mint (100+50 → receiver, sum=150 vs lock 100): {rb:?}");
+    assert!(
+        matches!(&rb, PutResult::Rejected(m) if m.contains("inflation guard")),
+        "extra-output inflation must be rejected (inflation guard), got {rb:?}"
+    );
+
+    // ── (C) EMPTY outputs claiming the lock → rejected. Two layers can catch
+    // this: the payload-authority gate ("at least one output required") runs
+    // BEFORE reconciliation, and `reconcile_bridge_mint`'s own `outputs.is_empty()`
+    // guard ("bridge mint has no outputs") is defense-in-depth behind it. Either
+    // rejection proves an empty mint can never create funds / consume a lock.
+    let empty = forge_multi(203, vec![]);
+    let rc = nft_inst.adapter.persist_block(&empty).await?;
+    println!("empty-output mint: {rc:?}");
+    assert!(
+        matches!(&rc, PutResult::Rejected(m)
+            if m.contains("at least one output required") || m.contains("no outputs")),
+        "empty-output mint must be rejected (authority gate or reconciliation guard), got {rc:?}"
+    );
+
+    // ── (D) The lock is STILL unconsumed (all rejected pre-commit). A correct
+    // single-output full-amount mint must still succeed → receiver credited 100.
+    let ok = forge_multi(
+        204,
+        vec![TxOutput::new(receiver_addr.clone(), "100.00000000".to_string(), None)],
+    );
+    let rd = nft_inst.adapter.persist_block(&ok).await?;
+    println!("correct mint after rejected attacks: {rd:?}");
+    assert!(
+        matches!(rd, PutResult::Inserted),
+        "correct mint must still succeed (fraud rejected without bricking the lock), got {rd:?}"
+    );
+
+    sleep(Duration::from_millis(50)).await;
+    let recv_bal: Decimal = nft_inst
+        .adapter
+        .utxos_by_address(&receiver_addr)
+        .await
+        .iter()
+        .map(|(_, o)| Decimal::from_str(&o.amount).unwrap())
+        .sum();
+    let atk_bal: Decimal = nft_inst
+        .adapter
+        .utxos_by_address(&attacker_addr)
+        .await
+        .iter()
+        .map(|(_, o)| Decimal::from_str(&o.amount).unwrap())
+        .sum();
+    println!("final receiver balance: {recv_bal} | attacker balance: {atk_bal}");
+    assert_eq!(
+        recv_bal,
+        Decimal::from_str("100.00000000")?,
+        "receiver must hold EXACTLY the locked 100 (no inflation, no double credit)"
+    );
+    assert_eq!(
+        atk_bal,
+        Decimal::ZERO,
+        "attacker must never receive any funds from a split-theft mint"
     );
 
     Ok(())
