@@ -218,13 +218,14 @@ async fn a_to_b_through_coordinator_via_send_tx_http() {
 
     let expected_alice = faucet_amount - amount - fee; // change output back to A
     println!("─────────────────────────────────────────────");
-    println!("[E2E] FINAL BALANCES");
+    println!("[E2E] FINAL BALANCES (fee burned at source)");
     println!("[E2E]   bob   = {bob_final}  (expected {amount})");
     println!("[E2E]   alice = {alice_final}  (expected {expected_alice})");
-    println!("[E2E]   admin = {admin_final}  (expected {fee})");
+    println!("[E2E]   admin = {admin_final}  (expected 0 — fee is BURNED)");
     println!(
-        "[E2E]   sum   = {}  (expected {faucet_amount})",
-        alice_final + bob_final + admin_final
+        "[E2E]   A+B   = {}  (expected {} = funded − burned fee)",
+        alice_final + bob_final,
+        faucet_amount - fee
     );
     println!("─────────────────────────────────────────────");
 
@@ -233,26 +234,29 @@ async fn a_to_b_through_coordinator_via_send_tx_http() {
         alice_final, expected_alice,
         "Alice's change must equal funded − amount − fee"
     );
-    assert_eq!(admin_final, fee, "fee must land on the admin fee-recipient");
+    // Fee model (phase 2b): the gas fee is BURNED at the source (in − out), not
+    // paid to a coordinator/admin output. The admin receives nothing.
     assert_eq!(
-        alice_final + bob_final + admin_final,
-        faucet_amount,
-        "value conservation: nothing created or destroyed"
+        admin_final,
+        Decimal::ZERO,
+        "fee must be BURNED at source, not paid to admin"
+    );
+    assert_eq!(
+        alice_final + bob_final,
+        faucet_amount - fee,
+        "supply: A + B == funded − fee (the gas fee was destroyed)"
     );
 }
 
 /// Same A→B flow but with COORDINATOR SHARDING enabled (`coord_shard_count > 0`).
 ///
-/// `prepare_tx` then routes the fee output to a derived coordinator **shard**
-/// address (round-robin) — which is NOT in `admin.wallet_addresses` /
-/// `treasury_addresses`. Before the fix, `wallet_send_tx` only recognised
-/// admin/treasury as fee recipients, so the shard fee output was counted as a
-/// taxable transfer → wrong "insufficient fees" (HTTP 400). This test exercises
-/// exactly that path (the testnet config) and asserts it now succeeds, with the
-/// fee landing on a shard and full value conservation. It is the regression
-/// guard for the prepare↔send fee-recipient inconsistency.
+/// Under the burn-at-source fee model (phase 2b) `prepare_tx` emits NO gas-fee
+/// output, so nothing lands on any coordinator shard — the fee is burned
+/// (`in − out`) regardless of the sharding config. This guards that enabling
+/// sharding does not resurrect a fee output / break the transfer, and that the
+/// fee is destroyed (supply: A + B == funded − fee).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_to_b_with_coordinator_sharding_fee_to_shard() {
+async fn a_to_b_with_coordinator_sharding_fee_burned() {
     let settings0 = pms_config::load_config().expect("load config");
     let hrp = settings0.address.hrp.clone();
 
@@ -316,7 +320,8 @@ async fn a_to_b_with_coordinator_sharding_fee_to_shard() {
     let funded = poll_balance(&http, &base, &alice_addr, faucet_amount).await;
     assert_eq!(funded, faucet_amount, "alice funded");
 
-    // Prepare → the fee output must target a coordinator shard address.
+    // Prepare → with burn-at-source there is NO gas-fee output at all (the fee
+    // is in − out). Confirm no output targets a shard address.
     let amount = Decimal::from(40u32);
     let prep_resp = http
         .post(format!("{base}/v1/tx/prepare"))
@@ -328,17 +333,16 @@ async fn a_to_b_with_coordinator_sharding_fee_to_shard() {
     println!("[E2E-shard] prepare body={prep}");
     let fee = Decimal::from_str(prep["fee"].as_str().expect("fee")).expect("fee dec");
 
-    // Confirm the bug's trigger: prepare routes the fee to a shard address.
     let outputs = prep["unsigned_tx"]["outputs"].as_array().expect("outputs");
     let fee_to_shard = outputs.iter().any(|o| {
         let a = o["address"].as_str().unwrap_or("");
         shard_addrs.iter().any(|s| s.eq_ignore_ascii_case(a))
     });
     assert!(
-        fee_to_shard,
-        "prepare_tx must route the fee output to a coordinator shard address (sharding on)"
+        !fee_to_shard,
+        "burn-at-source: prepare must NOT emit a gas-fee output to any shard"
     );
-    println!("[E2E-shard] confirmed: fee output targets a coordinator shard");
+    println!("[E2E-shard] confirmed: no gas-fee output (fee burned), nothing to a shard");
 
     // Alice signs locally.
     let mut tx: Transaction =
@@ -366,7 +370,7 @@ async fn a_to_b_with_coordinator_sharding_fee_to_shard() {
          (regression guard for the shard-blind 'insufficient fees' bug)"
     );
 
-    // Balances: Bob=40, Alice=100-40-fee, fee total on the shards, conservation.
+    // Balances: Bob=40, Alice=100-40-fee, shards receive NOTHING (fee burned).
     let bob_final = poll_balance(&http, &base, &bob_addr, amount).await;
     let alice_final = get_balance(&http, &base, &alice_addr).await;
     let mut shard_total = Decimal::ZERO;
@@ -375,13 +379,14 @@ async fn a_to_b_with_coordinator_sharding_fee_to_shard() {
     }
     let expected_alice = faucet_amount - amount - fee;
     println!("─────────────────────────────────────────────");
-    println!("[E2E-shard] FINAL BALANCES (sharding on)");
+    println!("[E2E-shard] FINAL BALANCES (sharding on, fee burned)");
     println!("[E2E-shard]   bob          = {bob_final}  (expected {amount})");
     println!("[E2E-shard]   alice        = {alice_final}  (expected {expected_alice})");
-    println!("[E2E-shard]   shards total = {shard_total}  (expected {fee})");
+    println!("[E2E-shard]   shards total = {shard_total}  (expected 0 — fee burned)");
     println!(
-        "[E2E-shard]   sum          = {}  (expected {faucet_amount})",
-        alice_final + bob_final + shard_total
+        "[E2E-shard]   A+B          = {}  (expected {} = funded − fee)",
+        alice_final + bob_final,
+        faucet_amount - fee
     );
     println!("─────────────────────────────────────────────");
 
@@ -391,13 +396,14 @@ async fn a_to_b_with_coordinator_sharding_fee_to_shard() {
         "Alice's change must equal funded − amount − fee"
     );
     assert_eq!(
-        shard_total, fee,
-        "the fee must land on a coordinator shard address"
+        shard_total,
+        Decimal::ZERO,
+        "burn-at-source: no fee lands on any coordinator shard"
     );
     assert_eq!(
-        alice_final + bob_final + shard_total,
-        faucet_amount,
-        "value conservation across A, B and the coordinator shards"
+        alice_final + bob_final,
+        faucet_amount - fee,
+        "supply: A + B == funded − fee (gas fee burned even with sharding on)"
     );
 }
 

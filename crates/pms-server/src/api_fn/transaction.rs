@@ -87,89 +87,71 @@ pub async fn wallet_send_tx(
     };
 
     // ============================================================
-    // 2) Validation des FRAIS (règle métier : destinataire + suffisance)
+    // 2) Validation des FRAIS (frais BRÛLÉ à la source : in − out)
     // ============================================================
-    // `validate_txutxo_full` a déjà prouvé la conservation par-asset ; ici on
-    // vérifie la règle métier des frais (output vers un destinataire coordinateur
-    // valide, montant >= attendu) — non couverte par la conservation.
+    // Le frais de gas n'est plus un output vers le coordinateur : c'est
+    // `Σ(inputs PMS) − Σ(outputs PMS)`, détruit au niveau de la tx (conservation
+    // `out ≤ in`, phase 2a). On vérifie ici qu'il couvre le minimum attendu
+    // (anti-spam / revenu). `taxable` = les outputs vers d'autres que le sender
+    // (le change retourne au sender et n'est pas taxé).
     let (fee_policy, _ratio_dec) = tx_helpers::load_fee_policy(&state.store);
-
-    // c) Identifier Sender Address pour exclure le Change
-    //    L'adresse du sender = celle du premier UTXO input, déjà résolu et
-    //    ownership/autorisation-vérifié par `validate_txutxo_full` ci-dessus.
     let sender_address: Option<String> = input_outputs.first().map(|u| u.address.clone());
 
-    // c) Identifier les outputs de frais. Un output de frais peut viser
-    //    n'importe quel destinataire coordinateur que `prepare_tx` peut choisir
-    //    via `fee_recipient_address()` : un SHARD coordinateur (round-robin),
-    //    un wallet admin, ou une treasury. On utilise donc le MÊME ensemble de
-    //    sources que la sélection (`fee_recipient_addresses`) — sinon un frais
-    //    payé à une adresse de shard (absente d'admin/treasury) serait compté
-    //    comme transfert taxable → faux "insufficient fees" quand le sharding
-    //    coordinateur est actif (testnet/mainnet).
-    let fee_recipients = state.fee_recipient_addresses();
-    let mut provided_fee = Decimal::ZERO;
-    let mut taxable_amount = Decimal::ZERO;
+    let native_in: Decimal = input_outputs
+        .iter()
+        .filter(|u| u.asset_id.is_none())
+        .filter_map(|u| Decimal::from_str_exact(&u.amount).ok())
+        .sum();
+    let native_out: Decimal = tx
+        .outputs
+        .iter()
+        .filter(|o| o.asset_id.is_none())
+        .filter_map(|o| Decimal::from_str_exact(&o.amount).ok())
+        .sum();
+    // ≥ 0 garanti par la conservation (`out ≤ in` pour le PMS natif).
+    let burned_fee = native_in - native_out;
 
-    for out in &tx.outputs {
-        if fee_recipients.contains(&out.address.to_ascii_lowercase()) {
-            // 1. Output de frais (shard / admin / treasury).
-            if let Ok(amt) = Decimal::from_str_exact(&out.amount) {
-                provided_fee += amt;
-            }
-        } else {
-            // 2. Sinon : change (retour vers soi) ou transfert taxable.
-            let is_sender = sender_address
+    let taxable_amount: Decimal = tx
+        .outputs
+        .iter()
+        .filter(|o| {
+            sender_address
                 .as_ref()
-                .map(|s| s.eq_ignore_ascii_case(&out.address))
-                .unwrap_or(false);
+                .map(|s| !s.eq_ignore_ascii_case(&o.address))
+                .unwrap_or(true)
+        })
+        .filter_map(|o| Decimal::from_str_exact(&o.amount).ok())
+        .sum();
 
-            if !is_sender {
-                if let Ok(amt) = Decimal::from_str_exact(&out.amount) {
-                    taxable_amount += amt;
-                }
-            }
-        }
-    }
-
-    // c) Calculer le fee attendu
-    // compute_fee() retourne maintenant un Amount avec précision garantie à 8 décimales
     let expected_fee = fee_policy
         .compute_fee(&taxable_amount.to_string())
-        .map(|a| a.inner()) // Convertir Amount -> Decimal
+        .map(|a| a.inner())
         .unwrap_or(Decimal::ZERO);
-    let expected_fee_dec = expected_fee;
 
-    // d) Vérifier (avec une petite tolérance epsilon si besoin, mais Decimal est précis)
-    if provided_fee < expected_fee_dec {
+    if burned_fee < expected_fee {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": "insufficient fees",
-                "provided": provided_fee.to_string(),
-                "expected": expected_fee_dec.to_string(),
+                "provided": burned_fee.to_string(),
+                "expected": expected_fee.to_string(),
                 "taxable_amount": taxable_amount.to_string()
             })),
         );
     }
 
     // ============================================================
-    // 3) Chiffrement (recipients_xpk de base + AUTO-ADD FEE RECIPIENTS)
+    // 3) Chiffrement — destinataires = base client + toutes les adresses de sortie
     // ============================================================
-    // Si des frais sont payés vers un destinataire coordinateur (shard, admin
-    // ou treasury), on ajoute sa clé publique X25519 à la liste des
-    // destinataires pour qu'il puisse déchiffrer et voir l'UTXO de frais. On
-    // réutilise le MÊME ensemble `fee_recipients` que la validation ci-dessus
-    // (source unique : `fee_recipient_addresses`).
+    // Le frais étant brûlé (aucun output de frais), il n'y a plus de clé
+    // coordinateur à ajouter. On ajoute la clé X25519 de CHAQUE adresse de sortie
+    // (destinataire, change, bénéficiaire de transfer-fee) pour qu'ils puissent
+    // déchiffrer leur UTXO.
     let mut recipients_xpk = body.recipients_xpk.clone();
-
     for out in &tx.outputs {
-        if fee_recipients.contains(&out.address.to_ascii_lowercase()) {
-            // On décode l'adresse pour extraire la X25519 PubKey (Bech32: H20+XPK).
-            if let Ok((_h20, xpk)) = pms_wallet::decode_address(&out.address) {
-                if !recipients_xpk.contains(&xpk) {
-                    recipients_xpk.push(xpk);
-                }
+        if let Ok((_h20, xpk)) = pms_wallet::decode_address(&out.address) {
+            if !recipients_xpk.contains(&xpk) {
+                recipients_xpk.push(xpk);
             }
         }
     }
@@ -480,11 +462,15 @@ pub async fn prepare_tx(
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // 6) Construire les outputs
+    // 6) Construire les outputs (modèle frais-brûlé-à-la-source, phase 2b)
     //    - Output 1: destination (to, amount, asset_id)
-    //    - Output 2: change vers sender (from, change, asset_id) [si > 0]
-    //    - Output 3: frais vers admin (admin, fee, None=PMS)
-    //    - Output 4: PMS change vers sender [si custom token + PMS change > 0]
+    //    - Outputs transfer-fee (smart contract) — même asset que le transfert
+    //    - Output: change vers sender (from, change, asset_id) [si > 0]
+    //    - Output: PMS change vers sender [si custom token + PMS change > 0]
+    //    PAS d'output de frais de gas : le frais (`fee_dec`) est BRÛLÉ à la
+    //    source (`Σ inputs PMS − Σ outputs PMS`), déjà soustrait du `change`
+    //    ci-dessous. Le validateur (conservation `out ≤ in`) et `wallet_send_tx`
+    //    (frais implicite ≥ minimum) l'enforcent.
     // ════════════════════════════════════════════════════════════════════════
     let mut tx_outputs: Vec<TxOutput> = Vec::new();
 
@@ -496,34 +482,16 @@ pub async fn prepare_tx(
         tx_outputs.push(TxOutput::new(fee_result.beneficiary_address.clone(), fee_result.fee_amount.to_string(), req.asset_id.clone()));
     }
 
-    // Change (retour vers l'expéditeur) — same asset as the transfer
+    // Change (retour vers l'expéditeur) — same asset as the transfer.
+    // `total_needed` inclut déjà `fee_dec` (pour le PMS natif), donc le change
+    // est minoré du frais → `in − out = fee` (brûlé).
     let change = selected_sum - total_needed;
     if change > Decimal::ZERO {
         tx_outputs.push(TxOutput::new(req.from.clone(), change.to_string(), req.asset_id.clone()));
     }
 
-    // Output frais vers admin wallet, ou shard quand sharding activé.
-    // Priority chain:
-    //   1. coord shard (round-robin) when [fees].coord_shard_count > 0
-    //   2. settings.admin.wallet_addresses[0]
-    //   3. settings.fees.treasury_addresses[0]
-    //   4. 500 — no valid recipient configured.
-    if fee_dec > Decimal::ZERO {
-        let admin_addr = match state.fee_recipient_address() {
-            Some(addr) => addr,
-            None => {
-                tracing::warn!("prepareTx: No admin or treasury address configured for fees!");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "no admin wallet configured for fees" })),
-                );
-            }
-        };
-
-        tx_outputs.push(TxOutput::new(admin_addr, fee_dec.to_string(), None,));
-    }
-
-    // PMS change (only for custom token transfers where we also spent PMS for fees)
+    // PMS change (only for custom token transfers where we also spent PMS for fees).
+    // `pms_change = pms_sum − fee_dec` : le frais PMS est brûlé (pas d'output).
     if pms_change > Decimal::ZERO {
         tx_outputs.push(TxOutput::new(req.from.clone(), pms_change.to_string(), None,));
     }

@@ -191,7 +191,6 @@ async fn activity_transfer_in_encrypted() -> anyhow::Result<()> {
         }],
         outputs: vec![
             TxOutput::new(to_addr.clone(), taxable_amount.to_string(), None),
-            TxOutput::new(admin_addr.clone(), fee.clone(), None),
             TxOutput::new(from_addr.clone(), change.clone(), None),
         ],
         fee: fee.clone(),
@@ -794,7 +793,7 @@ async fn activity_unfreeze_appears() -> anyhow::Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn activity_fee_received_appears() -> anyhow::Result<()> {
+async fn transfer_fee_is_burned_not_credited_as_fee_received() -> anyhow::Result<()> {
     let (_admin, admin_addr, admin_pubkey) = setup_admin_ctx();
     let ctx = make_test_ctx_with_admin(vec![admin_addr.clone()], vec![admin_pubkey]).await?;
     let hrp = ctx.settings.address.hrp.as_str();
@@ -844,7 +843,6 @@ async fn activity_fee_received_appears() -> anyhow::Result<()> {
         }],
         outputs: vec![
             TxOutput::new(to_addr.clone(), taxable_amount.to_string(), None),
-            TxOutput::new(admin_addr.clone(), fee.clone(), None),
             TxOutput::new(from_addr.clone(), change.clone(), None),
         ],
         fee: fee.clone(),
@@ -861,20 +859,23 @@ async fn activity_fee_received_appears() -> anyhow::Result<()> {
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Admin should see fee_received from the Reward block
+    // Burn-at-source (phase 2b): the gas fee is destroyed (`in − out`), NOT paid
+    // to an admin/coordinator output → the admin must NOT get any `fee_received`
+    // activity from a transfer. (fee_received still exists for distribution
+    // reward outputs — covered by the direct classification test below.)
     let path = format!("/v1/wallet/{}/activity", admin_addr);
     let (status, json) = get_json(&ctx.app, &path).await;
-    print_activity("FEE_RECEIVED", &admin_addr, &json);
+    print_activity("FEE_BURNED (no fee_received)", &admin_addr, &json);
 
     assert!(status.is_success(), "admin activity failed: {status} body={json}");
     let items = json["items"].as_array().expect("items should be an array");
 
     let has_fee = items.iter().any(|i| i["activity_type"] == "fee_received");
-    assert!(has_fee, "admin should have 'fee_received' in activity, items={json}");
-
-    let fee_item = items.iter().find(|i| i["activity_type"] == "fee_received").unwrap();
-    assert_eq!(fee_item["direction"], "in");
-    println!("  [OK] fee_received: direction={}, amount={}", fee_item["direction"], fee_item["amount"]);
+    assert!(
+        !has_fee,
+        "transfer gas fee is BURNED — admin must NOT receive 'fee_received', items={json}"
+    );
+    println!("  [OK] no fee_received: transfer fee was burned at source");
 
     Ok(())
 }
