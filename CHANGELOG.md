@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.25.1] - Unreleased — Simplify post-revue (anti-replay bridge)
+
+### Changed
+- **refactor(bridge/anti-replay)** — `/simplify` après revue sécurité (sémantique
+  inchangée) : extraction du helper `bridge_replay_rejected(lock_block_id)` (la
+  raison de rejet du replay ne peut plus diverger entre les 3 sites) ; fusion du
+  early-check durable/RAM en une condition + commentaire clarifiant qu'il s'agit
+  d'une **optimisation** (le garde autoritaire est le claim atomique au commit
+  point) ; doc-comment de `unconsume_bridge_lock` corrigé (décrivait un chemin de
+  rollback inexistant — réservé pour symétrie, sans appelant actuel).
+- **chore(version)** — `Cargo` 0.25.0 → **0.25.1** (refactor/docs uniquement, pas
+  de changement de comportement → `DAG_VERSION`/`API_VERSION` inchangés).
+
+---
+
 ## [0.25.0] - Unreleased — Bridge : anti-replay durable des BridgeMint (audit rang 3 / B3)
 
 ### Security / Economics
