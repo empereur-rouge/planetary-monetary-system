@@ -39,6 +39,7 @@ fn edenite_metadata() -> TokenMetadata {
         collateral_ratio_bps: None,
         royalty_bps: None,
         royalty_beneficiary: None,
+        royalty_version: 0,
     }
 }
 
@@ -57,6 +58,7 @@ fn gold_metadata() -> TokenMetadata {
         collateral_ratio_bps: None,
         royalty_bps: None,
         royalty_beneficiary: None,
+        royalty_version: 0,
     }
 }
 

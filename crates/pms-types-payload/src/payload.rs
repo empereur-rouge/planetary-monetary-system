@@ -189,7 +189,8 @@ pub enum PlainPayload {
     /// `Mint`/`TxUtxo`/`TokenBurn`.
     SftClassCreate(SftClass),
     /// Met à jour la **politique royalty de revente** d'un asset déjà enregistré
-    /// (token OU classe SFT) — protocole 2.7. Coordinator seulement.
+    /// (token OU classe SFT) — protocole 2.7. **Autorisé par la SIGNATURE du
+    /// bénéficiaire ACTUEL** (co-signature), PAS par le coordinateur/admin.
     ///
     /// La royalty étant résolue depuis le registre **au moment du settlement**
     /// (pas figée dans l'item au mint), écraser ici `royalty_bps` /
@@ -198,6 +199,15 @@ pub enum PlainPayload {
     /// nouvelles valeurs ABSOLUES à écrire (mêmes sémantiques que sur
     /// [`TokenMetadata`]/[`SftClass`] : `royalty_bps = None` ⇒ plus de royalty,
     /// `royalty_beneficiary = None` ⇒ défaut = `creator`).
+    ///
+    /// # Autorité (consensus)
+    /// Le validateur EXIGE que `auth_signature_b64` soit une signature valide de
+    /// `auth_pubkey_hex` sur [`royalty_update_signing_message`], ET que
+    /// `auth_pubkey_hex` dérive l'adresse du **bénéficiaire courant** de l'asset
+    /// (ou du `creator` si aucun bénéficiaire explicite). Le bloc reste forgé par
+    /// le Coordinator (single-writer) mais le Coordinator NE PEUT PAS rediriger la
+    /// royalty sans cette signature. Anti-replay : l'autorisateur devant être le
+    /// bénéficiaire *courant*, une signature rejouée après un changement échoue.
     RoyaltyUpdate {
         /// Asset ciblé : `asset_id` d'un token OU `"collection:class"` d'une classe SFT.
         asset_id: String,
@@ -207,6 +217,12 @@ pub enum PlainPayload {
         /// Nouveau bénéficiaire Bech32 (`None` = défaut = créateur). Non-vide si présent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         royalty_beneficiary: Option<String>,
+        /// Clé publique secp256k1 (hex sec1) de l'AUTORISATEUR = bénéficiaire courant.
+        auth_pubkey_hex: String,
+        /// Signature ECDSA (base64 DER) de l'autorisateur sur
+        /// [`royalty_update_signing_message`]`(network_id, asset_id, royalty_bps,
+        /// royalty_beneficiary)`.
+        auth_signature_b64: String,
     },
     /// Verrouille des UTXOs sur ce ledger pour un transfert cross-ledger.
     /// Les fonds sont détruits sur le ledger source. Coordinator seulement.
@@ -426,6 +442,52 @@ impl PlainPayload {
 /// the creator). **Single source of truth** — both the token registry
 /// (`register_token`) and the SFT-class persist path call this, so the cap can
 /// never drift between the two registration paths.
+/// Message canonique qu'un bénéficiaire de royalty signe pour AUTORISER un
+/// changement de politique (protocole 2.7). Bound au `network_id` (anti-replay
+/// cross-chain) + domaine dédié. Renvoie le SHA-256 hex du JSON canonique
+/// `{domain, network_id, asset_id, royalty_bps, royalty_beneficiary}` — **source
+/// UNIQUE** partagée par le signeur (endpoint/SDK) ET le validateur consensus.
+///
+/// Anti-replay : la signature commit à l'asset, au `network_id`, à la NOUVELLE
+/// politique exacte, ET à la **version courante** de la royalty (`current_version`,
+/// compteur monotone). Une signature capturée sur-DAG ne peut pas être rejouée :
+/// après tout changement, `royalty_version` avance, donc la version signée ne
+/// correspond plus à la version courante et la signature est invalide. Combiné au
+/// check « autorisateur == bénéficiaire courant », c'est une autorisation
+/// **à usage unique**, liée à l'état exact qu'elle remplace.
+pub fn royalty_update_signing_message(
+    network_id: &str,
+    asset_id: &str,
+    royalty_bps: Option<u32>,
+    royalty_beneficiary: Option<&str>,
+    current_version: u64,
+) -> String {
+    use sha2::{Digest, Sha256};
+    #[derive(Serialize)]
+    struct Canon<'a> {
+        domain: &'a str,
+        network_id: &'a str,
+        asset_id: &'a str,
+        royalty_bps: Option<u32>,
+        royalty_beneficiary: Option<&'a str>,
+        current_version: u64,
+    }
+    let canon = Canon {
+        domain: "pms-royalty-update-v1",
+        network_id,
+        asset_id,
+        royalty_bps,
+        royalty_beneficiary,
+        current_version,
+    };
+    // Sérialisation d'une struct à champs `&str`/`u32`/`u64` : infaillible et
+    // déterministe (ordre de déclaration). `.expect` plutôt qu'un fail-open vers
+    // un hash constant (audit : ne jamais dégrader silencieusement un message
+    // de sécurité).
+    let bytes = serde_json::to_vec(&canon).expect("canonical royalty message is infallible");
+    hex::encode(Sha256::digest(bytes))
+}
+
 pub fn validate_royalty_fields(
     royalty_bps: Option<u32>,
     royalty_beneficiary: Option<&str>,
@@ -498,10 +560,17 @@ pub struct TokenMetadata {
     /// (100 %). Lue au consensus quand cet asset est l'`asset_sold` d'un settlement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub royalty_bps: Option<u32>,
-    /// Bénéficiaire de la royalty (Bech32). `None` ⇒ défaut = `creator`. Immuable
-    /// après enregistrement. Reversé dans l'asset de PAIEMENT (pas forcément PMS).
+    /// Bénéficiaire de la royalty (Bech32). `None` ⇒ défaut = `creator`. Reversé
+    /// dans l'asset de PAIEMENT (pas forcément PMS). Modifiable via `RoyaltyUpdate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub royalty_beneficiary: Option<String>,
+    /// Compteur monotone **anti-replay** des changements de royalty (protocole
+    /// 2.7). Incrémenté à chaque `RoyaltyUpdate` appliqué ; la signature
+    /// d'autorisation commit à la version COURANTE via
+    /// [`royalty_update_signing_message`] → une signature capturée sur-DAG ne peut
+    /// jamais être rejouée (la version aura avancé). `0` = jamais modifiée.
+    #[serde(default)]
+    pub royalty_version: u64,
 }
 
 impl TokenMetadata {
@@ -580,6 +649,10 @@ pub struct SftClass {
     /// dans l'asset de PAIEMENT du settlement (pas forcément PMS).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub royalty_beneficiary: Option<String>,
+    /// Compteur monotone anti-replay des changements de royalty (cf. champ homonyme
+    /// de [`TokenMetadata`]). `0` = jamais modifiée.
+    #[serde(default)]
+    pub royalty_version: u64,
 }
 
 impl SftClass {
@@ -603,6 +676,7 @@ impl SftClass {
             collateral_ratio_bps: None,
             royalty_bps: self.royalty_bps,
             royalty_beneficiary: self.royalty_beneficiary.clone(),
+            royalty_version: self.royalty_version,
         }
     }
 }
@@ -626,6 +700,7 @@ mod royalty_tests {
             collateral_ratio_bps: None,
             royalty_bps: None,
             royalty_beneficiary: None,
+            royalty_version: 0,
         }
     }
 
@@ -683,6 +758,7 @@ mod royalty_tests {
             mint_authority: "pms1coord".into(),
             royalty_bps: Some(1500),
             royalty_beneficiary: None,
+            royalty_version: 0,
         };
         let tm = class.to_token_metadata();
         println!("SFT class royalty → token_metadata: {:?}", tm.effective_royalty());

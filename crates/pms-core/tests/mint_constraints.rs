@@ -55,6 +55,7 @@ fn meta(asset_id: &str, decimals: u8, max_supply: Option<&str>) -> TokenMetadata
         collateral_ratio_bps: None,
         royalty_bps: None,
         royalty_beneficiary: None,
+        royalty_version: 0,
     }
 }
 
@@ -66,6 +67,7 @@ fn meta_collateralized(asset_id: &str, ratio_bps: u32) -> TokenMetadata {
         collateral_ratio_bps: Some(ratio_bps),
         royalty_bps: None,
         royalty_beneficiary: None,
+        royalty_version: 0,
         ..meta(asset_id, 8, None)
     }
 }

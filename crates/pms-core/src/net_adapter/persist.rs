@@ -902,46 +902,101 @@ where
         }
 
         // 1.royalty) Mise à jour de la politique royalty d'un asset existant
-        // (protocole 2.7). Résolue au settlement depuis le registre → écraser ici
-        // fait payer le nouveau bénéficiaire par toutes les ventes futures.
+        // (protocole 2.7). AUTORISÉE PAR LA CO-SIGNATURE DU BÉNÉFICIAIRE COURANT
+        // (pas le coordinateur) : le Coordinator forge le bloc mais ne peut PAS
+        // rediriger la royalty sans la signature de l'ayant droit actuel.
         if let Some(PayloadEnvelope::Plain(PlainPayload::RoyaltyUpdate {
             asset_id,
             royalty_bps,
             royalty_beneficiary,
+            auth_pubkey_hex,
+            auth_signature_b64,
         })) = &payload
         {
-            // Nouveaux champs validés par la MÊME règle que la création (cap +
-            // bénéficiaire non-vide).
+            // (a) Nouveaux champs validés (cap + bénéficiaire non-vide).
             if let Err(e) =
                 pms_types::validate_royalty_fields(*royalty_bps, royalty_beneficiary.as_deref())
             {
                 return Ok(PutResult::Rejected(format!("royalty update: {e}")));
             }
-            // L'asset doit exister (token OU classe SFT, namespace `:` exclusif).
-            // On écrit sur le registre correspondant ; refus si introuvable
-            // (pas de création déguisée). Lookups fail-closed comme le gate royalty.
+            // (b) Politique COURANTE (fail-closed) → autorisateur légitime =
+            //     bénéficiaire explicite courant, à défaut le `creator`.
+            let current_meta = match self.resolve_asset_metadata_strict(asset_id) {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "royalty update: asset not found: {asset_id}"
+                    )));
+                }
+                Err(e) => return Ok(PutResult::Rejected(format!("royalty update lookup: {e}"))),
+            };
+            let current_authorizer = current_meta
+                .royalty_beneficiary
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| current_meta.creator.as_str());
+            // (c) La signature DOIT porter sur EXACTEMENT ce changement (asset +
+            //     nouvelle politique + network_id), ET provenir de l'autorisateur
+            //     courant. Anti-forge + anti-replay (un ancien bénéficiaire n'est
+            //     plus l'autorisateur courant → sa signature rejouée échoue).
+            // La signature commit à la VERSION COURANTE (anti-replay : une sig
+            // capturée sur-DAG devient invalide dès qu'un changement fait avancer
+            // `royalty_version`).
+            let consumed_version = current_meta.royalty_version;
+            let next_version = consumed_version.saturating_add(1);
+            let msg = pms_types::royalty_update_signing_message(
+                &self.wire_meta.network_id,
+                asset_id,
+                *royalty_bps,
+                royalty_beneficiary.as_deref(),
+                consumed_version,
+            );
+            if crate::validations::signature::verify_detached_signature(
+                msg.as_bytes(),
+                auth_pubkey_hex,
+                auth_signature_b64,
+            )
+            .is_err()
+            {
+                return Ok(PutResult::Rejected(
+                    "royalty update: invalid authorization signature".to_string(),
+                ));
+            }
+            if !crate::validations::ownership::unlock_matches_address(
+                auth_pubkey_hex,
+                current_authorizer,
+            ) {
+                return Ok(PutResult::Rejected(
+                    "royalty update: signer is not the current royalty beneficiary".to_string(),
+                ));
+            }
+            // (d) Écriture sur le registre correspondant (token OU classe SFT,
+            //     namespace `:` exclusif). Refus si introuvable (race improbable).
             match self.store.get_sft_class(asset_id) {
                 Ok(Some(mut class)) => {
                     class.royalty_bps = *royalty_bps;
                     class.royalty_beneficiary = royalty_beneficiary.clone();
+                    class.royalty_version = next_version; // anti-replay : monotone
                     if let Err(e) = self.store.put_sft_class(&class) {
                         return Ok(PutResult::Rejected(format!("royalty update store: {e}")));
                     }
                     tracing::info!(
-                        "👑 Royalty updated (SFT class {}): {:?} bps → {:?} (block {})",
-                        asset_id, royalty_bps, royalty_beneficiary, wb.id
+                        "👑 Royalty updated (SFT class {}): {:?} bps → {:?} v{} (block {})",
+                        asset_id, royalty_bps, royalty_beneficiary, next_version, wb.id
                     );
                 }
                 Ok(None) => match self.store.get_token(asset_id) {
                     Ok(Some(mut meta)) => {
                         meta.royalty_bps = *royalty_bps;
                         meta.royalty_beneficiary = royalty_beneficiary.clone();
+                        meta.royalty_version = next_version; // anti-replay : monotone
                         if let Err(e) = self.store.put_token(&meta) {
                             return Ok(PutResult::Rejected(format!("royalty update store: {e}")));
                         }
                         tracing::info!(
-                            "👑 Royalty updated (token {}): {:?} bps → {:?} (block {})",
-                            asset_id, royalty_bps, royalty_beneficiary, wb.id
+                            "👑 Royalty updated (token {}): {:?} bps → {:?} v{} (block {})",
+                            asset_id, royalty_bps, royalty_beneficiary, next_version, wb.id
                         );
                     }
                     Ok(None) => {

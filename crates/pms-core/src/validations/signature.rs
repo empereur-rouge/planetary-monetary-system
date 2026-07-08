@@ -67,6 +67,19 @@ pub fn verify_tx_signatures(tx: &Transaction, network_id: &str) -> Result<(), Va
     Ok(())
 }
 
+/// Vérifie une signature ECDSA **détachée** (secp256k1, DER base64) de
+/// `pubkey_hex` (sec1 hex) sur `msg_bytes`. Réutilise EXACTEMENT le vérificateur
+/// des signatures de transaction — aucune divergence crypto possible. Utilisé
+/// pour l'autorisation par co-signature hors-transaction (ex: `RoyaltyUpdate`,
+/// protocole 2.7 : le bénéficiaire courant signe le changement de royalty).
+pub fn verify_detached_signature(
+    msg_bytes: &[u8],
+    pubkey_hex: &str,
+    signature_b64: &str,
+) -> Result<(), ValidationError> {
+    verify_single_signature(msg_bytes, pubkey_hex, signature_b64, 0)
+}
+
 /// Vérifie une seule signature ECDSA (appelée en parallèle par rayon).
 #[inline]
 fn verify_single_signature(

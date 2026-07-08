@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.29.0] - Unreleased — Marketplace : changement de royalty CO-SIGNÉ par le bénéficiaire (protocole 2.7)
+
+### Changed / Security
+- **feat(marketplace)** — le changement de royalty est désormais **autorisé par la
+  SIGNATURE du bénéficiaire ACTUEL**, PAS par le coordinateur/admin. `RoyaltyUpdate`
+  porte `auth_pubkey_hex` + `auth_signature_b64` (signature détachée du bénéficiaire
+  courant sur `royalty_update_signing_message` = SHA-256 de `{domain, network_id,
+  asset_id, royalty_bps, royalty_beneficiary}`). **Le consensus REJETTE** tout
+  `RoyaltyUpdate` dont la signature n'est pas celle du bénéficiaire courant (ou du
+  `creator` à défaut) — **même forgé par le coordinateur**.
+- **sec(marketplace/anti-replay)** — un compteur monotone `royalty_version`
+  (`TokenMetadata`/`SftClass`, incrémenté à chaque changement) est **commité dans le
+  message signé** : chaque autorisation est **à usage unique**, liée à l'état exact
+  qu'elle remplace. Sans ça (revue sécurité, CRITIQUE), une signature capturée
+  sur-DAG — les blocs `RoyaltyUpdate` sont publics — pouvait être **rejouée** dès que
+  l'ancien signataire redevenait bénéficiaire courant (hijack permanent du flux de
+  royalties). Le `network_id` + l'`asset_id` sont aussi commités (anti cross-chain /
+  cross-asset).
+- **note(sécurité)** — pour un **token admin-créé SANS bénéficiaire explicite**,
+  `creator = coordinateur` → le coordinateur EST l'autorisateur et peut donc changer
+  la royalty. Pour exclure le coordinateur, poser un `royalty_beneficiary` externe à
+  la création (cas nominal des classes SFT et des ventes creator-studio).
+- **feat(api)** — `/admin/royalty` **retiré**, remplacé par `POST /v1/royalty/prepare`
+  (renvoie le message canonique à signer) + `POST /v1/royalty/update` (**API-key,
+  PAS admin**). `update` accepte soit la clé privée custodiée du bénéficiaire (le
+  serveur vérifie qu'elle est le bénéficiaire courant puis signe), soit une
+  signature pré-calculée (`auth_pubkey_hex` + `auth_signature_b64` — le coordinateur
+  ne voit jamais la clé). **Motivation** : les instances squelette custodiales
+  vendues à des tiers n'ont pas le token admin ; elles changent la royalty avec la
+  clé du bénéficiaire qu'elles détiennent.
+- **feat(consensus)** — `verify_detached_signature` (réutilise le vérificateur ECDSA
+  des transactions) ; `RoyaltyUpdate` passe du groupe coordinator-only au groupe
+  owner-signé (authority.rs), l'autorité étant la co-signature vérifiée au persist.
+
+### Infrastructure
+- **chore(version)** — `Cargo` 0.28.0 → **0.29.0** ; `DAG_VERSION` 3.13.0 →
+  **3.14.0** (le payload `RoyaltyUpdate` gagne les champs d'autorisation ; additif
+  car 3.13.0 Unreleased) ; `API_VERSION` 33 → **34**.
+
+---
+
 ## [0.28.0] - Unreleased — Marketplace : royalty de revente MUTABLE post-mint (protocole 2.7)
 
 ### Added

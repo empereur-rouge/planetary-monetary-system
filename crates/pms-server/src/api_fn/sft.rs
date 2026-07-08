@@ -112,6 +112,7 @@ pub async fn admin_create_sft_class(
         mint_authority: coordinator_pk,
         royalty_bps: req.royalty_bps.filter(|bps| *bps > 0),
         royalty_beneficiary: req.royalty_beneficiary.clone(),
+        royalty_version: 0,
     };
     // La validation (format, asset_id==collection:class, unicité…) vit dans persist.
     let block_id = forge_sft_block(&state, PlainPayload::SftClassCreate(class), "SftClassCreate").await?;

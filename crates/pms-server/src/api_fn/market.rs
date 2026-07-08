@@ -328,18 +328,15 @@ pub async fn market_settle(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// POST /admin/royalty — change the resale-royalty policy of an existing asset
+// Royalty mutable post-mint — AUTORISÉE PAR LA CO-SIGNATURE DU BÉNÉFICIAIRE
+// COURANT (protocole 2.7). Endpoints /v1 (API-key), PAS admin : une instance
+// squelette custodiale (sans token admin) change la royalty avec la clé du
+// bénéficiaire qu'elle détient. Le consensus rejette sans signature valide.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Requête `POST /admin/royalty` (protocole 2.7) : redirige/modifie la royalty
-/// d'un asset **déjà créé** (token OU classe SFT). Les champs sont des DELTAS
-/// appliqués sur la politique courante :
-/// - `royalty_beneficiary: Some(addr)` → nouveau bénéficiaire ; absent → inchangé.
-/// - `royalty_bps: Some(n)` → nouveau taux ; absent → inchangé.
-/// - `clear_beneficiary: true` → efface le bénéficiaire explicite (retour au créateur).
-/// - `clear_royalty: true` → supprime la royalty (taux → aucun).
+/// Deltas sur la politique royalty courante (partagé par prepare + update).
 #[derive(Debug, Deserialize)]
-pub struct UpdateRoyaltyRequest {
+pub struct RoyaltyChangeRequest {
     pub asset_id: String,
     #[serde(default)]
     pub royalty_bps: Option<u32>,
@@ -351,43 +348,185 @@ pub struct UpdateRoyaltyRequest {
     pub clear_royalty: bool,
 }
 
-/// `POST /admin/royalty` — change le bénéficiaire (et/ou le taux) de royalty d'un
-/// asset existant. La royalty étant résolue au settlement depuis le registre, le
-/// changement s'applique à **toutes les ventes futures** (aucune vente passée).
-pub async fn admin_update_royalty(
+/// Requête `POST /v1/royalty/update` : deltas + **autorisation** — soit la clé
+/// privée custodiée du bénéficiaire courant (le serveur signe), soit une
+/// signature pré-calculée `auth_pubkey_hex`+`auth_signature_b64` (le squelette
+/// signe localement, le coordinateur ne voit jamais la clé).
+#[derive(Debug, Deserialize)]
+pub struct RoyaltyUpdateRequest {
+    pub asset_id: String,
+    #[serde(default)]
+    pub royalty_bps: Option<u32>,
+    #[serde(default)]
+    pub royalty_beneficiary: Option<String>,
+    #[serde(default)]
+    pub clear_beneficiary: bool,
+    #[serde(default)]
+    pub clear_royalty: bool,
+    /// Voie custodiale : clé privée base64 du bénéficiaire COURANT (le serveur
+    /// vérifie qu'elle correspond au bénéficiaire courant, puis signe).
+    #[serde(default)]
+    pub authorizer_private_key_b64: Option<String>,
+    /// Voie pré-signée : pubkey sec1 hex du bénéficiaire courant.
+    #[serde(default)]
+    pub auth_pubkey_hex: Option<String>,
+    /// Voie pré-signée : signature base64 sur `royalty_update_signing_message`.
+    #[serde(default)]
+    pub auth_signature_b64: Option<String>,
+}
+
+/// Nouvelles valeurs absolues = politique courante + deltas.
+fn resolve_new_policy(
+    current: &TokenMetadata,
+    royalty_bps: Option<u32>,
+    royalty_beneficiary: &Option<String>,
+    clear_royalty: bool,
+    clear_beneficiary: bool,
+) -> (Option<u32>, Option<String>) {
+    let new_bps = if clear_royalty {
+        None
+    } else {
+        royalty_bps.or(current.royalty_bps).filter(|b| *b > 0)
+    };
+    let new_beneficiary = if clear_beneficiary {
+        None
+    } else {
+        royalty_beneficiary
+            .clone()
+            .or_else(|| current.royalty_beneficiary.clone())
+    };
+    (new_bps, new_beneficiary)
+}
+
+/// Adresse dont la clé DOIT signer un changement = bénéficiaire explicite courant,
+/// à défaut le `creator`. (Miroir exact du check consensus dans persist.)
+fn current_authorizer_addr(current: &TokenMetadata) -> String {
+    current
+        .royalty_beneficiary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(current.creator.as_str())
+        .to_string()
+}
+
+/// `POST /v1/royalty/prepare` — renvoie le message canonique à SIGNER (par la clé
+/// du bénéficiaire courant) pour autoriser le changement, sans rien produire.
+/// Permet la voie non-custodiale (le squelette signe localement).
+pub async fn royalty_prepare(
     State(state): State<AppState>,
-    Json(req): Json<UpdateRoyaltyRequest>,
+    Json(req): Json<RoyaltyChangeRequest>,
 ) -> impl IntoResponse {
-    // Politique courante (token OU classe SFT). 404 si l'asset n'existe pas —
-    // pas de création déguisée.
     let Some(current) = resolve_meta(&state, &req.asset_id) else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": format!("asset not found: {}", req.asset_id) })),
         );
     };
-    // Nouvelles valeurs absolues = politique courante + deltas de la requête.
-    let new_bps = if req.clear_royalty {
-        None
-    } else {
-        req.royalty_bps.or(current.royalty_bps).filter(|b| *b > 0)
-    };
-    let new_beneficiary = if req.clear_beneficiary {
-        None
-    } else {
-        req.royalty_beneficiary
-            .clone()
-            .or_else(|| current.royalty_beneficiary.clone())
-    };
-    // Même validation que la création (source unique).
+    let (new_bps, new_beneficiary) = resolve_new_policy(
+        &current,
+        req.royalty_bps,
+        &req.royalty_beneficiary,
+        req.clear_royalty,
+        req.clear_beneficiary,
+    );
     if let Err(e) = pms_types::validate_royalty_fields(new_bps, new_beneficiary.as_deref()) {
         return bad(e);
     }
+    let message_hex = pms_types::royalty_update_signing_message(
+        &state.settings.network.network_id,
+        &req.asset_id,
+        new_bps,
+        new_beneficiary.as_deref(),
+        current.royalty_version,
+    );
+    (
+        StatusCode::OK,
+        Json(json!({
+            "asset_id": req.asset_id,
+            "current_beneficiary": current_authorizer_addr(&current),
+            "current_royalty_version": current.royalty_version,
+            "new_royalty_bps": new_bps,
+            "new_royalty_beneficiary": new_beneficiary,
+            "message_hex": message_hex,
+        })),
+    )
+}
+
+/// `POST /v1/royalty/update` — applique le changement de royalty, **autorisé par
+/// la signature du bénéficiaire courant** (custodial ou pré-signée). Aucun token
+/// admin requis. Le consensus RE-VÉRIFIE la signature (défense en profondeur).
+pub async fn royalty_update(
+    State(state): State<AppState>,
+    Json(req): Json<RoyaltyUpdateRequest>,
+) -> impl IntoResponse {
+    let Some(current) = resolve_meta(&state, &req.asset_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("asset not found: {}", req.asset_id) })),
+        );
+    };
+    let (new_bps, new_beneficiary) = resolve_new_policy(
+        &current,
+        req.royalty_bps,
+        &req.royalty_beneficiary,
+        req.clear_royalty,
+        req.clear_beneficiary,
+    );
+    if let Err(e) = pms_types::validate_royalty_fields(new_bps, new_beneficiary.as_deref()) {
+        return bad(e);
+    }
+    let authorizer = current_authorizer_addr(&current);
+    let msg = pms_types::royalty_update_signing_message(
+        &state.settings.network.network_id,
+        &req.asset_id,
+        new_bps,
+        new_beneficiary.as_deref(),
+        current.royalty_version,
+    );
+
+    // Obtenir (auth_pubkey_hex, auth_signature_b64).
+    let (auth_pubkey_hex, auth_signature_b64) = if let Some(pk_b64) = &req.authorizer_private_key_b64
+    {
+        // Voie custodiale : reconstruit le wallet, vérifie qu'il EST le
+        // bénéficiaire courant (403 sinon), puis signe.
+        let wallet = match wallet_from_b64(pk_b64) {
+            Ok(w) => w,
+            Err(e) => return bad(format!("invalid authorizer key: {e}")),
+        };
+        if !pms_core::validations::ownership::unlock_matches_address(
+            &wallet.public_key_hex,
+            &authorizer,
+        ) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "provided key is not the current royalty beneficiary" })),
+            );
+        }
+        match wallet.sign(&msg) {
+            Ok(sig) => (wallet.public_key_hex.clone(), sig),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("sign failed: {e:?}") })),
+                );
+            }
+        }
+    } else if let (Some(pk), Some(sig)) = (&req.auth_pubkey_hex, &req.auth_signature_b64) {
+        // Voie pré-signée : le coordinateur ne voit jamais la clé. Persist vérifie.
+        (pk.clone(), sig.clone())
+    } else {
+        return bad(
+            "provide authorizer_private_key_b64 OR (auth_pubkey_hex + auth_signature_b64)",
+        );
+    };
 
     let payload = PlainPayload::RoyaltyUpdate {
         asset_id: req.asset_id.clone(),
         royalty_bps: new_bps,
         royalty_beneficiary: new_beneficiary.clone(),
+        auth_pubkey_hex,
+        auth_signature_b64,
     };
     match forge_persist_plain(&state, payload, "RoyaltyUpdate").await {
         Ok(block_id) => (

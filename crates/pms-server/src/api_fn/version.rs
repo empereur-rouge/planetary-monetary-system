@@ -75,7 +75,10 @@ use crate::api::AppState;
 /// `POST /admin/sft/classes`.
 /// v33 (protocole 2.7 — royalty mutable) : nouvel endpoint `POST /admin/royalty`
 /// (redirige/modifie le bénéficiaire ou le taux de royalty d'un asset existant).
-pub const API_VERSION: u32 = 33;
+/// v34 (protocole 2.7 — royalty co-signée) : `/admin/royalty` remplacé par
+/// `POST /v1/royalty/prepare` + `POST /v1/royalty/update` (API-key, PAS admin) —
+/// autorisés par la SIGNATURE du bénéficiaire courant (custodial ou pré-signée).
+pub const API_VERSION: u32 = 34;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,6 +178,8 @@ mod tests {
         //          sur tokens/create & sft/classes).
         // v0.28.0: 32 → 33 (protocole 2.7 : POST /admin/royalty — royalty mutable
         //          post-mint).
-        assert_eq!(parsed.api_version, 33);
+        // v0.29.0: 33 → 34 (protocole 2.7 : /v1/royalty/{prepare,update} co-signés
+        //          par le bénéficiaire courant ; /admin/royalty retiré).
+        assert_eq!(parsed.api_version, 34);
     }
 }

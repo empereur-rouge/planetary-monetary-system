@@ -150,6 +150,7 @@ pub async fn admin_create_token(
         collateral_ratio_bps: req.collateral_ratio_bps,
         royalty_bps: req.royalty_bps.filter(|bps| *bps > 0),
         royalty_beneficiary: req.royalty_beneficiary.clone(),
+        royalty_version: 0,
     };
 
     // Register in the token registry (RocksDB)

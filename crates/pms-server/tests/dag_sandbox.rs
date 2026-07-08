@@ -6657,15 +6657,34 @@ async fn test_royalty_beneficiary_change_after_mint() -> Result<()> {
     assert_eq!(b1["royalty_beneficiary"].as_str(), Some(creator_a_addr.as_str()));
     sleep(Duration::from_millis(200)).await;
 
-    // Redirection du bénéficiaire vers le créateur B (taux inchangé).
+    // Redirection du bénéficiaire vers le créateur B — AUTORISÉE PAR LA
+    // CO-SIGNATURE du bénéficiaire courant (créateur A). Custodial : on passe la
+    // clé de A ; le serveur vérifie que A EST le bénéficiaire courant, signe.
     let (st, upd) = sandbox
-        .admin_post("/admin/royalty", json!({"asset_id":"studio:pass","royalty_beneficiary":creator_b_addr}))
+        .post(None, "/v1/royalty/update", json!({
+            "asset_id":"studio:pass",
+            "royalty_beneficiary":creator_b_addr,
+            "authorizer_private_key_b64": creator_a.private_key_b64,
+        }))
         .await;
-    println!("  ROYALTY UPDATE → {st} — {upd:?}");
+    println!("  ROYALTY UPDATE (signé par A) → {st} — {upd:?}");
     anyhow::ensure!(st.is_success(), "royalty update failed: {upd}");
     assert_eq!(upd["royalty_beneficiary"].as_str(), Some(creator_b_addr.as_str()));
     assert_eq!(upd["royalty_bps"].as_u64(), Some(2000), "taux inchangé");
     sleep(Duration::from_millis(200)).await;
+
+    // Après le handoff A→B, le créateur A n'est PLUS le bénéficiaire courant :
+    // sa clé ne peut plus autoriser un changement (403 au pré-check endpoint).
+    let (st_a, _r) = sandbox
+        .post(None, "/v1/royalty/update", json!({
+            "asset_id":"studio:pass",
+            "royalty_beneficiary":creator_a_addr,
+            "authorizer_private_key_b64": creator_a.private_key_b64,
+        }))
+        .await;
+    println!("  A tente de reprendre la royalty → {st_a} (attendu 403)");
+    assert_eq!(st_a.as_u16(), 403, "A n'est plus le bénéficiaire courant");
+    sleep(Duration::from_millis(150)).await;
 
     // Vente #2 → créateur B payé (nouvelle politique), A inchangé.
     let (st, b2) = sandbox
@@ -6695,5 +6714,165 @@ async fn test_royalty_beneficiary_change_after_mint() -> Result<()> {
     assert!(b_acts.iter().any(|t| t == "royalty_received"), "créateur B voit royalty_received");
 
     println!("  ✅ bénéficiaire redirigé APRÈS mint ; les ventes futures paient le nouveau bénéficiaire");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_royalty_change_rejected_without_beneficiary_signature() -> Result<()> {
+    use pms_types::{PayloadEnvelope, PlainPayload};
+
+    let sandbox = boot_sandbox().await?;
+    let creator = Wallet::generate();
+    let attacker = Wallet::generate();
+    let creator_addr = creator.get_address("8e");
+    let attacker_addr = attacker.get_address("8e");
+
+    println!("\n=== [ROYALTY CHANGE — CONSENSUS REJECT sans co-signature] ===");
+
+    // Classe royalty 20% → créateur (bénéficiaire courant).
+    let (st, _b) = sandbox
+        .admin_post("/admin/sft/classes", json!({
+            "collection_id":"secure","class_id":"art","name":"Art","decimals":0,
+            "max_supply":"5","royalty_bps":2000,"royalty_beneficiary":creator_addr,
+        }))
+        .await;
+    anyhow::ensure!(st.is_success(), "class create failed");
+    sleep(Duration::from_millis(150)).await;
+
+    // (1) L'ATTAQUANT forge un RoyaltyUpdate signé par SA propre clé (signature
+    //     cryptographiquement valide) pour se rediriger la royalty. Le bloc est
+    //     forgé par le COORDINATEUR (admin_wallet). Le consensus doit rejeter car
+    //     l'attaquant n'est pas le bénéficiaire courant.
+    let msg = pms_types::royalty_update_signing_message(
+        &sandbox.network_id, "secure:art", Some(2000), Some(&attacker_addr), 0,
+    );
+    let sig = attacker.sign(&msg).expect("attacker sign");
+    let payload = PlainPayload::RoyaltyUpdate {
+        asset_id: "secure:art".to_string(),
+        royalty_bps: Some(2000),
+        royalty_beneficiary: Some(attacker_addr.clone()),
+        auth_pubkey_hex: attacker.public_key_hex.clone(),
+        auth_signature_b64: sig,
+    };
+    let parents = sandbox.tips().await?;
+    let wb = forge_signed_wire_block_for_test(
+        parents, &sandbox.wire_meta, &sandbox.admin_wallet, 0,
+        Some(PayloadEnvelope::Plain(payload)),
+    );
+    let resp = sandbox.client.post(format!("{}/submit/block", sandbox.base_url)).json(&wb).send().await.expect("submit");
+    let code = resp.status();
+    let reason = resp.text().await.unwrap_or_default();
+    println!("  attaquant signe pour lui-même → {code} — {reason:?}");
+    assert!(!code.is_success(), "un tiers ne peut pas rediriger la royalty (got {code})");
+    assert!(reason.to_lowercase().contains("current royalty beneficiary"), "raison: {reason:?}");
+
+    // (2) TAMPER : le VRAI bénéficiaire signe pour X, mais le payload déclare Y.
+    //     La signature ne colle pas à la politique déclarée → rejet.
+    let msg_x = pms_types::royalty_update_signing_message(
+        &sandbox.network_id, "secure:art", Some(2000), Some(&attacker_addr), 0,
+    );
+    let sig_creator_over_x = creator.sign(&msg_x).expect("creator sign");
+    let other = Wallet::generate().get_address("8e");
+    let tampered = PlainPayload::RoyaltyUpdate {
+        asset_id: "secure:art".to_string(),
+        royalty_bps: Some(2000),
+        royalty_beneficiary: Some(other), // ≠ ce que le créateur a signé (attacker_addr)
+        auth_pubkey_hex: creator.public_key_hex.clone(),
+        auth_signature_b64: sig_creator_over_x,
+    };
+    let parents = sandbox.tips().await?;
+    let wb2 = forge_signed_wire_block_for_test(
+        parents, &sandbox.wire_meta, &sandbox.admin_wallet, 0,
+        Some(PayloadEnvelope::Plain(tampered)),
+    );
+    let resp2 = sandbox.client.post(format!("{}/submit/block", sandbox.base_url)).json(&wb2).send().await.expect("submit");
+    let code2 = resp2.status();
+    let reason2 = resp2.text().await.unwrap_or_default();
+    println!("  sig du créateur sur une AUTRE politique → {code2} — {reason2:?}");
+    assert!(!code2.is_success(), "signature/policy mismatch doit être rejeté");
+    assert!(reason2.to_lowercase().contains("invalid authorization signature"), "raison: {reason2:?}");
+
+    // (3) State intact : la royalty pointe toujours vers le créateur.
+    let (st, cls) = sandbox.post(None, "/v1/royalty/prepare", json!({"asset_id":"secure:art"})).await;
+    anyhow::ensure!(st.is_success(), "prepare failed");
+    println!("  bénéficiaire courant inchangé = {:?}", cls["current_beneficiary"]);
+    assert_eq!(cls["current_beneficiary"].as_str(), Some(creator_addr.as_str()), "royalty intacte");
+
+    println!("  ✅ aucun changement de royalty sans la signature du bénéficiaire courant");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_royalty_change_signature_not_replayable() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+    let a = Wallet::generate();
+    let b = Wallet::generate();
+    let a_addr = a.get_address("8e");
+    let b_addr = b.get_address("8e");
+    let net = sandbox.network_id.clone();
+
+    println!("\n=== [ROYALTY — signature NON REJOUABLE (anti-replay version)] ===");
+
+    // Classe royalty 20% → A (version 0).
+    let (st, _x) = sandbox
+        .admin_post("/admin/sft/classes", json!({
+            "collection_id":"replay","class_id":"pass","name":"Pass","decimals":0,
+            "max_supply":"3","royalty_bps":2000,"royalty_beneficiary":a_addr,
+        }))
+        .await;
+    anyhow::ensure!(st.is_success(), "class create failed");
+    sleep(Duration::from_millis(150)).await;
+
+    // A signe pour rediriger vers B, sur la VERSION 0. On CAPTURE cette signature.
+    let msg_v0 = pms_types::royalty_update_signing_message(&net, "replay:pass", Some(2000), Some(&b_addr), 0);
+    let a_sig_v0 = a.sign(&msg_v0).expect("A sign v0");
+
+    // Appliquée (voie pré-signée) → bénéficiaire = B, version 1.
+    let (st, r1) = sandbox
+        .post(None, "/v1/royalty/update", json!({
+            "asset_id":"replay:pass","royalty_beneficiary":b_addr,
+            "auth_pubkey_hex": a.public_key_hex, "auth_signature_b64": a_sig_v0,
+        }))
+        .await;
+    println!("  A→B (sig v0) → {st} {r1:?}");
+    anyhow::ensure!(st.is_success(), "A→B failed: {r1}");
+    sleep(Duration::from_millis(150)).await;
+
+    // B redonne à A (custodial, version 1) → bénéficiaire = A, version 2.
+    let (st, _r2) = sandbox
+        .post(None, "/v1/royalty/update", json!({
+            "asset_id":"replay:pass","royalty_beneficiary":a_addr,
+            "authorizer_private_key_b64": b.private_key_b64,
+        }))
+        .await;
+    anyhow::ensure!(st.is_success(), "B→A failed");
+    sleep(Duration::from_millis(150)).await;
+
+    // A est de nouveau le bénéficiaire courant. On REJOUE sa signature v0 (→B).
+    // Sans version : ça repasserait (A est courant, sig valide) = hijack. AVEC la
+    // version monotone (courante = 2), le message diffère → signature invalide.
+    let (st, rr) = sandbox
+        .post(None, "/v1/royalty/update", json!({
+            "asset_id":"replay:pass","royalty_beneficiary":b_addr,
+            "auth_pubkey_hex": a.public_key_hex, "auth_signature_b64": a_sig_v0,
+        }))
+        .await;
+    println!("  REJEU de la sig v0 (A courant, version=2) → {st} {rr:?}");
+    assert!(!st.is_success(), "une signature capturée NE DOIT PAS être rejouable (got {st})");
+    assert!(
+        rr["error"].as_str().unwrap_or("").to_lowercase().contains("rejected"),
+        "erreur: {rr:?}"
+    );
+
+    // Bénéficiaire courant toujours A (le rejeu n'a rien changé).
+    let (st, cls) = sandbox.post(None, "/v1/royalty/prepare", json!({"asset_id":"replay:pass"})).await;
+    anyhow::ensure!(st.is_success(), "prepare failed");
+    println!("  bénéficiaire courant = {:?}, version = {:?}", cls["current_beneficiary"], cls["current_royalty_version"]);
+    assert_eq!(cls["current_beneficiary"].as_str(), Some(a_addr.as_str()), "toujours A");
+    assert_eq!(cls["current_royalty_version"].as_u64(), Some(2), "version = 2 (2 changements)");
+
+    println!("  ✅ signature d'autorisation à usage unique (version monotone) — pas de replay");
     Ok(())
 }

@@ -58,6 +58,7 @@ fn valid_class() -> SftClass {
         mint_authority: "minter_pk".into(),
         royalty_bps: None,
         royalty_beneficiary: None,
+        royalty_version: 0,
     }
 }
 
