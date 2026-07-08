@@ -6597,11 +6597,23 @@ async fn test_market_settle_rejects_tampered_royalty() -> Result<()> {
         low.contains("settlement"),
         "reject reason must be a settlement violation, got: {reason:?}"
     );
-    // The creator address appears in the "must net-receive" message → confirms the
-    // rejection is specifically the under-paid royalty, not an unrelated failure.
+    // Exact-accounting gate: the declared split is item→buyer, royalty(20)→creator,
+    // net(80)→seller. The tampered tx routes 90 to the seller and 10 to the creator,
+    // so at least one address nets an amount that is NOT part of the declared split.
+    // The gate reports the first such mismatch as "unexpected credit <n> <asset> to
+    // <addr> (not part of the declared split)" — this is precisely the royalty-shape
+    // enforcement, and the assertion is order-independent (either the seller's +90
+    // over-credit or the creator's +10 short-credit may surface first).
     assert!(
-        low.contains("net-receive") || low.contains(&creator_addr.to_lowercase()),
-        "reject reason must point at the royalty shortfall, got: {reason:?}"
+        low.contains("unexpected credit") && low.contains("not part of the declared split"),
+        "reject reason must be the exact-accounting royalty-split violation, got: {reason:?}"
+    );
+    // And it must name a PMS amount from the tampered split (90 grabbed by seller, or
+    // 10 short-paid to creator) — proving it caught THIS mis-routing, not an unrelated
+    // failure.
+    assert!(
+        low.contains(" 90 pms") || low.contains(" 10 pms"),
+        "reject reason must reference the tampered PMS split (90 or 10), got: {reason:?}"
     );
 
     // And the state must be unchanged: buyer got no ticket, creator got nothing.
@@ -6860,10 +6872,16 @@ async fn test_royalty_change_signature_not_replayable() -> Result<()> {
         }))
         .await;
     println!("  REJEU de la sig v0 (A courant, version=2) → {st} {rr:?}");
-    assert!(!st.is_success(), "une signature capturée NE DOIT PAS être rejouable (got {st})");
-    assert!(
-        rr["error"].as_str().unwrap_or("").to_lowercase().contains("rejected"),
-        "erreur: {rr:?}"
+    // Le consensus refuse la signature rejouée (la version a avancé → message
+    // différent → sig invalide). Le handler mappe tout rejet consensus sur
+    // ApiError::Conflict (code stable 3070, status 409) — les clients SDK
+    // branchent sur le CODE, pas sur le message. Le fait que l'état soit
+    // inchangé (asserté plus bas) prouve que le rejeu n'a eu AUCUN effet.
+    assert_eq!(st.as_u16(), 409, "rejet consensus = 409 Conflict (got {st})");
+    assert_eq!(
+        rr["code"].as_u64(),
+        Some(3070),
+        "code stable = 3070 (Conflict) pour un rejet consensus: {rr:?}"
     );
 
     // Bénéficiaire courant toujours A (le rejeu n'a rien changé).

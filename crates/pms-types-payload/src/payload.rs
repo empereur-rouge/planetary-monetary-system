@@ -436,12 +436,6 @@ impl PlainPayload {
     }
 }
 
-/// Validates the resale-royalty policy fields shared by [`TokenMetadata`] and
-/// [`SftClass`] (protocole 2.7): `royalty_bps ≤ 10_000` (a money-rule cap), and
-/// an explicit `royalty_beneficiary` must be non-empty (omit it to default to
-/// the creator). **Single source of truth** — both the token registry
-/// (`register_token`) and the SFT-class persist path call this, so the cap can
-/// never drift between the two registration paths.
 /// Message canonique qu'un bénéficiaire de royalty signe pour AUTORISER un
 /// changement de politique (protocole 2.7). Bound au `network_id` (anti-replay
 /// cross-chain) + domaine dédié. Renvoie le SHA-256 hex du JSON canonique
@@ -488,19 +482,33 @@ pub fn royalty_update_signing_message(
     hex::encode(Sha256::digest(bytes))
 }
 
+/// Validates the resale-royalty policy fields shared by [`TokenMetadata`] and
+/// [`SftClass`] (protocole 2.7): `royalty_bps ≤ 10_000` (a money-rule cap), and —
+/// when `royalty_bps > 0` — a **required, non-empty `royalty_beneficiary`**.
+///
+/// The explicit-beneficiary requirement (audit B2) prevents a footgun: without
+/// it, `effective_royalty` falls back to `creator`, which for admin-created
+/// assets is a raw secp256k1 public key (sec1 hex), NOT a Bech32 address — so the
+/// `MarketSettle` royalty `TxOutput` would be addressed by a pubkey hex, invisible
+/// to balance-by-address indexing and awkward to spend. Requiring an explicit
+/// payout address closes that.
+///
+/// **Single source of truth** — both the token registry (`register_token`) and
+/// the SFT-class persist path call this, so the rule can never drift.
 pub fn validate_royalty_fields(
     royalty_bps: Option<u32>,
     royalty_beneficiary: Option<&str>,
 ) -> Result<(), String> {
-    if let Some(bps) = royalty_bps {
-        if bps > 10_000 {
-            return Err(format!("royalty_bps must be <= 10000, got {bps}"));
-        }
+    let bps = royalty_bps.unwrap_or(0);
+    if bps > 10_000 {
+        return Err(format!("royalty_bps must be <= 10000, got {bps}"));
     }
-    if let Some(b) = royalty_beneficiary {
-        if b.trim().is_empty() {
-            return Err("royalty_beneficiary cannot be empty (omit it to default to creator)".into());
-        }
+    let beneficiary = royalty_beneficiary.map(str::trim).filter(|s| !s.is_empty());
+    if royalty_beneficiary.is_some() && beneficiary.is_none() {
+        return Err("royalty_beneficiary cannot be empty".into());
+    }
+    if bps > 0 && beneficiary.is_none() {
+        return Err("royalty_beneficiary is required when royalty_bps > 0".into());
     }
     Ok(())
 }

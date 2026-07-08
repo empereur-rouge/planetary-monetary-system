@@ -80,6 +80,34 @@ création de l'asset (`royalty_bps`/`royalty_beneficiary` sur `/admin/tokens/cre
 | POST | `/admin/tokens/create` | + `royalty_bps?`, `royalty_beneficiary?` |
 | POST | `/admin/sft/classes` | + `royalty_bps?`, `royalty_beneficiary?` |
 
+### Codes d'erreur ([[api-error-codes]], revue D1)
+
+Les endpoints marketplace renvoient des erreurs `ApiError` à **code numérique stable**
+(`{"code":NNNN,"message":...}`) — les SDK branchent sur le `code`, pas sur le message.
+
+| Code | HTTP | Quand |
+|---|---|---|
+| `1050` `Forbidden` | 403 | Clé custodiale fournie ≠ bénéficiaire courant (`/royalty/update`) |
+| `2020` `InvalidAmount` | 400 | `price`/`quantity` hors range ; overflow royalty |
+| `2030` `InvalidField` | 400 | Clé b64 invalide ; `buyer==seller` ; `asset_sold==price_asset` ; bps/bénéficiaire invalides |
+| `3001` `InsufficientBalance` | 422 | Le vendeur n'a pas l'item / l'acheteur n'a pas le paiement |
+| `3040` `NotFound` | 404 | `asset_id` inconnu (`/royalty/*`) |
+| `3070` `Conflict` | 409 | **Rejet consensus** (royalty sous-payée, signature d'autorisation invalide/rejouée, double-spend) |
+| `5010` `GasPoolEmpty` | 503 | Pool de gas du ledger épuisé |
+
+## Durcissement consensus (revue de code, v0.29.0)
+
+- **A1 — écritures de registre après validation** : les mutations de registre
+  (`RoyaltyUpdate` → `put_token`/`put_sft_class`) sont gated par un `1.pre`
+  (idempotence + parents) dans `do_persist_block_internal`, AVANT tout arm mutateur —
+  un bloc rejeté ne laisse jamais de mutation orpheline (invariant « toute mutation =
+  un bloc DAG signé »). Voir [[block-payloads]] / [[validation-consensus]].
+- **B1/B3 — dual-layer UTXO** : `MarketSettle` est traité par `bootstrap_utxos`
+  (restart) et `apply_block_mem` (garde RAM) exactement comme `TxUtxo` — pas de
+  résurrection d'item vendu ni de double-spend RAM. Voir [[utxo-system]].
+- **B2 — royalty payable** : `royalty_bps > 0` exige un `royalty_beneficiary`
+  explicite (adresse payable, jamais le pubkey hex du `creator`).
+
 ## Royalty mutable post-mint, CO-SIGNÉE (v0.29.0)
 
 La royalty étant **résolue au settlement depuis le registre** (pas figée dans l'item

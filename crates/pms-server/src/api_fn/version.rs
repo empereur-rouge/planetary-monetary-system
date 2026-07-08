@@ -78,7 +78,13 @@ use crate::api::AppState;
 /// v34 (protocole 2.7 — royalty co-signée) : `/admin/royalty` remplacé par
 /// `POST /v1/royalty/prepare` + `POST /v1/royalty/update` (API-key, PAS admin) —
 /// autorisés par la SIGNATURE du bénéficiaire courant (custodial ou pré-signée).
-pub const API_VERSION: u32 = 34;
+/// v35 (revue marketplace — D1) : `POST /v1/market/settle` et
+/// `POST /v1/royalty/{prepare,update}` renvoient désormais des erreurs au format
+/// `ApiError` à **code numérique stable** (`{"code":NNNN,"message":...}`) au lieu
+/// de `{"error":"..."}` ad hoc. Nouveau code `1050` (Forbidden — clé fournie ≠
+/// bénéficiaire courant, 403). Un rejet consensus (royalty/settlement) mappe sur
+/// `3070` (Conflict, 409).
+pub const API_VERSION: u32 = 35;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -180,6 +186,9 @@ mod tests {
         //          post-mint).
         // v0.29.0: 33 → 34 (protocole 2.7 : /v1/royalty/{prepare,update} co-signés
         //          par le bénéficiaire courant ; /admin/royalty retiré).
-        assert_eq!(parsed.api_version, 34);
+        // v0.29.0 (revue D1): 34 → 35 (market/royalty renvoient ApiError à code
+        //          stable ; nouveau code 1050 Forbidden). Toujours dans le cycle
+        //          non-publié 0.29.0 — l'API 34 n'a jamais été released.
+        assert_eq!(parsed.api_version, 35);
     }
 }

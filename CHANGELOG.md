@@ -41,10 +41,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   des transactions) ; `RoyaltyUpdate` passe du groupe coordinator-only au groupe
   owner-signé (authority.rs), l'autorité étant la co-signature vérifiée au persist.
 
+### Fixed / Security (revue de code avant merge)
+- **fix(consensus/settlement) [B1/B3]** — `bootstrap_utxos` (reconstruction au
+  démarrage) et `apply_block_mem` (garde double-spend RAM) ignoraient
+  `MarketSettle` : au restart, l'item déjà vendu ressuscitait comme non-dépensé
+  (double-spend) et les outputs item/royalty/net disparaissaient ; en RAM, les
+  inputs d'un settlement n'étaient jamais marqués dépensés. Ajout des arms
+  `MarketSettle` (miroir de `TxUtxo`) dans les deux couches.
+- **fix(marketplace/royalty) [B2]** — `royalty_bps > 0` sans bénéficiaire explicite
+  défaultait sur `creator` = **pubkey hex, pas une adresse payable** → output
+  royalty non-dépensable. `validate_royalty_fields` REJETTE désormais `bps > 0`
+  sans bénéficiaire (registre + prepare/update).
+- **fix(consensus/settlement) [A2/A3]** — `validate_settlement` : rejet explicite si
+  le bénéficiaire de royalty est l'acheteur (message clair au lieu de « must
+  net-receive ») ; arithmétique `checked_add`/`checked_sub` sur les nets par
+  (adresse, asset) — un validateur de consensus ne doit JAMAIS paniquer sur un
+  montant attaquant (overflow `Decimal`).
+- **fix(consensus/registry) [A1]** — les écritures de registre des arms `1.*`
+  (royalty, compliance freeze/seize, enregistrement SFT, rotation de clé, NFT,
+  gouvernance) étaient appliquées **avant** la vérification d'existence des parents
+  et la persistance du bloc. Un bloc rejeté ensuite laissait une mutation d'état
+  SANS bloc DAG correspondant (viole « toute mutation = un bloc »). Hissé un gate
+  `1.pre` (idempotence + parents uniques/min/single-writer + existence des parents)
+  AVANT tout arm mutateur. Comportement inchangé pour les blocs valides (35/38
+  tests sandbox verts ; les 3 rouges pré-existent sur la baseline, hors scope).
+- **fix(consensus/royalty) [A4]** — la résolution de métadonnées lisait `token`
+  d'abord puis `sft_class`, mais l'écriture de `RoyaltyUpdate` écrivait dans l'ordre
+  inverse. Aligné l'écriture sur l'ordre de lecture (token d'abord) pour que
+  l'entrée autorisée soit exactement l'entrée écrite.
+- **fix(api) [D1]** — `POST /v1/market/settle` et `POST /v1/royalty/{prepare,update}`
+  renvoient désormais des erreurs `ApiError` à **code numérique stable**
+  (`{"code":NNNN,"message":...}`) au lieu de `{"error":"..."}` ad hoc. Nouveau code
+  `1050` (`Forbidden`, 403 — clé fournie ≠ bénéficiaire courant) ; un rejet
+  consensus mappe sur `3070` (`Conflict`, 409).
+
 ### Infrastructure
 - **chore(version)** — `Cargo` 0.28.0 → **0.29.0** ; `DAG_VERSION` 3.13.0 →
   **3.14.0** (le payload `RoyaltyUpdate` gagne les champs d'autorisation ; additif
-  car 3.13.0 Unreleased) ; `API_VERSION` 33 → **34**.
+  car 3.13.0 Unreleased) ; `API_VERSION` 33 → 34 → **35** (revue D1 : formats
+  d'erreur ApiError à code stable + code 1050). Toujours dans le cycle non-publié
+  0.29.0 (l'API 34 n'a jamais été released).
 
 ---
 

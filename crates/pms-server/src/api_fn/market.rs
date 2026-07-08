@@ -21,6 +21,7 @@
 //! même si ce handler était contourné.
 
 use crate::api::AppState;
+use crate::api_error::ApiError;
 use crate::api_fn::tx_helpers;
 use crate::api_fn::wallet_factory::wallet_from_b64;
 use axum::Json;
@@ -83,22 +84,27 @@ fn resolve_meta(state: &AppState, asset_id: &str) -> Option<TokenMetadata> {
         .map(|c| c.to_token_metadata())
 }
 
-fn bad(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": msg.into() })))
-}
-
 /// Forge un bloc plain signé Coordinator + persiste. Renvoie le `block_id` sur
-/// succès, ou une réponse d'erreur `(status, JSON)` prête à retourner. Facteur
-/// commun des handlers marketplace (settle, royalty update) — le shaping de la
-/// réponse de succès (fee accumulation, corps JSON) reste propre à chaque appelant.
+/// succès, ou une [`ApiError`] à code numérique stable. Facteur commun des
+/// handlers marketplace (settle, royalty update) — le shaping de la réponse de
+/// succès (fee accumulation, corps JSON) reste propre à chaque appelant.
+///
+/// Mapping des rejets consensus : un `PutResult::Rejected` est une VIOLATION des
+/// règles de consensus (royalty sous-payée, signature d'autorisation invalide,
+/// double-spend) → `ApiError::Conflict` (3070, message public vague, raison
+/// interne loggée). Le custodial (creator-studio) tient les deux clés et ne
+/// devrait jamais l'atteindre en pratique ; le `label` distingue les deux flux
+/// dans les logs.
 async fn forge_persist_plain(
     state: &AppState,
     payload: PlainPayload,
     label: &str,
-) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<String, ApiError> {
     let parents = tx_helpers::get_block_parents(&state.store, &state.settings)
         .await
-        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e }))))?;
+        .map_err(|e| ApiError::Internal {
+            reason: format!("{label} parents: {e}"),
+        })?;
     let wb = tx_helpers::forge_and_sign_block(
         Some(PayloadEnvelope::Plain(payload)),
         parents,
@@ -108,37 +114,42 @@ async fn forge_persist_plain(
         Some(label),
     )
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))))?;
+    .map_err(|e| ApiError::Internal {
+        reason: format!("{label} forge: {e}"),
+    })?;
     match tx_helpers::persist_and_broadcast(state, &wb).await {
         Ok(PutResult::Inserted) => Ok(wb.id),
-        Ok(PutResult::AlreadyExists) => {
-            Err((StatusCode::CONFLICT, Json(json!({ "error": "block already exists" }))))
-        }
-        Ok(PutResult::Rejected(r)) => {
-            Err((StatusCode::BAD_REQUEST, Json(json!({ "error": format!("rejected: {r}") }))))
-        }
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e })))),
+        Ok(PutResult::AlreadyExists) => Err(ApiError::AlreadyExists {
+            kind: "block",
+            id: wb.id,
+        }),
+        Ok(PutResult::Rejected(r)) => Err(ApiError::Conflict(format!("{label} rejected: {r}"))),
+        Err(e) => Err(ApiError::StorageError {
+            reason: format!("{label} persist: {e}"),
+        }),
     }
 }
 
 pub async fn market_settle(
     State(state): State<AppState>,
     Json(req): Json<SettleRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, ApiError> {
     // 0) Gas pool (custom ledgers only).
-    if let Err(e) = tx_helpers::try_consume_gas(&state) {
-        return (StatusCode::PAYMENT_REQUIRED, Json(json!({ "error": e })));
-    }
+    tx_helpers::try_consume_gas(&state).map_err(|_| ApiError::GasPoolEmpty(state.ledger_id.clone()))?;
 
     // 1) Wallets + adresses.
-    let seller_wallet = match wallet_from_b64(&req.seller_private_key_b64) {
-        Ok(w) => w,
-        Err(e) => return bad(format!("invalid seller key: {e}")),
-    };
-    let buyer_wallet = match wallet_from_b64(&req.buyer_private_key_b64) {
-        Ok(w) => w,
-        Err(e) => return bad(format!("invalid buyer key: {e}")),
-    };
+    let seller_wallet = wallet_from_b64(&req.seller_private_key_b64).map_err(|e| {
+        ApiError::InvalidField {
+            field: "seller_private_key_b64",
+            reason: e.to_string(),
+        }
+    })?;
+    let buyer_wallet = wallet_from_b64(&req.buyer_private_key_b64).map_err(|e| {
+        ApiError::InvalidField {
+            field: "buyer_private_key_b64",
+            reason: e.to_string(),
+        }
+    })?;
     let hrp = &state.settings.address.hrp;
     let seller = seller_wallet.get_address(hrp);
     let buyer = buyer_wallet.get_address(hrp);
@@ -147,17 +158,31 @@ pub async fn market_settle(
     let max_amount = Decimal::from(market::MAX_SETTLEMENT_AMOUNT);
     let quantity = match Decimal::from_str_exact(&req.quantity) {
         Ok(d) if d > Decimal::ZERO && d <= max_amount => d,
-        _ => return bad("quantity must be a positive decimal within range"),
+        _ => {
+            return Err(ApiError::InvalidAmount {
+                reason: "quantity must be a positive decimal within range".into(),
+            });
+        }
     };
     let price = match Decimal::from_str_exact(&req.price) {
         Ok(d) if d > Decimal::ZERO && d <= max_amount => d,
-        _ => return bad("price must be a positive decimal within range"),
+        _ => {
+            return Err(ApiError::InvalidAmount {
+                reason: "price must be a positive decimal within range".into(),
+            });
+        }
     };
     if seller == buyer {
-        return bad("buyer and seller must differ");
+        return Err(ApiError::InvalidField {
+            field: "buyer",
+            reason: "buyer and seller must differ".into(),
+        });
     }
     if req.price_asset.as_deref() == Some(req.asset_sold.as_str()) {
-        return bad("asset_sold and price_asset must differ");
+        return Err(ApiError::InvalidField {
+            field: "price_asset",
+            reason: "asset_sold and price_asset must differ".into(),
+        });
     }
 
     // 3) Politique royalty de l'ASSET VENDU (registre) → montant + bénéficiaire.
@@ -176,7 +201,11 @@ pub async fn market_settle(
             // Shares the validator's exact formula; None = overflow (rejected there too).
             match market::compute_royalty(price, bps, price_dec_places) {
                 Some(r) => (r, Some(b)),
-                None => return bad("price too large: royalty computation overflow"),
+                None => {
+                    return Err(ApiError::InvalidAmount {
+                        reason: "price too large: royalty computation overflow".into(),
+                    });
+                }
             }
         }
         None => (Decimal::ZERO, None),
@@ -196,21 +225,28 @@ pub async fn market_settle(
 
     // 5) Sélection des UTXOs.
     // 5.a) Item du VENDEUR.
-    let (item_inputs, item_sum) =
-        match tx_helpers::select_utxos(&adapter, &seller, quantity, &sold).await {
-            Ok(r) => r,
-            Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": format!("seller item: {e}") }))),
-        };
+    let (item_inputs, item_sum) = tx_helpers::select_utxos(&adapter, &seller, quantity, &sold)
+        .await
+        .map_err(|_| ApiError::InsufficientBalance {
+            addr: seller.clone(),
+            asset_id: sold.clone(),
+            requested: quantity.to_string(),
+            available: "0".into(),
+        })?;
     let item_change = item_sum - quantity;
 
     // 5.b) Paiement de l'ACHETEUR (+ gas selon l'asset de paiement).
     let pms_native_price = price_asset.is_none();
     let buyer_pay_target = if pms_native_price { price + gas } else { price };
     let (pay_inputs, pay_sum) =
-        match tx_helpers::select_utxos(&adapter, &buyer, buyer_pay_target, &price_asset).await {
-            Ok(r) => r,
-            Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": format!("buyer payment: {e}") }))),
-        };
+        tx_helpers::select_utxos(&adapter, &buyer, buyer_pay_target, &price_asset)
+            .await
+            .map_err(|_| ApiError::InsufficientBalance {
+                addr: buyer.clone(),
+                asset_id: price_asset.clone(),
+                requested: buyer_pay_target.to_string(),
+                available: "0".into(),
+            })?;
 
     // 5.c) Gas séparé en PMS pour un paiement en asset custom (waivable si l'acheteur
     //      n'a pas de PMS sur ce ledger — parité avec send-simple).
@@ -271,22 +307,21 @@ pub async fn market_settle(
         fee: gas.to_string(),
         unlocks: vec![],
     };
-    let tx_hash = match unsigned.signing_message(&state.settings.network.network_id) {
-        Ok(h) => h,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("tx hash: {e}") }))),
-    };
+    let tx_hash = unsigned
+        .signing_message(&state.settings.network.network_id)
+        .map_err(|e| ApiError::Internal {
+            reason: format!("tx hash: {e}"),
+        })?;
 
     // 9) Co-signature : le MÊME message est signé par les DEUX parties ; chaque
     //    input porte l'unlock de SON propriétaire (vendeur pour l'item, acheteur
     //    pour le paiement/gas) — appariement positionnel `input[i] ↔ unlock[i]`.
-    let seller_sig = match seller_wallet.sign(&tx_hash) {
-        Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("seller sign: {e:?}") }))),
-    };
-    let buyer_sig = match buyer_wallet.sign(&tx_hash) {
-        Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("buyer sign: {e:?}") }))),
-    };
+    let seller_sig = seller_wallet.sign(&tx_hash).map_err(|e| ApiError::Internal {
+        reason: format!("seller sign: {e:?}"),
+    })?;
+    let buyer_sig = buyer_wallet.sign(&tx_hash).map_err(|e| ApiError::Internal {
+        reason: format!("buyer sign: {e:?}"),
+    })?;
     let unlocks: Vec<Unlock> = (0..unsigned.inputs.len())
         .map(|i| {
             if i < seller_input_count {
@@ -309,22 +344,18 @@ pub async fn market_settle(
         buyer: buyer.clone(),
     };
 
-    match forge_persist_plain(&state, payload, "MarketSettle").await {
-        Ok(block_id) => {
-            tx_helpers::accumulate_tx_fee(&state, gas).await;
-            (
-                StatusCode::CREATED,
-                Json(json!(SettleResponse {
-                    block_id,
-                    royalty: royalty.to_string(),
-                    royalty_beneficiary: beneficiary,
-                    net_to_seller: net_to_seller.to_string(),
-                    fee: gas.to_string(),
-                })),
-            )
-        }
-        Err(resp) => resp,
-    }
+    let block_id = forge_persist_plain(&state, payload, "MarketSettle").await?;
+    tx_helpers::accumulate_tx_fee(&state, gas).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!(SettleResponse {
+            block_id,
+            royalty: royalty.to_string(),
+            royalty_beneficiary: beneficiary,
+            net_to_seller: net_to_seller.to_string(),
+            fee: gas.to_string(),
+        })),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -416,13 +447,11 @@ fn current_authorizer_addr(current: &TokenMetadata) -> String {
 pub async fn royalty_prepare(
     State(state): State<AppState>,
     Json(req): Json<RoyaltyChangeRequest>,
-) -> impl IntoResponse {
-    let Some(current) = resolve_meta(&state, &req.asset_id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("asset not found: {}", req.asset_id) })),
-        );
-    };
+) -> Result<impl IntoResponse, ApiError> {
+    let current = resolve_meta(&state, &req.asset_id).ok_or_else(|| ApiError::NotFound {
+        kind: "asset",
+        id: req.asset_id.clone(),
+    })?;
     let (new_bps, new_beneficiary) = resolve_new_policy(
         &current,
         req.royalty_bps,
@@ -430,9 +459,12 @@ pub async fn royalty_prepare(
         req.clear_royalty,
         req.clear_beneficiary,
     );
-    if let Err(e) = pms_types::validate_royalty_fields(new_bps, new_beneficiary.as_deref()) {
-        return bad(e);
-    }
+    pms_types::validate_royalty_fields(new_bps, new_beneficiary.as_deref()).map_err(|e| {
+        ApiError::InvalidField {
+            field: "royalty",
+            reason: e,
+        }
+    })?;
     let message_hex = pms_types::royalty_update_signing_message(
         &state.settings.network.network_id,
         &req.asset_id,
@@ -440,7 +472,7 @@ pub async fn royalty_prepare(
         new_beneficiary.as_deref(),
         current.royalty_version,
     );
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "asset_id": req.asset_id,
@@ -450,7 +482,7 @@ pub async fn royalty_prepare(
             "new_royalty_beneficiary": new_beneficiary,
             "message_hex": message_hex,
         })),
-    )
+    ))
 }
 
 /// `POST /v1/royalty/update` — applique le changement de royalty, **autorisé par
@@ -459,13 +491,11 @@ pub async fn royalty_prepare(
 pub async fn royalty_update(
     State(state): State<AppState>,
     Json(req): Json<RoyaltyUpdateRequest>,
-) -> impl IntoResponse {
-    let Some(current) = resolve_meta(&state, &req.asset_id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("asset not found: {}", req.asset_id) })),
-        );
-    };
+) -> Result<impl IntoResponse, ApiError> {
+    let current = resolve_meta(&state, &req.asset_id).ok_or_else(|| ApiError::NotFound {
+        kind: "asset",
+        id: req.asset_id.clone(),
+    })?;
     let (new_bps, new_beneficiary) = resolve_new_policy(
         &current,
         req.royalty_bps,
@@ -473,9 +503,12 @@ pub async fn royalty_update(
         req.clear_royalty,
         req.clear_beneficiary,
     );
-    if let Err(e) = pms_types::validate_royalty_fields(new_bps, new_beneficiary.as_deref()) {
-        return bad(e);
-    }
+    pms_types::validate_royalty_fields(new_bps, new_beneficiary.as_deref()).map_err(|e| {
+        ApiError::InvalidField {
+            field: "royalty",
+            reason: e,
+        }
+    })?;
     let authorizer = current_authorizer_addr(&current);
     let msg = pms_types::royalty_update_signing_message(
         &state.settings.network.network_id,
@@ -489,36 +522,32 @@ pub async fn royalty_update(
     let (auth_pubkey_hex, auth_signature_b64) = if let Some(pk_b64) = &req.authorizer_private_key_b64
     {
         // Voie custodiale : reconstruit le wallet, vérifie qu'il EST le
-        // bénéficiaire courant (403 sinon), puis signe.
-        let wallet = match wallet_from_b64(pk_b64) {
-            Ok(w) => w,
-            Err(e) => return bad(format!("invalid authorizer key: {e}")),
-        };
+        // bénéficiaire courant (403 Forbidden sinon), puis signe.
+        let wallet = wallet_from_b64(pk_b64).map_err(|e| ApiError::InvalidField {
+            field: "authorizer_private_key_b64",
+            reason: e.to_string(),
+        })?;
         if !pms_core::validations::ownership::unlock_matches_address(
             &wallet.public_key_hex,
             &authorizer,
         ) {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({ "error": "provided key is not the current royalty beneficiary" })),
-            );
+            return Err(ApiError::Forbidden {
+                reason: "provided key is not the current royalty beneficiary".into(),
+            });
         }
-        match wallet.sign(&msg) {
-            Ok(sig) => (wallet.public_key_hex.clone(), sig),
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": format!("sign failed: {e:?}") })),
-                );
-            }
-        }
+        let sig = wallet.sign(&msg).map_err(|e| ApiError::Internal {
+            reason: format!("authorizer sign failed: {e:?}"),
+        })?;
+        (wallet.public_key_hex.clone(), sig)
     } else if let (Some(pk), Some(sig)) = (&req.auth_pubkey_hex, &req.auth_signature_b64) {
         // Voie pré-signée : le coordinateur ne voit jamais la clé. Persist vérifie.
         (pk.clone(), sig.clone())
     } else {
-        return bad(
-            "provide authorizer_private_key_b64 OR (auth_pubkey_hex + auth_signature_b64)",
-        );
+        return Err(ApiError::InvalidField {
+            field: "authorization",
+            reason: "provide authorizer_private_key_b64 OR (auth_pubkey_hex + auth_signature_b64)"
+                .into(),
+        });
     };
 
     let payload = PlainPayload::RoyaltyUpdate {
@@ -528,17 +557,15 @@ pub async fn royalty_update(
         auth_pubkey_hex,
         auth_signature_b64,
     };
-    match forge_persist_plain(&state, payload, "RoyaltyUpdate").await {
-        Ok(block_id) => (
-            StatusCode::OK,
-            Json(json!({
-                "status": "ok",
-                "asset_id": req.asset_id,
-                "royalty_bps": new_bps,
-                "royalty_beneficiary": new_beneficiary,
-                "block_id": block_id,
-            })),
-        ),
-        Err(resp) => resp,
-    }
+    let block_id = forge_persist_plain(&state, payload, "RoyaltyUpdate").await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "asset_id": req.asset_id,
+            "royalty_bps": new_bps,
+            "royalty_beneficiary": new_beneficiary,
+            "block_id": block_id,
+        })),
+    ))
 }

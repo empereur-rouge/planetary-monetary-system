@@ -153,22 +153,37 @@ pub fn validate_settlement(
     if c.royalty > Decimal::ZERO && c.beneficiary.is_none() {
         return Err("settlement: royalty > 0 requires a beneficiary".into());
     }
+    // audit A2: the royalty beneficiary cannot be the buyer — they would both pay
+    // the price AND receive their own royalty, netting negative in `price_asset`,
+    // which the exact-gain accounting below can't express (it would fail with a
+    // confusing "must net-receive"). Reject early with a clear reason. (The
+    // `beneficiary == seller` case — a creator reselling their own item — IS
+    // supported: the gains accumulate to `price`.)
+    if c.royalty > Decimal::ZERO && c.beneficiary == Some(c.buyer) {
+        return Err("settlement: royalty beneficiary cannot be the buyer".into());
+    }
     let net_to_seller = c.price - c.royalty;
     let item = Some(c.asset_sold);
 
     // ── Net change per (address, asset): + received, − spent ─────────────
+    // Checked arithmetic (audit A3): a consensus validator must never panic on
+    // attacker-influenced amounts — `Decimal`'s `+=`/`-=` panic on overflow.
     let mut net: HashMap<(&str, Option<&str>), Decimal> = HashMap::new();
     for o in outputs {
         let a = Decimal::from_str_exact(&o.amount)
             .map_err(|_| format!("settlement: bad output amount {}", o.amount))?;
-        *net.entry((o.address.as_str(), o.asset_id.as_deref()))
-            .or_default() += a;
+        let slot = net.entry((o.address.as_str(), o.asset_id.as_deref())).or_default();
+        *slot = slot
+            .checked_add(a)
+            .ok_or_else(|| "settlement: amount overflow".to_string())?;
     }
     for i in input_outputs {
         let a = Decimal::from_str_exact(&i.amount)
             .map_err(|_| format!("settlement: bad input amount {}", i.amount))?;
-        *net.entry((i.address.as_str(), i.asset_id.as_deref()))
-            .or_default() -= a;
+        let slot = net.entry((i.address.as_str(), i.asset_id.as_deref())).or_default();
+        *slot = slot
+            .checked_sub(a)
+            .ok_or_else(|| "settlement: amount overflow".to_string())?;
     }
     let get = |addr: &str, asset: Option<&str>| -> Decimal {
         net.get(&(addr, asset)).copied().unwrap_or(Decimal::ZERO)
@@ -519,5 +534,17 @@ mod tests {
         let r = validate_settlement(&[], &[], &c);
         println!("buyer==seller → {r:?}");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn reject_beneficiary_equals_buyer() {
+        // audit A2: the royalty beneficiary cannot be the buyer — clear reason,
+        // not a confusing "must net-receive".
+        let mut c = baseline_check();
+        c.beneficiary = Some("bob"); // == buyer
+        let r = validate_settlement(&[], &[], &c);
+        println!("beneficiary==buyer → {r:?}");
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("beneficiary cannot be the buyer"));
     }
 }

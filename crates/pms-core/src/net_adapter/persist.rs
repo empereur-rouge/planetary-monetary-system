@@ -96,8 +96,12 @@ where
     /// mint contraint ET la résolution du taux de demurrage.
     fn resolve_asset_metadata(&self, asset_id: &str) -> Option<pms_types::TokenMetadata> {
         // Fail-open view of the strict resolver: a store read error is swallowed
-        // to `None` (used by the demurrage-rate lookup, where a transient miss is
-        // tolerable). The royalty gate uses `resolve_asset_metadata_strict`.
+        // to `None`. Used by the two paths where a transient miss is tolerable and
+        // fails safe: the demurrage-rate lookup (a missed rate just skips decay)
+        // and constrained-mint validation (a missed cap/collateral falls back to
+        // the Coordinator gate — see `validate_custom_asset_mints`). The royalty
+        // settlement gate, which MUST be deterministic across nodes, uses the
+        // fail-CLOSED `resolve_asset_metadata_strict` instead.
         self.resolve_asset_metadata_strict(asset_id).unwrap_or(None)
     }
 
@@ -393,6 +397,101 @@ where
             );
             return Ok(PutResult::Rejected(format!("payload authority: {e}")));
         }
+
+        // ============================================================
+        // 1.pre) GATE STRUCTUREL + PARENTS — AVANT toute mutation d'état
+        // ============================================================
+        //
+        // Audit A1 : les arms `1.*` ci-dessous (mint NFT, ConfigUpdate,
+        // Governance, SFT, Royalty, Compliance, KeyRotation) MUTENT le registre
+        // (`apply_mint`/`apply_action`/`apply_config_update`/`put_governance_*`/
+        // `put_sft_class`/`put_token`/`freeze_address`/`record_key_rotation`…).
+        // Ces écritures NE DOIVENT PAS s'appliquer si le bloc est ensuite rejeté
+        // pour une raison structurelle (parents dupliqués, parent inexistant,
+        // chaîne single-writer) ou parce qu'il est déjà présent : sinon on
+        // obtient une mutation d'état SANS bloc DAG correspondant (viole
+        // l'invariant « toute mutation = un bloc signé ») et une divergence entre
+        // nœuds selon la santé de leur store. On hisse donc ICI, EN AMONT des arms
+        // mutateurs, l'idempotence + les contrôles structurels de parents
+        // (ex-2.d/2.e/2.f) + l'existence des parents (ex-4.a). Les payloads à UTXO
+        // (TxUtxo/MarketSettle/Bridge/Seize/Reverse) restent en plus gardés au
+        // commit-point atomique (`try_mark_spent`) en section 5.
+
+        // (idempotence) Un bloc déjà présent ne ré-applique JAMAIS ses effets. Le
+        // check autoritaire reste en section 5 (avant `apply_diff`) ; celui-ci
+        // évite en amont de rejouer un arm mutateur sur un re-gossip / retry.
+        if self.dag.contains_block(&wb.id) {
+            return Ok(PutResult::AlreadyExists);
+        }
+
+        // (parents 2.d) Parents uniques + pas d'auto-parentage (protection de base)
+        {
+            use std::collections::HashSet;
+            let mut seen = HashSet::new();
+            if !wb.parents.iter().all(|p| seen.insert(p)) {
+                return Ok(PutResult::Rejected("duplicate parent reference".into()));
+            }
+            if wb.parents.iter().any(|p| p == &wb.id) {
+                return Ok(PutResult::Rejected("self-parent not allowed".into()));
+            }
+        }
+
+        // (parents 2.e) Minimum de parents après bootstrap (soft anti-spam). En
+        // mode single-writer, REMPLACÉ par enforce_single_parent (2.f ci-dessous).
+        if !policy.enforce_single_writer {
+            let dag_was_bootstrapped = { self.dag.len() > 1 };
+            if dag_was_bootstrapped && wb.parents.len() < policy.min_parents_after_boot {
+                let has_genesis = wb.parents.iter().any(|p| p == "genesis");
+                let available_tips = self.dag.find_tips().len();
+                if !(has_genesis && available_tips < policy.min_parents_after_boot) {
+                    return Ok(PutResult::Rejected(format!(
+                        "not enough parents after bootstrap: got {}, need {}. Tip: use 'genesis' as parent during bootstrap.",
+                        wb.parents.len(),
+                        policy.min_parents_after_boot
+                    )));
+                }
+            }
+        }
+
+        // (parents 2.f) SINGLE WRITER : chaîne linéaire (exactement 1 parent, sauf
+        // genesis à 0 parent).
+        if self.settings.validation.enforce_single_writer {
+            let is_genesis = payload
+                .as_ref()
+                .is_some_and(|p| matches!(p, PayloadEnvelope::Plain(PlainPayload::Genesis)));
+            if !is_genesis && wb.parents.len() != 1 {
+                tracing::warn!(
+                    "🚫 Single Writer violation: block {} has {} parents (expected 1)",
+                    &wb.id[..16.min(wb.id.len())],
+                    wb.parents.len()
+                );
+                return Ok(PutResult::Rejected(format!(
+                    "single_writer: block must have exactly 1 parent, got {}",
+                    wb.parents.len()
+                )));
+            }
+        }
+
+        // (parents 4.a) Existence des parents (RAM DAG d'abord, puis store — gère
+        // la race de persistance async). DOIT précéder les arms mutateurs.
+        let t_parents_start = std::time::Instant::now();
+        if policy.enforce_parent_existence {
+            for parent_id in &wb.parents {
+                let in_ram = self.dag.contains_block(parent_id);
+                if !in_ram {
+                    match self.store.get_block(parent_id).await {
+                        Ok(Some(_)) => continue, // Parent in store
+                        Ok(None) | Err(_) => {
+                            return Ok(PutResult::Rejected(format!(
+                                "dag validation failed: parent {} not found",
+                                parent_id
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        let t_parents = t_parents_start.elapsed();
 
         // 1.x) Politique de mint (PlainPayload::Mint seulement)
         //
@@ -971,31 +1070,36 @@ where
                     "royalty update: signer is not the current royalty beneficiary".to_string(),
                 ));
             }
-            // (d) Écriture sur le registre correspondant (token OU classe SFT,
-            //     namespace `:` exclusif). Refus si introuvable (race improbable).
-            match self.store.get_sft_class(asset_id) {
-                Ok(Some(mut class)) => {
-                    class.royalty_bps = *royalty_bps;
-                    class.royalty_beneficiary = royalty_beneficiary.clone();
-                    class.royalty_version = next_version; // anti-replay : monotone
-                    if let Err(e) = self.store.put_sft_class(&class) {
+            // (d) Écriture sur le registre correspondant, dans le MÊME ordre de
+            //     résolution que la lecture (audit A4/C3 : token d'abord, puis
+            //     classe SFT — cf. `resolve_asset_metadata_strict`). Aligner les
+            //     deux ordres garantit que l'entrée écrite est EXACTEMENT celle
+            //     qui a servi à autoriser le changement (version + autorisateur),
+            //     même dans le cas dégénéré où les deux namespaces coexisteraient.
+            //     Namespace `:` mutuellement exclusif ; refus si introuvable.
+            match self.store.get_token(asset_id) {
+                Ok(Some(mut meta)) => {
+                    meta.royalty_bps = *royalty_bps;
+                    meta.royalty_beneficiary = royalty_beneficiary.clone();
+                    meta.royalty_version = next_version; // anti-replay : monotone
+                    if let Err(e) = self.store.put_token(&meta) {
                         return Ok(PutResult::Rejected(format!("royalty update store: {e}")));
                     }
                     tracing::info!(
-                        "👑 Royalty updated (SFT class {}): {:?} bps → {:?} v{} (block {})",
+                        "👑 Royalty updated (token {}): {:?} bps → {:?} v{} (block {})",
                         asset_id, royalty_bps, royalty_beneficiary, next_version, wb.id
                     );
                 }
-                Ok(None) => match self.store.get_token(asset_id) {
-                    Ok(Some(mut meta)) => {
-                        meta.royalty_bps = *royalty_bps;
-                        meta.royalty_beneficiary = royalty_beneficiary.clone();
-                        meta.royalty_version = next_version; // anti-replay : monotone
-                        if let Err(e) = self.store.put_token(&meta) {
+                Ok(None) => match self.store.get_sft_class(asset_id) {
+                    Ok(Some(mut class)) => {
+                        class.royalty_bps = *royalty_bps;
+                        class.royalty_beneficiary = royalty_beneficiary.clone();
+                        class.royalty_version = next_version; // anti-replay : monotone
+                        if let Err(e) = self.store.put_sft_class(&class) {
                             return Ok(PutResult::Rejected(format!("royalty update store: {e}")));
                         }
                         tracing::info!(
-                            "👑 Royalty updated (token {}): {:?} bps → {:?} v{} (block {})",
+                            "👑 Royalty updated (SFT class {}): {:?} bps → {:?} v{} (block {})",
                             asset_id, royalty_bps, royalty_beneficiary, next_version, wb.id
                         );
                     }
@@ -1160,72 +1264,10 @@ where
             );
         }
 
-        // 2.d) Parents uniques + pas d'auto-parentage (protection de base)
-        {
-            use std::collections::HashSet;
-            let mut seen = HashSet::new();
-
-            if !wb.parents.iter().all(|p| seen.insert(p)) {
-                return Ok(PutResult::Rejected("duplicate parent reference".into()));
-            }
-
-            if wb.parents.iter().any(|p| p == &wb.id) {
-                return Ok(PutResult::Rejected("self-parent not allowed".into()));
-            }
-        }
-
-        // 2.e) Minimum de parents apres bootstrap (soft anti-spam)
-        //
-        // On requiert min_parents (typiquement 2),
-        // MAIS on permet d'utiliser "genesis" comme parent supplementaire
-        // si le DAG n'a pas assez de tips distincts.
-        //
-        // NOTE: En mode Single Writer, cette regle est REMPLACEE par enforce_single_parent.
-        //
-        // Regle:
-        //  - parents.len() >= min_parents_after_boot
-        //  - SAUF si le bloc contient "genesis" comme parent ET qu'il n'y a pas assez de tips
-        //  - Dans ce cas, genesis peut "completer" le compte de parents
-        if !policy.enforce_single_writer {
-            let dag_was_bootstrapped = { self.dag.len() > 1 };
-            if dag_was_bootstrapped && wb.parents.len() < policy.min_parents_after_boot {
-                // Verifier si genesis est utilise comme parent supplementaire
-                let has_genesis = wb.parents.iter().any(|p| p == "genesis");
-                let available_tips = self.dag.find_tips().len();
-
-                // Autoriser si genesis est utilise ET qu'il n'y a pas assez de tips disponibles
-                if !(has_genesis && available_tips < policy.min_parents_after_boot) {
-                    return Ok(PutResult::Rejected(format!(
-                        "not enough parents after bootstrap: got {}, need {}. Tip: use 'genesis' as parent during bootstrap.",
-                        wb.parents.len(),
-                        policy.min_parents_after_boot
-                    )));
-                }
-            }
-        }
-
-        // 2.f) SINGLE WRITER: Chaine Lineaire (1 parent)
-        //
-        // En mode Single Writer, on impose exactement 1 parent par bloc.
-        // Cela garantit une chaine lineaire au lieu d'un DAG.
-        if self.settings.validation.enforce_single_writer {
-            let is_genesis = payload
-                .as_ref()
-                .is_some_and(|p| matches!(p, PayloadEnvelope::Plain(PlainPayload::Genesis)));
-
-            // Genesis: 0 parents, Non-genesis: exactement 1 parent
-            if !is_genesis && wb.parents.len() != 1 {
-                tracing::warn!(
-                    "🚫 Single Writer violation: block {} has {} parents (expected 1)",
-                    &wb.id[..16.min(wb.id.len())],
-                    wb.parents.len()
-                );
-                return Ok(PutResult::Rejected(format!(
-                    "single_writer: block must have exactly 1 parent, got {}",
-                    wb.parents.len()
-                )));
-            }
-        }
+        // NOTE: les contrôles structurels de parents (uniques, min-parents,
+        // single-writer) ET l'existence des parents ont été hissés en section
+        // `1.pre` (audit A1) — ils DOIVENT précéder les arms mutateurs `1.*`
+        // ci-dessus. Ne pas les ré-appliquer ici (double exécution inutile).
 
         // ============================================================
         // 3) RECONSTRUCTION DU Block (objet RAM) POUR LA VALIDATION DAG
@@ -1234,7 +1276,7 @@ where
         // A ce stade:
         //   - header ok (reseau, signature, PoW)
         //   - payload JSON parse (ou None)
-        //   - contraintes structurelles simples faites (taille, parents uniques)
+        //   - contraintes structurelles + existence des parents faites (1.pre)
         //
         // On peut donc construire un Block propre et coherent.
         let block = Block {
@@ -1251,44 +1293,11 @@ where
         // 4) VALIDATION DAG PROFONDE (UTXO, double-spend, regles metier)
         // ============================================================
         //
-        // On utilise ta fonction `validate_block(dag, &block, policy)` qui:
-        //   - verifie parents_exist / no_cycle / parent_count
-        //   - applique la politique UTXO (double spend, montants, etc.)
-        //
         // Important: on ne modifie pas le DAG ici, on fait juste les checks.
-        //
-        // ## FIX RACE CONDITION (Phase 2 IOTA-like)
-        //
-        // Les tips sont selectionnes depuis RocksDB (`store.top_tips()`), mais
-        // validate_block verifie les parents en RAM. Sous charge parallele,
-        // un parent peut exister dans RocksDB mais pas encore en RAM.
-        //
-        // Solution: verifier d'abord que les parents existent dans le store.
+        // L'existence + la structure des parents sont déjà validées en 1.pre
+        // (hissées avant les arms mutateurs, audit A1). Reste ici la validation
+        // UTXO (double-spend, montants, conservation) pour les payloads à tx.
         // ============================================================
-
-        // 4.a) Verification des parents (RAM DAG + store)
-        // FIX: Check RAM DAG first to handle async persistence race condition
-        let t_parents_start = std::time::Instant::now();
-        if policy.enforce_parent_existence {
-            for parent_id in &block.parents {
-                // Check RAM DAG first (blocks are inserted here immediately)
-                let in_ram = self.dag.contains_block(parent_id);
-
-                // If not in RAM, check store (for blocks not yet loaded in RAM)
-                if !in_ram {
-                    match self.store.get_block(parent_id).await {
-                        Ok(Some(_)) => continue, // Parent in store
-                        Ok(None) | Err(_) => {
-                            return Ok(PutResult::Rejected(format!(
-                                "dag validation failed: parent {} not found",
-                                parent_id
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-        let t_parents = t_parents_start.elapsed();
 
         // 4.new) Validation UTXO Async (Sharding Phase 4)
         //
