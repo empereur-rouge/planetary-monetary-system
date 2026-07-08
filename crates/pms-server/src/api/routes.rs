@@ -420,6 +420,9 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         // Admin SFT API - semi-fongibles (créer une classe + mint) — produit des blocs
         .route("/admin/sft/classes", post(crate::api_fn::sft::admin_create_sft_class))
         .route("/admin/sft/mint", post(crate::api_fn::sft::admin_mint_sft))
+        // Admin Royalty API (protocole 2.7) — redirige/modifie la royalty d'un
+        // asset existant (produit un bloc RoyaltyUpdate).
+        .route("/admin/royalty", post(crate::api_fn::market::admin_update_royalty))
         // Admin Ledger API - block-producing operations only
         .route("/admin/ledgers/create", post(admin_create_ledger))
         .route("/admin/ledgers/{ledger_id}/transfer-ownership", post(transfer_ledger_ownership))

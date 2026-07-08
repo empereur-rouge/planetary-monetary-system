@@ -73,7 +73,9 @@ use crate::api::AppState;
 /// (règlement atomique vente/revente + royalty enforced consensus) ; champs
 /// `royalty_bps`/`royalty_beneficiary` ajoutés à `POST /admin/tokens/create` et
 /// `POST /admin/sft/classes`.
-pub const API_VERSION: u32 = 32;
+/// v33 (protocole 2.7 — royalty mutable) : nouvel endpoint `POST /admin/royalty`
+/// (redirige/modifie le bénéficiaire ou le taux de royalty d'un asset existant).
+pub const API_VERSION: u32 = 33;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -171,6 +173,8 @@ mod tests {
         //          BridgeMint avec son BridgeLock — montant/asset/destinataire/ledger).
         // v0.27.0: 31 → 32 (protocole 2.7 : POST /v1/market/settle + champs royalty
         //          sur tokens/create & sft/classes).
-        assert_eq!(parsed.api_version, 32);
+        // v0.28.0: 32 → 33 (protocole 2.7 : POST /admin/royalty — royalty mutable
+        //          post-mint).
+        assert_eq!(parsed.api_version, 33);
     }
 }

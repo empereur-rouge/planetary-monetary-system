@@ -13,6 +13,9 @@ use pms_types_payload::{SftClass, TokenMetadata};
 pub trait TokenRegistryStorage: Send + Sync {
     /// Récupère les métadonnées d'un asset custom, `None` si non enregistré.
     fn get_token(&self, asset_id: &str) -> Result<Option<TokenMetadata>>;
+    /// Écrase les métadonnées d'un token **existant** (validées, sans contrôle
+    /// d'unicité) — mutations de politique (ex: `RoyaltyUpdate`, protocole 2.7).
+    fn put_token(&self, metadata: &TokenMetadata) -> Result<()>;
 }
 
 /// Registre des classes semi-fongibles (SFT, `pms-spec-semi-fungibles.md`).

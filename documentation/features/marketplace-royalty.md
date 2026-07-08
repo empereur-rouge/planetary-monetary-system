@@ -2,7 +2,7 @@
 tags: [feature]
 created: 2026-07-08
 updated: 2026-07-08
-version: v0.27.0
+version: v0.28.0
 ---
 
 # Marketplace — Règlement atomique + Royalty de revente (protocole 2.7)
@@ -75,8 +75,26 @@ création de l'asset (`royalty_bps`/`royalty_beneficiary` sur `/admin/tokens/cre
 | Méthode | Path | Description |
 |---------|------|-------------|
 | POST | `/v1/market/settle` | Règlement atomique vente/revente (custodial). Body : `seller_private_key_b64`, `buyer_private_key_b64`, `asset_sold`, `quantity`, `price_asset?`, `price` |
+| POST | `/admin/royalty` | **Redirige/modifie** la royalty d'un asset existant. Body : `asset_id`, `royalty_beneficiary?`, `royalty_bps?`, `clear_beneficiary?`, `clear_royalty?` (v0.28.0) |
 | POST | `/admin/tokens/create` | + `royalty_bps?`, `royalty_beneficiary?` |
 | POST | `/admin/sft/classes` | + `royalty_bps?`, `royalty_beneficiary?` |
+
+## Royalty mutable post-mint (v0.28.0)
+
+La royalty étant **résolue au settlement depuis le registre** (pas figée dans l'item
+au mint), le bénéficiaire — et le taux — peuvent être **changés après création** via
+`POST /admin/royalty` (payload `RoyaltyUpdate`, coordinator-only, bloc DAG). L'update
+s'applique à **toutes les ventes futures**, aucune vente passée n'est affectée. Cas
+d'usage : le créateur vend ses droits, une DAO reprend, ou un simple changement de
+wallet de payout.
+
+```
+POST /admin/royalty { "asset_id":"studio:ticket", "royalty_beneficiary":"<nouveau>" }
+→ 200 { asset_id, royalty_bps, royalty_beneficiary, block_id }
+```
+Deltas : `royalty_beneficiary`/`royalty_bps` absents = inchangés ; `clear_beneficiary`
+= retour au créateur par défaut ; `clear_royalty` = supprime la royalty. Le nouveau
+bénéficiaire voit `royalty_updated` dans son feed d'activité.
 
 ## Séquence end-to-end
 

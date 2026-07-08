@@ -42,6 +42,11 @@ pub fn extract_involved_addresses(plain: &PlainPayload) -> Vec<String> {
             pms_types_nft::NftAction::BatchBurn { burner, .. } => addrs.push(burner.clone()),
         },
         PlainPayload::TokenCreate(meta) => addrs.push(meta.creator.clone()),
+        PlainPayload::RoyaltyUpdate { royalty_beneficiary, .. } => {
+            if let Some(b) = royalty_beneficiary {
+                addrs.push(b.clone());
+            }
+        }
         PlainPayload::BridgeLock { dest_address, .. } => addrs.push(dest_address.clone()),
         PlainPayload::BridgeMint { outputs, .. } => {
             addrs.extend(outputs.iter().map(|o| o.address.clone()));
@@ -166,6 +171,11 @@ pub fn extract_involved_with_category(plain: &PlainPayload) -> Vec<(String, Acti
         },
         PlainPayload::TokenCreate(meta) => {
             out.push((meta.creator.clone(), ActivityCategory::TokenCreate));
+        }
+        PlainPayload::RoyaltyUpdate { royalty_beneficiary, .. } => {
+            if let Some(b) = royalty_beneficiary {
+                out.push((b.clone(), ActivityCategory::TokenCreate));
+            }
         }
         PlainPayload::TokenBurn { owner, .. } => {
             out.push((owner.clone(), ActivityCategory::Burn));
@@ -434,6 +444,22 @@ pub fn classify_for_storage(
                 asset_id: Some(meta.asset_id.clone()),
                 counterparty: None,
                 payload: serde_json::to_value(meta).unwrap_or_default(),
+            }]
+        }
+
+        // RoyaltyUpdate (protocole 2.7): the new beneficiary sees "royalty_updated".
+        PlainPayload::RoyaltyUpdate {
+            asset_id,
+            royalty_beneficiary,
+            ..
+        } if royalty_beneficiary.as_deref() == Some(addr) => {
+            vec![StoredActivityItem {
+                activity_type: "royalty_updated".into(),
+                direction: "info".into(),
+                amount: None,
+                asset_id: Some(asset_id.clone()),
+                counterparty: None,
+                payload: serde_json::to_value(plain).unwrap_or_default(),
             }]
         }
 

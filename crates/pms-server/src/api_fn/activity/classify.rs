@@ -290,6 +290,24 @@ pub(crate) async fn classify_activity(
             }]
         }
 
+        PlainPayload::RoyaltyUpdate {
+            asset_id,
+            royalty_beneficiary,
+            ..
+        } if royalty_beneficiary.as_deref() == Some(addr) => {
+            vec![ActivityItem {
+                block_id: String::new(),
+                ts_ms: 0,
+                activity_type: "royalty_updated".to_string(),
+                direction: "info".to_string(),
+                amount: None,
+                asset_id: Some(asset_id.clone()),
+                counterparty: None,
+                ledger_id: None,
+                payload: serde_json::to_value(plain).unwrap_or_default(),
+            }]
+        }
+
         PlainPayload::TokenBurn {
             owner,
             amount,
@@ -715,6 +733,24 @@ pub(crate) fn classify_activity_sync(plain: &PlainPayload, addr: &str) -> Vec<Ac
                 counterparty: None,
                 ledger_id: None,
                 payload: serde_json::to_value(meta).unwrap_or_default(),
+            }]
+        }
+
+        PlainPayload::RoyaltyUpdate {
+            asset_id,
+            royalty_beneficiary,
+            ..
+        } if royalty_beneficiary.as_deref() == Some(addr) => {
+            vec![ActivityItem {
+                block_id: String::new(),
+                ts_ms: 0,
+                activity_type: "royalty_updated".to_string(),
+                direction: "info".to_string(),
+                amount: None,
+                asset_id: Some(asset_id.clone()),
+                counterparty: None,
+                ledger_id: None,
+                payload: serde_json::to_value(plain).unwrap_or_default(),
             }]
         }
 

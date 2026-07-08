@@ -6616,3 +6616,84 @@ async fn test_market_settle_rejects_tampered_royalty() -> Result<()> {
     println!("  ✅ tampered royalty settlement REJECTED by consensus; state intact");
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_royalty_beneficiary_change_after_mint() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+    let seller = Wallet::generate();
+    let buyer = Wallet::generate();
+    let creator_a = Wallet::generate();
+    let creator_b = Wallet::generate();
+    let seller_addr = seller.get_address("8e");
+    let buyer_addr = buyer.get_address("8e");
+    let creator_a_addr = creator_a.get_address("8e");
+    let creator_b_addr = creator_b.get_address("8e");
+
+    println!("\n=== [ROYALTY BENEFICIARY CHANGE POST-MINT] créateur A → B ===");
+
+    // Classe royalty 20% → créateur A ; 2 exemplaires au vendeur.
+    let (st, _b) = sandbox
+        .admin_post("/admin/sft/classes", json!({
+            "collection_id":"studio","class_id":"pass","name":"Season Pass","decimals":0,
+            "max_supply":"10","royalty_bps":2000,"royalty_beneficiary":creator_a_addr,
+        }))
+        .await;
+    anyhow::ensure!(st.is_success(), "class create failed");
+    let (st, _b) = sandbox.admin_post("/admin/sft/mint", json!({"asset_id":"studio:pass","to":seller_addr,"amount":"2"})).await;
+    anyhow::ensure!(st.is_success(), "mint failed");
+    sandbox.faucet_mint(None, &buyer_addr, "1000").await?;
+    sleep(Duration::from_millis(200)).await;
+
+    // Vente #1 → créateur A payé (politique d'origine).
+    let (st, b1) = sandbox
+        .post(None, "/v1/market/settle", json!({
+            "seller_private_key_b64":seller.private_key_b64,"buyer_private_key_b64":buyer.private_key_b64,
+            "asset_sold":"studio:pass","quantity":"1","price":"100",
+        }))
+        .await;
+    println!("  settle #1 → {st} — beneficiary={:?}", b1["royalty_beneficiary"]);
+    anyhow::ensure!(st.is_success(), "settle 1 failed: {b1}");
+    assert_eq!(b1["royalty_beneficiary"].as_str(), Some(creator_a_addr.as_str()));
+    sleep(Duration::from_millis(200)).await;
+
+    // Redirection du bénéficiaire vers le créateur B (taux inchangé).
+    let (st, upd) = sandbox
+        .admin_post("/admin/royalty", json!({"asset_id":"studio:pass","royalty_beneficiary":creator_b_addr}))
+        .await;
+    println!("  ROYALTY UPDATE → {st} — {upd:?}");
+    anyhow::ensure!(st.is_success(), "royalty update failed: {upd}");
+    assert_eq!(upd["royalty_beneficiary"].as_str(), Some(creator_b_addr.as_str()));
+    assert_eq!(upd["royalty_bps"].as_u64(), Some(2000), "taux inchangé");
+    sleep(Duration::from_millis(200)).await;
+
+    // Vente #2 → créateur B payé (nouvelle politique), A inchangé.
+    let (st, b2) = sandbox
+        .post(None, "/v1/market/settle", json!({
+            "seller_private_key_b64":seller.private_key_b64,"buyer_private_key_b64":buyer.private_key_b64,
+            "asset_sold":"studio:pass","quantity":"1","price":"100",
+        }))
+        .await;
+    println!("  settle #2 → {st} — beneficiary={:?}", b2["royalty_beneficiary"]);
+    anyhow::ensure!(st.is_success(), "settle 2 failed: {b2}");
+    assert_eq!(b2["royalty_beneficiary"].as_str(), Some(creator_b_addr.as_str()), "settle #2 paie le créateur B");
+    sleep(Duration::from_millis(200)).await;
+
+    let a = sandbox.get_balance("main", &creator_a_addr).await?;
+    let b = sandbox.get_balance("main", &creator_b_addr).await?;
+    let s = sandbox.get_balance("main", &seller_addr).await?;
+    let buyer_tickets = sandbox.get_asset_balance("main", &buyer_addr, Some("studio:pass")).await?;
+    println!("  creatorA(old)={a} creatorB(new)={b} seller={s} buyer_passes={buyer_tickets}");
+    assert_eq!(a, Decimal::from(20), "créateur A : royalty de la vente #1 seulement");
+    assert_eq!(b, Decimal::from(20), "créateur B : royalty de la vente #2 (post-changement)");
+    assert_eq!(s, Decimal::from(160), "vendeur : 80 + 80");
+    assert_eq!(buyer_tickets, Decimal::from(2), "acheteur possède les 2 pass");
+
+    let b_acts = sandbox.activity_types(&creator_b_addr).await?;
+    println!("  creatorB activity = {b_acts:?}");
+    assert!(b_acts.iter().any(|t| t == "royalty_updated"), "créateur B voit royalty_updated");
+    assert!(b_acts.iter().any(|t| t == "royalty_received"), "créateur B voit royalty_received");
+
+    println!("  ✅ bénéficiaire redirigé APRÈS mint ; les ventes futures paient le nouveau bénéficiaire");
+    Ok(())
+}

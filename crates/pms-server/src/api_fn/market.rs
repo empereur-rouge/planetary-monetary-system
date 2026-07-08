@@ -87,6 +87,40 @@ fn bad(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": msg.into() })))
 }
 
+/// Forge un bloc plain signé Coordinator + persiste. Renvoie le `block_id` sur
+/// succès, ou une réponse d'erreur `(status, JSON)` prête à retourner. Facteur
+/// commun des handlers marketplace (settle, royalty update) — le shaping de la
+/// réponse de succès (fee accumulation, corps JSON) reste propre à chaque appelant.
+async fn forge_persist_plain(
+    state: &AppState,
+    payload: PlainPayload,
+    label: &str,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let parents = tx_helpers::get_block_parents(&state.store, &state.settings)
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e }))))?;
+    let wb = tx_helpers::forge_and_sign_block(
+        Some(PayloadEnvelope::Plain(payload)),
+        parents,
+        &state.srv.adapter_arc(),
+        &state.node_wallet,
+        &state.settings,
+        Some(label),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))))?;
+    match tx_helpers::persist_and_broadcast(state, &wb).await {
+        Ok(PutResult::Inserted) => Ok(wb.id),
+        Ok(PutResult::AlreadyExists) => {
+            Err((StatusCode::CONFLICT, Json(json!({ "error": "block already exists" }))))
+        }
+        Ok(PutResult::Rejected(r)) => {
+            Err((StatusCode::BAD_REQUEST, Json(json!({ "error": format!("rejected: {r}") }))))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e })))),
+    }
+}
+
 pub async fn market_settle(
     State(state): State<AppState>,
     Json(req): Json<SettleRequest>,
@@ -275,31 +309,13 @@ pub async fn market_settle(
         buyer: buyer.clone(),
     };
 
-    let parents = match tx_helpers::get_block_parents(&state.store, &state.settings).await {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": e }))),
-    };
-    let wb = match tx_helpers::forge_and_sign_block(
-        Some(PayloadEnvelope::Plain(payload)),
-        parents,
-        &adapter,
-        &state.node_wallet,
-        &state.settings,
-        Some("MarketSettle"),
-    )
-    .await
-    {
-        Ok(wb) => wb,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))),
-    };
-
-    match tx_helpers::persist_and_broadcast(&state, &wb).await {
-        Ok(PutResult::Inserted) => {
+    match forge_persist_plain(&state, payload, "MarketSettle").await {
+        Ok(block_id) => {
             tx_helpers::accumulate_tx_fee(&state, gas).await;
             (
                 StatusCode::CREATED,
                 Json(json!(SettleResponse {
-                    block_id: wb.id,
+                    block_id,
                     royalty: royalty.to_string(),
                     royalty_beneficiary: beneficiary,
                     net_to_seller: net_to_seller.to_string(),
@@ -307,8 +323,83 @@ pub async fn market_settle(
                 })),
             )
         }
-        Ok(PutResult::AlreadyExists) => (StatusCode::CONFLICT, Json(json!({ "error": "block already exists" }))),
-        Ok(PutResult::Rejected(reason)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("rejected: {reason}") }))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))),
+        Err(resp) => resp,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POST /admin/royalty — change the resale-royalty policy of an existing asset
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Requête `POST /admin/royalty` (protocole 2.7) : redirige/modifie la royalty
+/// d'un asset **déjà créé** (token OU classe SFT). Les champs sont des DELTAS
+/// appliqués sur la politique courante :
+/// - `royalty_beneficiary: Some(addr)` → nouveau bénéficiaire ; absent → inchangé.
+/// - `royalty_bps: Some(n)` → nouveau taux ; absent → inchangé.
+/// - `clear_beneficiary: true` → efface le bénéficiaire explicite (retour au créateur).
+/// - `clear_royalty: true` → supprime la royalty (taux → aucun).
+#[derive(Debug, Deserialize)]
+pub struct UpdateRoyaltyRequest {
+    pub asset_id: String,
+    #[serde(default)]
+    pub royalty_bps: Option<u32>,
+    #[serde(default)]
+    pub royalty_beneficiary: Option<String>,
+    #[serde(default)]
+    pub clear_beneficiary: bool,
+    #[serde(default)]
+    pub clear_royalty: bool,
+}
+
+/// `POST /admin/royalty` — change le bénéficiaire (et/ou le taux) de royalty d'un
+/// asset existant. La royalty étant résolue au settlement depuis le registre, le
+/// changement s'applique à **toutes les ventes futures** (aucune vente passée).
+pub async fn admin_update_royalty(
+    State(state): State<AppState>,
+    Json(req): Json<UpdateRoyaltyRequest>,
+) -> impl IntoResponse {
+    // Politique courante (token OU classe SFT). 404 si l'asset n'existe pas —
+    // pas de création déguisée.
+    let Some(current) = resolve_meta(&state, &req.asset_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("asset not found: {}", req.asset_id) })),
+        );
+    };
+    // Nouvelles valeurs absolues = politique courante + deltas de la requête.
+    let new_bps = if req.clear_royalty {
+        None
+    } else {
+        req.royalty_bps.or(current.royalty_bps).filter(|b| *b > 0)
+    };
+    let new_beneficiary = if req.clear_beneficiary {
+        None
+    } else {
+        req.royalty_beneficiary
+            .clone()
+            .or_else(|| current.royalty_beneficiary.clone())
+    };
+    // Même validation que la création (source unique).
+    if let Err(e) = pms_types::validate_royalty_fields(new_bps, new_beneficiary.as_deref()) {
+        return bad(e);
+    }
+
+    let payload = PlainPayload::RoyaltyUpdate {
+        asset_id: req.asset_id.clone(),
+        royalty_bps: new_bps,
+        royalty_beneficiary: new_beneficiary.clone(),
+    };
+    match forge_persist_plain(&state, payload, "RoyaltyUpdate").await {
+        Ok(block_id) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "asset_id": req.asset_id,
+                "royalty_bps": new_bps,
+                "royalty_beneficiary": new_beneficiary,
+                "block_id": block_id,
+            })),
+        ),
+        Err(resp) => resp,
     }
 }

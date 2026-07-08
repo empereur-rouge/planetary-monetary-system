@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.28.0] - Unreleased — Marketplace : royalty de revente MUTABLE post-mint (protocole 2.7)
+
+### Added
+- **feat(marketplace)** — nouveau payload `PlainPayload::RoyaltyUpdate { asset_id,
+  royalty_bps?, royalty_beneficiary? }` : **redirige/modifie la royalty de revente
+  d'un asset DÉJÀ créé** (token OU classe SFT). Coordinator-only, bloc DAG.
+  Comme la royalty est résolue au settlement depuis le registre (pas figée dans
+  l'item au mint), l'update s'applique à **toutes les ventes futures** — aucune
+  vente passée affectée.
+- **feat(api)** — endpoint `POST /admin/royalty` : deltas sur la politique courante
+  (`royalty_beneficiary` = nouveau bénéficiaire ; `royalty_bps` = nouveau taux ;
+  `clear_beneficiary`/`clear_royalty` pour effacer). Fetch la politique courante,
+  applique le delta, forge un bloc `RoyaltyUpdate` signé Coordinator.
+- **feat(storage)** — `TokenRegistryStorage::put_token` (écrase les métadonnées d'un
+  token existant, validées, sans contrôle d'unicité) — pour les mutations de politique.
+
+### Fixed
+- **fix(activity)** — `RoyaltyUpdate` câblé dans les 8 surfaces d'activité/historique
+  (comme `TokenCreate`) : le NOUVEAU bénéficiaire voit `royalty_updated` dans son feed.
+
+### Infrastructure
+- **chore(version)** — `Cargo` 0.27.0 → **0.28.0** ; `DAG_VERSION` 3.12.0 →
+  **3.13.0** (nouveau payload, additif, migration auto ; upgrade P2P coordonné) ;
+  `API_VERSION` 32 → **33**. `CURRENT_VER` inchangé (réutilise le CF `token_registry`).
+
+---
+
 ## [0.27.0] - Unreleased — Marketplace : règlement atomique + royalty de revente enforced consensus (protocole 2.7)
 
 ### Added

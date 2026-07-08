@@ -87,7 +87,10 @@ pub const CURRENT_VER: i64 = 12;
 // s'ajoute → MINOR, migration auto, pas de wipe. (Mixed-version P2P : un nœud
 // 3.11.x ne sait pas désérialiser un bloc MarketSettle — upgrade coordonné requis
 // avant d'émettre des ventes.)
-pub const DAG_VERSION: &str = "3.12.0";
+// 3.12.0 → 3.13.0 : nouveau payload `PlainPayload::RoyaltyUpdate` (redirection de
+// la royalty de revente d'un asset existant, protocole 2.7). Additif → MINOR,
+// migration auto, pas de wipe (upgrade P2P coordonné avant d'émettre l'update).
+pub const DAG_VERSION: &str = "3.13.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

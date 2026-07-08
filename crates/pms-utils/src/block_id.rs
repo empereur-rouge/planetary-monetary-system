@@ -52,6 +52,7 @@ pub fn compute_block_id(
                 PlainPayload::EncryptedReward { .. } => "EncryptedReward",
                 PlainPayload::TokenCreate(_) => "TokenCreate",
                 PlainPayload::SftClassCreate(_) => "SftClassCreate",
+                PlainPayload::RoyaltyUpdate { .. } => "RoyaltyUpdate",
                 PlainPayload::BridgeLock { .. } => "BridgeLock",
                 PlainPayload::BridgeMint { .. } => "BridgeMint",
                 PlainPayload::Freeze { .. } => "Freeze",

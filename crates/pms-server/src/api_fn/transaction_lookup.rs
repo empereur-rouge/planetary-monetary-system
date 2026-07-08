@@ -21,7 +21,7 @@ use crate::api::AppState;
 use axum::extract::{Path, State};
 use axum::{Json, http::StatusCode};
 use pms_storage::DagStorage;
-use pms_types::{PayloadEnvelope, PlainPayload, TxOutput};
+use pms_types::{PayloadEnvelope, TxOutput};
 use serde::Serialize;
 use serde_json::{Value, json};
 

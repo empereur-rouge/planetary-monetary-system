@@ -188,6 +188,26 @@ pub enum PlainPayload {
     /// UTXO, avec des métadonnées riches PUBLIQUES. Mint/transfert/burn réutilisent
     /// `Mint`/`TxUtxo`/`TokenBurn`.
     SftClassCreate(SftClass),
+    /// Met à jour la **politique royalty de revente** d'un asset déjà enregistré
+    /// (token OU classe SFT) — protocole 2.7. Coordinator seulement.
+    ///
+    /// La royalty étant résolue depuis le registre **au moment du settlement**
+    /// (pas figée dans l'item au mint), écraser ici `royalty_bps` /
+    /// `royalty_beneficiary` fait payer le NOUVEAU bénéficiaire par toutes les
+    /// ventes futures. N'affecte AUCUNE vente passée. Les deux champs sont les
+    /// nouvelles valeurs ABSOLUES à écrire (mêmes sémantiques que sur
+    /// [`TokenMetadata`]/[`SftClass`] : `royalty_bps = None` ⇒ plus de royalty,
+    /// `royalty_beneficiary = None` ⇒ défaut = `creator`).
+    RoyaltyUpdate {
+        /// Asset ciblé : `asset_id` d'un token OU `"collection:class"` d'une classe SFT.
+        asset_id: String,
+        /// Nouveau taux en bps (`None` = plus de royalty). Validé `≤ 10_000`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        royalty_bps: Option<u32>,
+        /// Nouveau bénéficiaire Bech32 (`None` = défaut = créateur). Non-vide si présent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        royalty_beneficiary: Option<String>,
+    },
     /// Verrouille des UTXOs sur ce ledger pour un transfert cross-ledger.
     /// Les fonds sont détruits sur le ledger source. Coordinator seulement.
     BridgeLock {

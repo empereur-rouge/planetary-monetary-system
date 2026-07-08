@@ -901,6 +901,64 @@ where
             );
         }
 
+        // 1.royalty) Mise à jour de la politique royalty d'un asset existant
+        // (protocole 2.7). Résolue au settlement depuis le registre → écraser ici
+        // fait payer le nouveau bénéficiaire par toutes les ventes futures.
+        if let Some(PayloadEnvelope::Plain(PlainPayload::RoyaltyUpdate {
+            asset_id,
+            royalty_bps,
+            royalty_beneficiary,
+        })) = &payload
+        {
+            // Nouveaux champs validés par la MÊME règle que la création (cap +
+            // bénéficiaire non-vide).
+            if let Err(e) =
+                pms_types::validate_royalty_fields(*royalty_bps, royalty_beneficiary.as_deref())
+            {
+                return Ok(PutResult::Rejected(format!("royalty update: {e}")));
+            }
+            // L'asset doit exister (token OU classe SFT, namespace `:` exclusif).
+            // On écrit sur le registre correspondant ; refus si introuvable
+            // (pas de création déguisée). Lookups fail-closed comme le gate royalty.
+            match self.store.get_sft_class(asset_id) {
+                Ok(Some(mut class)) => {
+                    class.royalty_bps = *royalty_bps;
+                    class.royalty_beneficiary = royalty_beneficiary.clone();
+                    if let Err(e) = self.store.put_sft_class(&class) {
+                        return Ok(PutResult::Rejected(format!("royalty update store: {e}")));
+                    }
+                    tracing::info!(
+                        "👑 Royalty updated (SFT class {}): {:?} bps → {:?} (block {})",
+                        asset_id, royalty_bps, royalty_beneficiary, wb.id
+                    );
+                }
+                Ok(None) => match self.store.get_token(asset_id) {
+                    Ok(Some(mut meta)) => {
+                        meta.royalty_bps = *royalty_bps;
+                        meta.royalty_beneficiary = royalty_beneficiary.clone();
+                        if let Err(e) = self.store.put_token(&meta) {
+                            return Ok(PutResult::Rejected(format!("royalty update store: {e}")));
+                        }
+                        tracing::info!(
+                            "👑 Royalty updated (token {}): {:?} bps → {:?} (block {})",
+                            asset_id, royalty_bps, royalty_beneficiary, wb.id
+                        );
+                    }
+                    Ok(None) => {
+                        return Ok(PutResult::Rejected(format!(
+                            "royalty update: asset not found: {asset_id}"
+                        )));
+                    }
+                    Err(e) => {
+                        return Ok(PutResult::Rejected(format!("royalty update lookup: {e}")));
+                    }
+                },
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!("royalty update lookup: {e}")));
+                }
+            }
+        }
+
         // 1.compliance) Apply compliance registry operations (Freeze / Unfreeze / Seize / Reverse)
         if let Some(PayloadEnvelope::Plain(PlainPayload::Freeze {
             ref address,

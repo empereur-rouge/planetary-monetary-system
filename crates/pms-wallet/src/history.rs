@@ -124,6 +124,11 @@ pub fn collect_involved_addresses(plain: &PlainPayload) -> Vec<String> {
             pms_types_nft::NftAction::BatchBurn { burner, .. } => addrs.push(burner.clone()),
         },
         PlainPayload::TokenCreate(meta) => addrs.push(meta.creator.clone()),
+        PlainPayload::RoyaltyUpdate { royalty_beneficiary, .. } => {
+            if let Some(b) = royalty_beneficiary {
+                addrs.push(b.clone());
+            }
+        }
         PlainPayload::EncryptedReward { .. } => {} // chiffré, pas d'adresses extractibles
         PlainPayload::BridgeLock { dest_address, .. } => addrs.push(dest_address.clone()),
         PlainPayload::BridgeMint { outputs, .. } => {
@@ -168,6 +173,9 @@ pub fn involves_address(plain: &PlainPayload, addr: &str) -> bool {
         }
         PlainPayload::Nft(action) => nft_involves_address(action, addr),
         PlainPayload::TokenCreate(meta) => meta.creator == addr,
+        PlainPayload::RoyaltyUpdate { royalty_beneficiary, .. } => {
+            royalty_beneficiary.as_deref() == Some(addr)
+        }
         // EncryptedReward: outputs chiffrés, impossible de checker sans clé.
         // Géré séparément dans history_page_for_address / scan_decrypt_recent_for_address.
         PlainPayload::EncryptedReward { .. } => false,
@@ -240,6 +248,9 @@ pub fn involves_any_address(plain: &PlainPayload, candidates: &[String]) -> bool
         PlainPayload::TokenCreate(meta) => candidates
             .iter()
             .any(|c| meta.creator.eq_ignore_ascii_case(c)),
+        PlainPayload::RoyaltyUpdate { royalty_beneficiary, .. } => royalty_beneficiary
+            .as_ref()
+            .is_some_and(|b| candidates.iter().any(|c| b.eq_ignore_ascii_case(c))),
         PlainPayload::EncryptedReward { .. } => false,
         PlainPayload::BridgeLock { dest_address, .. } => candidates
             .iter()

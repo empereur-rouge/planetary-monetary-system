@@ -378,6 +378,7 @@ pub fn validate_block(
             | PlainPayload::EncryptedReward { .. }
             | PlainPayload::TokenCreate(_)
             | PlainPayload::SftClassCreate(_)
+            | PlainPayload::RoyaltyUpdate { .. }
             | PlainPayload::BridgeLock { .. }
             | PlainPayload::BridgeMint { .. }
             | PlainPayload::Freeze { .. }
