@@ -14,8 +14,14 @@ impl ConcurrentDag {
         difficulty_leading_zeros: u8,
         compute_id: impl Fn(&[String], &Option<PayloadEnvelope>, u64) -> BlockId,
     ) -> Result<Block> {
-        // 1. Select parents (2 min, 2 max)
-        let parents = self.select_parents(2, 2);
+        // 1. Select parents.
+        // Single-Writer : le nœud rejette tout bloc à ≠1 parent
+        // (net_adapter::persist single_writer_gate). Le forge headless reconstruit
+        // son DAG depuis le store secondaire, où le genesis peut subsister comme
+        // "tip fantôme" ; en sélectionnant 1 seul parent (le tip de plus fort poids)
+        // on produit un bloc à parent unique, accepté. (Avant : (2,2) → toujours 2
+        // parents → toujours rejeté en single-writer.)
+        let parents = self.select_parents(1, 1);
 
         // Bootstrapping: if we have blocks but select_parents returns nothing,
         // it means something is wrong unless we only have genesis.

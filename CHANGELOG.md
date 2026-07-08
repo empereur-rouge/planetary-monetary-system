@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.30.0] - Unreleased — Démo transfert distant single-writer (fix forge 1-parent)
+
+> Bump `Cargo.toml` (workspace) à faire au merge sur `main` (0.29.0 → 0.30.0).
+> `DAG_VERSION`/`API_VERSION` inchangés : ni le format des blocs ni les endpoints
+> ne changent (le fix touche la sélection de parents du forge CLI, pas le
+> consensus de production).
+
+### Fixed
+- **fix(forge)** — en mode Single-Writer, le nœud rejette tout bloc à ≠1 parent
+  (`net_adapter::persist` single_writer_gate). Or `ConcurrentDag::forge_block`
+  sélectionnait toujours 2 parents (`select_parents(2,2)`) : tout bloc forgé par
+  le **forge headless / CLI** (`tools-cli`, qui reconstruit son DAG depuis le
+  store secondaire où le genesis peut subsister comme tip fantôme) était donc
+  **systématiquement rejeté**. Passé à `select_parents(1,1)` (tip de plus fort
+  poids) → bloc à parent unique, accepté. Débloque le transfert wallet-à-wallet
+  via le CLI. **Portée** : `ConcurrentDag::forge_block` (tools-cli + tests
+  d'intégration) uniquement ; le coordinateur de production forge via
+  `forge_and_sign_block`/`forge_persist_plain` (chemin distinct, inchangé).
+
 ## [0.29.0] - Unreleased — Marketplace : changement de royalty CO-SIGNÉ par le bénéficiaire (protocole 2.7)
 
 ### Changed / Security
