@@ -71,6 +71,13 @@ pub enum ApiError {
         required: String,
         granted: Vec<String>,
     },
+    /// 1050 — Caller is authenticated but not authorized for THIS specific
+    /// action: the presented key/identity is not the party the operation
+    /// requires (e.g. a royalty change where the provided custodial key is
+    /// not the current royalty beneficiary). Distinct from `AdminRequired`
+    /// (privilege tier) — this is a per-resource ownership/authorizer check.
+    /// Public message stays vague; the internal `reason` is logged.
+    Forbidden { reason: String },
 
     // ── 2xxx request validation (specific public OK) ──────────────
     /// 2001 — JSON body malformed or didn't parse against the
@@ -181,6 +188,7 @@ impl ApiError {
             ApiError::ReadOnly { .. } => 1020,
             ApiError::IpNotAllowed { .. } => 1030,
             ApiError::InsufficientScope { .. } => 1040,
+            ApiError::Forbidden { .. } => 1050,
             ApiError::MalformedJson(_) => 2001,
             ApiError::InvalidAddress { .. } => 2010,
             ApiError::InvalidAmount { .. } => 2020,
@@ -216,7 +224,8 @@ impl ApiError {
             ApiError::MissingAuth | ApiError::InvalidAuth => StatusCode::UNAUTHORIZED,
             ApiError::AdminRequired
             | ApiError::IpNotAllowed { .. }
-            | ApiError::InsufficientScope { .. } => StatusCode::FORBIDDEN,
+            | ApiError::InsufficientScope { .. }
+            | ApiError::Forbidden { .. } => StatusCode::FORBIDDEN,
             ApiError::ReadOnly { .. }
             | ApiError::GasPoolEmpty(_)
             | ApiError::SubscriptionInactive(_)
@@ -261,6 +270,7 @@ impl ApiError {
             ApiError::InvalidAuth => "Authentication failed".into(),
             ApiError::AdminRequired => "Insufficient privileges".into(),
             ApiError::IpNotAllowed { .. } => "Insufficient privileges".into(),
+            ApiError::Forbidden { .. } => "Operation forbidden".into(),
             ApiError::InsufficientScope { required, .. } => {
                 // Scope is OK to expose — the SDK needs to know which
                 // scope to request, and listing required vs granted is
@@ -331,6 +341,7 @@ impl ApiError {
                 "insufficient scope: required={} granted={:?}",
                 required, granted
             ),
+            ApiError::Forbidden { reason } => reason.clone(),
             ApiError::ReadOnly { reason } => format!("read-only mode armed (reason: {})", reason),
             ApiError::MalformedJson(reason) => reason.clone(),
             ApiError::InvalidAddress { addr } => format!("address={}", addr),
@@ -490,6 +501,7 @@ mod tests {
                 granted: vec![],
             }
             .code(),
+            ApiError::Forbidden { reason: "x".into() }.code(),
             ApiError::MalformedJson("x".into()).code(),
             ApiError::InvalidAddress { addr: "x".into() }.code(),
             ApiError::InvalidAmount { reason: "x".into() }.code(),
@@ -573,6 +585,11 @@ mod tests {
             ApiError::EmissionBudgetExhausted {
                 reason: "voie=onramp requested=0.99887766 remaining=0.05479452 budget=0.05479452"
                     .into(),
+            },
+            // Forbidden: the internal reason may name the current royalty
+            // beneficiary address — it MUST NOT leak into the public message.
+            ApiError::Forbidden {
+                reason: "provided key is not the current royalty beneficiary 8e1benef_secret".into(),
             },
         ];
         for err in cases {

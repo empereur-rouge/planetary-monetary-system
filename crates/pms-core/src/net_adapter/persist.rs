@@ -95,13 +95,39 @@ where
     /// `None` sur erreur store. Point unique de résolution pour la validation de
     /// mint contraint ET la résolution du taux de demurrage.
     fn resolve_asset_metadata(&self, asset_id: &str) -> Option<pms_types::TokenMetadata> {
-        match self.store.get_token(asset_id).unwrap_or(None) {
-            Some(m) => Some(m),
-            None => self
-                .store
-                .get_sft_class(asset_id)
-                .unwrap_or(None)
-                .map(|c| c.to_token_metadata()),
+        // Fail-open view of the strict resolver: a store read error is swallowed
+        // to `None`. Used by the two paths where a transient miss is tolerable and
+        // fails safe: the demurrage-rate lookup (a missed rate just skips decay)
+        // and constrained-mint validation (a missed cap/collateral falls back to
+        // the Coordinator gate — see `validate_custom_asset_mints`). The royalty
+        // settlement gate, which MUST be deterministic across nodes, uses the
+        // fail-CLOSED `resolve_asset_metadata_strict` instead.
+        self.resolve_asset_metadata_strict(asset_id).unwrap_or(None)
+    }
+
+    /// **Fail-CLOSED** resolution for the settlement path (audit F5).
+    ///
+    /// Unlike [`Self::resolve_asset_metadata`] (which swallows a store read error
+    /// to `None`), this distinguishes `Ok(None)` — genuinely no registry entry,
+    /// royalty legitimately absent — from `Err` — a transient RocksDB failure.
+    /// The MarketSettle royalty gate MUST NOT treat a read error as "no royalty":
+    /// that would both silently drop the creator's cut AND fork consensus (nodes
+    /// with divergent store health would resolve different royalties and
+    /// accept/reject the same block differently). On `Err` the settlement is
+    /// rejected so every node reaches the same verdict.
+    fn resolve_asset_metadata_strict(
+        &self,
+        asset_id: &str,
+    ) -> Result<Option<pms_types::TokenMetadata>, String> {
+        match self.store.get_token(asset_id) {
+            Ok(Some(m)) => return Ok(Some(m)),
+            Ok(None) => {}
+            Err(e) => return Err(format!("token registry read failed: {e}")),
+        }
+        match self.store.get_sft_class(asset_id) {
+            Ok(Some(c)) => Ok(Some(c.to_token_metadata())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("sft registry read failed: {e}")),
         }
     }
 
@@ -371,6 +397,101 @@ where
             );
             return Ok(PutResult::Rejected(format!("payload authority: {e}")));
         }
+
+        // ============================================================
+        // 1.pre) GATE STRUCTUREL + PARENTS — AVANT toute mutation d'état
+        // ============================================================
+        //
+        // Audit A1 : les arms `1.*` ci-dessous (mint NFT, ConfigUpdate,
+        // Governance, SFT, Royalty, Compliance, KeyRotation) MUTENT le registre
+        // (`apply_mint`/`apply_action`/`apply_config_update`/`put_governance_*`/
+        // `put_sft_class`/`put_token`/`freeze_address`/`record_key_rotation`…).
+        // Ces écritures NE DOIVENT PAS s'appliquer si le bloc est ensuite rejeté
+        // pour une raison structurelle (parents dupliqués, parent inexistant,
+        // chaîne single-writer) ou parce qu'il est déjà présent : sinon on
+        // obtient une mutation d'état SANS bloc DAG correspondant (viole
+        // l'invariant « toute mutation = un bloc signé ») et une divergence entre
+        // nœuds selon la santé de leur store. On hisse donc ICI, EN AMONT des arms
+        // mutateurs, l'idempotence + les contrôles structurels de parents
+        // (ex-2.d/2.e/2.f) + l'existence des parents (ex-4.a). Les payloads à UTXO
+        // (TxUtxo/MarketSettle/Bridge/Seize/Reverse) restent en plus gardés au
+        // commit-point atomique (`try_mark_spent`) en section 5.
+
+        // (idempotence) Un bloc déjà présent ne ré-applique JAMAIS ses effets. Le
+        // check autoritaire reste en section 5 (avant `apply_diff`) ; celui-ci
+        // évite en amont de rejouer un arm mutateur sur un re-gossip / retry.
+        if self.dag.contains_block(&wb.id) {
+            return Ok(PutResult::AlreadyExists);
+        }
+
+        // (parents 2.d) Parents uniques + pas d'auto-parentage (protection de base)
+        {
+            use std::collections::HashSet;
+            let mut seen = HashSet::new();
+            if !wb.parents.iter().all(|p| seen.insert(p)) {
+                return Ok(PutResult::Rejected("duplicate parent reference".into()));
+            }
+            if wb.parents.iter().any(|p| p == &wb.id) {
+                return Ok(PutResult::Rejected("self-parent not allowed".into()));
+            }
+        }
+
+        // (parents 2.e) Minimum de parents après bootstrap (soft anti-spam). En
+        // mode single-writer, REMPLACÉ par enforce_single_parent (2.f ci-dessous).
+        if !policy.enforce_single_writer {
+            let dag_was_bootstrapped = { self.dag.len() > 1 };
+            if dag_was_bootstrapped && wb.parents.len() < policy.min_parents_after_boot {
+                let has_genesis = wb.parents.iter().any(|p| p == "genesis");
+                let available_tips = self.dag.find_tips().len();
+                if !(has_genesis && available_tips < policy.min_parents_after_boot) {
+                    return Ok(PutResult::Rejected(format!(
+                        "not enough parents after bootstrap: got {}, need {}. Tip: use 'genesis' as parent during bootstrap.",
+                        wb.parents.len(),
+                        policy.min_parents_after_boot
+                    )));
+                }
+            }
+        }
+
+        // (parents 2.f) SINGLE WRITER : chaîne linéaire (exactement 1 parent, sauf
+        // genesis à 0 parent).
+        if self.settings.validation.enforce_single_writer {
+            let is_genesis = payload
+                .as_ref()
+                .is_some_and(|p| matches!(p, PayloadEnvelope::Plain(PlainPayload::Genesis)));
+            if !is_genesis && wb.parents.len() != 1 {
+                tracing::warn!(
+                    "🚫 Single Writer violation: block {} has {} parents (expected 1)",
+                    &wb.id[..16.min(wb.id.len())],
+                    wb.parents.len()
+                );
+                return Ok(PutResult::Rejected(format!(
+                    "single_writer: block must have exactly 1 parent, got {}",
+                    wb.parents.len()
+                )));
+            }
+        }
+
+        // (parents 4.a) Existence des parents (RAM DAG d'abord, puis store — gère
+        // la race de persistance async). DOIT précéder les arms mutateurs.
+        let t_parents_start = std::time::Instant::now();
+        if policy.enforce_parent_existence {
+            for parent_id in &wb.parents {
+                let in_ram = self.dag.contains_block(parent_id);
+                if !in_ram {
+                    match self.store.get_block(parent_id).await {
+                        Ok(Some(_)) => continue, // Parent in store
+                        Ok(None) | Err(_) => {
+                            return Ok(PutResult::Rejected(format!(
+                                "dag validation failed: parent {} not found",
+                                parent_id
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        let t_parents = t_parents_start.elapsed();
 
         // 1.x) Politique de mint (PlainPayload::Mint seulement)
         //
@@ -846,6 +967,14 @@ where
                     ));
                 }
             }
+            // royalty de revente (2.7) : cap 10_000 bps + bénéficiaire non-vide.
+            // Source unique partagée avec le registre token (register_token).
+            if let Err(e) = pms_types::validate_royalty_fields(
+                class.royalty_bps,
+                class.royalty_beneficiary.as_deref(),
+            ) {
+                return Ok(PutResult::Rejected(format!("sft class: {e}")));
+            }
             // Unicité : une classe déjà enregistrée ne doit pas être écrasée
             // silencieusement (anti-overwrite, comme la gouvernance).
             match self.store.get_sft_class(&class.asset_id) {
@@ -869,6 +998,124 @@ where
                 class.name,
                 wb.id
             );
+        }
+
+        // 1.royalty) Mise à jour de la politique royalty d'un asset existant
+        // (protocole 2.7). AUTORISÉE PAR LA CO-SIGNATURE DU BÉNÉFICIAIRE COURANT
+        // (pas le coordinateur) : le Coordinator forge le bloc mais ne peut PAS
+        // rediriger la royalty sans la signature de l'ayant droit actuel.
+        if let Some(PayloadEnvelope::Plain(PlainPayload::RoyaltyUpdate {
+            asset_id,
+            royalty_bps,
+            royalty_beneficiary,
+            auth_pubkey_hex,
+            auth_signature_b64,
+        })) = &payload
+        {
+            // (a) Nouveaux champs validés (cap + bénéficiaire non-vide).
+            if let Err(e) =
+                pms_types::validate_royalty_fields(*royalty_bps, royalty_beneficiary.as_deref())
+            {
+                return Ok(PutResult::Rejected(format!("royalty update: {e}")));
+            }
+            // (b) Politique COURANTE (fail-closed) → autorisateur légitime =
+            //     bénéficiaire explicite courant, à défaut le `creator`.
+            let current_meta = match self.resolve_asset_metadata_strict(asset_id) {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "royalty update: asset not found: {asset_id}"
+                    )));
+                }
+                Err(e) => return Ok(PutResult::Rejected(format!("royalty update lookup: {e}"))),
+            };
+            let current_authorizer = current_meta
+                .royalty_beneficiary
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| current_meta.creator.as_str());
+            // (c) La signature DOIT porter sur EXACTEMENT ce changement (asset +
+            //     nouvelle politique + network_id), ET provenir de l'autorisateur
+            //     courant. Anti-forge + anti-replay (un ancien bénéficiaire n'est
+            //     plus l'autorisateur courant → sa signature rejouée échoue).
+            // La signature commit à la VERSION COURANTE (anti-replay : une sig
+            // capturée sur-DAG devient invalide dès qu'un changement fait avancer
+            // `royalty_version`).
+            let consumed_version = current_meta.royalty_version;
+            let next_version = consumed_version.saturating_add(1);
+            let msg = pms_types::royalty_update_signing_message(
+                &self.wire_meta.network_id,
+                asset_id,
+                *royalty_bps,
+                royalty_beneficiary.as_deref(),
+                consumed_version,
+            );
+            if crate::validations::signature::verify_detached_signature(
+                msg.as_bytes(),
+                auth_pubkey_hex,
+                auth_signature_b64,
+            )
+            .is_err()
+            {
+                return Ok(PutResult::Rejected(
+                    "royalty update: invalid authorization signature".to_string(),
+                ));
+            }
+            if !crate::validations::ownership::unlock_matches_address(
+                auth_pubkey_hex,
+                current_authorizer,
+            ) {
+                return Ok(PutResult::Rejected(
+                    "royalty update: signer is not the current royalty beneficiary".to_string(),
+                ));
+            }
+            // (d) Écriture sur le registre correspondant, dans le MÊME ordre de
+            //     résolution que la lecture (audit A4/C3 : token d'abord, puis
+            //     classe SFT — cf. `resolve_asset_metadata_strict`). Aligner les
+            //     deux ordres garantit que l'entrée écrite est EXACTEMENT celle
+            //     qui a servi à autoriser le changement (version + autorisateur),
+            //     même dans le cas dégénéré où les deux namespaces coexisteraient.
+            //     Namespace `:` mutuellement exclusif ; refus si introuvable.
+            match self.store.get_token(asset_id) {
+                Ok(Some(mut meta)) => {
+                    meta.royalty_bps = *royalty_bps;
+                    meta.royalty_beneficiary = royalty_beneficiary.clone();
+                    meta.royalty_version = next_version; // anti-replay : monotone
+                    if let Err(e) = self.store.put_token(&meta) {
+                        return Ok(PutResult::Rejected(format!("royalty update store: {e}")));
+                    }
+                    tracing::info!(
+                        "👑 Royalty updated (token {}): {:?} bps → {:?} v{} (block {})",
+                        asset_id, royalty_bps, royalty_beneficiary, next_version, wb.id
+                    );
+                }
+                Ok(None) => match self.store.get_sft_class(asset_id) {
+                    Ok(Some(mut class)) => {
+                        class.royalty_bps = *royalty_bps;
+                        class.royalty_beneficiary = royalty_beneficiary.clone();
+                        class.royalty_version = next_version; // anti-replay : monotone
+                        if let Err(e) = self.store.put_sft_class(&class) {
+                            return Ok(PutResult::Rejected(format!("royalty update store: {e}")));
+                        }
+                        tracing::info!(
+                            "👑 Royalty updated (SFT class {}): {:?} bps → {:?} v{} (block {})",
+                            asset_id, royalty_bps, royalty_beneficiary, next_version, wb.id
+                        );
+                    }
+                    Ok(None) => {
+                        return Ok(PutResult::Rejected(format!(
+                            "royalty update: asset not found: {asset_id}"
+                        )));
+                    }
+                    Err(e) => {
+                        return Ok(PutResult::Rejected(format!("royalty update lookup: {e}")));
+                    }
+                },
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!("royalty update lookup: {e}")));
+                }
+            }
         }
 
         // 1.compliance) Apply compliance registry operations (Freeze / Unfreeze / Seize / Reverse)
@@ -1017,72 +1264,10 @@ where
             );
         }
 
-        // 2.d) Parents uniques + pas d'auto-parentage (protection de base)
-        {
-            use std::collections::HashSet;
-            let mut seen = HashSet::new();
-
-            if !wb.parents.iter().all(|p| seen.insert(p)) {
-                return Ok(PutResult::Rejected("duplicate parent reference".into()));
-            }
-
-            if wb.parents.iter().any(|p| p == &wb.id) {
-                return Ok(PutResult::Rejected("self-parent not allowed".into()));
-            }
-        }
-
-        // 2.e) Minimum de parents apres bootstrap (soft anti-spam)
-        //
-        // On requiert min_parents (typiquement 2),
-        // MAIS on permet d'utiliser "genesis" comme parent supplementaire
-        // si le DAG n'a pas assez de tips distincts.
-        //
-        // NOTE: En mode Single Writer, cette regle est REMPLACEE par enforce_single_parent.
-        //
-        // Regle:
-        //  - parents.len() >= min_parents_after_boot
-        //  - SAUF si le bloc contient "genesis" comme parent ET qu'il n'y a pas assez de tips
-        //  - Dans ce cas, genesis peut "completer" le compte de parents
-        if !policy.enforce_single_writer {
-            let dag_was_bootstrapped = { self.dag.len() > 1 };
-            if dag_was_bootstrapped && wb.parents.len() < policy.min_parents_after_boot {
-                // Verifier si genesis est utilise comme parent supplementaire
-                let has_genesis = wb.parents.iter().any(|p| p == "genesis");
-                let available_tips = self.dag.find_tips().len();
-
-                // Autoriser si genesis est utilise ET qu'il n'y a pas assez de tips disponibles
-                if !(has_genesis && available_tips < policy.min_parents_after_boot) {
-                    return Ok(PutResult::Rejected(format!(
-                        "not enough parents after bootstrap: got {}, need {}. Tip: use 'genesis' as parent during bootstrap.",
-                        wb.parents.len(),
-                        policy.min_parents_after_boot
-                    )));
-                }
-            }
-        }
-
-        // 2.f) SINGLE WRITER: Chaine Lineaire (1 parent)
-        //
-        // En mode Single Writer, on impose exactement 1 parent par bloc.
-        // Cela garantit une chaine lineaire au lieu d'un DAG.
-        if self.settings.validation.enforce_single_writer {
-            let is_genesis = payload
-                .as_ref()
-                .is_some_and(|p| matches!(p, PayloadEnvelope::Plain(PlainPayload::Genesis)));
-
-            // Genesis: 0 parents, Non-genesis: exactement 1 parent
-            if !is_genesis && wb.parents.len() != 1 {
-                tracing::warn!(
-                    "🚫 Single Writer violation: block {} has {} parents (expected 1)",
-                    &wb.id[..16.min(wb.id.len())],
-                    wb.parents.len()
-                );
-                return Ok(PutResult::Rejected(format!(
-                    "single_writer: block must have exactly 1 parent, got {}",
-                    wb.parents.len()
-                )));
-            }
-        }
+        // NOTE: les contrôles structurels de parents (uniques, min-parents,
+        // single-writer) ET l'existence des parents ont été hissés en section
+        // `1.pre` (audit A1) — ils DOIVENT précéder les arms mutateurs `1.*`
+        // ci-dessus. Ne pas les ré-appliquer ici (double exécution inutile).
 
         // ============================================================
         // 3) RECONSTRUCTION DU Block (objet RAM) POUR LA VALIDATION DAG
@@ -1091,7 +1276,7 @@ where
         // A ce stade:
         //   - header ok (reseau, signature, PoW)
         //   - payload JSON parse (ou None)
-        //   - contraintes structurelles simples faites (taille, parents uniques)
+        //   - contraintes structurelles + existence des parents faites (1.pre)
         //
         // On peut donc construire un Block propre et coherent.
         let block = Block {
@@ -1108,44 +1293,11 @@ where
         // 4) VALIDATION DAG PROFONDE (UTXO, double-spend, regles metier)
         // ============================================================
         //
-        // On utilise ta fonction `validate_block(dag, &block, policy)` qui:
-        //   - verifie parents_exist / no_cycle / parent_count
-        //   - applique la politique UTXO (double spend, montants, etc.)
-        //
         // Important: on ne modifie pas le DAG ici, on fait juste les checks.
-        //
-        // ## FIX RACE CONDITION (Phase 2 IOTA-like)
-        //
-        // Les tips sont selectionnes depuis RocksDB (`store.top_tips()`), mais
-        // validate_block verifie les parents en RAM. Sous charge parallele,
-        // un parent peut exister dans RocksDB mais pas encore en RAM.
-        //
-        // Solution: verifier d'abord que les parents existent dans le store.
+        // L'existence + la structure des parents sont déjà validées en 1.pre
+        // (hissées avant les arms mutateurs, audit A1). Reste ici la validation
+        // UTXO (double-spend, montants, conservation) pour les payloads à tx.
         // ============================================================
-
-        // 4.a) Verification des parents (RAM DAG + store)
-        // FIX: Check RAM DAG first to handle async persistence race condition
-        let t_parents_start = std::time::Instant::now();
-        if policy.enforce_parent_existence {
-            for parent_id in &block.parents {
-                // Check RAM DAG first (blocks are inserted here immediately)
-                let in_ram = self.dag.contains_block(parent_id);
-
-                // If not in RAM, check store (for blocks not yet loaded in RAM)
-                if !in_ram {
-                    match self.store.get_block(parent_id).await {
-                        Ok(Some(_)) => continue, // Parent in store
-                        Ok(None) | Err(_) => {
-                            return Ok(PutResult::Rejected(format!(
-                                "dag validation failed: parent {} not found",
-                                parent_id
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-        let t_parents = t_parents_start.elapsed();
 
         // 4.new) Validation UTXO Async (Sharding Phase 4)
         //
@@ -1173,6 +1325,100 @@ where
             if let Err(e) = self.validate_plain_txutxo(tx, policy, now_ms).await {
                 return Ok(PutResult::Rejected(e));
             }
+        }
+        // ─── MarketSettle (protocole 2.7) : règlement atomique + royalty enforced ───
+        // Réutilise la MÊME validation UTXO que TxUtxo (signatures, ownership,
+        // conservation par-asset, compliance) via `validate_plain_txutxo`, PUIS
+        // impose le gate royalty/rôles (`validations::market`). La royalty est
+        // RÉ-DÉRIVÉE du registre de `asset_sold` — impossible pour le builder de
+        // sous-payer le créateur : un settlement non conforme est REJETÉ ici.
+        if let Some(PayloadEnvelope::Plain(PlainPayload::MarketSettle {
+            tx,
+            asset_sold,
+            quantity,
+            price_asset,
+            price,
+            seller,
+            buyer,
+        })) = &block.payload
+        {
+            use crate::validations::market;
+            // 1. Validation UTXO complète (source unique partagée avec TxUtxo).
+            //    Retourne les UTXOs dépensés résolus (adresse propriétaire + asset)
+            //    nécessaires au binding de rôle vendeur/acheteur.
+            let input_outputs = match self.validate_plain_txutxo(tx, policy, now_ms).await {
+                Ok(outs) => outs,
+                Err(e) => return Ok(PutResult::Rejected(format!("settlement tx: {e}"))),
+            };
+            // 2. Montants déclarés.
+            let Ok(qty) = rust_decimal::Decimal::from_str_exact(quantity) else {
+                return Ok(PutResult::Rejected(
+                    "settlement: quantity not a decimal".to_string(),
+                ));
+            };
+            let Ok(price_dec) = rust_decimal::Decimal::from_str_exact(price) else {
+                return Ok(PutResult::Rejected("settlement: price not a decimal".to_string()));
+            };
+            // 3. Politique royalty de l'ASSET VENDU (registre) + décimales du prix.
+            //    Résolution FAIL-CLOSED (audit F5) : une erreur store rejette (pas
+            //    de bypass royalty ni de fork consensus). Ok(None) = pas de
+            //    politique → royalty 0 (swap atomique pur, toujours valide).
+            let sold_meta = match self.resolve_asset_metadata_strict(asset_sold) {
+                Ok(m) => m,
+                Err(e) => return Ok(PutResult::Rejected(format!("settlement: {e}"))),
+            };
+            let (royalty, beneficiary) = match sold_meta.and_then(|m| m.effective_royalty()) {
+                Some((bps, b)) => {
+                    let price_meta = match price_asset.as_deref() {
+                        Some(a) => match self.resolve_asset_metadata_strict(a) {
+                            Ok(m) => m,
+                            Err(e) => return Ok(PutResult::Rejected(format!("settlement: {e}"))),
+                        },
+                        None => None,
+                    };
+                    let dec = market::price_decimals(price_meta.map(|m| m.decimals));
+                    // compute_royalty is fallible (overflow → None, audit F3).
+                    match market::compute_royalty(price_dec, bps, dec) {
+                        Some(r) => (r, Some(b)),
+                        None => {
+                            return Ok(PutResult::Rejected(
+                                "settlement: royalty computation overflow".to_string(),
+                            ));
+                        }
+                    }
+                }
+                None => (rust_decimal::Decimal::ZERO, None),
+            };
+            // 4. Gate forme + binding de rôle.
+            let check = market::SettlementCheck {
+                asset_sold,
+                quantity: qty,
+                price_asset: price_asset.as_deref(),
+                price: price_dec,
+                seller,
+                buyer,
+                royalty,
+                beneficiary: beneficiary.as_deref(),
+            };
+            if let Err(e) = market::validate_settlement(&input_outputs, &tx.outputs, &check) {
+                // `e` is already self-prefixed with "settlement:" — don't double it.
+                tracing::warn!(
+                    "🚫 MarketSettle rejected on block {}: {e}",
+                    &wb.id[..16.min(wb.id.len())]
+                );
+                return Ok(PutResult::Rejected(e));
+            }
+            tracing::info!(
+                "🛒 MarketSettle OK: buyer={} qty={} of {} price={} {} (royalty {} → {}) block={}",
+                &buyer[..20.min(buyer.len())],
+                quantity,
+                asset_sold,
+                price,
+                price_asset.as_deref().unwrap_or("PMS"),
+                royalty,
+                beneficiary.as_deref().unwrap_or("-"),
+                &wb.id[..16.min(wb.id.len())],
+            );
         }
         if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock {
             inputs,
@@ -1383,7 +1629,11 @@ where
                 })
             }
 
-            Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) => {
+            // MarketSettle partage EXACTEMENT la mécanique UTXO de TxUtxo (dépense
+            // les inputs, crée les outputs item/royalty/net/change, brûle le gas
+            // `tx.fee` → part treasury). Même arme = zéro divergence de delta.
+            Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx)))
+            | Some(PayloadEnvelope::Plain(PlainPayload::MarketSettle { tx, .. })) => {
                 // Tx = spend inputs + create outputs
                 let spend = tx
                     .inputs

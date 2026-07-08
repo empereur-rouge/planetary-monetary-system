@@ -7,6 +7,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.29.0] - Unreleased — Marketplace : changement de royalty CO-SIGNÉ par le bénéficiaire (protocole 2.7)
+
+### Changed / Security
+- **feat(marketplace)** — le changement de royalty est désormais **autorisé par la
+  SIGNATURE du bénéficiaire ACTUEL**, PAS par le coordinateur/admin. `RoyaltyUpdate`
+  porte `auth_pubkey_hex` + `auth_signature_b64` (signature détachée du bénéficiaire
+  courant sur `royalty_update_signing_message` = SHA-256 de `{domain, network_id,
+  asset_id, royalty_bps, royalty_beneficiary}`). **Le consensus REJETTE** tout
+  `RoyaltyUpdate` dont la signature n'est pas celle du bénéficiaire courant (ou du
+  `creator` à défaut) — **même forgé par le coordinateur**.
+- **sec(marketplace/anti-replay)** — un compteur monotone `royalty_version`
+  (`TokenMetadata`/`SftClass`, incrémenté à chaque changement) est **commité dans le
+  message signé** : chaque autorisation est **à usage unique**, liée à l'état exact
+  qu'elle remplace. Sans ça (revue sécurité, CRITIQUE), une signature capturée
+  sur-DAG — les blocs `RoyaltyUpdate` sont publics — pouvait être **rejouée** dès que
+  l'ancien signataire redevenait bénéficiaire courant (hijack permanent du flux de
+  royalties). Le `network_id` + l'`asset_id` sont aussi commités (anti cross-chain /
+  cross-asset).
+- **note(sécurité)** — pour un **token admin-créé SANS bénéficiaire explicite**,
+  `creator = coordinateur` → le coordinateur EST l'autorisateur et peut donc changer
+  la royalty. Pour exclure le coordinateur, poser un `royalty_beneficiary` externe à
+  la création (cas nominal des classes SFT et des ventes creator-studio).
+- **feat(api)** — `/admin/royalty` **retiré**, remplacé par `POST /v1/royalty/prepare`
+  (renvoie le message canonique à signer) + `POST /v1/royalty/update` (**API-key,
+  PAS admin**). `update` accepte soit la clé privée custodiée du bénéficiaire (le
+  serveur vérifie qu'elle est le bénéficiaire courant puis signe), soit une
+  signature pré-calculée (`auth_pubkey_hex` + `auth_signature_b64` — le coordinateur
+  ne voit jamais la clé). **Motivation** : les instances squelette custodiales
+  vendues à des tiers n'ont pas le token admin ; elles changent la royalty avec la
+  clé du bénéficiaire qu'elles détiennent.
+- **feat(consensus)** — `verify_detached_signature` (réutilise le vérificateur ECDSA
+  des transactions) ; `RoyaltyUpdate` passe du groupe coordinator-only au groupe
+  owner-signé (authority.rs), l'autorité étant la co-signature vérifiée au persist.
+
+### Fixed / Security (revue de code avant merge)
+- **fix(consensus/settlement) [B1/B3]** — `bootstrap_utxos` (reconstruction au
+  démarrage) et `apply_block_mem` (garde double-spend RAM) ignoraient
+  `MarketSettle` : au restart, l'item déjà vendu ressuscitait comme non-dépensé
+  (double-spend) et les outputs item/royalty/net disparaissaient ; en RAM, les
+  inputs d'un settlement n'étaient jamais marqués dépensés. Ajout des arms
+  `MarketSettle` (miroir de `TxUtxo`) dans les deux couches.
+- **fix(marketplace/royalty) [B2]** — `royalty_bps > 0` sans bénéficiaire explicite
+  défaultait sur `creator` = **pubkey hex, pas une adresse payable** → output
+  royalty non-dépensable. `validate_royalty_fields` REJETTE désormais `bps > 0`
+  sans bénéficiaire (registre + prepare/update).
+- **fix(consensus/settlement) [A2/A3]** — `validate_settlement` : rejet explicite si
+  le bénéficiaire de royalty est l'acheteur (message clair au lieu de « must
+  net-receive ») ; arithmétique `checked_add`/`checked_sub` sur les nets par
+  (adresse, asset) — un validateur de consensus ne doit JAMAIS paniquer sur un
+  montant attaquant (overflow `Decimal`).
+- **fix(consensus/registry) [A1]** — les écritures de registre des arms `1.*`
+  (royalty, compliance freeze/seize, enregistrement SFT, rotation de clé, NFT,
+  gouvernance) étaient appliquées **avant** la vérification d'existence des parents
+  et la persistance du bloc. Un bloc rejeté ensuite laissait une mutation d'état
+  SANS bloc DAG correspondant (viole « toute mutation = un bloc »). Hissé un gate
+  `1.pre` (idempotence + parents uniques/min/single-writer + existence des parents)
+  AVANT tout arm mutateur. Comportement inchangé pour les blocs valides (35/38
+  tests sandbox verts ; les 3 rouges pré-existent sur la baseline, hors scope).
+- **fix(consensus/royalty) [A4]** — la résolution de métadonnées lisait `token`
+  d'abord puis `sft_class`, mais l'écriture de `RoyaltyUpdate` écrivait dans l'ordre
+  inverse. Aligné l'écriture sur l'ordre de lecture (token d'abord) pour que
+  l'entrée autorisée soit exactement l'entrée écrite.
+- **fix(api) [D1]** — `POST /v1/market/settle` et `POST /v1/royalty/{prepare,update}`
+  renvoient désormais des erreurs `ApiError` à **code numérique stable**
+  (`{"code":NNNN,"message":...}`) au lieu de `{"error":"..."}` ad hoc. Nouveau code
+  `1050` (`Forbidden`, 403 — clé fournie ≠ bénéficiaire courant) ; un rejet
+  consensus mappe sur `3070` (`Conflict`, 409).
+
+### Infrastructure
+- **chore(version)** — `Cargo` 0.28.0 → **0.29.0** ; `DAG_VERSION` 3.13.0 →
+  **3.14.0** (le payload `RoyaltyUpdate` gagne les champs d'autorisation ; additif
+  car 3.13.0 Unreleased) ; `API_VERSION` 33 → 34 → **35** (revue D1 : formats
+  d'erreur ApiError à code stable + code 1050). Toujours dans le cycle non-publié
+  0.29.0 (l'API 34 n'a jamais été released).
+
+---
+
+## [0.28.0] - Unreleased — Marketplace : royalty de revente MUTABLE post-mint (protocole 2.7)
+
+### Added
+- **feat(marketplace)** — nouveau payload `PlainPayload::RoyaltyUpdate { asset_id,
+  royalty_bps?, royalty_beneficiary? }` : **redirige/modifie la royalty de revente
+  d'un asset DÉJÀ créé** (token OU classe SFT). Coordinator-only, bloc DAG.
+  Comme la royalty est résolue au settlement depuis le registre (pas figée dans
+  l'item au mint), l'update s'applique à **toutes les ventes futures** — aucune
+  vente passée affectée.
+- **feat(api)** — endpoint `POST /admin/royalty` : deltas sur la politique courante
+  (`royalty_beneficiary` = nouveau bénéficiaire ; `royalty_bps` = nouveau taux ;
+  `clear_beneficiary`/`clear_royalty` pour effacer). Fetch la politique courante,
+  applique le delta, forge un bloc `RoyaltyUpdate` signé Coordinator.
+- **feat(storage)** — `TokenRegistryStorage::put_token` (écrase les métadonnées d'un
+  token existant, validées, sans contrôle d'unicité) — pour les mutations de politique.
+
+### Fixed
+- **fix(activity)** — `RoyaltyUpdate` câblé dans les 8 surfaces d'activité/historique
+  (comme `TokenCreate`) : le NOUVEAU bénéficiaire voit `royalty_updated` dans son feed.
+
+### Infrastructure
+- **chore(version)** — `Cargo` 0.27.0 → **0.28.0** ; `DAG_VERSION` 3.12.0 →
+  **3.13.0** (nouveau payload, additif, migration auto ; upgrade P2P coordonné) ;
+  `API_VERSION` 32 → **33**. `CURRENT_VER` inchangé (réutilise le CF `token_registry`).
+
+---
+
+## [0.27.0] - Unreleased — Marketplace : règlement atomique + royalty de revente enforced consensus (protocole 2.7)
+
+### Added
+- **feat(marketplace)** — nouveau payload `PlainPayload::MarketSettle` : règlement
+  **atomique** d'une vente/revente (item ↔ paiement en UN bloc) avec **royalty de
+  revente prélevée et versée au consensus**. Fonctionne pour **tout token, toute
+  classe SFT, tout ledger**, la royalty étant reversée dans **l'asset de paiement**
+  (pas forcément PMS natif). Résout Q2 (royalty) ET Q3 (atomicité).
+- **feat(registry)** — politique royalty **par-asset** dans le registre :
+  `royalty_bps` + `royalty_beneficiary` sur `TokenMetadata` ET `SftClass`
+  (bénéficiaire par défaut = `creator`), validés à l'enregistrement (`≤ 10000` bps).
+  Exposés sur `POST /admin/tokens/create` et `POST /admin/sft/classes`.
+- **feat(api)** — endpoint `POST /v1/market/settle` (custodial one-shot) : co-signe
+  le leg vendeur (item) + acheteur (paiement), calcule la royalty du registre,
+  forge un bloc `MarketSettle` signé Coordinator. Réponse : `royalty`,
+  `royalty_beneficiary`, `net_to_seller`, `fee`, `block_id`.
+- **feat(consensus)** — `do_persist_block_internal` **rejette** tout settlement dont
+  les outputs ne respectent pas la forme royalty (`validations::market`) : réutilise
+  la validation UTXO complète (`validate_plain_txutxo` : signatures, ownership,
+  conservation par-asset, compliance) PUIS impose le split exact.
+
+### Security
+- **sec(marketplace/F1)** — **accounting EXACT** (pas des planchers) dans
+  `validate_settlement` : le vendeur et le bénéficiaire reçoivent *exactement* leurs
+  parts déclarées, dans le *seul* asset de paiement ; tout crédit inattendu
+  (prix sous-déclaré, paiement en asset-side, tiers, sur-paiement) est rejeté.
+  Ferme le contournement « déclarer un prix minuscule et router la vraie valeur au
+  vendeur → royalty ~0 ».
+- **sec(marketplace/F3)** — `compute_royalty` en arithmétique **checked** (overflow
+  → `None` → rejet, plus de panic validateur) + borne `MAX_SETTLEMENT_AMOUNT` sur
+  `price`/`quantity`.
+- **sec(marketplace/F5)** — résolution royalty **fail-CLOSED** au persist
+  (`resolve_asset_metadata_strict`) : une erreur de lecture registre **rejette** le
+  settlement au lieu de retomber sur royalty 0 (évite bypass + fork consensus
+  non-déterministe).
+
+### Fixed
+- **fix(activity)** — `MarketSettle` câblé dans les 10 surfaces d'activité/audit qui
+  filtraient par variant (classify storage ×3, activity classify ×2, wallet history
+  ×3, `extract_tx_fee`, `transaction_lookup`) : la vente apparaît désormais dans le
+  feed d'activité (`market_buy`/`market_sell`/`royalty_received`), le SSE, les
+  webhooks et l'historique ; le gas fee est correctement accumulé sur le chemin
+  `submit_block`. Sans ça, une vente réelle était **invisible** de toutes les vues
+  wallet (RAM + RocksDB).
+
+### Infrastructure
+- **chore(version)** — `Cargo` 0.26.2 → **0.27.0** ; `DAG_VERSION` 3.11.0 →
+  **3.12.0** (nouveau payload, additif, migration auto, pas de wipe ; upgrade P2P
+  coordonné requis avant d'émettre des ventes) ; `API_VERSION` 31 → **32**.
+  `CURRENT_VER` (schéma RocksDB) inchangé — champs royalty optionnels rétro-compat.
+
+### Notes / décision ouverte
+- **F4 (royalty « inévitable »)** : aujourd'hui la royalty est enforced **sur les
+  settlements** ; un transfert `TxUtxo` nu du même actif ne prélève rien (deux
+  parties peuvent contourner en OTC). Rendre la royalty *totalement* inévitable
+  exigerait de **restreindre les transferts des actifs royalty-bearing au seul
+  `MarketSettle`** (coût : un lookup registre par transfert d'asset custom sur le
+  hot-path + actifs non-librement-transférables). Non activé par défaut — décision
+  produit à trancher.
+
+---
+
 ## [0.26.2] - Unreleased — Cleanup : marqueur bridge_consumed de l'engine = index de statut (audit rang 3 / B3)
 
 ### Removed / Changed

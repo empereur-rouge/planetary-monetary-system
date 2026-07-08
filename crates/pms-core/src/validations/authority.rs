@@ -254,10 +254,21 @@ pub fn validate_payload_authority(
         // pas coordinator-only. Son autorisation (unlocks des inputs) +
         // conservation-burn sont vérifiées par `validate_token_burn_async` dans
         // le hot path, comme TxUtxo via `validate_transaction_full`.
+        // MarketSettle est owner-signé (acheteur + vendeur déverrouillent leurs
+        // propres inputs) : pas coordinator-only, comme TxUtxo/TokenBurn. Son
+        // autorisation (unlocks des inputs) + conservation + le gate royalty sont
+        // vérifiés dans le hot path (validate_plain_txutxo + validations::market).
+        // RoyaltyUpdate est autorisé par la SIGNATURE du bénéficiaire courant
+        // (co-signature, protocole 2.7), PAS par le coordinateur — d'où sa place
+        // ici et non dans le groupe coordinator-only. La vérification de la
+        // signature (contre le bénéficiaire courant résolu du registre) est faite
+        // au persist (`do_persist_block_internal`), comme l'ownership d'un TxUtxo.
         PlainPayload::Genesis
         | PlainPayload::Mint { .. }
         | PlainPayload::TxUtxo(_)
         | PlainPayload::TokenBurn { .. }
+        | PlainPayload::MarketSettle { .. }
+        | PlainPayload::RoyaltyUpdate { .. }
         | PlainPayload::Nft(_) => Ok(()),
     }
 }

@@ -108,6 +108,9 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
         .route("/wallet/history", post(get_wallet_history))
         .route("/v1/balance", post(balance_by_address))
         .route("/v1/tx/prepare", post(prepare_tx))
+        // Royalty change — returns the canonical message the CURRENT beneficiary
+        // must sign to authorize a change (no block; non-custodial signing path).
+        .route("/v1/royalty/prepare", post(crate::api_fn::market::royalty_prepare))
         .route("/v1/wallet/create", post(wallet_create));
 
     // Write-producing wallet endpoints — gated.
@@ -119,6 +122,19 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
         .route(
             "/v1/wallet/token/burn",
             post(crate::api_fn::token_burn::wallet_burn_token),
+        )
+        // Marketplace settlement (protocole 2.7) — atomic sale/resale with
+        // consensus-enforced resale royalty (any token, any ledger, royalty in
+        // the payment asset). Produces one Coordinator-signed MarketSettle block.
+        .route(
+            "/v1/market/settle",
+            post(crate::api_fn::market::market_settle),
+        )
+        // Royalty change (protocole 2.7) — authorized by the CURRENT beneficiary's
+        // co-signature (no admin token). Produces a RoyaltyUpdate block.
+        .route(
+            "/v1/royalty/update",
+            post(crate::api_fn::market::royalty_update),
         );
 
     let blocks = Router::new().route("/blocks/stream", get(stream_blocks));

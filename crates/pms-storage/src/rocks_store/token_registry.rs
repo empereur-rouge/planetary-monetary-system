@@ -73,6 +73,14 @@ impl RocksStore {
             }
         }
 
+        // royalty de revente (2.7) : cap 10_000 bps + bénéficiaire non-vide.
+        // Source unique partagée avec la validation de classe SFT (persist).
+        pms_types_payload::validate_royalty_fields(
+            metadata.royalty_bps,
+            metadata.royalty_beneficiary.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
+
         // mint collatéralisé (2.3 v2) : cohérence des trois champs
         match (&metadata.collateral_address, metadata.collateral_ratio_bps) {
             (Some(addr), ratio) => {
@@ -118,6 +126,17 @@ impl RocksStore {
         Ok(())
     }
 
+    /// Écrase les métadonnées d'un token **déjà existant** (validées), sans
+    /// contrôle d'unicité. Réservé aux mutations de politique (ex: `RoyaltyUpdate`,
+    /// protocole 2.7) — la création reste `register_token` (anti-overwrite).
+    pub fn put_token(&self, metadata: &TokenMetadata) -> Result<()> {
+        Self::validate_token_metadata(metadata)?;
+        let cf = self.cf_token_registry();
+        let json = serde_json::to_vec(metadata)?;
+        self.db.put_cf(&cf, metadata.asset_id.as_bytes(), json)?;
+        Ok(())
+    }
+
     /// Récupère les métadonnées d'un token par son asset_id.
     pub fn get_token(&self, asset_id: &str) -> Result<Option<TokenMetadata>> {
         let cf = self.cf_token_registry();
@@ -148,5 +167,8 @@ impl RocksStore {
 impl crate::token_store::TokenRegistryStorage for RocksStore {
     fn get_token(&self, asset_id: &str) -> Result<Option<TokenMetadata>> {
         RocksStore::get_token(self, asset_id)
+    }
+    fn put_token(&self, metadata: &TokenMetadata) -> Result<()> {
+        RocksStore::put_token(self, metadata)
     }
 }

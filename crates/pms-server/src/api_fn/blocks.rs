@@ -187,15 +187,20 @@ fn extract_tx_fee(wb: &WireBlock, st: &AppState) -> Option<Decimal> {
     };
 
     match envelope {
-        PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx)) => match Decimal::from_str(&tx.fee) {
-            Ok(fee) => Some(fee),
-            Err(e) => {
-                eprintln!(
-                    "extract_tx_fee: Fee parse error for block {}: {} (fee='{}')",
-                    wb.id, e, tx.fee
-                );
-                None
-            }
+        // Any tx-wrapping plain payload (TxUtxo / TokenBurn / MarketSettle) via
+        // the single `tx()` accessor; non-tx plain payloads (Mint/Reward/…) → 0.
+        PayloadEnvelope::Plain(plain) => match plain.tx() {
+            Some(tx) => match Decimal::from_str(&tx.fee) {
+                Ok(fee) => Some(fee),
+                Err(e) => {
+                    eprintln!(
+                        "extract_tx_fee: Fee parse error for block {}: {} (fee='{}')",
+                        wb.id, e, tx.fee
+                    );
+                    None
+                }
+            },
+            None => None,
         },
         PayloadEnvelope::Encrypted(enc) => {
             // Try to decrypt with node's private key
@@ -248,10 +253,6 @@ fn extract_tx_fee(wb: &WireBlock, st: &AppState) -> Option<Decimal> {
                     None
                 }
             }
-        }
-        _ => {
-            eprintln!("extract_tx_fee: Envelope mismatch for block {}", wb.id);
-            None
         }
     }
 }

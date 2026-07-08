@@ -21,7 +21,7 @@ use crate::api::AppState;
 use axum::extract::{Path, State};
 use axum::{Json, http::StatusCode};
 use pms_storage::DagStorage;
-use pms_types::{PayloadEnvelope, PlainPayload, TxOutput};
+use pms_types::{PayloadEnvelope, TxOutput};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -118,12 +118,11 @@ pub async fn get_transaction_by_block_id(
         }
     };
 
-    // Inputs only exist for `TxUtxo` (UTXO-spending transactions); Mint /
-    // Reward / Bridge have no inputs.
-    let (inputs, fee) = if let PlainPayload::TxUtxo(tx) = &plain {
-        (resolve_inputs(&state, tx).await, tx.fee.clone())
-    } else {
-        (Vec::new(), "0".to_string())
+    // Inputs/fee exist for the tx-wrapping payloads (`TxUtxo`, `TokenBurn`,
+    // `MarketSettle`); Mint / Reward / Bridge have none. Single `tx()` accessor.
+    let (inputs, fee) = match plain.tx() {
+        Some(tx) => (resolve_inputs(&state, tx).await, tx.fee.clone()),
+        None => (Vec::new(), "0".to_string()),
     };
 
     // Single source of truth for "outputs created by this payload" — see

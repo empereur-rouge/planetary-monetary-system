@@ -69,7 +69,22 @@ use crate::api::AppState;
 /// réconcilie un `BridgeMint` avec son `BridgeLock` source (montant == verrouillé,
 /// asset, destinataire, ledger destination) — rejette sur-émission, vol,
 /// lock inexistant, ou mauvais ledger destination.
-pub const API_VERSION: u32 = 31;
+/// v32 (protocole 2.7 — marketplace) : nouvel endpoint `POST /v1/market/settle`
+/// (règlement atomique vente/revente + royalty enforced consensus) ; champs
+/// `royalty_bps`/`royalty_beneficiary` ajoutés à `POST /admin/tokens/create` et
+/// `POST /admin/sft/classes`.
+/// v33 (protocole 2.7 — royalty mutable) : nouvel endpoint `POST /admin/royalty`
+/// (redirige/modifie le bénéficiaire ou le taux de royalty d'un asset existant).
+/// v34 (protocole 2.7 — royalty co-signée) : `/admin/royalty` remplacé par
+/// `POST /v1/royalty/prepare` + `POST /v1/royalty/update` (API-key, PAS admin) —
+/// autorisés par la SIGNATURE du bénéficiaire courant (custodial ou pré-signée).
+/// v35 (revue marketplace — D1) : `POST /v1/market/settle` et
+/// `POST /v1/royalty/{prepare,update}` renvoient désormais des erreurs au format
+/// `ApiError` à **code numérique stable** (`{"code":NNNN,"message":...}`) au lieu
+/// de `{"error":"..."}` ad hoc. Nouveau code `1050` (Forbidden — clé fournie ≠
+/// bénéficiaire courant, 403). Un rejet consensus (royalty/settlement) mappe sur
+/// `3070` (Conflict, 409).
+pub const API_VERSION: u32 = 35;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -165,6 +180,15 @@ mod tests {
         //          rejouant un lock déjà consommé — anti-replay durable).
         // v0.26.0: 30 → 31 (audit rang 3/B3 : réconciliation cross-ledger du
         //          BridgeMint avec son BridgeLock — montant/asset/destinataire/ledger).
-        assert_eq!(parsed.api_version, 31);
+        // v0.27.0: 31 → 32 (protocole 2.7 : POST /v1/market/settle + champs royalty
+        //          sur tokens/create & sft/classes).
+        // v0.28.0: 32 → 33 (protocole 2.7 : POST /admin/royalty — royalty mutable
+        //          post-mint).
+        // v0.29.0: 33 → 34 (protocole 2.7 : /v1/royalty/{prepare,update} co-signés
+        //          par le bénéficiaire courant ; /admin/royalty retiré).
+        // v0.29.0 (revue D1): 34 → 35 (market/royalty renvoient ApiError à code
+        //          stable ; nouveau code 1050 Forbidden). Toujours dans le cycle
+        //          non-publié 0.29.0 — l'API 34 n'a jamais été released.
+        assert_eq!(parsed.api_version, 35);
     }
 }

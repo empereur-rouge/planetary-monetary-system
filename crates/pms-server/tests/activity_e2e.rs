@@ -970,6 +970,9 @@ async fn activity_token_create_appears() -> anyhow::Result<()> {
         collateral_address: None,
         collateral_asset_id: None,
         collateral_ratio_bps: None,
+        royalty_bps: None,
+        royalty_beneficiary: None,
+        royalty_version: 0,
     };
 
     let wb = forge_signed_wire_block_for_test(

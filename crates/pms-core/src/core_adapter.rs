@@ -392,6 +392,19 @@ impl<
                         spent.insert((inp.out.txid.clone(), inp.out.index));
                     }
                 }
+                // MarketSettle: the wrapped co-signed tx spends the seller's item
+                // UTXO + the buyer's payment UTXOs (audit B1). Without this arm a
+                // restart rebuild would resurrect them as unspent → double-spend of
+                // an already-sold item and lost item/royalty/net outputs.
+                if let pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::MarketSettle {
+                    tx,
+                    ..
+                }) = p
+                {
+                    for inp in &tx.inputs {
+                        spent.insert((inp.out.txid.clone(), inp.out.index));
+                    }
+                }
                 if let pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::BridgeLock {
                     inputs,
                     ..
@@ -432,6 +445,14 @@ impl<
                 Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::TxUtxo(tx))) => {
                     Some((tx.outputs.clone(), 0))
                 }
+                // MarketSettle: its wrapped tx creates the item / royalty / net /
+                // change outputs — replay them on rebuild exactly like a TxUtxo
+                // (audit B1), else the buyer's item and the seller's proceeds
+                // vanish after a restart.
+                Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::MarketSettle {
+                    tx,
+                    ..
+                })) => Some((tx.outputs.clone(), 0)),
                 Some(pms_types::PayloadEnvelope::Plain(pms_types::PlainPayload::BridgeMint {
                     outputs,
                     ..

@@ -6,6 +6,7 @@ pub mod conditions; // Spend conditions des outputs : MultiSig / HashLock (proto
 pub mod demurrage; // Décote temporelle opt-in par asset (protocole 2.5)
 pub mod fees;
 mod impls;
+pub mod market; // Règlement atomique marketplace + royalty de revente (protocole 2.7)
 pub mod mint; // Validation de sécurité du Minting (Coordinateur Only)
 pub mod nft; // Validation des actions NFT
 pub mod ownership; // Binding unlock pubkey ↔ propriétaire UTXO (audit C-1)

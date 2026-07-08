@@ -37,6 +37,9 @@ fn edenite_metadata() -> TokenMetadata {
         collateral_address: None,
         collateral_asset_id: None,
         collateral_ratio_bps: None,
+        royalty_bps: None,
+        royalty_beneficiary: None,
+        royalty_version: 0,
     }
 }
 
@@ -53,6 +56,9 @@ fn gold_metadata() -> TokenMetadata {
         collateral_address: None,
         collateral_asset_id: None,
         collateral_ratio_bps: None,
+        royalty_bps: None,
+        royalty_beneficiary: None,
+        royalty_version: 0,
     }
 }
 
@@ -96,6 +102,50 @@ async fn register_token_duplicate_fails() -> Result<()> {
         result.unwrap_err().to_string().contains("already exists"),
         "error should mention 'already exists'"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn register_token_rejects_royalty_over_100pct() -> Result<()> {
+    let ts = mk_store("reg:royalty").await?;
+
+    // 20% royalty with an explicit beneficiary is fine.
+    let mut ok_meta = edenite_metadata();
+    ok_meta.asset_id = "royaltok".into();
+    ok_meta.royalty_bps = Some(2000);
+    ok_meta.royalty_beneficiary = Some("8e1beneficiary".into());
+    ts.store.register_token(&ok_meta)?;
+    let stored = ts.store.get_token("royaltok")?.expect("registered");
+    println!("stored royalty: {:?}", stored.effective_royalty());
+    assert_eq!(stored.effective_royalty(), Some((2000, "8e1beneficiary".to_string())));
+
+    // audit B2: royalty_bps > 0 without an explicit beneficiary is REJECTED
+    // (would otherwise default to the creator = pubkey hex, not an address).
+    let mut no_ben = edenite_metadata();
+    no_ben.asset_id = "royalnoben".into();
+    no_ben.royalty_bps = Some(2000);
+    let err = ts.store.register_token(&no_ben).unwrap_err().to_string();
+    println!("bps>0 without beneficiary rejected: {err}");
+    assert!(err.contains("royalty_beneficiary is required"), "got: {err}");
+
+    // > 10000 bps must be rejected at the registry.
+    let mut bad = edenite_metadata();
+    bad.asset_id = "royalbad".into();
+    bad.royalty_bps = Some(10_001);
+    bad.royalty_beneficiary = Some("8e1beneficiary".into());
+    let err = ts.store.register_token(&bad).unwrap_err().to_string();
+    println!("royalty 10001 bps rejected: {err}");
+    assert!(err.contains("royalty_bps"), "got: {err}");
+
+    // Explicit-but-empty beneficiary is rejected.
+    let mut blank = edenite_metadata();
+    blank.asset_id = "royalblank".into();
+    blank.royalty_bps = Some(500);
+    blank.royalty_beneficiary = Some("  ".into());
+    let err = ts.store.register_token(&blank).unwrap_err().to_string();
+    println!("blank beneficiary rejected: {err}");
+    assert!(err.contains("royalty_beneficiary"), "got: {err}");
 
     Ok(())
 }

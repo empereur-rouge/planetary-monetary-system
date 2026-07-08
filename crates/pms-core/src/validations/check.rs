@@ -329,13 +329,14 @@ pub fn validate_block(
                     utxo_sufficient_funds(dag, tx)?;
                 }
             }
-            PlainPayload::TokenBurn { tx, .. } => {
-                // Owner-signé : le burner autorise la dépense de ses propres
-                // UTXOs. Checks de base ici (chemin sync RAM DAG / tests) ; la
-                // conservation-burn (amount = inputs − change), l'ownership et
-                // l'anti-double-spend autoritaires sont dans le hot path
-                // (`validate_token_burn_async`), comme TxUtxo via
-                // `validate_transaction_full`.
+            // Owner-signé (burner, ou acheteur+vendeur pour MarketSettle). Checks
+            // de base ici (chemin sync RAM DAG / tests) : signatures + structure
+            // des conditions d'output + anti-double-spend/fonds. Les gates
+            // AUTORITAIRES (conservation-burn pour TokenBurn ; forme du settlement
+            // + royalty pour MarketSettle) vivent dans le hot path
+            // (`do_persist_block_internal`), comme TxUtxo via
+            // `validate_transaction_full`.
+            PlainPayload::TokenBurn { tx, .. } | PlainPayload::MarketSettle { tx, .. } => {
                 verify_tx_signatures(tx, &policy.network_id)?;
                 crate::validations::conditions::validate_output_conditions(&tx.outputs)?;
                 if !policy.skip_utxo_checks {
@@ -377,6 +378,7 @@ pub fn validate_block(
             | PlainPayload::EncryptedReward { .. }
             | PlainPayload::TokenCreate(_)
             | PlainPayload::SftClassCreate(_)
+            | PlainPayload::RoyaltyUpdate { .. }
             | PlainPayload::BridgeLock { .. }
             | PlainPayload::BridgeMint { .. }
             | PlainPayload::Freeze { .. }

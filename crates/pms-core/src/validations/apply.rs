@@ -42,6 +42,17 @@ pub fn apply_block_mem<W: WriteState>(dag: &mut W, b: &Block) {
         //    dans RocksDB via apply_tx_utxo_atomic() / équivalent.
     }
 
+    // MarketSettle: the co-signed tx moves the item + payment atomically — its
+    // inputs must be marked spent in RAM exactly like a plain TxUtxo (audit B3).
+    // Without this the fast-path double-spend guard never sees a settlement's
+    // inputs, so the seller's item UTXO and the buyer's payment UTXOs could be
+    // re-spent in RAM before the RocksDB layer rejects them.
+    if let Some(PayloadEnvelope::Plain(PlainPayload::MarketSettle { tx, .. })) = &b.payload {
+        for inp in &tx.inputs {
+            dag.mark_spent_ram((&inp.out.txid, inp.out.index));
+        }
+    }
+
     // BridgeLock: mark inputs as spent (funds leave this ledger)
     if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock { inputs, .. })) = &b.payload {
         for inp in inputs {

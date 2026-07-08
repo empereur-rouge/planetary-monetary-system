@@ -42,6 +42,7 @@ updated: 2026-05-04
 | [[webhook-delivery]] | Watcher API : multi-address SSE (1 stream / N adresses) + webhook subscription HMAC-signée (CRUD + delivery worker) |
 | [[token-system]] | Tokens custom multi-asset, Amount (8 décimales), FeePolicy |
 | [[semi-fungibles]] | SFT façon ERC-1155 : classes `collection:class` sur le moteur UTXO, mint contraint, catalogue public (v0.19.0) |
+| [[marketplace-royalty]] | Règlement atomique vente/revente + royalty de revente enforced consensus, tout token/SFT/ledger, royalty dans l'asset de paiement (v0.27.0) |
 | [[block-payloads]] | 17 types de payload (PlainPayload), chiffrement X25519+AES-256-GCM |
 
 ## Protocole & Consensus

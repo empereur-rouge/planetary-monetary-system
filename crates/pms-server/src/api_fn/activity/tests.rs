@@ -263,6 +263,9 @@ fn classify_token_create() {
         collateral_address: None,
         collateral_asset_id: None,
         collateral_ratio_bps: None,
+        royalty_bps: None,
+        royalty_beneficiary: None,
+        royalty_version: 0,
     });
     let items = classify_activity_sync(&plain, "alice");
     assert_eq!(items.len(), 1);
@@ -285,6 +288,9 @@ fn classify_token_create_not_creator() {
         collateral_address: None,
         collateral_asset_id: None,
         collateral_ratio_bps: None,
+        royalty_bps: None,
+        royalty_beneficiary: None,
+        royalty_version: 0,
     });
     let items = classify_activity_sync(&plain, "bob");
     assert!(items.is_empty());

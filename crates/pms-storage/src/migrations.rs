@@ -81,7 +81,19 @@ pub const CURRENT_VER: i64 = 12;
 /// (montant == lock) reste accepté. MINOR → migration auto, pas de wipe.
 /// (Mixed-version P2P : un nœud 3.10.0 ne réconcilie pas les montants — upgrade
 /// coordonné requis pour fermer l'inflation par mint mal formé.)
-pub const DAG_VERSION: &str = "3.11.0";
+// 3.11.0 → 3.12.0 : nouveau payload `PlainPayload::MarketSettle` (règlement
+// atomique marketplace + royalty de revente enforced consensus, protocole 2.7).
+// Règle ADDITIVE : les blocs existants restent valides, seul un nouveau variant
+// s'ajoute → MINOR, migration auto, pas de wipe. (Mixed-version P2P : un nœud
+// 3.11.x ne sait pas désérialiser un bloc MarketSettle — upgrade coordonné requis
+// avant d'émettre des ventes.)
+// 3.12.0 → 3.13.0 : nouveau payload `PlainPayload::RoyaltyUpdate` (redirection de
+// la royalty de revente d'un asset existant, protocole 2.7). Additif → MINOR.
+// 3.13.0 → 3.14.0 : `RoyaltyUpdate` porte désormais l'AUTORISATION du bénéficiaire
+// courant (`auth_pubkey_hex` + `auth_signature_b64`, co-signature) — le format du
+// payload change, mais 3.13.0 étant Unreleased (aucun bloc RoyaltyUpdate déployé),
+// c'est additif en pratique → MINOR, migration auto.
+pub const DAG_VERSION: &str = "3.14.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

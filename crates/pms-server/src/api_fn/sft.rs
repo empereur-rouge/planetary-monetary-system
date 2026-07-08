@@ -42,6 +42,13 @@ pub struct CreateSftClassRequest {
     /// Demurrage opt-in (bps/jour, ≤ 10000). `None`/`0` = pas de décote.
     #[serde(default)]
     pub demurrage_bps_per_day: Option<u32>,
+    /// Royalty de revente (protocole 2.7) : bps du prix reversés au bénéficiaire
+    /// à chaque `MarketSettle` où cette classe est l'`asset_sold`. Absent/0 = aucune.
+    #[serde(default)]
+    pub royalty_bps: Option<u32>,
+    /// Bénéficiaire de la royalty (Bech32). Absent ⇒ défaut = créateur (coordinateur).
+    #[serde(default)]
+    pub royalty_beneficiary: Option<String>,
 }
 
 /// Requête de mint d'une classe.
@@ -103,6 +110,9 @@ pub async fn admin_create_sft_class(
         demurrage_bps_per_day: req.demurrage_bps_per_day,
         creator: coordinator_pk.clone(),
         mint_authority: coordinator_pk,
+        royalty_bps: req.royalty_bps.filter(|bps| *bps > 0),
+        royalty_beneficiary: req.royalty_beneficiary.clone(),
+        royalty_version: 0,
     };
     // La validation (format, asset_id==collection:class, unicité…) vit dans persist.
     let block_id = forge_sft_block(&state, PlainPayload::SftClassCreate(class), "SftClassCreate").await?;

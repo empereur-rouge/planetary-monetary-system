@@ -29,7 +29,9 @@ use pms_server::api::{AppState, FeePoolRefundSink, build_api_router, spawn_fee_d
 use pms_server::stats::Stats;
 use pms_server::{Server, resolve_admin_token};
 // RocksMemoryConfig not needed — LedgerManager::bootstrap handles DB config
+use pms_testkit::forge_signed_wire_block_for_test;
 use pms_wallet::{SignerBackend, Wallet};
+use pms_wire::WireMeta;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
@@ -58,6 +60,11 @@ struct Sandbox {
     admin_token: String,
     #[allow(dead_code)]
     network_id: String,
+    /// Wire metadata (network_id + protocol_version) for hand-forging blocks
+    /// submitted via `/submit/block` in adversarial tests. Populated at boot
+    /// from the running config so forged blocks match the engine's expectations.
+    #[allow(dead_code)]
+    wire_meta: WireMeta,
     /// Kept alive so RocksDB data directory persists for the test duration.
     _tmp: tempfile::TempDir,
     /// Server task handle — aborted on drop.
@@ -702,6 +709,7 @@ async fn boot_sandbox() -> Result<Sandbox> {
         admin_wallet,
         admin_addr,
         admin_token,
+        wire_meta: WireMeta::from(&settings),
         network_id,
         _tmp: tmp,
         _server_handle: server_handle,
@@ -3339,6 +3347,7 @@ async fn boot_one_engine(
         admin_wallet: admin_wallet.clone(),
         admin_addr: admin_addr.to_string(),
         admin_token,
+        wire_meta: WireMeta::from(&settings),
         network_id,
         _tmp: tmp,
         _server_handle: server_handle,
@@ -6233,4 +6242,655 @@ async fn test_sft_lifecycle() -> Result<()> {
 /// Helper local : parse un Decimal pour les assertions SFT.
 fn dec_sft(s: &str) -> rust_decimal::Decimal {
     rust_decimal::Decimal::from_str_exact(s).unwrap()
+}
+
+// ============================================================================
+// TEST: Marketplace settlement with consensus-enforced resale royalty (2.7)
+//
+// Prouve, sur le VRAI chemin (endpoint → build+co-sign → persist → validate →
+// delta → balances), que :
+//   1. une vente/revente est ATOMIQUE (item ↔ paiement en 1 bloc) ;
+//   2. la royalty de revente est PRÉLEVÉE et VERSÉE au créateur, au consensus,
+//      dans l'asset de PAIEMENT (PMS natif OU token custom) ;
+//   3. un settlement TAMPERED (créateur sous-payé) est REJETÉ par persist.
+// ============================================================================
+
+impl Sandbox {
+    /// Fetch UTXO refs `(OutputId, asset_id, amount)` for hand-building txs in
+    /// adversarial settlement tests. Parses `txId`/`outIdx` from the utxos endpoint.
+    async fn get_utxo_refs(
+        &self,
+        ledger_id: &str,
+        address: &str,
+    ) -> Result<Vec<(pms_types::OutputId, Option<String>, Decimal)>> {
+        let url = match ledger_id {
+            "main" => format!("{}/v1/wallet/{}/utxos", self.base_url, address),
+            lid => format!("{}/l/{}/v1/wallet/{}/utxos", self.base_url, lid, address),
+        };
+        let resp = self.client.get(&url).send().await.context("GET utxos failed")?;
+        let json: Value = resp.json().await.unwrap_or(json!({}));
+        let refs = json["utxos"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|u| {
+                        let txid = u["txId"].as_str()?.to_string();
+                        let index = u["outIdx"].as_u64()? as u32;
+                        let asset_id = u["asset_id"].as_str().map(|s| s.to_string());
+                        let amount = u["amount"].as_str().and_then(|s| Decimal::from_str(s).ok())?;
+                        Some((pms_types::OutputId { txid, index }, asset_id, amount))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(refs)
+    }
+
+    /// Activity-feed `activity_type` labels for an address (proves the RocksDB
+    /// activity index recorded a block — GAP1 audit-trail check).
+    async fn activity_types(&self, address: &str) -> Result<Vec<String>> {
+        let url = format!("{}/v1/wallet/{}/activity", self.base_url, address);
+        let resp = self.client.get(&url).send().await.context("GET activity failed")?;
+        let json: Value = resp.json().await.unwrap_or(json!({}));
+        Ok(json["items"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|it| it["activity_type"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Current DAG tips (parents for a hand-forged block).
+    async fn tips(&self) -> Result<Vec<String>> {
+        let (st, body) = self.post(None, "/v1/dag/tips", json!({ "limit": 1 })).await;
+        anyhow::ensure!(st.is_success(), "tips failed: {st} {body}");
+        Ok(body
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_market_settle_royalty_pms_price() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    let seller = Wallet::generate();
+    let buyer = Wallet::generate();
+    let creator = Wallet::generate(); // royalty beneficiary
+    let seller_addr = seller.get_address("8e");
+    let buyer_addr = buyer.get_address("8e");
+    let creator_addr = creator.get_address("8e");
+
+    println!("\n=== [MARKET SETTLE / PMS PRICE] SFT édition /10, royalty 20% ===");
+    println!(
+        "  seller={}… buyer={}… creator={}…",
+        &seller_addr[..14], &buyer_addr[..14], &creator_addr[..14]
+    );
+
+    // 1) Classe SFT "studio:ticket" plafonnée à 10, royalty 20% → creator.
+    let (st, body) = sandbox
+        .admin_post(
+            "/admin/sft/classes",
+            json!({
+                "collection_id": "studio", "class_id": "ticket",
+                "name": "Cosmic Ticket /10", "decimals": 0, "max_supply": "10",
+                "royalty_bps": 2000, "royalty_beneficiary": creator_addr,
+            }),
+        )
+        .await;
+    println!("  create class: {st} — {body:?}");
+    anyhow::ensure!(st.is_success(), "create class failed: {st} {body}");
+
+    // 2) Mint 1 exemplaire au vendeur.
+    let (st, body) = sandbox
+        .admin_post(
+            "/admin/sft/mint",
+            json!({ "asset_id": "studio:ticket", "to": seller_addr, "amount": "1" }),
+        )
+        .await;
+    println!("  mint ticket→seller: {st} — {body:?}");
+    anyhow::ensure!(st.is_success(), "mint failed: {st} {body}");
+
+    // 3) Faucet PMS à l'acheteur (prix 100 + gas).
+    sandbox.faucet_mint(None, &buyer_addr, "1000").await?;
+    sleep(Duration::from_millis(200)).await;
+
+    let seller_item_before = sandbox.get_asset_balance("main", &seller_addr, Some("studio:ticket")).await?;
+    let buyer_pms_before = sandbox.get_balance("main", &buyer_addr).await?;
+    println!("  BEFORE: seller_item={seller_item_before}, buyer_pms={buyer_pms_before}");
+    assert_eq!(seller_item_before, Decimal::from(1), "seller owns 1 ticket");
+
+    // 4) Revente atomique : l'acheteur paie 100 PMS pour le ticket.
+    let (st, body) = sandbox
+        .post(
+            None,
+            "/v1/market/settle",
+            json!({
+                "seller_private_key_b64": seller.private_key_b64,
+                "buyer_private_key_b64": buyer.private_key_b64,
+                "asset_sold": "studio:ticket", "quantity": "1", "price": "100",
+            }),
+        )
+        .await;
+    println!("  SETTLE → {st} — {body:?}");
+    anyhow::ensure!(st.is_success(), "settle failed: {st} {body}");
+    assert_eq!(body["royalty"], "20", "royalty = 20% × 100 = 20");
+    assert_eq!(body["net_to_seller"], "80", "seller net = 80");
+    assert_eq!(body["royalty_beneficiary"].as_str(), Some(creator_addr.as_str()));
+    sleep(Duration::from_millis(200)).await;
+
+    let buyer_item = sandbox.get_asset_balance("main", &buyer_addr, Some("studio:ticket")).await?;
+    let seller_item = sandbox.get_asset_balance("main", &seller_addr, Some("studio:ticket")).await?;
+    let creator_pms = sandbox.get_balance("main", &creator_addr).await?;
+    let seller_pms = sandbox.get_balance("main", &seller_addr).await?;
+    let buyer_pms = sandbox.get_balance("main", &buyer_addr).await?;
+    println!("  AFTER: buyer_item={buyer_item}, seller_item={seller_item}");
+    println!("         creator_pms(royalty)={creator_pms}, seller_pms(net)={seller_pms}, buyer_pms={buyer_pms}");
+
+    assert_eq!(buyer_item, Decimal::from(1), "buyer now owns the ticket");
+    assert_eq!(seller_item, Decimal::ZERO, "seller relinquished the ticket");
+    assert_eq!(creator_pms, Decimal::from(20), "creator received 20% royalty in PMS");
+    assert_eq!(seller_pms, Decimal::from(80), "seller received 80 net in PMS");
+    assert!(buyer_pms < Decimal::from(900), "buyer paid price+gas, remaining={buyer_pms}");
+
+    // GAP1 audit-trail: the sale MUST surface in each party's activity feed
+    // (previously MarketSettle fell through a wildcard → invisible everywhere).
+    let buyer_acts = sandbox.activity_types(&buyer_addr).await?;
+    let seller_acts = sandbox.activity_types(&seller_addr).await?;
+    let creator_acts = sandbox.activity_types(&creator_addr).await?;
+    println!("  ACTIVITY buyer={buyer_acts:?} seller={seller_acts:?} creator={creator_acts:?}");
+    assert!(buyer_acts.iter().any(|t| t == "market_buy"), "buyer sees market_buy");
+    assert!(seller_acts.iter().any(|t| t == "market_sell"), "seller sees market_sell");
+    assert!(creator_acts.iter().any(|t| t == "royalty_received"), "creator sees royalty_received");
+
+    println!("  ✅ atomic resale + 20% royalty enforced by consensus (PMS price) + visible in activity");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_market_settle_royalty_custom_token_price() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    let seller = Wallet::generate();
+    let buyer = Wallet::generate();
+    let creator = Wallet::generate();
+    let seller_addr = seller.get_address("8e");
+    let buyer_addr = buyer.get_address("8e");
+    let creator_addr = creator.get_address("8e");
+
+    println!("\n=== [MARKET SETTLE / CUSTOM-TOKEN PRICE] royalty en usdx (pas PMS) ===");
+
+    // Payment token "usdx" (6 decimals).
+    let (st, body) = sandbox
+        .admin_post(
+            "/admin/tokens/create",
+            json!({ "asset_id": "usdx", "symbol": "USDX", "name": "Test USD", "decimals": 6, "max_supply": "1000000" }),
+        )
+        .await;
+    anyhow::ensure!(st.is_success(), "usdx create failed: {st} {body}");
+
+    // SFT class with a 15% royalty → creator.
+    let (st, body) = sandbox
+        .admin_post(
+            "/admin/sft/classes",
+            json!({
+                "collection_id": "art", "class_id": "print", "name": "Signed Print",
+                "decimals": 0, "max_supply": "5", "royalty_bps": 1500, "royalty_beneficiary": creator_addr,
+            }),
+        )
+        .await;
+    anyhow::ensure!(st.is_success(), "class failed: {st} {body}");
+
+    // Mint the item to seller; mint 1000 usdx to buyer; faucet buyer PMS for gas.
+    let (st, _b) = sandbox.admin_post("/admin/sft/mint", json!({ "asset_id": "art:print", "to": seller_addr, "amount": "1" })).await;
+    anyhow::ensure!(st.is_success(), "sft mint failed");
+    let (st, _b) = sandbox.admin_post("/admin/tokens/mint", json!({ "asset_id": "usdx", "to": buyer_addr, "amount": "1000" })).await;
+    anyhow::ensure!(st.is_success(), "usdx mint failed");
+    sandbox.faucet_mint(None, &buyer_addr, "100").await?; // PMS for gas
+    sleep(Duration::from_millis(200)).await;
+
+    // Settle: buyer buys the print for 200 usdx. Royalty = 15% × 200 = 30 usdx.
+    let (st, body) = sandbox
+        .post(
+            None,
+            "/v1/market/settle",
+            json!({
+                "seller_private_key_b64": seller.private_key_b64,
+                "buyer_private_key_b64": buyer.private_key_b64,
+                "asset_sold": "art:print", "quantity": "1",
+                "price_asset": "usdx", "price": "200",
+            }),
+        )
+        .await;
+    println!("  SETTLE(usdx) → {st} — {body:?}");
+    anyhow::ensure!(st.is_success(), "settle failed: {st} {body}");
+    assert_eq!(body["royalty"], "30", "royalty = 15% × 200 = 30 usdx");
+    assert_eq!(body["net_to_seller"], "170");
+    sleep(Duration::from_millis(200)).await;
+
+    let buyer_item = sandbox.get_asset_balance("main", &buyer_addr, Some("art:print")).await?;
+    let creator_usdx = sandbox.get_asset_balance("main", &creator_addr, Some("usdx")).await?;
+    let seller_usdx = sandbox.get_asset_balance("main", &seller_addr, Some("usdx")).await?;
+    let buyer_usdx = sandbox.get_asset_balance("main", &buyer_addr, Some("usdx")).await?;
+    println!("  AFTER: buyer_item={buyer_item}, creator_usdx(royalty)={creator_usdx}, seller_usdx(net)={seller_usdx}, buyer_usdx={buyer_usdx}");
+    assert_eq!(buyer_item, Decimal::from(1), "buyer owns the print");
+    assert_eq!(creator_usdx, Decimal::from(30), "creator got 30 usdx royalty (NOT PMS)");
+    assert_eq!(seller_usdx, Decimal::from(170), "seller got 170 usdx net");
+    assert_eq!(buyer_usdx, Decimal::from(800), "buyer paid 200 usdx (1000-200)");
+    println!("  ✅ royalty prélevée dans le token de PAIEMENT custom (usdx), consensus-enforced");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_market_settle_rejects_tampered_royalty() -> Result<()> {
+    use pms_types::{PayloadEnvelope, PlainPayload, Transaction, TxInput, TxOutput, Unlock};
+
+    let sandbox = boot_sandbox().await?;
+
+    let seller = Wallet::generate();
+    let buyer = Wallet::generate();
+    let creator = Wallet::generate();
+    let seller_addr = seller.get_address("8e");
+    let buyer_addr = buyer.get_address("8e");
+    let creator_addr = creator.get_address("8e");
+
+    println!("\n=== [MARKET SETTLE / REJECT] créateur sous-payé (10 au lieu de 20) ===");
+
+    // Class with 20% royalty; mint item to seller; faucet buyer PMS.
+    let (st, _b) = sandbox
+        .admin_post("/admin/sft/classes", json!({
+            "collection_id": "studio", "class_id": "ticket", "name": "Ticket", "decimals": 0,
+            "max_supply": "10", "royalty_bps": 2000, "royalty_beneficiary": creator_addr,
+        }))
+        .await;
+    anyhow::ensure!(st.is_success(), "class failed");
+    let (st, _b) = sandbox.admin_post("/admin/sft/mint", json!({ "asset_id": "studio:ticket", "to": seller_addr, "amount": "1" })).await;
+    anyhow::ensure!(st.is_success(), "mint failed");
+    sandbox.faucet_mint(None, &buyer_addr, "1000").await?;
+    sleep(Duration::from_millis(200)).await;
+
+    // Hand-build a TAMPERED settlement: buyer pays 100 PMS, but the creator only
+    // gets 10 (should be 20) and the seller grabs 90 (should be 80). The wrapped
+    // tx is fully valid (conservation holds, both parties sign) — only the ROYALTY
+    // shape is wrong. The consensus gate must reject it.
+    let seller_refs = sandbox.get_utxo_refs("main", &seller_addr).await?;
+    let (item_oid, _, _) = seller_refs
+        .iter()
+        .find(|(_, a, amt)| a.as_deref() == Some("studio:ticket") && *amt >= Decimal::from(1))
+        .cloned()
+        .expect("seller item UTXO");
+    let buyer_refs = sandbox.get_utxo_refs("main", &buyer_addr).await?;
+    let (pms_oid, _, pms_amt) = buyer_refs
+        .iter()
+        .find(|(_, a, amt)| a.is_none() && *amt >= Decimal::from(100))
+        .cloned()
+        .expect("buyer PMS UTXO");
+
+    let buyer_change = pms_amt - Decimal::from(100);
+    let mut outputs = vec![
+        TxOutput::new(buyer_addr.clone(), "1", Some("studio:ticket".to_string())), // item → buyer
+        TxOutput::new(creator_addr.clone(), "10", None), // TAMPERED royalty (should be 20)
+        TxOutput::new(seller_addr.clone(), "90", None),  // TAMPERED net (should be 80)
+    ];
+    if buyer_change > Decimal::ZERO {
+        outputs.push(TxOutput::new(buyer_addr.clone(), buyer_change.to_string(), None));
+    }
+    let unsigned = Transaction {
+        inputs: vec![TxInput { out: item_oid }, TxInput { out: pms_oid }],
+        outputs,
+        fee: "0".to_string(),
+        unlocks: vec![],
+    };
+    let msg = unsigned.signing_message(&sandbox.network_id).expect("signing_message");
+    let seller_sig = seller.sign(&msg).expect("seller sign");
+    let buyer_sig = buyer.sign(&msg).expect("buyer sign");
+    let signed = Transaction {
+        unlocks: vec![
+            Unlock::new(seller.public_key_hex.clone(), seller_sig), // input 0 = seller item
+            Unlock::new(buyer.public_key_hex.clone(), buyer_sig),   // input 1 = buyer PMS
+        ],
+        ..unsigned
+    };
+
+    let payload = PlainPayload::MarketSettle {
+        tx: signed,
+        asset_sold: "studio:ticket".to_string(),
+        quantity: "1".to_string(),
+        price_asset: None,
+        price: "100".to_string(),
+        seller: seller_addr.clone(),
+        buyer: buyer_addr.clone(),
+    };
+
+    let parents = sandbox.tips().await?;
+    anyhow::ensure!(!parents.is_empty(), "no tips");
+    let wb = forge_signed_wire_block_for_test(
+        parents,
+        &sandbox.wire_meta,
+        &sandbox.admin_wallet, // Coordinator signs the block (single-writer)
+        0,
+        Some(PayloadEnvelope::Plain(payload)),
+    );
+
+    // `/submit/block` returns the rejection reason as a PLAIN-TEXT body — read it raw.
+    let resp = sandbox
+        .client
+        .post(format!("{}/submit/block", sandbox.base_url))
+        .json(&wb)
+        .send()
+        .await
+        .expect("submit HTTP failed");
+    let st = resp.status();
+    let reason = resp.text().await.unwrap_or_default();
+    println!("  SUBMIT tampered settlement → {st} — reason: {reason:?}");
+
+    // Must be rejected, and for the RIGHT reason (settlement/royalty shape).
+    assert!(!st.is_success(), "tampered settlement must NOT be accepted (got {st})");
+    let low = reason.to_lowercase();
+    assert!(
+        low.contains("settlement"),
+        "reject reason must be a settlement violation, got: {reason:?}"
+    );
+    // Exact-accounting gate: the declared split is item→buyer, royalty(20)→creator,
+    // net(80)→seller. The tampered tx routes 90 to the seller and 10 to the creator,
+    // so at least one address nets an amount that is NOT part of the declared split.
+    // The gate reports the first such mismatch as "unexpected credit <n> <asset> to
+    // <addr> (not part of the declared split)" — this is precisely the royalty-shape
+    // enforcement, and the assertion is order-independent (either the seller's +90
+    // over-credit or the creator's +10 short-credit may surface first).
+    assert!(
+        low.contains("unexpected credit") && low.contains("not part of the declared split"),
+        "reject reason must be the exact-accounting royalty-split violation, got: {reason:?}"
+    );
+    // And it must name a PMS amount from the tampered split (90 grabbed by seller, or
+    // 10 short-paid to creator) — proving it caught THIS mis-routing, not an unrelated
+    // failure.
+    assert!(
+        low.contains(" 90 pms") || low.contains(" 10 pms"),
+        "reject reason must reference the tampered PMS split (90 or 10), got: {reason:?}"
+    );
+
+    // And the state must be unchanged: buyer got no ticket, creator got nothing.
+    sleep(Duration::from_millis(150)).await;
+    let buyer_item = sandbox.get_asset_balance("main", &buyer_addr, Some("studio:ticket")).await?;
+    let creator_pms = sandbox.get_balance("main", &creator_addr).await?;
+    let seller_item = sandbox.get_asset_balance("main", &seller_addr, Some("studio:ticket")).await?;
+    println!("  STATE UNCHANGED: buyer_item={buyer_item}, creator_pms={creator_pms}, seller_item={seller_item}");
+    assert_eq!(buyer_item, Decimal::ZERO, "buyer must NOT have received the item");
+    assert_eq!(creator_pms, Decimal::ZERO, "creator must NOT have been paid");
+    assert_eq!(seller_item, Decimal::from(1), "seller must still own the item");
+    println!("  ✅ tampered royalty settlement REJECTED by consensus; state intact");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_royalty_beneficiary_change_after_mint() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+    let seller = Wallet::generate();
+    let buyer = Wallet::generate();
+    let creator_a = Wallet::generate();
+    let creator_b = Wallet::generate();
+    let seller_addr = seller.get_address("8e");
+    let buyer_addr = buyer.get_address("8e");
+    let creator_a_addr = creator_a.get_address("8e");
+    let creator_b_addr = creator_b.get_address("8e");
+
+    println!("\n=== [ROYALTY BENEFICIARY CHANGE POST-MINT] créateur A → B ===");
+
+    // Classe royalty 20% → créateur A ; 2 exemplaires au vendeur.
+    let (st, _b) = sandbox
+        .admin_post("/admin/sft/classes", json!({
+            "collection_id":"studio","class_id":"pass","name":"Season Pass","decimals":0,
+            "max_supply":"10","royalty_bps":2000,"royalty_beneficiary":creator_a_addr,
+        }))
+        .await;
+    anyhow::ensure!(st.is_success(), "class create failed");
+    let (st, _b) = sandbox.admin_post("/admin/sft/mint", json!({"asset_id":"studio:pass","to":seller_addr,"amount":"2"})).await;
+    anyhow::ensure!(st.is_success(), "mint failed");
+    sandbox.faucet_mint(None, &buyer_addr, "1000").await?;
+    sleep(Duration::from_millis(200)).await;
+
+    // Vente #1 → créateur A payé (politique d'origine).
+    let (st, b1) = sandbox
+        .post(None, "/v1/market/settle", json!({
+            "seller_private_key_b64":seller.private_key_b64,"buyer_private_key_b64":buyer.private_key_b64,
+            "asset_sold":"studio:pass","quantity":"1","price":"100",
+        }))
+        .await;
+    println!("  settle #1 → {st} — beneficiary={:?}", b1["royalty_beneficiary"]);
+    anyhow::ensure!(st.is_success(), "settle 1 failed: {b1}");
+    assert_eq!(b1["royalty_beneficiary"].as_str(), Some(creator_a_addr.as_str()));
+    sleep(Duration::from_millis(200)).await;
+
+    // Redirection du bénéficiaire vers le créateur B — AUTORISÉE PAR LA
+    // CO-SIGNATURE du bénéficiaire courant (créateur A). Custodial : on passe la
+    // clé de A ; le serveur vérifie que A EST le bénéficiaire courant, signe.
+    let (st, upd) = sandbox
+        .post(None, "/v1/royalty/update", json!({
+            "asset_id":"studio:pass",
+            "royalty_beneficiary":creator_b_addr,
+            "authorizer_private_key_b64": creator_a.private_key_b64,
+        }))
+        .await;
+    println!("  ROYALTY UPDATE (signé par A) → {st} — {upd:?}");
+    anyhow::ensure!(st.is_success(), "royalty update failed: {upd}");
+    assert_eq!(upd["royalty_beneficiary"].as_str(), Some(creator_b_addr.as_str()));
+    assert_eq!(upd["royalty_bps"].as_u64(), Some(2000), "taux inchangé");
+    sleep(Duration::from_millis(200)).await;
+
+    // Après le handoff A→B, le créateur A n'est PLUS le bénéficiaire courant :
+    // sa clé ne peut plus autoriser un changement (403 au pré-check endpoint).
+    let (st_a, _r) = sandbox
+        .post(None, "/v1/royalty/update", json!({
+            "asset_id":"studio:pass",
+            "royalty_beneficiary":creator_a_addr,
+            "authorizer_private_key_b64": creator_a.private_key_b64,
+        }))
+        .await;
+    println!("  A tente de reprendre la royalty → {st_a} (attendu 403)");
+    assert_eq!(st_a.as_u16(), 403, "A n'est plus le bénéficiaire courant");
+    sleep(Duration::from_millis(150)).await;
+
+    // Vente #2 → créateur B payé (nouvelle politique), A inchangé.
+    let (st, b2) = sandbox
+        .post(None, "/v1/market/settle", json!({
+            "seller_private_key_b64":seller.private_key_b64,"buyer_private_key_b64":buyer.private_key_b64,
+            "asset_sold":"studio:pass","quantity":"1","price":"100",
+        }))
+        .await;
+    println!("  settle #2 → {st} — beneficiary={:?}", b2["royalty_beneficiary"]);
+    anyhow::ensure!(st.is_success(), "settle 2 failed: {b2}");
+    assert_eq!(b2["royalty_beneficiary"].as_str(), Some(creator_b_addr.as_str()), "settle #2 paie le créateur B");
+    sleep(Duration::from_millis(200)).await;
+
+    let a = sandbox.get_balance("main", &creator_a_addr).await?;
+    let b = sandbox.get_balance("main", &creator_b_addr).await?;
+    let s = sandbox.get_balance("main", &seller_addr).await?;
+    let buyer_tickets = sandbox.get_asset_balance("main", &buyer_addr, Some("studio:pass")).await?;
+    println!("  creatorA(old)={a} creatorB(new)={b} seller={s} buyer_passes={buyer_tickets}");
+    assert_eq!(a, Decimal::from(20), "créateur A : royalty de la vente #1 seulement");
+    assert_eq!(b, Decimal::from(20), "créateur B : royalty de la vente #2 (post-changement)");
+    assert_eq!(s, Decimal::from(160), "vendeur : 80 + 80");
+    assert_eq!(buyer_tickets, Decimal::from(2), "acheteur possède les 2 pass");
+
+    let b_acts = sandbox.activity_types(&creator_b_addr).await?;
+    println!("  creatorB activity = {b_acts:?}");
+    assert!(b_acts.iter().any(|t| t == "royalty_updated"), "créateur B voit royalty_updated");
+    assert!(b_acts.iter().any(|t| t == "royalty_received"), "créateur B voit royalty_received");
+
+    println!("  ✅ bénéficiaire redirigé APRÈS mint ; les ventes futures paient le nouveau bénéficiaire");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_royalty_change_rejected_without_beneficiary_signature() -> Result<()> {
+    use pms_types::{PayloadEnvelope, PlainPayload};
+
+    let sandbox = boot_sandbox().await?;
+    let creator = Wallet::generate();
+    let attacker = Wallet::generate();
+    let creator_addr = creator.get_address("8e");
+    let attacker_addr = attacker.get_address("8e");
+
+    println!("\n=== [ROYALTY CHANGE — CONSENSUS REJECT sans co-signature] ===");
+
+    // Classe royalty 20% → créateur (bénéficiaire courant).
+    let (st, _b) = sandbox
+        .admin_post("/admin/sft/classes", json!({
+            "collection_id":"secure","class_id":"art","name":"Art","decimals":0,
+            "max_supply":"5","royalty_bps":2000,"royalty_beneficiary":creator_addr,
+        }))
+        .await;
+    anyhow::ensure!(st.is_success(), "class create failed");
+    sleep(Duration::from_millis(150)).await;
+
+    // (1) L'ATTAQUANT forge un RoyaltyUpdate signé par SA propre clé (signature
+    //     cryptographiquement valide) pour se rediriger la royalty. Le bloc est
+    //     forgé par le COORDINATEUR (admin_wallet). Le consensus doit rejeter car
+    //     l'attaquant n'est pas le bénéficiaire courant.
+    let msg = pms_types::royalty_update_signing_message(
+        &sandbox.network_id, "secure:art", Some(2000), Some(&attacker_addr), 0,
+    );
+    let sig = attacker.sign(&msg).expect("attacker sign");
+    let payload = PlainPayload::RoyaltyUpdate {
+        asset_id: "secure:art".to_string(),
+        royalty_bps: Some(2000),
+        royalty_beneficiary: Some(attacker_addr.clone()),
+        auth_pubkey_hex: attacker.public_key_hex.clone(),
+        auth_signature_b64: sig,
+    };
+    let parents = sandbox.tips().await?;
+    let wb = forge_signed_wire_block_for_test(
+        parents, &sandbox.wire_meta, &sandbox.admin_wallet, 0,
+        Some(PayloadEnvelope::Plain(payload)),
+    );
+    let resp = sandbox.client.post(format!("{}/submit/block", sandbox.base_url)).json(&wb).send().await.expect("submit");
+    let code = resp.status();
+    let reason = resp.text().await.unwrap_or_default();
+    println!("  attaquant signe pour lui-même → {code} — {reason:?}");
+    assert!(!code.is_success(), "un tiers ne peut pas rediriger la royalty (got {code})");
+    assert!(reason.to_lowercase().contains("current royalty beneficiary"), "raison: {reason:?}");
+
+    // (2) TAMPER : le VRAI bénéficiaire signe pour X, mais le payload déclare Y.
+    //     La signature ne colle pas à la politique déclarée → rejet.
+    let msg_x = pms_types::royalty_update_signing_message(
+        &sandbox.network_id, "secure:art", Some(2000), Some(&attacker_addr), 0,
+    );
+    let sig_creator_over_x = creator.sign(&msg_x).expect("creator sign");
+    let other = Wallet::generate().get_address("8e");
+    let tampered = PlainPayload::RoyaltyUpdate {
+        asset_id: "secure:art".to_string(),
+        royalty_bps: Some(2000),
+        royalty_beneficiary: Some(other), // ≠ ce que le créateur a signé (attacker_addr)
+        auth_pubkey_hex: creator.public_key_hex.clone(),
+        auth_signature_b64: sig_creator_over_x,
+    };
+    let parents = sandbox.tips().await?;
+    let wb2 = forge_signed_wire_block_for_test(
+        parents, &sandbox.wire_meta, &sandbox.admin_wallet, 0,
+        Some(PayloadEnvelope::Plain(tampered)),
+    );
+    let resp2 = sandbox.client.post(format!("{}/submit/block", sandbox.base_url)).json(&wb2).send().await.expect("submit");
+    let code2 = resp2.status();
+    let reason2 = resp2.text().await.unwrap_or_default();
+    println!("  sig du créateur sur une AUTRE politique → {code2} — {reason2:?}");
+    assert!(!code2.is_success(), "signature/policy mismatch doit être rejeté");
+    assert!(reason2.to_lowercase().contains("invalid authorization signature"), "raison: {reason2:?}");
+
+    // (3) State intact : la royalty pointe toujours vers le créateur.
+    let (st, cls) = sandbox.post(None, "/v1/royalty/prepare", json!({"asset_id":"secure:art"})).await;
+    anyhow::ensure!(st.is_success(), "prepare failed");
+    println!("  bénéficiaire courant inchangé = {:?}", cls["current_beneficiary"]);
+    assert_eq!(cls["current_beneficiary"].as_str(), Some(creator_addr.as_str()), "royalty intacte");
+
+    println!("  ✅ aucun changement de royalty sans la signature du bénéficiaire courant");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_royalty_change_signature_not_replayable() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+    let a = Wallet::generate();
+    let b = Wallet::generate();
+    let a_addr = a.get_address("8e");
+    let b_addr = b.get_address("8e");
+    let net = sandbox.network_id.clone();
+
+    println!("\n=== [ROYALTY — signature NON REJOUABLE (anti-replay version)] ===");
+
+    // Classe royalty 20% → A (version 0).
+    let (st, _x) = sandbox
+        .admin_post("/admin/sft/classes", json!({
+            "collection_id":"replay","class_id":"pass","name":"Pass","decimals":0,
+            "max_supply":"3","royalty_bps":2000,"royalty_beneficiary":a_addr,
+        }))
+        .await;
+    anyhow::ensure!(st.is_success(), "class create failed");
+    sleep(Duration::from_millis(150)).await;
+
+    // A signe pour rediriger vers B, sur la VERSION 0. On CAPTURE cette signature.
+    let msg_v0 = pms_types::royalty_update_signing_message(&net, "replay:pass", Some(2000), Some(&b_addr), 0);
+    let a_sig_v0 = a.sign(&msg_v0).expect("A sign v0");
+
+    // Appliquée (voie pré-signée) → bénéficiaire = B, version 1.
+    let (st, r1) = sandbox
+        .post(None, "/v1/royalty/update", json!({
+            "asset_id":"replay:pass","royalty_beneficiary":b_addr,
+            "auth_pubkey_hex": a.public_key_hex, "auth_signature_b64": a_sig_v0,
+        }))
+        .await;
+    println!("  A→B (sig v0) → {st} {r1:?}");
+    anyhow::ensure!(st.is_success(), "A→B failed: {r1}");
+    sleep(Duration::from_millis(150)).await;
+
+    // B redonne à A (custodial, version 1) → bénéficiaire = A, version 2.
+    let (st, _r2) = sandbox
+        .post(None, "/v1/royalty/update", json!({
+            "asset_id":"replay:pass","royalty_beneficiary":a_addr,
+            "authorizer_private_key_b64": b.private_key_b64,
+        }))
+        .await;
+    anyhow::ensure!(st.is_success(), "B→A failed");
+    sleep(Duration::from_millis(150)).await;
+
+    // A est de nouveau le bénéficiaire courant. On REJOUE sa signature v0 (→B).
+    // Sans version : ça repasserait (A est courant, sig valide) = hijack. AVEC la
+    // version monotone (courante = 2), le message diffère → signature invalide.
+    let (st, rr) = sandbox
+        .post(None, "/v1/royalty/update", json!({
+            "asset_id":"replay:pass","royalty_beneficiary":b_addr,
+            "auth_pubkey_hex": a.public_key_hex, "auth_signature_b64": a_sig_v0,
+        }))
+        .await;
+    println!("  REJEU de la sig v0 (A courant, version=2) → {st} {rr:?}");
+    // Le consensus refuse la signature rejouée (la version a avancé → message
+    // différent → sig invalide). Le handler mappe tout rejet consensus sur
+    // ApiError::Conflict (code stable 3070, status 409) — les clients SDK
+    // branchent sur le CODE, pas sur le message. Le fait que l'état soit
+    // inchangé (asserté plus bas) prouve que le rejeu n'a eu AUCUN effet.
+    assert_eq!(st.as_u16(), 409, "rejet consensus = 409 Conflict (got {st})");
+    assert_eq!(
+        rr["code"].as_u64(),
+        Some(3070),
+        "code stable = 3070 (Conflict) pour un rejet consensus: {rr:?}"
+    );
+
+    // Bénéficiaire courant toujours A (le rejeu n'a rien changé).
+    let (st, cls) = sandbox.post(None, "/v1/royalty/prepare", json!({"asset_id":"replay:pass"})).await;
+    anyhow::ensure!(st.is_success(), "prepare failed");
+    println!("  bénéficiaire courant = {:?}, version = {:?}", cls["current_beneficiary"], cls["current_royalty_version"]);
+    assert_eq!(cls["current_beneficiary"].as_str(), Some(a_addr.as_str()), "toujours A");
+    assert_eq!(cls["current_royalty_version"].as_u64(), Some(2), "version = 2 (2 changements)");
+
+    println!("  ✅ signature d'autorisation à usage unique (version monotone) — pas de replay");
+    Ok(())
 }

@@ -12,6 +12,7 @@ pub mod estimate_fee;
 pub mod healthz;
 pub mod history;
 pub mod ledger;
+pub mod market;
 pub mod memory_profile;
 pub mod milestone;
 pub mod governance;
