@@ -119,6 +119,13 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
         .route(
             "/v1/wallet/token/burn",
             post(crate::api_fn::token_burn::wallet_burn_token),
+        )
+        // Marketplace settlement (protocole 2.7) — atomic sale/resale with
+        // consensus-enforced resale royalty (any token, any ledger, royalty in
+        // the payment asset). Produces one Coordinator-signed MarketSettle block.
+        .route(
+            "/v1/market/settle",
+            post(crate::api_fn::market::market_settle),
         );
 
     let blocks = Router::new().route("/blocks/stream", get(stream_blocks));

@@ -100,6 +100,11 @@ pub fn collect_involved_addresses(plain: &PlainPayload) -> Vec<String> {
         PlainPayload::TxUtxo(tx) => {
             addrs.extend(tx.outputs.iter().map(|o| o.address.clone()));
         }
+        PlainPayload::MarketSettle { tx, seller, buyer, .. } => {
+            addrs.push(seller.clone());
+            addrs.push(buyer.clone());
+            addrs.extend(tx.outputs.iter().map(|o| o.address.clone()));
+        }
         PlainPayload::Reward {
             fee_outputs,
             reward_outputs,
@@ -150,6 +155,9 @@ pub fn involves_address(plain: &PlainPayload, addr: &str) -> bool {
     match plain {
         PlainPayload::Mint { outputs } => outputs.iter().any(|o| o.address == addr),
         PlainPayload::TxUtxo(tx) => tx.outputs.iter().any(|o| o.address == addr),
+        PlainPayload::MarketSettle { tx, seller, buyer, .. } => {
+            seller == addr || buyer == addr || tx.outputs.iter().any(|o| o.address == addr)
+        }
         PlainPayload::Reward {
             fee_outputs,
             reward_outputs,
@@ -209,6 +217,13 @@ pub fn involves_any_address(plain: &PlainPayload, candidates: &[String]) -> bool
             .outputs
             .iter()
             .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c))),
+        PlainPayload::MarketSettle { tx, seller, buyer, .. } => {
+            candidates.iter().any(|c| seller.eq_ignore_ascii_case(c) || buyer.eq_ignore_ascii_case(c))
+                || tx
+                    .outputs
+                    .iter()
+                    .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c)))
+        }
         PlainPayload::Reward {
             fee_outputs,
             reward_outputs,

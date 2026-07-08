@@ -73,6 +73,14 @@ impl RocksStore {
             }
         }
 
+        // royalty de revente (2.7) : cap 10_000 bps + bénéficiaire non-vide.
+        // Source unique partagée avec la validation de classe SFT (persist).
+        pms_types_payload::validate_royalty_fields(
+            metadata.royalty_bps,
+            metadata.royalty_beneficiary.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
+
         // mint collatéralisé (2.3 v2) : cohérence des trois champs
         match (&metadata.collateral_address, metadata.collateral_ratio_bps) {
             (Some(addr), ratio) => {

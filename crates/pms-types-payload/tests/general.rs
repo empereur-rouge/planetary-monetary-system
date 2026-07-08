@@ -29,6 +29,7 @@ fn mvp_encrypt_decrypt_confidential_type_only() {
         PlainPayload::Mint { .. } => println!("Type = Mint"),
         PlainPayload::TxUtxo(_) => println!("Type = TxUtxo"),
         PlainPayload::TokenBurn { .. } => println!("Type = TokenBurn"),
+        PlainPayload::MarketSettle { .. } => println!("Type = MarketSettle"),
         PlainPayload::Milestone { .. } => println!("Type = Milestone"),
         PlainPayload::Nft(_) => println!("Type = Nft"),
         PlainPayload::ConfigUpdate(_) => println!("Type = ConfigUpdate"),

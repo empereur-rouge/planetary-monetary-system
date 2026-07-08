@@ -15,6 +15,13 @@ pub fn extract_involved_addresses(plain: &PlainPayload) -> Vec<String> {
         PlainPayload::TxUtxo(tx) => {
             addrs.extend(tx.outputs.iter().map(|o| o.address.clone()));
         }
+        // MarketSettle: seller, buyer AND every output recipient (incl. the
+        // royalty beneficiary) so the sale surfaces in each party's activity.
+        PlainPayload::MarketSettle { tx, seller, buyer, .. } => {
+            addrs.push(seller.clone());
+            addrs.push(buyer.clone());
+            addrs.extend(tx.outputs.iter().map(|o| o.address.clone()));
+        }
         PlainPayload::TokenBurn { owner, .. } => addrs.push(owner.clone()),
         PlainPayload::Reward {
             fee_outputs,
@@ -162,6 +169,15 @@ pub fn extract_involved_with_category(plain: &PlainPayload) -> Vec<(String, Acti
         }
         PlainPayload::TokenBurn { owner, .. } => {
             out.push((owner.clone(), ActivityCategory::Burn));
+        }
+        // MarketSettle: seller/buyer + all recipients under Transfer (the sale is
+        // a value movement for each). Deduped downstream by the index writer.
+        PlainPayload::MarketSettle { tx, seller, buyer, .. } => {
+            out.push((seller.clone(), ActivityCategory::Transfer));
+            out.push((buyer.clone(), ActivityCategory::Transfer));
+            for o in &tx.outputs {
+                out.push((o.address.clone(), ActivityCategory::Transfer));
+            }
         }
         PlainPayload::BridgeLock { dest_address, .. } => {
             out.push((dest_address.clone(), ActivityCategory::Bridge));
@@ -419,6 +435,58 @@ pub fn classify_for_storage(
                 counterparty: None,
                 payload: serde_json::to_value(meta).unwrap_or_default(),
             }]
+        }
+
+        // MarketSettle (protocole 2.7): render the sale from `addr`'s perspective.
+        // Buyer → "market_buy" (paid `price`); seller → "market_sell" (received
+        // net); royalty beneficiary → "royalty_received". Amounts read from the
+        // wrapped tx so change/gas are excluded.
+        PlainPayload::MarketSettle {
+            tx,
+            price_asset,
+            price,
+            seller,
+            buyer,
+            ..
+        } => {
+            let payload_val = serde_json::to_value(plain).unwrap_or_default();
+            // Net received by `addr` in the payment asset (excludes item/change/gas).
+            let recv_pay: rust_decimal::Decimal = tx
+                .outputs
+                .iter()
+                .filter(|o| o.address == addr && o.asset_id.as_deref() == price_asset.as_deref())
+                .filter_map(|o| o.amount.parse::<rust_decimal::Decimal>().ok())
+                .sum();
+            if addr == buyer {
+                vec![StoredActivityItem {
+                    activity_type: "market_buy".into(),
+                    direction: "out".into(),
+                    amount: Some(price.clone()),
+                    asset_id: price_asset.clone(),
+                    counterparty: Some(seller.clone()),
+                    payload: payload_val,
+                }]
+            } else if addr == seller {
+                vec![StoredActivityItem {
+                    activity_type: "market_sell".into(),
+                    direction: "in".into(),
+                    amount: Some(recv_pay.to_string()),
+                    asset_id: price_asset.clone(),
+                    counterparty: Some(buyer.clone()),
+                    payload: payload_val,
+                }]
+            } else if recv_pay > rust_decimal::Decimal::ZERO {
+                vec![StoredActivityItem {
+                    activity_type: "royalty_received".into(),
+                    direction: "in".into(),
+                    amount: Some(recv_pay.to_string()),
+                    asset_id: price_asset.clone(),
+                    counterparty: Some(seller.clone()),
+                    payload: payload_val,
+                }]
+            } else {
+                vec![]
+            }
         }
 
         PlainPayload::TokenBurn {

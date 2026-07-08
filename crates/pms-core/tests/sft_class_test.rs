@@ -56,6 +56,8 @@ fn valid_class() -> SftClass {
         demurrage_bps_per_day: None,
         creator: "creator_pk".into(),
         mint_authority: "minter_pk".into(),
+        royalty_bps: None,
+        royalty_beneficiary: None,
     }
 }
 

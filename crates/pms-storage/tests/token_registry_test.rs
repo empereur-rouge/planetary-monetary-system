@@ -37,6 +37,8 @@ fn edenite_metadata() -> TokenMetadata {
         collateral_address: None,
         collateral_asset_id: None,
         collateral_ratio_bps: None,
+        royalty_bps: None,
+        royalty_beneficiary: None,
     }
 }
 
@@ -53,6 +55,8 @@ fn gold_metadata() -> TokenMetadata {
         collateral_address: None,
         collateral_asset_id: None,
         collateral_ratio_bps: None,
+        royalty_bps: None,
+        royalty_beneficiary: None,
     }
 }
 
@@ -96,6 +100,39 @@ async fn register_token_duplicate_fails() -> Result<()> {
         result.unwrap_err().to_string().contains("already exists"),
         "error should mention 'already exists'"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn register_token_rejects_royalty_over_100pct() -> Result<()> {
+    let ts = mk_store("reg:royalty").await?;
+
+    // 20% royalty is fine.
+    let mut ok_meta = edenite_metadata();
+    ok_meta.asset_id = "royaltok".into();
+    ok_meta.royalty_bps = Some(2000);
+    ts.store.register_token(&ok_meta)?;
+    let stored = ts.store.get_token("royaltok")?.expect("registered");
+    println!("stored royalty: {:?}", stored.effective_royalty());
+    assert_eq!(stored.effective_royalty(), Some((2000, "coordinator_pk_hex".to_string())));
+
+    // > 10000 bps must be rejected at the registry.
+    let mut bad = edenite_metadata();
+    bad.asset_id = "royalbad".into();
+    bad.royalty_bps = Some(10_001);
+    let err = ts.store.register_token(&bad).unwrap_err().to_string();
+    println!("royalty 10001 bps rejected: {err}");
+    assert!(err.contains("royalty_bps"), "got: {err}");
+
+    // Explicit-but-empty beneficiary is rejected (must omit to default to creator).
+    let mut blank = edenite_metadata();
+    blank.asset_id = "royalblank".into();
+    blank.royalty_bps = Some(500);
+    blank.royalty_beneficiary = Some("  ".into());
+    let err = ts.store.register_token(&blank).unwrap_err().to_string();
+    println!("blank beneficiary rejected: {err}");
+    assert!(err.contains("royalty_beneficiary"), "got: {err}");
 
     Ok(())
 }

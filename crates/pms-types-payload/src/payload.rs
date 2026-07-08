@@ -73,6 +73,49 @@ pub enum PlainPayload {
         /// re-check ; ne jamais l'affaiblir.
         owner: String,
     },
+    /// Règlement atomique d'une vente marketplace (protocole 2.7) avec **royalty
+    /// de revente enforced au consensus**.
+    ///
+    /// Déclare une vente — l'item (`asset_sold`, `quantity`) passe du `seller` à
+    /// l'`buyer`, le paiement (`price` en `price_asset`) de l'`buyer` au `seller`
+    /// — et embarque la transaction UTXO `tx` **co-signée** par les deux parties
+    /// (chaque input déverrouillé par son propriétaire, cf. `TxUtxo`). Le
+    /// validateur RÉ-DÉRIVE la royalty depuis le registre de `asset_sold`
+    /// ([`crate::TokenMetadata::effective_royalty`]) et EXIGE que `tx.outputs`
+    /// respecte la forme (item→acheteur, `price×bps/10000`→bénéficiaire dans
+    /// `price_asset`, reste→vendeur) — sinon le bloc est **rejeté**. Item ET
+    /// paiement bougent dans le même bloc : atomicité tout-ou-rien.
+    ///
+    /// **Owner-signé** (autorité comme `TxUtxo` : pas coordinator-only ; le bloc
+    /// reste forgé/signé par le Coordinator en single-writer). **Payload PLAIN**
+    /// (la vente est publique-by-design : prix, parties, royalty auditables).
+    ///
+    /// Fonctionne pour **tout token / toute classe SFT / tout ledger**, la
+    /// royalty étant versée dans l'**asset de paiement** (pas forcément PMS).
+    MarketSettle {
+        /// Transaction UTXO co-signée portant les mouvements atomiques (inputs
+        /// vendeur+acheteur, outputs item/royalty/net/change, `fee` gas brûlé).
+        /// Validée par la MÊME `validate_plain_txutxo` que `TxUtxo` (signatures,
+        /// ownership, conservation par-asset, compliance) AVANT le gate royalty.
+        tx: Transaction,
+        /// Asset vendu (token `asset_id` OU classe SFT `"collection:class"`).
+        /// Porte la politique royalty. Jamais le PMS natif (on ne « vend » pas
+        /// du PMS comme item).
+        asset_sold: String,
+        /// Quantité de l'item transférée à l'acheteur (décimal string > 0).
+        quantity: String,
+        /// Asset de paiement (`None` = PMS natif, `Some(x)` = token/SFT). DOIT
+        /// différer de `asset_sold`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        price_asset: Option<String>,
+        /// Prix total payé par l'acheteur au vendeur, AVANT split royalty (> 0).
+        price: String,
+        /// Adresse du vendeur (propriétaire actuel de l'item). Ré-vérifiée contre
+        /// les propriétaires d'inputs par le validateur (binding de rôle).
+        seller: String,
+        /// Adresse de l'acheteur (reçoit l'item, paie le prix). Ré-vérifiée idem.
+        buyer: String,
+    },
     Milestone {
         approved: Vec<String>,
         /// Si true, distribue le pool de fees aux nœuds proportionnellement à leurs blocs
@@ -332,12 +375,52 @@ impl PlainPayload {
             // TokenBurn: only the CHANGE outputs are created UTXOs; the burned
             // amount creates nothing (supply drops). Indexer/balance must see change.
             PlainPayload::TokenBurn { tx, .. } => Some(tx.outputs.clone()),
+            // MarketSettle: the wrapped tx moves item + payment; all its outputs
+            // are created UTXOs (item→buyer, royalty→beneficiary, net→seller, change).
+            PlainPayload::MarketSettle { tx, .. } => Some(tx.outputs.clone()),
             // No UTXO creation: Genesis, Milestone, ConfigUpdate, EncryptedReward,
             // TokenCreate, BridgeLock, Freeze, Unfreeze, ContractRegister,
             // ContractUpdate, LedgerOwnershipTransfer, CoordinatorKeyRotate, Nft.
             _ => None,
         }
     }
+
+    /// Returns the inner UTXO [`Transaction`] for the payloads that wrap one —
+    /// `TxUtxo`, `TokenBurn`, `MarketSettle` — else `None`. Single accessor so
+    /// call sites that need the wrapped `inputs`/`outputs`/`fee` (tx lookup, fee
+    /// extraction) don't hand-enumerate these variants and can't silently omit
+    /// one (mirrors [`Self::outputs`]).
+    pub fn tx(&self) -> Option<&Transaction> {
+        match self {
+            PlainPayload::TxUtxo(tx)
+            | PlainPayload::TokenBurn { tx, .. }
+            | PlainPayload::MarketSettle { tx, .. } => Some(tx),
+            _ => None,
+        }
+    }
+}
+
+/// Validates the resale-royalty policy fields shared by [`TokenMetadata`] and
+/// [`SftClass`] (protocole 2.7): `royalty_bps ≤ 10_000` (a money-rule cap), and
+/// an explicit `royalty_beneficiary` must be non-empty (omit it to default to
+/// the creator). **Single source of truth** — both the token registry
+/// (`register_token`) and the SFT-class persist path call this, so the cap can
+/// never drift between the two registration paths.
+pub fn validate_royalty_fields(
+    royalty_bps: Option<u32>,
+    royalty_beneficiary: Option<&str>,
+) -> Result<(), String> {
+    if let Some(bps) = royalty_bps {
+        if bps > 10_000 {
+            return Err(format!("royalty_bps must be <= 10000, got {bps}"));
+        }
+    }
+    if let Some(b) = royalty_beneficiary {
+        if b.trim().is_empty() {
+            return Err("royalty_beneficiary cannot be empty (omit it to default to creator)".into());
+        }
+    }
+    Ok(())
 }
 
 /// Métadonnées d'un token enregistré dans le DAG.
@@ -389,6 +472,39 @@ pub struct TokenMetadata {
     /// `collateral_address` est défini (validé au registry).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collateral_ratio_bps: Option<u32>,
+    /// Royalty de revente (marketplace, protocole 2.7) : part en **basis points**
+    /// du PRIX d'une vente [`PlainPayload::MarketSettle`] reversée au
+    /// `royalty_beneficiary`. `None`/`0` = pas de royalty. Invariant : `≤ 10_000`
+    /// (100 %). Lue au consensus quand cet asset est l'`asset_sold` d'un settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub royalty_bps: Option<u32>,
+    /// Bénéficiaire de la royalty (Bech32). `None` ⇒ défaut = `creator`. Immuable
+    /// après enregistrement. Reversé dans l'asset de PAIEMENT (pas forcément PMS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub royalty_beneficiary: Option<String>,
+}
+
+impl TokenMetadata {
+    /// Résout la politique royalty **effective** de cet asset pour un settlement
+    /// marketplace : `Some((bps, beneficiary))` si `royalty_bps > 0`, sinon
+    /// `None`. Le bénéficiaire est `royalty_beneficiary` s'il est non-vide, à
+    /// défaut le `creator` de l'asset. Source UNIQUE partagée par le builder
+    /// serveur ET le validateur consensus (aucune divergence possible).
+    pub fn effective_royalty(&self) -> Option<(u32, String)> {
+        match self.royalty_bps {
+            Some(bps) if bps > 0 => {
+                let beneficiary = self
+                    .royalty_beneficiary
+                    .as_ref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| self.creator.clone());
+                Some((bps, beneficiary))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Métadonnées **publiques** d'une classe semi-fongible (SFT, façon ERC-1155 —
@@ -435,6 +551,15 @@ pub struct SftClass {
     pub creator: String,
     /// Clé publique autorisée à mint cette classe.
     pub mint_authority: String,
+    /// Royalty de revente (marketplace, protocole 2.7) : part en **basis points**
+    /// du PRIX d'une vente [`PlainPayload::MarketSettle`] de cette classe reversée
+    /// au `royalty_beneficiary`. `None`/`0` = pas de royalty. `≤ 10_000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub royalty_bps: Option<u32>,
+    /// Bénéficiaire de la royalty (Bech32). `None` ⇒ défaut = `creator`. Reversé
+    /// dans l'asset de PAIEMENT du settlement (pas forcément PMS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub royalty_beneficiary: Option<String>,
 }
 
 impl SftClass {
@@ -456,6 +581,92 @@ impl SftClass {
             collateral_address: None,
             collateral_asset_id: None,
             collateral_ratio_bps: None,
+            royalty_bps: self.royalty_bps,
+            royalty_beneficiary: self.royalty_beneficiary.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod royalty_tests {
+    use super::*;
+
+    fn base_meta() -> TokenMetadata {
+        TokenMetadata {
+            asset_id: "tkn".into(),
+            symbol: "TKN".into(),
+            name: "Token".into(),
+            decimals: 8,
+            max_supply: None,
+            creator: "pms1creator".into(),
+            mint_authority: "pms1creator".into(),
+            demurrage_bps_per_day: None,
+            collateral_address: None,
+            collateral_asset_id: None,
+            collateral_ratio_bps: None,
+            royalty_bps: None,
+            royalty_beneficiary: None,
+        }
+    }
+
+    #[test]
+    fn effective_royalty_none_when_absent_or_zero() {
+        let mut m = base_meta();
+        assert_eq!(m.effective_royalty(), None, "no royalty_bps → None");
+        m.royalty_bps = Some(0);
+        assert_eq!(m.effective_royalty(), None, "royalty_bps=0 → None");
+        println!("effective_royalty absent/zero → None: OK");
+    }
+
+    #[test]
+    fn effective_royalty_defaults_beneficiary_to_creator() {
+        let mut m = base_meta();
+        m.royalty_bps = Some(2000);
+        let got = m.effective_royalty();
+        println!("royalty 2000 bps, no beneficiary → {got:?}");
+        assert_eq!(got, Some((2000, "pms1creator".to_string())));
+    }
+
+    #[test]
+    fn effective_royalty_uses_explicit_beneficiary() {
+        let mut m = base_meta();
+        m.royalty_bps = Some(500);
+        m.royalty_beneficiary = Some("pms1studio".into());
+        let got = m.effective_royalty();
+        println!("royalty 500 bps → {got:?}");
+        assert_eq!(got, Some((500, "pms1studio".to_string())));
+    }
+
+    #[test]
+    fn effective_royalty_blank_beneficiary_falls_back_to_creator() {
+        let mut m = base_meta();
+        m.royalty_bps = Some(1000);
+        m.royalty_beneficiary = Some("   ".into());
+        let got = m.effective_royalty();
+        println!("royalty 1000 bps, blank beneficiary → {got:?}");
+        assert_eq!(got, Some((1000, "pms1creator".to_string())), "blank → creator");
+    }
+
+    #[test]
+    fn sft_class_carries_royalty_into_token_metadata() {
+        let class = SftClass {
+            asset_id: "col:cls".into(),
+            collection_id: "col".into(),
+            class_id: "cls".into(),
+            name: "Item".into(),
+            uri: None,
+            attributes: None,
+            decimals: 0,
+            max_supply: Some("10".into()),
+            demurrage_bps_per_day: None,
+            creator: "pms1artist".into(),
+            mint_authority: "pms1coord".into(),
+            royalty_bps: Some(1500),
+            royalty_beneficiary: None,
+        };
+        let tm = class.to_token_metadata();
+        println!("SFT class royalty → token_metadata: {:?}", tm.effective_royalty());
+        // Beneficiary defaults to the class CREATOR (the artist), not the mint_authority.
+        assert_eq!(tm.effective_royalty(), Some((1500, "pms1artist".to_string())));
     }
 }

@@ -5,6 +5,50 @@ use pms_types_payload::PlainPayload;
 // Classification logic
 // ═══════════════════════════════════════════════════════════════════
 
+/// Builds activity items for a `MarketSettle` (protocole 2.7) from `addr`'s
+/// perspective — buyer sees `market_buy`, seller `market_sell`, royalty
+/// beneficiary `royalty_received`. Shared by the async and sync classifiers so
+/// they can't diverge. Amounts are read from the wrapped tx (change/gas excluded).
+fn market_settle_items(plain: &PlainPayload, addr: &str) -> Vec<ActivityItem> {
+    let PlainPayload::MarketSettle {
+        tx,
+        price_asset,
+        price,
+        seller,
+        buyer,
+        ..
+    } = plain
+    else {
+        return vec![];
+    };
+    let recv_pay: rust_decimal::Decimal = tx
+        .outputs
+        .iter()
+        .filter(|o| o.address == addr && o.asset_id.as_deref() == price_asset.as_deref())
+        .filter_map(|o| o.amount.parse::<rust_decimal::Decimal>().ok())
+        .sum();
+    let mk = |activity_type: &str, direction: &str, amount: String, counterparty: &str| ActivityItem {
+        block_id: String::new(),
+        ts_ms: 0,
+        activity_type: activity_type.to_string(),
+        direction: direction.to_string(),
+        amount: Some(amount),
+        asset_id: price_asset.clone(),
+        counterparty: Some(counterparty.to_string()),
+        ledger_id: None,
+        payload: serde_json::to_value(plain).unwrap_or_default(),
+    };
+    if addr == buyer {
+        vec![mk("market_buy", "out", price.clone(), seller)]
+    } else if addr == seller {
+        vec![mk("market_sell", "in", recv_pay.to_string(), buyer)]
+    } else if recv_pay > rust_decimal::Decimal::ZERO {
+        vec![mk("royalty_received", "in", recv_pay.to_string(), seller)]
+    } else {
+        vec![]
+    }
+}
+
 /// Classify a PlainPayload into ActivityItems for a given address.
 /// Async version with UTXO lookup for sender detection.
 pub(crate) async fn classify_activity(
@@ -394,6 +438,8 @@ pub(crate) async fn classify_activity(
                 .collect()
         }
 
+        PlainPayload::MarketSettle { .. } => market_settle_items(plain, addr),
+
         _ => vec![],
     }
 }
@@ -725,6 +771,8 @@ pub(crate) fn classify_activity_sync(plain: &PlainPayload, addr: &str) -> Vec<Ac
                 payload: serde_json::to_value(plain).unwrap_or_default(),
             })
             .collect(),
+
+        PlainPayload::MarketSettle { .. } => market_settle_items(plain, addr),
 
         _ => vec![],
     }

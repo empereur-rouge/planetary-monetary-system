@@ -69,7 +69,11 @@ use crate::api::AppState;
 /// réconcilie un `BridgeMint` avec son `BridgeLock` source (montant == verrouillé,
 /// asset, destinataire, ledger destination) — rejette sur-émission, vol,
 /// lock inexistant, ou mauvais ledger destination.
-pub const API_VERSION: u32 = 31;
+/// v32 (protocole 2.7 — marketplace) : nouvel endpoint `POST /v1/market/settle`
+/// (règlement atomique vente/revente + royalty enforced consensus) ; champs
+/// `royalty_bps`/`royalty_beneficiary` ajoutés à `POST /admin/tokens/create` et
+/// `POST /admin/sft/classes`.
+pub const API_VERSION: u32 = 32;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -165,6 +169,8 @@ mod tests {
         //          rejouant un lock déjà consommé — anti-replay durable).
         // v0.26.0: 30 → 31 (audit rang 3/B3 : réconciliation cross-ledger du
         //          BridgeMint avec son BridgeLock — montant/asset/destinataire/ledger).
-        assert_eq!(parsed.api_version, 31);
+        // v0.27.0: 31 → 32 (protocole 2.7 : POST /v1/market/settle + champs royalty
+        //          sur tokens/create & sft/classes).
+        assert_eq!(parsed.api_version, 32);
     }
 }

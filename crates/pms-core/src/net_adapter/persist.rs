@@ -95,13 +95,35 @@ where
     /// `None` sur erreur store. Point unique de résolution pour la validation de
     /// mint contraint ET la résolution du taux de demurrage.
     fn resolve_asset_metadata(&self, asset_id: &str) -> Option<pms_types::TokenMetadata> {
-        match self.store.get_token(asset_id).unwrap_or(None) {
-            Some(m) => Some(m),
-            None => self
-                .store
-                .get_sft_class(asset_id)
-                .unwrap_or(None)
-                .map(|c| c.to_token_metadata()),
+        // Fail-open view of the strict resolver: a store read error is swallowed
+        // to `None` (used by the demurrage-rate lookup, where a transient miss is
+        // tolerable). The royalty gate uses `resolve_asset_metadata_strict`.
+        self.resolve_asset_metadata_strict(asset_id).unwrap_or(None)
+    }
+
+    /// **Fail-CLOSED** resolution for the settlement path (audit F5).
+    ///
+    /// Unlike [`Self::resolve_asset_metadata`] (which swallows a store read error
+    /// to `None`), this distinguishes `Ok(None)` — genuinely no registry entry,
+    /// royalty legitimately absent — from `Err` — a transient RocksDB failure.
+    /// The MarketSettle royalty gate MUST NOT treat a read error as "no royalty":
+    /// that would both silently drop the creator's cut AND fork consensus (nodes
+    /// with divergent store health would resolve different royalties and
+    /// accept/reject the same block differently). On `Err` the settlement is
+    /// rejected so every node reaches the same verdict.
+    fn resolve_asset_metadata_strict(
+        &self,
+        asset_id: &str,
+    ) -> Result<Option<pms_types::TokenMetadata>, String> {
+        match self.store.get_token(asset_id) {
+            Ok(Some(m)) => return Ok(Some(m)),
+            Ok(None) => {}
+            Err(e) => return Err(format!("token registry read failed: {e}")),
+        }
+        match self.store.get_sft_class(asset_id) {
+            Ok(Some(c)) => Ok(Some(c.to_token_metadata())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("sft registry read failed: {e}")),
         }
     }
 
@@ -846,6 +868,14 @@ where
                     ));
                 }
             }
+            // royalty de revente (2.7) : cap 10_000 bps + bénéficiaire non-vide.
+            // Source unique partagée avec le registre token (register_token).
+            if let Err(e) = pms_types::validate_royalty_fields(
+                class.royalty_bps,
+                class.royalty_beneficiary.as_deref(),
+            ) {
+                return Ok(PutResult::Rejected(format!("sft class: {e}")));
+            }
             // Unicité : une classe déjà enregistrée ne doit pas être écrasée
             // silencieusement (anti-overwrite, comme la gouvernance).
             match self.store.get_sft_class(&class.asset_id) {
@@ -1174,6 +1204,100 @@ where
                 return Ok(PutResult::Rejected(e));
             }
         }
+        // ─── MarketSettle (protocole 2.7) : règlement atomique + royalty enforced ───
+        // Réutilise la MÊME validation UTXO que TxUtxo (signatures, ownership,
+        // conservation par-asset, compliance) via `validate_plain_txutxo`, PUIS
+        // impose le gate royalty/rôles (`validations::market`). La royalty est
+        // RÉ-DÉRIVÉE du registre de `asset_sold` — impossible pour le builder de
+        // sous-payer le créateur : un settlement non conforme est REJETÉ ici.
+        if let Some(PayloadEnvelope::Plain(PlainPayload::MarketSettle {
+            tx,
+            asset_sold,
+            quantity,
+            price_asset,
+            price,
+            seller,
+            buyer,
+        })) = &block.payload
+        {
+            use crate::validations::market;
+            // 1. Validation UTXO complète (source unique partagée avec TxUtxo).
+            //    Retourne les UTXOs dépensés résolus (adresse propriétaire + asset)
+            //    nécessaires au binding de rôle vendeur/acheteur.
+            let input_outputs = match self.validate_plain_txutxo(tx, policy, now_ms).await {
+                Ok(outs) => outs,
+                Err(e) => return Ok(PutResult::Rejected(format!("settlement tx: {e}"))),
+            };
+            // 2. Montants déclarés.
+            let Ok(qty) = rust_decimal::Decimal::from_str_exact(quantity) else {
+                return Ok(PutResult::Rejected(
+                    "settlement: quantity not a decimal".to_string(),
+                ));
+            };
+            let Ok(price_dec) = rust_decimal::Decimal::from_str_exact(price) else {
+                return Ok(PutResult::Rejected("settlement: price not a decimal".to_string()));
+            };
+            // 3. Politique royalty de l'ASSET VENDU (registre) + décimales du prix.
+            //    Résolution FAIL-CLOSED (audit F5) : une erreur store rejette (pas
+            //    de bypass royalty ni de fork consensus). Ok(None) = pas de
+            //    politique → royalty 0 (swap atomique pur, toujours valide).
+            let sold_meta = match self.resolve_asset_metadata_strict(asset_sold) {
+                Ok(m) => m,
+                Err(e) => return Ok(PutResult::Rejected(format!("settlement: {e}"))),
+            };
+            let (royalty, beneficiary) = match sold_meta.and_then(|m| m.effective_royalty()) {
+                Some((bps, b)) => {
+                    let price_meta = match price_asset.as_deref() {
+                        Some(a) => match self.resolve_asset_metadata_strict(a) {
+                            Ok(m) => m,
+                            Err(e) => return Ok(PutResult::Rejected(format!("settlement: {e}"))),
+                        },
+                        None => None,
+                    };
+                    let dec = market::price_decimals(price_meta.map(|m| m.decimals));
+                    // compute_royalty is fallible (overflow → None, audit F3).
+                    match market::compute_royalty(price_dec, bps, dec) {
+                        Some(r) => (r, Some(b)),
+                        None => {
+                            return Ok(PutResult::Rejected(
+                                "settlement: royalty computation overflow".to_string(),
+                            ));
+                        }
+                    }
+                }
+                None => (rust_decimal::Decimal::ZERO, None),
+            };
+            // 4. Gate forme + binding de rôle.
+            let check = market::SettlementCheck {
+                asset_sold,
+                quantity: qty,
+                price_asset: price_asset.as_deref(),
+                price: price_dec,
+                seller,
+                buyer,
+                royalty,
+                beneficiary: beneficiary.as_deref(),
+            };
+            if let Err(e) = market::validate_settlement(&input_outputs, &tx.outputs, &check) {
+                // `e` is already self-prefixed with "settlement:" — don't double it.
+                tracing::warn!(
+                    "🚫 MarketSettle rejected on block {}: {e}",
+                    &wb.id[..16.min(wb.id.len())]
+                );
+                return Ok(PutResult::Rejected(e));
+            }
+            tracing::info!(
+                "🛒 MarketSettle OK: buyer={} qty={} of {} price={} {} (royalty {} → {}) block={}",
+                &buyer[..20.min(buyer.len())],
+                quantity,
+                asset_sold,
+                price,
+                price_asset.as_deref().unwrap_or("PMS"),
+                royalty,
+                beneficiary.as_deref().unwrap_or("-"),
+                &wb.id[..16.min(wb.id.len())],
+            );
+        }
         if let Some(PayloadEnvelope::Plain(PlainPayload::BridgeLock {
             inputs,
             amount,
@@ -1383,7 +1507,11 @@ where
                 })
             }
 
-            Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx))) => {
+            // MarketSettle partage EXACTEMENT la mécanique UTXO de TxUtxo (dépense
+            // les inputs, crée les outputs item/royalty/net/change, brûle le gas
+            // `tx.fee` → part treasury). Même arme = zéro divergence de delta.
+            Some(PayloadEnvelope::Plain(PlainPayload::TxUtxo(tx)))
+            | Some(PayloadEnvelope::Plain(PlainPayload::MarketSettle { tx, .. })) => {
                 // Tx = spend inputs + create outputs
                 let spend = tx
                     .inputs

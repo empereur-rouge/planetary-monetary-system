@@ -67,6 +67,13 @@ pub struct CreateTokenRequest {
     /// Ratio de couverture en bps (10000 = 1:1). Requis avec collateral_address.
     #[serde(default)]
     pub collateral_ratio_bps: Option<u32>,
+    /// Royalty de revente (protocole 2.7) : bps du prix reversés au bénéficiaire
+    /// à chaque `MarketSettle` où ce token est l'`asset_sold`. Absent/0 = aucune.
+    #[serde(default)]
+    pub royalty_bps: Option<u32>,
+    /// Bénéficiaire de la royalty (Bech32). Absent ⇒ défaut = créateur (coordinateur).
+    #[serde(default)]
+    pub royalty_beneficiary: Option<String>,
 }
 
 /// POST /admin/tokens/create — Crée un nouveau token.
@@ -141,6 +148,8 @@ pub async fn admin_create_token(
         collateral_address: req.collateral_address.clone(),
         collateral_asset_id: req.collateral_asset_id.clone(),
         collateral_ratio_bps: req.collateral_ratio_bps,
+        royalty_bps: req.royalty_bps.filter(|bps| *bps > 0),
+        royalty_beneficiary: req.royalty_beneficiary.clone(),
     };
 
     // Register in the token registry (RocksDB)

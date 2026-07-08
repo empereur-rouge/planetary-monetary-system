@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.27.0] - Unreleased — Marketplace : règlement atomique + royalty de revente enforced consensus (protocole 2.7)
+
+### Added
+- **feat(marketplace)** — nouveau payload `PlainPayload::MarketSettle` : règlement
+  **atomique** d'une vente/revente (item ↔ paiement en UN bloc) avec **royalty de
+  revente prélevée et versée au consensus**. Fonctionne pour **tout token, toute
+  classe SFT, tout ledger**, la royalty étant reversée dans **l'asset de paiement**
+  (pas forcément PMS natif). Résout Q2 (royalty) ET Q3 (atomicité).
+- **feat(registry)** — politique royalty **par-asset** dans le registre :
+  `royalty_bps` + `royalty_beneficiary` sur `TokenMetadata` ET `SftClass`
+  (bénéficiaire par défaut = `creator`), validés à l'enregistrement (`≤ 10000` bps).
+  Exposés sur `POST /admin/tokens/create` et `POST /admin/sft/classes`.
+- **feat(api)** — endpoint `POST /v1/market/settle` (custodial one-shot) : co-signe
+  le leg vendeur (item) + acheteur (paiement), calcule la royalty du registre,
+  forge un bloc `MarketSettle` signé Coordinator. Réponse : `royalty`,
+  `royalty_beneficiary`, `net_to_seller`, `fee`, `block_id`.
+- **feat(consensus)** — `do_persist_block_internal` **rejette** tout settlement dont
+  les outputs ne respectent pas la forme royalty (`validations::market`) : réutilise
+  la validation UTXO complète (`validate_plain_txutxo` : signatures, ownership,
+  conservation par-asset, compliance) PUIS impose le split exact.
+
+### Security
+- **sec(marketplace/F1)** — **accounting EXACT** (pas des planchers) dans
+  `validate_settlement` : le vendeur et le bénéficiaire reçoivent *exactement* leurs
+  parts déclarées, dans le *seul* asset de paiement ; tout crédit inattendu
+  (prix sous-déclaré, paiement en asset-side, tiers, sur-paiement) est rejeté.
+  Ferme le contournement « déclarer un prix minuscule et router la vraie valeur au
+  vendeur → royalty ~0 ».
+- **sec(marketplace/F3)** — `compute_royalty` en arithmétique **checked** (overflow
+  → `None` → rejet, plus de panic validateur) + borne `MAX_SETTLEMENT_AMOUNT` sur
+  `price`/`quantity`.
+- **sec(marketplace/F5)** — résolution royalty **fail-CLOSED** au persist
+  (`resolve_asset_metadata_strict`) : une erreur de lecture registre **rejette** le
+  settlement au lieu de retomber sur royalty 0 (évite bypass + fork consensus
+  non-déterministe).
+
+### Fixed
+- **fix(activity)** — `MarketSettle` câblé dans les 10 surfaces d'activité/audit qui
+  filtraient par variant (classify storage ×3, activity classify ×2, wallet history
+  ×3, `extract_tx_fee`, `transaction_lookup`) : la vente apparaît désormais dans le
+  feed d'activité (`market_buy`/`market_sell`/`royalty_received`), le SSE, les
+  webhooks et l'historique ; le gas fee est correctement accumulé sur le chemin
+  `submit_block`. Sans ça, une vente réelle était **invisible** de toutes les vues
+  wallet (RAM + RocksDB).
+
+### Infrastructure
+- **chore(version)** — `Cargo` 0.26.2 → **0.27.0** ; `DAG_VERSION` 3.11.0 →
+  **3.12.0** (nouveau payload, additif, migration auto, pas de wipe ; upgrade P2P
+  coordonné requis avant d'émettre des ventes) ; `API_VERSION` 31 → **32**.
+  `CURRENT_VER` (schéma RocksDB) inchangé — champs royalty optionnels rétro-compat.
+
+### Notes / décision ouverte
+- **F4 (royalty « inévitable »)** : aujourd'hui la royalty est enforced **sur les
+  settlements** ; un transfert `TxUtxo` nu du même actif ne prélève rien (deux
+  parties peuvent contourner en OTC). Rendre la royalty *totalement* inévitable
+  exigerait de **restreindre les transferts des actifs royalty-bearing au seul
+  `MarketSettle`** (coût : un lookup registre par transfert d'asset custom sur le
+  hot-path + actifs non-librement-transférables). Non activé par défaut — décision
+  produit à trancher.
+
+---
+
 ## [0.26.2] - Unreleased — Cleanup : marqueur bridge_consumed de l'engine = index de statut (audit rang 3 / B3)
 
 ### Removed / Changed
