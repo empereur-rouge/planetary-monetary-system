@@ -26,6 +26,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   d'intégration) uniquement ; le coordinateur de production forge via
   `forge_and_sign_block`/`forge_persist_plain` (chemin distinct, inchangé).
 
+### Added
+- **feat(tools-cli)** — exemple `remote_tx` : transfert wallet-à-wallet
+  **distant non-custodial** (`/v1/tx/prepare` → signature locale via `pms-wallet`
+  → `/wallet/tx/send`). Le serveur sélectionne les UTXOs et renvoie une tx non
+  signée + `tx_hash` ; le client signe localement (la clé privée de l'émetteur
+  ne quitte jamais le process) ; le coordinateur emballe la tx dans un bloc
+  qu'il signe. Auth par en-tête `X-API-Key`. Réplique le chemin prouvé par
+  `wallet_send_tx_e2e.rs`.
+
+### Changed
+- **chore(testnet)** — `etc/config/config.docker-test.toml` aligné sur la démo
+  single-writer : coordinateur = clé publique du wallet de démo (+
+  `coordinator_x25519_public_key` correspondante), `signer_pubkeys` autorisés au
+  mint (Testnet l'exige), adresse treasury de démo. **`daily_inflation_enabled =
+  false`** : le service d'inflation injectait des tips concurrents → le CLI
+  forgeait des blocs à 2 parents (rejetés en single-writer).
+- **chore(docker)** — `docker-compose.test.yml` monte `etc/pms/api-keys.json`
+  (rw) dans le conteneur engine (auth API-key du flux `remote_tx`).
+- **chore(monitoring)** — `etc/prometheus/prometheus.yml` réduit aux jobs
+  `pms-engine` + `pms-gateway` (scrape `/metrics` simple) : retrait des jobs
+  alerting/alertmanager/cadvisor/simulator et de l'auth Bearer, absents du
+  compose de test local.
+- **chore(gitignore)** — `etc/pms/api-keys.json` ignoré (fichier runtime rw,
+  non versionné — comme les autres secrets de `etc/pms/`).
+
 ## [0.29.0] - Unreleased — Marketplace : changement de royalty CO-SIGNÉ par le bénéficiaire (protocole 2.7)
 
 ### Changed / Security
