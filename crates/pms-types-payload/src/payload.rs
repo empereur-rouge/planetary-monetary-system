@@ -705,6 +705,29 @@ mod royalty_tests {
     }
 
     #[test]
+    fn royalty_signing_message_golden() {
+        // Vecteurs GOLDEN pour la parité cross-implémentation (SDK TypeScript).
+        // Le SDK DOIT produire le MÊME JSON compact (ordre = déclaration, sans
+        // espaces, `None`→`null`, `Some(x)`→`x`, u64 en nombre) puis SHA-256 hex.
+        // JSON attendu (vecteur 1) :
+        //   {"domain":"pms-royalty-update-v1","network_id":"pms-dev-v1",
+        //    "asset_id":"studio:ticket","royalty_bps":2000,
+        //    "royalty_beneficiary":"8e1abc","current_version":0}
+        let v1 = royalty_update_signing_message("pms-dev-v1", "studio:ticket", Some(2000), Some("8e1abc"), 0);
+        // JSON attendu (vecteur 2, cas None) :
+        //   {"domain":"pms-royalty-update-v1","network_id":"pms-dev-v1",
+        //    "asset_id":"col:cls","royalty_bps":null,
+        //    "royalty_beneficiary":null,"current_version":3}
+        let v2 = royalty_update_signing_message("pms-dev-v1", "col:cls", None, None, 3);
+        println!("GOLDEN v1 = {v1}");
+        println!("GOLDEN v2 = {v2}");
+        // Golden hardcodés (indépendants de la formule) — toute divergence côté SDK
+        // OU tout changement du format de message casse ce test (bien voulu).
+        assert_eq!(v1, "5ef3ba01105c96e4e1ab07a702ee4b2ccb2e21aa15f4243956261bd4ebbaeb4e", "PIN v1");
+        assert_eq!(v2, "4ae5830ef7f4ce6d8a966fc3fd19053cc3b40094e3e5930c813621b9dec5880f", "PIN v2");
+    }
+
+    #[test]
     fn effective_royalty_none_when_absent_or_zero() {
         let mut m = base_meta();
         assert_eq!(m.effective_royalty(), None, "no royalty_bps → None");
