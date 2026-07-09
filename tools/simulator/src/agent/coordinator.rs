@@ -1,4 +1,5 @@
 use crate::agent::{Agent, AgentContext};
+use crate::backoff::{log_throttle, WARN_THROTTLE_PERIOD};
 use crate::error::SimResult;
 use crate::metrics::MetricEvent;
 use crate::types::{SendSimpleRequest, WalletInfo};
@@ -65,14 +66,22 @@ impl Agent for CoordinatorAgent {
             });
         }
 
-        // Check if we have enough balance to send
+        // Check if we have enough balance to send.
+        // État durable (wallet à sec) → warn throttlé : sans lui, ce warn
+        // partait à CHAQUE tick tant que le wallet n'était pas refinancé.
         if self.cached_balance < self.min_amount {
-            tracing::warn!(
-                "[{}] Balance {:.2} PMS < min_amount {:.2}, skipping send",
-                self.name,
-                self.cached_balance,
-                self.min_amount
-            );
+            if let Some(suppressed) =
+                log_throttle::allow("coordinator_low_balance", WARN_THROTTLE_PERIOD)
+            {
+                tracing::warn!(
+                    "[{}] Balance {:.2} PMS < min_amount {:.2}, skipping send — {} warns similaires étouffés sur {:?}",
+                    self.name,
+                    self.cached_balance,
+                    self.min_amount,
+                    suppressed,
+                    WARN_THROTTLE_PERIOD
+                );
+            }
             return Ok(());
         }
 
@@ -127,13 +136,32 @@ impl Agent for CoordinatorAgent {
                 });
             }
             Err(e) => {
-                tracing::warn!(
-                    "[{}] Failed to send {} PMS to {}: {:#}",
-                    self.name,
-                    amount_str,
-                    target.name,
-                    e
-                );
+                // Erreur d'ÉTAT (solde insuffisant côté serveur) : throttlé —
+                // même cause racine que le check de solde ci-dessus, le cache
+                // de balance (rafraîchi tous les 5 ticks) peut être en retard.
+                if e.is_state_error() {
+                    if let Some(suppressed) =
+                        log_throttle::allow("coordinator_send_state_error", WARN_THROTTLE_PERIOD)
+                    {
+                        tracing::warn!(
+                            "[{}] Failed to send {} PMS to {} (erreur d'état): {:#} — {} warns similaires étouffés sur {:?}",
+                            self.name,
+                            amount_str,
+                            target.name,
+                            e,
+                            suppressed,
+                            WARN_THROTTLE_PERIOD
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        "[{}] Failed to send {} PMS to {}: {:#}",
+                        self.name,
+                        amount_str,
+                        target.name,
+                        e
+                    );
+                }
                 let _ = ctx.metrics_tx.try_send(MetricEvent::AgentError {
                     agent_name: self.name.clone(),
                     error: format!("{:#}", e),
