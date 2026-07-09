@@ -35,6 +35,7 @@ services:
       - ./etc/pms/node.key:/home/pms/config/node-identity.key:ro
       - ./etc/pms/admin-wallet.json:/home/pms/config/admin-wallet.json:ro
       - ./etc/pms/treasury-wallets.json:/home/pms/config/treasury-wallets.json:ro
+      - ./etc/pms/api-keys.json:/home/pms/config/api-keys.json:rw
       - ./secrets/tls:/home/pms/tls:ro
       - rocksdb_data:/home/pms/data  # VPS 3: Persistent RocksDB storage
     # NO PUBLIC PORTS - Internal network only!

@@ -157,10 +157,32 @@ impl BridgeEngine {
     /// 3. Crée BridgeLock sur source (consomme UTXOs)
     /// 4. Crée BridgeMint sur dest (crée UTXOs)
     /// 5. Marque le lock comme consommé (anti-replay)
+    /// Exécute un transfert cross-ledger : forge un `BridgeLock` qui DÉTRUIT des
+    /// UTXOs de `req.from_address` sur le ledger source, puis un `BridgeMint` sur
+    /// la destination.
+    ///
+    /// **`authorized` est OBLIGATOIRE** : le `BridgeLock` consomme les fonds de
+    /// `from_address` sans `unlocks` (le bloc n'est signé que par le
+    /// coordinateur), donc l'engine ne peut pas vérifier lui-même la propriété
+    /// des fonds — c'est à l'APPELANT de prouver l'autorisation AVANT d'appeler :
+    /// soit une autorité opérateur (admin/coordinateur, seize-like), soit une
+    /// **preuve de contrôle de `from_address`** (signature de son propriétaire —
+    /// cf. `bridge_transfer_signing_message` côté serveur). Sans ça, exposer le
+    /// bridge hors-admin laisserait un tiers (ex: owner d'un ledger) drainer
+    /// n'importe quel utilisateur. Ce garde fail-closed refuse tout appel non
+    /// autorisé. Revue sécurité v0.30.1.
     pub async fn execute_transfer(
         &self,
         req: &BridgeTransferRequest,
+        authorized: bool,
     ) -> Result<BridgeTransferResponse> {
+        if !authorized {
+            bail!(
+                "bridge transfer not authorized: caller must be admin OR prove control of from_address '{}'",
+                req.from_address
+            );
+        }
+
         // 1) Vérifier que le bridge link est actif
         if !self
             .bridge_store

@@ -400,8 +400,12 @@ fn auth_owner_can_manage_custom_bridges() {
         Some("owner_b")
     ));
 
-    // Only source owner can transfer
-    assert!(BridgeAuth::can_transfer(
+    // v0.30.1 hardening: at the ledger level, `can_transfer` authorizes ONLY the
+    // admin — NOT the source-ledger owner. Owning the ledger is not proof of
+    // control of an arbitrary `from_address`'s funds (that would let an owner
+    // drain any user on their ledger). A non-admin transfer must instead prove
+    // control of `from_address` (signature — see `from_address_control_proven`).
+    assert!(!BridgeAuth::can_transfer(
         &custom_a,
         &custom_b,
         false,
@@ -413,6 +417,8 @@ fn auth_owner_can_manage_custom_bridges() {
         false,
         Some("owner_b")
     ));
+    // Admin still authorized (operator/seize path).
+    assert!(BridgeAuth::can_transfer(&custom_a, &custom_b, true, None));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

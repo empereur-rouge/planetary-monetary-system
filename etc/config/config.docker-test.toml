@@ -19,6 +19,9 @@ hrp = "8e"
 # Treasury wallets loaded from signed JSON file (verified against coordinator key)
 # Selection: pseudo-random for fees, first wallet for block rewards
 treasury_wallets_file = "/home/pms/config/treasury-wallets.json"
+# Pubkeys autorisés à mint (Testnet mode l'exige). = clé coordinateur (uncompressed),
+# match insensible à la casse contre le signer du bloc Mint.
+signer_pubkeys = ["045da509742a0064e36fea6c99d35f871189ad912420734ccff88b6027e7ae940f11f5348b8c5eb3a3999c77e4c7328d1f541aaaddaea88d12828b80c9b6431d04", "0450896e03dd06a9446f9dc5cf3711678bdb87a3a66a937829f40300a82a2d6cc4fcb32935ac85a32f5fd7a882baec982019b7030c7a42d784d10433f2b5f11626"]
 
 [client]
 bind_addr = "0.0.0.0:8443"
@@ -41,16 +44,17 @@ rate_limit_rps = 100000
 burst = 200000
 
 [fees]
-treasury_addresses = [
-    "pms1nqgc9xfc3hwcngkaah6999y9lmvrnfwx9g983rwkg89vaxhfqprvatapz4mzxg9yyl4w89kmswqpaczzcdrs56rtkj",
-]
+treasury_addresses = ["pms1sr9zszk0j2mrepljtugrcyexfhpze6nm594sgpchts78crlgx6kfd2q0cfrd5duxmxta79krnhgh7a6w5cuq0j3ghk"]
 epsilon = "0.001"
 scan_limit = 2000
 mode = "uniform"
 enforce_fee_recipient = false # Désactivé pour les tests
 distribution_interval_sec = 10 # Distribution rapide pour les tests (10s)
 # Scheduled Inflation Mint
-daily_inflation_enabled = true
+# Désactivé pour la démo de transfert : en Single-Writer mode chaque bloc doit
+# avoir exactement 1 parent, or le service d'inflation injecte des tips
+# concurrents qui font que le CLI forge des blocs à 2 parents (rejetés).
+daily_inflation_enabled = false
 daily_inflation_interval_sec = 60 # 60s pour tester (86400 = 24h en prod)
 annual_inflation_percent = 3.0
 treasury_reward_percent = 20
@@ -81,5 +85,5 @@ enforce_fee_recipient = false    # Désactivé pour les tests
 
 # COORDINATOR PUBLIC KEY - Dérivée de node1.key
 # Seul Node 1 peut minter car il a la clé privée correspondante
-coordinator_public_key = "04de88bf6ec4d2c38151df56efbf48ea7f5bc2dc19ef26cd8614fe1a065a0e2545bac3d76d8fd0fcedecf539f2c927ce2547ce9951822e08c12ca45b0790dacdff"
-coordinator_x25519_public_key = "f3212c42ca04cb32c1e19e6d246e8556bd19023a208ca72461db5e11320d3a29"
+coordinator_public_key = "045da509742a0064e36fea6c99d35f871189ad912420734ccff88b6027e7ae940f11f5348b8c5eb3a3999c77e4c7328d1f541aaaddaea88d12828b80c9b6431d04"
+coordinator_x25519_public_key = "9b58cb508123bb522c5f14dcef6d771ace3fbce4c7d9cebec9aa103d73b74c3c"

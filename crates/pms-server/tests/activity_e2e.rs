@@ -1522,6 +1522,24 @@ async fn activity_bridge_lock_in_appears() -> anyhow::Result<()> {
 // Test 17: Bridge mint appears in activity
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// A fixed `BridgeLockResolver` for tests: resolves ANY `lock_block_id` to a
+/// pre-set `BridgeLockInfo`. Since the cross-ledger reconciliation feature a
+/// `BridgeMint` is reconciled against its source `BridgeLock` (amount/asset/dest)
+/// and persist REJECTS it when no resolver is wired — so an in-process test must
+/// wire one.
+struct FixedBridgeResolver(pms_interface::BridgeLockInfo);
+
+#[async_trait::async_trait]
+impl pms_interface::BridgeLockResolver for FixedBridgeResolver {
+    async fn resolve_bridge_lock(
+        &self,
+        _source_ledger_id: &str,
+        _lock_block_id: &str,
+    ) -> anyhow::Result<Option<pms_interface::BridgeLockInfo>> {
+        Ok(Some(self.0.clone()))
+    }
+}
+
 #[tokio::test]
 async fn activity_bridge_mint_appears() -> anyhow::Result<()> {
     let ctx = make_test_ctx().await?;
@@ -1533,6 +1551,20 @@ async fn activity_bridge_mint_appears() -> anyhow::Result<()> {
 
     println!("\n=== [BRIDGE_MINT] Setup ===");
     println!("  Recipient: {addr}");
+
+    // Wire a bridge-lock resolver so the BridgeMint can reconcile against its
+    // (mocked) source lock — required since the cross-ledger reconciliation
+    // feature. The lock must match the mint outputs (amount/asset/dest) and its
+    // dest_ledger_id must equal the ledger_id passed to set_bridge_resolver.
+    ctx.srv.adapter_arc().set_bridge_resolver(
+        std::sync::Arc::new(FixedBridgeResolver(pms_interface::BridgeLockInfo {
+            amount: "100.00".to_string(),
+            asset_id: None,
+            dest_ledger_id: "main".to_string(),
+            dest_address: addr.clone(),
+        })),
+        "main".to_string(),
+    );
 
     let tips = get_tips(&ctx).await;
 

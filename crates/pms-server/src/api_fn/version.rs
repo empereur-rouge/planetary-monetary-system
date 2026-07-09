@@ -84,7 +84,25 @@ use crate::api::AppState;
 /// de `{"error":"..."}` ad hoc. Nouveau code `1050` (Forbidden — clé fournie ≠
 /// bénéficiaire courant, 403). Un rejet consensus (royalty/settlement) mappe sur
 /// `3070` (Conflict, 409).
-pub const API_VERSION: u32 = 35;
+/// v36 (v0.30.0 — fee distribution) : `POST /admin/distribute_fees` et la tâche
+/// périodique créditent désormais la **part producteur du coordinateur**
+/// (`coordinator_fee_percent`, 65 % après la coupe treasury) au wallet du
+/// coordinateur au lieu de la rediriger vers la treasury. Format de requête/réponse
+/// inchangé — seul le comportement de routage des fonds change.
+/// v37 (v0.30.1 — durcissement sécurité) : `POST /v1/nft/mint` est create-only
+/// (409 si le token existe) ET exige une **autorité d'émission** sur le chemin
+/// API-key (`creator_pubkey_hex` + `creator_signature_b64` d'un coordinateur /
+/// admin-signer / owner de ledger) — anti vol de NFT par re-mint + anti farming
+/// de contrat burn-refund. `/v1/register`, `/v1/heartbeat`, `/v1/peers/connect`
+/// passent derrière `require_local_or_admin`. `/internal/*` retiré du routeur
+/// public. `require_api_key` fail-closed en mainnet si aucune clé n'est provisionnée.
+/// v38 (v0.30.1 — auth crypto node registry) : `POST /v1/register` et
+/// `/v1/heartbeat` acceptent une **preuve de possession de `node_pk`** (champs
+/// `ts_ms` + `signature_b64` sur `node_register_signing_message`) en plus du token
+/// admin — un pair peut s'auto-inscrire sans le token opérateur. Anti-rejeu
+/// (fraîcheur ±5 min + monotonie sur `ts_ms`) + cap anti-DoS. `peers/connect`
+/// reste opérateur-only.
+pub const API_VERSION: u32 = 38;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -189,6 +207,13 @@ mod tests {
         // v0.29.0 (revue D1): 34 → 35 (market/royalty renvoient ApiError à code
         //          stable ; nouveau code 1050 Forbidden). Toujours dans le cycle
         //          non-publié 0.29.0 — l'API 34 n'a jamais été released.
-        assert_eq!(parsed.api_version, 35);
+        // v0.30.0: 35 → 36 (fee distribution crédite la part producteur du
+        //          coordinateur au lieu de la rediriger vers la treasury).
+        // v0.30.1: 36 → 37 (durcissement sécurité : nft/mint create-only +
+        //          signature d'émetteur ; node routes gated ; /internal retiré
+        //          du public ; api-key fail-closed en prod).
+        // v0.30.1: 37 → 38 (auth crypto node registry : /v1/register &
+        //          /v1/heartbeat acceptent une signature de node_pk).
+        assert_eq!(parsed.api_version, 38);
     }
 }

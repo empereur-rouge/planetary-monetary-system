@@ -241,6 +241,20 @@ pub async fn admin_create_ledger(
             .into_response();
     }
 
+    // Owner keys must be provided as a PAIR (or neither). The fee distributor
+    // derives the owner's authoritative payout address from BOTH keys
+    // (owner_pubkey + owner_x25519 — see `perform_fee_distribution`). A
+    // half-configured owner has no derivable address, so its fee share would
+    // fall back to the mutable/unauthenticated `node_registry`, reopening the
+    // `/v1/register` hijack the authoritative resolution closes. Reject up front.
+    if req.owner_pubkey.is_some() != req.owner_x25519_pubkey.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "owner_pubkey and owner_x25519_pubkey must be provided together (both or neither)"})),
+        )
+            .into_response();
+    }
+
     if mgr.get(&req.id).is_some() {
         return (
             StatusCode::CONFLICT,
@@ -391,6 +405,19 @@ pub async fn transfer_ledger_ownership(
         )
             .into_response();
     };
+
+    // Owner keys must be transferred as a PAIR (or cleared together — both
+    // None reverts to admin-owned). Same rationale as `admin_create_ledger`:
+    // the fee distributor derives the owner's authoritative payout address from
+    // BOTH keys, so a half-set owner would fall back to the unauthenticated
+    // `node_registry` (hijackable via `/v1/register`).
+    if req.new_owner_pubkey.is_some() != req.new_owner_x25519_pubkey.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "new_owner_pubkey and new_owner_x25519_pubkey must be provided together (both or neither)"})),
+        )
+            .into_response();
+    }
 
     let old_owner = instance.def.owner_pubkey.clone();
     let old_owner_x25519 = instance.def.owner_x25519_pubkey.clone();

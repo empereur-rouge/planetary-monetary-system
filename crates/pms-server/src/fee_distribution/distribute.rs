@@ -211,6 +211,54 @@ pub async fn perform_fee_distribution(
         let registry = state.node_registry.read().await;
         let nodes = registry.get_active_nodes();
 
+        // Authoritative payout addresses — derived from data WE control, never
+        // from the mutable / unauthenticated / TTL-expiring `node_registry`.
+        // `perform_fee_distribution` is coordinator-only, so:
+        //   • a share for OUR pk is the coordinator's block-producer reward
+        //     (`main` + null-owner custom ledgers accrue to us — see
+        //     `accumulate_tx_fee`); resolve it to our own wallet.
+        //   • a share for the CURRENT custom ledger's owner is resolved from
+        //     the durable ledger definition (owner_pubkey + owner_x25519).
+        // Both are looked up BEFORE the registry, so:
+        //   (a) neither can be hijacked via `POST /v1/register` — an
+        //       unauthenticated endpoint that overwrites registry
+        //       wallet_addresses; and
+        //   (b) neither silently diverts to the treasury when the
+        //       heartbeat-less registry entry ages out (24h TTL).
+        // Only genuinely-unknown pks (future remote peer nodes) fall through to
+        // the registry, for which TTL / peer-discovery semantics are correct.
+        // See CHANGELOG 0.30.0.
+        let self_pk = node_wallet.encoded_public_key();
+        let self_hrp = settings.address.hrp.as_str();
+
+        // The current custom ledger's owner as (owner_pk, derived_payout_addr).
+        // `None` for `main` or an admin-owned (null-owner) ledger.
+        let ledger_owner_payout: Option<(String, String)> = if state.ledger_id != "main" {
+            state
+                .ledger_mgr
+                .as_ref()
+                .and_then(|mgr| mgr.get(&state.ledger_id))
+                .and_then(|inst| {
+                    match (&inst.def.owner_pubkey, &inst.def.owner_x25519_pubkey) {
+                        (Some(opk), Some(oxpk)) => {
+                            match crate::api::serve::derive_address_from_keys(opk, oxpk, self_hrp) {
+                                Ok(addr) => Some((opk.clone(), addr)),
+                                Err(e) => {
+                                    tracing::error!(
+                                        ledger = %state.ledger_id,
+                                        "cannot derive ledger owner payout address: {e}"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        _ => None,
+                    }
+                })
+        } else {
+            None
+        };
+
         for (node_pk, share_pct, _original_share_amount) in &shares {
             // Recalculate share amount based on remaining pool
             let share_amount = (node_pool_amount * *share_pct).round_dp(8);
@@ -219,27 +267,42 @@ pub async fn perform_fee_distribution(
                 continue;
             }
 
-            // Find node info to get wallet address
-            let node_info = nodes.iter().find(|n| &n.node_pk == node_pk);
-            let mut target_address = None;
-
-            if let Some(node) = node_info {
-                if let Some(addr) = &node.wallet_address {
-                    target_address = Some(addr.clone());
-                } else {
-                    tracing::warn!(
-                        "⚠️ Node {} has no registered wallet address!",
-                        &node_pk[..10]
-                    );
-                }
+            // 1) Authoritative identities (coordinator, current ledger owner),
+            //    resolved from our own keys / the ledger definition — NOT the
+            //    registry. Per-address UTXO growth stays bounded by the periodic
+            //    consolidation task (fees are batched into one Reward block per
+            //    distribution interval).
+            let mut target_address: Option<String> = if *node_pk == self_pk {
+                Some(node_wallet.get_address(self_hrp))
             } else {
-                tracing::warn!(
-                    "⚠️ Node {} disappeared from registry during distribution!",
-                    &node_pk[..10]
-                );
+                ledger_owner_payout
+                    .as_ref()
+                    .filter(|(owner_pk, _)| owner_pk == node_pk)
+                    .map(|(_, addr)| addr.clone())
+            };
+
+            // 2) Genuinely-unknown pk (future remote peer) → registry lookup.
+            if target_address.is_none() {
+                match nodes.iter().find(|n| &n.node_pk == node_pk) {
+                    Some(node) => {
+                        target_address = node.wallet_address.clone();
+                        if target_address.is_none() {
+                            tracing::warn!(
+                                "⚠️ Node {} has no registered wallet address!",
+                                &node_pk[..10.min(node_pk.len())]
+                            );
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            "⚠️ Node {} not found in registry (no authoritative address)!",
+                            &node_pk[..10.min(node_pk.len())]
+                        );
+                    }
+                }
             }
 
-            // If no target address found (node missing or no wallet), fallback to Treasury
+            // 3) If no target address found (peer missing or no wallet), fallback to Treasury
             if target_address.is_none() {
                 // Determine fallback treasury address (same logic as tax)
                 let fallback = if !state.treasury_wallets.is_empty() {

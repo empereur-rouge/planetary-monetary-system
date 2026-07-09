@@ -2,98 +2,19 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
-# Alert rules — see `etc/prometheus/alerting_rules.yml` for the full list.
-# `evaluation_interval: 15s` above means Prometheus checks every rule
-# every 15 s; `for: <duration>` in each rule decides how long the
-# expression must stay true before the alert actually fires.
-rule_files:
-  - /etc/prometheus/alerting_rules.yml
-
-# Alertmanager target. The Compose service name `alertmanager` resolves
-# via Docker DNS on the `pms_pms-testnet-internal` network. Port 9093
-# is the default. Until alertmanager.yml has real webhook URLs, alerts
-# are silently dropped (see the `null` receiver in that file) — so
-# enabling this section costs nothing operationally.
-alerting:
-  alertmanagers:
-    - static_configs:
-        - targets:
-            - 'alertmanager:9093'
-
 scrape_configs:
-  # PMS Engine — full Prometheus registry (per-stage persist counters,
-  # consumer timings, persist queue depth, fee-pool size, UTXO-set size,
-  # RocksDB write-stall counters). The plain `/metrics` endpoint returns
-  # only 3 dashboard-friendly counters per ledger (no labels) and masks
-  # everything the v0.7.4 metrics sampler + v0.7.5 per-stage diagnostic
-  # exposes; `/metrics/all` returns the full `prometheus::gather()`
-  # output.
-  #
-  # AUTH: `/metrics`, `/metrics/all`, and `/l/{id}/metrics` all sit
-  # behind `require_local_or_admin`. Prometheus runs in its own
-  # container on the docker network — it is NOT loopback, so the admin
-  # token is required. The token is mounted into this container at
-  # `/etc/prometheus/admin_token` by `scripts/deploy-testnet.sh`
-  # (one-line file containing the value of `$PMS_ADMIN_TOKEN`). Keeps
-  # the token out of this YAML, out of the image layer, and out of
-  # Prometheus's scrape-config dashboard view.
   - job_name: 'pms-engine'
     scheme: https
     tls_config:
       insecure_skip_verify: true
-    authorization:
-      type: Bearer
-      credentials_file: /etc/prometheus/admin_token
     static_configs:
       - targets: ['pms-engine:8080']
-    metrics_path: /metrics/all
+    metrics_path: /metrics
 
-  # Gateway exposes its own `/metrics` (request rates, upstream latency,
-  # rate-limit decisions). The endpoint sits behind the same admin-token
-  # check as the engine (the gateway reads `ADMIN_TOKEN` from the
-  # compose env and applies it on `/metrics`), so we reuse the same
-  # `credentials_file` that the engine job uses. Both services receive
-  # `PMS_ADMIN_TOKEN` from the same compose variable, so a single file
-  # is enough.
   - job_name: 'pms-gateway'
     scheme: https
     tls_config:
       insecure_skip_verify: true
-    authorization:
-      type: Bearer
-      credentials_file: /etc/prometheus/admin_token
     static_configs:
       - targets: ['pms-gateway:8443']
-    metrics_path: /metrics
-
-  # PMS Simulator — producer-side counters (recommendation #7 in v0.7.5).
-  # `pms_simulator_tx_sent_total{agent_group, kind}`,
-  # `pms_simulator_tx_failed_total{agent_group, kind, reason}`,
-  # `pms_simulator_cubes_minted_total`, etc. Pair with engine's
-  # `/metrics/all` to compute attempted-vs-accepted gaps in Grafana.
-  # Plain HTTP, no auth — same instance that serves the dashboard at :9090.
-  - job_name: 'pms-simulator'
-    scheme: http
-    static_configs:
-      - targets: ['pms-simulator:9090']
-    metrics_path: /metrics
-
-  # Alertmanager self-metrics. Lets us alert on the alertmanager itself
-  # (e.g. dispatch failures) — without this we wouldn't know if our
-  # paging path was broken until an actual outage.
-  - job_name: 'alertmanager'
-    scheme: http
-    static_configs:
-      - targets: ['alertmanager:9093']
-    metrics_path: /metrics
-
-  # cAdvisor — per-container cgroup metrics (memory, cpu, oom events).
-  # Gives us the visibility the Rust prometheus client doesn't auto-
-  # expose. Memory alerts (EngineMemoryHigh, SimulatorMemoryHigh,
-  # ContainerOOMKilled) all key off cadvisor metrics — without this
-  # job they silently don't fire.
-  - job_name: 'cadvisor'
-    scheme: http
-    static_configs:
-      - targets: ['cadvisor:8080']
     metrics_path: /metrics

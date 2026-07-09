@@ -11,7 +11,7 @@
 mod state;
 mod middleware;
 mod routes;
-mod serve;
+pub(crate) mod serve;
 mod ledger_dispatch;
 mod tasks;
 

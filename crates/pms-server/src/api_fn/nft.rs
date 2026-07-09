@@ -5,7 +5,7 @@
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use pms_types_nft::NftMetadata; // Used for MintNftRequest
@@ -226,11 +226,79 @@ pub struct MintNftRequest {
     pub owner_x25519_pubkey: String,
     /// Métadonnées du NFT
     pub metadata: NftMetadata,
+    /// **Autorisation d'émission (chemin API-key uniquement).** Clé publique
+    /// (sec1 hex) de l'émetteur autorisé qui a signé ce mint. Ignoré sur le
+    /// chemin admin (`/admin/nft/mint`, déjà autorisé par le token admin). Sans
+    /// admin ni signature d'un émetteur autorisé (coordinateur, admin-signer, ou
+    /// owner du ledger), le mint est rejeté (403) — cf. revue sécurité v0.30.1.
+    #[serde(default)]
+    pub creator_pubkey_hex: Option<String>,
+    /// Signature détachée (DER base64) de `creator_pubkey_hex` sur le message
+    /// canonique `nft_mint_signing_message`. Chemin API-key uniquement.
+    #[serde(default)]
+    pub creator_signature_b64: Option<String>,
+}
+
+/// Message canonique signé par l'émetteur autorisé d'un NFT (chemin API-key).
+/// Lie la signature au mint EXACT — réseau, ledger, token_id, owner, et hash des
+/// métadonnées — pour qu'une signature capturée ne soit pas rejouable sur un
+/// autre mint. SHA-256 domain-separated. `pub` pour que les clients/tests
+/// signent le MÊME message que celui vérifié ici (aucune divergence possible),
+/// comme `pms_types::royalty_update_signing_message`.
+pub fn nft_mint_signing_message(
+    network_id: &str,
+    ledger_id: &str,
+    token_id: &str,
+    owner_address: &str,
+    metadata: &NftMetadata,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let metadata_json = serde_json::to_vec(metadata).unwrap_or_default();
+    let mut h = Sha256::new();
+    h.update(b"PMS_NFT_MINT_v1|");
+    h.update(network_id.as_bytes());
+    h.update(b"|");
+    h.update(ledger_id.as_bytes());
+    h.update(b"|");
+    h.update(token_id.as_bytes());
+    h.update(b"|");
+    h.update(owner_address.as_bytes());
+    h.update(b"|");
+    h.update(Sha256::digest(&metadata_json));
+    // Hex string (like `royalty_update_signing_message`): the signer signs these
+    // bytes via `Wallet::sign(&str)` and the verifier checks `msg.as_bytes()`.
+    hex::encode(h.finalize())
+}
+
+/// L'émetteur `creator_pk` (sec1 hex) est-il autorisé à minter un NFT sur le
+/// ledger courant ? Autorités : le coordinateur, un admin-signer, ou l'owner du
+/// ledger custom courant (dérivé de la def durable, PAS du node_registry).
+/// Empêche un simple détenteur d'API-key de créer des NFT (ex: faux « cube »
+/// pour farmer un contrat de burn-refund non gaté). Cf. revue sécurité v0.30.1.
+fn is_authorized_nft_issuer(state: &AppState, creator_pk: &str) -> bool {
+    let s = &state.settings;
+    if s.validation.coordinator_public_key.as_deref() == Some(creator_pk) {
+        return true;
+    }
+    if s.admin.signer_pubkeys.iter().any(|p| p == creator_pk) {
+        return true;
+    }
+    if state.ledger_id != "main" {
+        if let Some(mgr) = state.ledger_mgr.as_ref() {
+            if let Some(inst) = mgr.get(&state.ledger_id) {
+                if inst.def.owner_pubkey.as_deref() == Some(creator_pk) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Handler générique pour minter un NFT (Signé par le Coordinateur)
 pub async fn mint_nft(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<MintNftRequest>,
 ) -> impl IntoResponse {
     // 0. Gas pool check (custom ledgers only)
@@ -245,6 +313,70 @@ pub async fn mint_nft(
             "Invalid token_id length (must be 64 hex chars)",
         )
             .into_response();
+    }
+
+    // 1a. CREATE-ONLY — refuse de réécrire un token existant AVANT de persister
+    //     (sinon un attaquant re-minte le token_id d'un tiers avec
+    //     owner_address=lui et vole le NFT). Pré-check handler ; `apply_mint`
+    //     redouble le garde côté stockage. Revue sécurité v0.30.1.
+    match state.store.get_owner(&req.token_id) {
+        Ok(Some(_)) => {
+            return (
+                StatusCode::CONFLICT,
+                "token_id already exists (NFT mint is create-only)",
+            )
+                .into_response();
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("ownership lookup failed: {e}"),
+            )
+                .into_response();
+        }
+    }
+
+    // 1b. AUTORISATION D'ÉMISSION. Le chemin admin (`/admin/nft/mint`, token
+    //     admin déjà validé par le middleware) est de confiance. Le chemin
+    //     API-key (`/v1/nft/mint`) exige une signature d'un émetteur autorisé
+    //     (coordinateur / admin-signer / owner du ledger) sur le message
+    //     canonique du mint — sinon n'importe quelle clé API pourrait créer des
+    //     NFT (vol via re-mint fermé plus haut, mais aussi faux « cube » →
+    //     farming d'un contrat de burn-refund). Revue sécurité v0.30.1.
+    if !crate::helper::is_admin_authorized(&state, &headers) {
+        let creator_pk = req.creator_pubkey_hex.as_deref().unwrap_or("");
+        let sig = req.creator_signature_b64.as_deref().unwrap_or("");
+        if creator_pk.is_empty() || sig.is_empty() {
+            return (
+                StatusCode::FORBIDDEN,
+                "NFT mint requires admin auth OR a creator signature (creator_pubkey_hex + creator_signature_b64)",
+            )
+                .into_response();
+        }
+        if !is_authorized_nft_issuer(&state, creator_pk) {
+            return (
+                StatusCode::FORBIDDEN,
+                "creator is not an authorized NFT issuer for this ledger",
+            )
+                .into_response();
+        }
+        let msg = nft_mint_signing_message(
+            &state.settings.network.network_id,
+            &state.ledger_id,
+            &req.token_id,
+            &req.owner_address,
+            &req.metadata,
+        );
+        if pms_core::validations::signature::verify_detached_signature(msg.as_bytes(), creator_pk, sig)
+            .is_err()
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                "invalid creator signature for NFT mint",
+            )
+                .into_response();
+        }
     }
 
     // 1b. Compute NFT mint fee (if configured and not exempt)

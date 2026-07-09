@@ -116,7 +116,19 @@ pub trait NftStorage: Send + Sync {
     /// Applique un Mint avec le block_id source.
     ///
     /// Les métadonnées sont dans le bloc, pas dans le store.
+    ///
+    /// **Create-only** : un Mint ne réécrit JAMAIS un token existant. Seul le
+    /// Mint passe par ici (Transfer utilise `set_owner`/`apply_transfer`), donc
+    /// ce garde est la moitié « stockage » de la protection dual-layer contre le
+    /// hijack d'ownership par re-mint (l'autre moitié est le pré-check dans le
+    /// handler `mint_nft` + `validate_nft_action` au consensus). Cf. revue
+    /// sécurité v0.30.1.
     fn apply_mint(&self, token_id: &str, creator: &str, block_id: &str) -> Result<()> {
+        if self.get_owner(token_id)?.is_some() {
+            anyhow::bail!(
+                "NFT {token_id} already exists — mint is create-only (refusing to overwrite owner)"
+            );
+        }
         self.set_owner(token_id, creator)?;
         self.set_block_id(token_id, block_id)?;
         Ok(())

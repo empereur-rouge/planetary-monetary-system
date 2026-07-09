@@ -259,6 +259,32 @@ async fn setup_e2e() -> Result<(
     Ok((mgr, engine, coordinator, dir))
 }
 
+/// v0.30.1 security: the engine refuses to lock `from_address` funds unless the
+/// caller explicitly vouches authorization (`authorized = true`). Guards against a
+/// future non-admin route forgetting the from_address proof-of-control. The gate
+/// fires BEFORE any bridge-enabled / coin-selection work.
+#[tokio::test]
+async fn execute_transfer_rejects_unauthorized() -> Result<()> {
+    let (_mgr, engine, _coord, _dir) = setup_e2e().await?;
+    let req = BridgeTransferRequest {
+        from_ledger: "main".to_string(),
+        to_ledger: "eden".to_string(),
+        from_address: "8e1victimaddress".to_string(),
+        to_address: "8e1attackeraddress".to_string(),
+        amount: "100".to_string(),
+        asset_id: None,
+    };
+    let res = engine.execute_transfer(&req, false).await;
+    assert!(res.is_err(), "unauthorized bridge transfer must be rejected");
+    let msg = res.unwrap_err().to_string();
+    println!("unauthorized transfer rejected: {msg}");
+    assert!(
+        msg.contains("not authorized"),
+        "rejection reason must be authorization, got: {msg}"
+    );
+    Ok(())
+}
+
 /// Mint funds to an address on a specific ledger.
 async fn mint_on_ledger(
     mgr: &LedgerManager,
@@ -332,7 +358,7 @@ async fn bridge_full_lifecycle() -> Result<()> {
         asset_id: None,
     };
 
-    let result = engine.execute_transfer(&transfer_req).await;
+    let result = engine.execute_transfer(&transfer_req, true).await;
     assert!(result.is_err(), "transfer should fail without bridge");
     assert!(
         result.unwrap_err().to_string().contains("no active bridge"),
@@ -355,7 +381,7 @@ async fn bridge_full_lifecycle() -> Result<()> {
     assert_eq!(links.len(), 1);
 
     // ── Step 4: Execute transfer main → nft ──────────────────────────
-    let resp = engine.execute_transfer(&transfer_req).await?;
+    let resp = engine.execute_transfer(&transfer_req, true).await?;
     assert_eq!(resp.from_ledger, "main");
     assert_eq!(resp.to_ledger, "nft");
     assert_eq!(resp.amount, "100.00000000");
@@ -386,7 +412,7 @@ async fn bridge_full_lifecycle() -> Result<()> {
     // (The lock is already consumed, executing the exact same transfer
     //  would create a *new* lock since it's a new block, but the sender
     //  has no UTXOs left so it should fail with insufficient balance)
-    let result2 = engine.execute_transfer(&transfer_req).await;
+    let result2 = engine.execute_transfer(&transfer_req, true).await;
     assert!(
         result2.is_err(),
         "second transfer should fail (no UTXOs left)"
@@ -412,7 +438,7 @@ async fn bridge_full_lifecycle() -> Result<()> {
         amount: "50.00000000".into(),
         asset_id: None,
     };
-    let result3 = engine.execute_transfer(&transfer_req2).await;
+    let result3 = engine.execute_transfer(&transfer_req2, true).await;
     assert!(
         result3.is_err(),
         "transfer should fail when bridge is disabled"
@@ -433,7 +459,7 @@ async fn bridge_full_lifecycle() -> Result<()> {
     let link2 = engine.enable_bridge(&enable_req2, true, None)?;
     assert!(link2.enabled);
 
-    let resp2 = engine.execute_transfer(&transfer_req2).await?;
+    let resp2 = engine.execute_transfer(&transfer_req2, true).await?;
     assert_eq!(resp2.amount, "50.00000000");
 
     // Verify receiver now has 2 UTXOs on nft (100 + 50)
@@ -496,7 +522,7 @@ async fn bridge_mint_replay_is_rejected() -> Result<()> {
         amount: "100.00000000".into(),
         asset_id: None,
     };
-    let resp = engine.execute_transfer(&req).await?;
+    let resp = engine.execute_transfer(&req, true).await?;
     println!(
         "✅ legit transfer: lock_block_id={} mint_block_id={}",
         resp.lock_block_id, resp.mint_block_id
@@ -996,7 +1022,7 @@ async fn bridge_directional_atob() -> Result<()> {
         amount: "50.00000000".into(),
         asset_id: None,
     };
-    let resp = engine.execute_transfer(&fwd).await?;
+    let resp = engine.execute_transfer(&fwd, true).await?;
     assert_eq!(resp.amount, "50.00000000");
 
     // nft → main should fail (wrong direction)
@@ -1008,7 +1034,7 @@ async fn bridge_directional_atob() -> Result<()> {
         amount: "50.00000000".into(),
         asset_id: None,
     };
-    let result = engine.execute_transfer(&rev).await;
+    let result = engine.execute_transfer(&rev, true).await;
     assert!(result.is_err(), "reverse transfer should fail (AtoB only)");
     assert!(result.unwrap_err().to_string().contains("no active bridge"));
 
@@ -1048,7 +1074,7 @@ async fn bridge_insufficient_balance() -> Result<()> {
         asset_id: None,
     };
 
-    let result = engine.execute_transfer(&req).await;
+    let result = engine.execute_transfer(&req, true).await;
     assert!(result.is_err());
     assert!(
         result
@@ -1099,7 +1125,7 @@ async fn bridge_multiple_transfers() -> Result<()> {
             amount: "100.00000000".into(),
             asset_id: None,
         };
-        engine.execute_transfer(&req).await?;
+        engine.execute_transfer(&req, true).await?;
     }
 
     // All UTXOs consumed on main
