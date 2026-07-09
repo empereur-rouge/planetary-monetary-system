@@ -296,7 +296,7 @@ async fn signature_with_swapped_pubkey_is_rejected() -> Result<()> {
 /// le rejet vient bien du contrôle d'autorité (et non d'un montant/parent/etc.).
 #[tokio::test]
 async fn non_authorized_mint_is_rejected_by_persist() -> Result<()> {
-    let (dag, adapter, meta) = fresh_adapter("unauth-mint").await?;
+    let (_dag, adapter, meta) = fresh_adapter("unauth-mint").await?;
 
     // Wallet aléatoire — N'EST PAS dans admin.signer_pubkeys de config.dev.toml.
     let attacker = Wallet::from_seed(&[42u8; 32], None).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -305,15 +305,19 @@ async fn non_authorized_mint_is_rejected_by_persist() -> Result<()> {
     let plain = PlainPayload::Mint {
         outputs: vec![TxOutput::new(addr, "1000".to_string(), None)],
     };
-    let block = dag.forge_block(Some(PayloadEnvelope::Plain(plain)), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it inserts
+    // the block into the RAM DAG, so persist_block would return AlreadyExists and
+    // SHORT-CIRCUIT before the mint-authority gate — the block must actually be
+    // Inserted for the gate to run and reject it.
+    let parents = adapter.top_tips(1).await?;
     // Signature VALIDE de l'attaquant (donc le rejet n'est PAS dû à la crypto,
     // mais bien au contrôle d'autorité de mint).
     let wb = forge_signed_wire_block_for_test(
-        block.parents.clone(),
+        parents,
         &meta,
         &attacker,
-        block.nonce,
-        block.payload,
+        0,
+        Some(PayloadEnvelope::Plain(plain)),
     );
 
     let res = adapter.persist_block(&wb).await?;

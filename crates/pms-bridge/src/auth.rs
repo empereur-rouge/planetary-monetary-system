@@ -66,26 +66,26 @@ impl BridgeAuth {
         }
     }
 
-    /// Vérifie si l'appelant est autorisé à faire un transfert via ce pont.
+    /// Autorise l'INITIATION d'un transfert via ce pont **au niveau ledger**.
     ///
-    /// - Admin → toujours OK
-    /// - Owner du ledger source → OK
+    /// **SÉCURITÉ (durcissement v0.30.1)** : renvoie `true` UNIQUEMENT pour
+    /// l'admin. Auparavant l'owner du ledger source était accepté — mais un
+    /// `BridgeLock` détruit les UTXOs d'un `from_address` ARBITRAIRE (pas
+    /// forcément celui de l'owner), donc autoriser sur la seule propriété du
+    /// ledger laissait un owner **drainer n'importe quel utilisateur de son
+    /// ledger**. La propriété du ledger n'est PAS une preuve de contrôle des
+    /// fonds de `from_address`.
+    ///
+    /// Un appelant NON-admin doit prouver le contrôle de `from_address` lui-même
+    /// (signature de son propriétaire, cf. `bridge_transfer_signing_message` +
+    /// `from_address_control_proven` côté serveur), pas via cette fonction. Ce
+    /// n'est donc plus qu'un gate opérateur au niveau ledger.
     pub fn can_transfer(
-        source_ledger: &LedgerDef,
-        dest_ledger: &LedgerDef,
+        _source_ledger: &LedgerDef,
+        _dest_ledger: &LedgerDef,
         is_admin: bool,
-        signer_pubkey: Option<&str>,
+        _signer_pubkey: Option<&str>,
     ) -> bool {
-        if is_admin {
-            return true;
-        }
-        if Self::requires_admin(source_ledger, dest_ledger) {
-            return false;
-        }
-        if let Some(signer) = signer_pubkey {
-            source_ledger.owner_pubkey.as_deref() == Some(signer)
-        } else {
-            false
-        }
+        is_admin
     }
 }

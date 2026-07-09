@@ -11,6 +11,82 @@ use pms_storage::ConfigStorage;
 use rust_decimal::Decimal;
 use serde_json::json;
 
+/// Fenêtre de fraîcheur (±5 min) d'une preuve de contrôle de `from_address`.
+const BRIDGE_PROOF_FRESHNESS_MS: i64 = 300_000;
+
+/// Message canonique signé par le PROPRIÉTAIRE de `from_address` pour prouver le
+/// contrôle des fonds lors d'un transfert bridge non-admin. Lie réseau + les deux
+/// ledgers + from/to + montant + asset + ts — une signature ne peut ni être
+/// détournée vers d'autres champs ni rejouée sur un autre réseau. SHA-256
+/// domain-separated, rendu en hex (comme les autres messages signés du projet).
+pub fn bridge_transfer_signing_message(
+    network_id: &str,
+    from_ledger: &str,
+    to_ledger: &str,
+    from_address: &str,
+    to_address: &str,
+    amount: &str,
+    asset_id: Option<&str>,
+    ts_ms: i64,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"PMS_BRIDGE_TRANSFER_v1|");
+    for field in [
+        network_id,
+        from_ledger,
+        to_ledger,
+        from_address,
+        to_address,
+        amount,
+        asset_id.unwrap_or(""),
+    ] {
+        h.update(field.as_bytes());
+        h.update(b"|");
+    }
+    h.update(ts_ms.to_le_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Vérifie qu'un appelant NON-admin prouve le **contrôle de `req.from_address`**
+/// avant qu'`execute_transfer` ne détruise ses UTXOs : `from_pubkey_hex` doit (a)
+/// dériver vers `from_address` (bon propriétaire), (b) avoir signé le message
+/// canonique du transfert, (c) dans la fenêtre de fraîcheur. Une future route
+/// bridge non-custodiale passe le résultat comme `authorized` à `execute_transfer`.
+/// Diff i128 pour qu'un `ts_ms` malicieux ne fasse pas déborder.
+pub fn from_address_control_proven(
+    network_id: &str,
+    req: &BridgeTransferRequest,
+    from_pubkey_hex: &str,
+    signature_b64: &str,
+    ts_ms: i64,
+) -> bool {
+    let now = pms_utils::ts_ms() as i128;
+    if (now - ts_ms as i128).abs() > BRIDGE_PROOF_FRESHNESS_MS as i128 {
+        return false;
+    }
+    // La clé doit dériver vers from_address (preuve que c'est bien le propriétaire).
+    if !pms_core::validations::ownership::unlock_matches_address(from_pubkey_hex, &req.from_address) {
+        return false;
+    }
+    let msg = bridge_transfer_signing_message(
+        network_id,
+        &req.from_ledger,
+        &req.to_ledger,
+        &req.from_address,
+        &req.to_address,
+        &req.amount,
+        req.asset_id.as_deref(),
+        ts_ms,
+    );
+    pms_core::validations::signature::verify_detached_signature(
+        msg.as_bytes(),
+        from_pubkey_hex,
+        signature_b64,
+    )
+    .is_ok()
+}
+
 /// Validates a raw `cross_ledger_fee_multiplier` config value and converts
 /// it to a `Decimal` suitable for fee arithmetic.
 ///
@@ -157,7 +233,10 @@ pub async fn admin_bridge_transfer(
         }
     }
 
-    match engine.execute_transfer(&req).await {
+    // `authorized = true`: the admin token was verified above. This is the
+    // operator (seize-like) path. A future non-admin bridge route must instead
+    // pass `from_address_control_proven(...)` (proof-of-possession signature).
+    match engine.execute_transfer(&req, true).await {
         Ok(resp) => {
             // Charge cross-ledger fee (base_fee * cross_ledger_multiplier).
             // Any pathological multiplier (NaN, ±Inf, negative, non-representable
@@ -275,7 +354,7 @@ pub async fn bridge_status(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_cross_ledger_multiplier;
+    use super::*;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
@@ -339,5 +418,61 @@ mod tests {
         let r = validate_cross_ledger_multiplier(f64::MAX);
         println!("multiplier=f64::MAX -> {:?}", r);
         assert_eq!(r, Err("value cannot be represented as Decimal"));
+    }
+
+    #[test]
+    fn bridge_from_address_control_proof() {
+        use pms_wallet::{SignerBackend, Wallet};
+        let net = "pms-bridge-test";
+        let owner = Wallet::generate();
+        let from = owner.get_address("8e");
+        let mk = |from: &str| BridgeTransferRequest {
+            from_ledger: "main".into(),
+            to_ledger: "eden".into(),
+            from_address: from.into(),
+            to_address: "8e1destination".into(),
+            amount: "10".into(),
+            asset_id: None,
+        };
+        let req = mk(&from);
+        let ts = pms_utils::ts_ms() as i64;
+        let msg = bridge_transfer_signing_message(
+            net, &req.from_ledger, &req.to_ledger, &req.from_address, &req.to_address, &req.amount, None, ts,
+        );
+        let sig = owner.sign(&msg).unwrap();
+
+        // Valid proof of control → true.
+        assert!(
+            from_address_control_proven(net, &req, &owner.public_key_hex, &sig, ts),
+            "owner's valid signature must prove control of from_address"
+        );
+
+        // A key that does NOT derive to from_address (attacker) → false, even with
+        // a cryptographically valid signature. THIS is the drain vector closed.
+        let attacker = Wallet::generate();
+        let atk_sig = attacker.sign(&msg).unwrap();
+        assert!(
+            !from_address_control_proven(net, &req, &attacker.public_key_hex, &atk_sig, ts),
+            "a non-owner key must NOT prove control of from_address"
+        );
+
+        // Tampered request (amount differs from what was signed) → false.
+        let mut tampered = mk(&from);
+        tampered.amount = "999".into();
+        assert!(
+            !from_address_control_proven(net, &tampered, &owner.public_key_hex, &sig, ts),
+            "the signature must bind the transfer amount"
+        );
+
+        // Stale ts (valid sig over an old ts) → false (freshness window).
+        let stale = ts - 3_600_000;
+        let msg_stale = bridge_transfer_signing_message(
+            net, &req.from_ledger, &req.to_ledger, &req.from_address, &req.to_address, &req.amount, None, stale,
+        );
+        let sig_stale = owner.sign(&msg_stale).unwrap();
+        assert!(
+            !from_address_control_proven(net, &req, &owner.public_key_hex, &sig_stale, stale),
+            "stale timestamp must fail the freshness window"
+        );
     }
 }

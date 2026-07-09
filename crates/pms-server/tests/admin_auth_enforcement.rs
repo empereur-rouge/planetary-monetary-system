@@ -179,3 +179,87 @@ async fn admin_route_rejects_wrong_token() {
         "wrong admin token must be rejected with 401"
     );
 }
+
+/// v0.30.1 security: `/v1/peers/connect` triggers an OUTBOUND connection to a
+/// caller-chosen host (SSRF + P2P-poisoning primitive). It stays operator-only
+/// behind `require_local_or_admin` — a non-loopback request with no token MUST
+/// be rejected. (`/v1/register` + `/v1/heartbeat` moved to a self-authenticating
+/// model — admin OR a node_pk signature — and are covered by the sandbox test
+/// `test_node_register_crypto_auth`.)
+#[tokio::test]
+async fn peers_connect_requires_admin_from_non_loopback() {
+    let app = make_app_with_admin_token()
+        .await
+        .expect("test app builds");
+
+    let req = inject_remote_ip(
+        Request::builder()
+            .method("POST")
+            .uri("/v1/peers/connect")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let status = app.clone().oneshot(req).await.expect("oneshot").status();
+    println!("POST /v1/peers/connect (non-loopback, no token) -> {status}");
+    assert!(
+        matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+        "/v1/peers/connect must reject a non-loopback request without a token, got {status}"
+    );
+}
+
+/// The node-registry READ routes stay anonymous (SDKs use `/v1/nodes` for
+/// client-side node discovery). They must NOT be gated behind admin.
+#[tokio::test]
+async fn node_read_routes_stay_public() {
+    let app = make_app_with_admin_token()
+        .await
+        .expect("test app builds");
+
+    for path in ["/v1/nodes", "/v1/peers"] {
+        let req = inject_remote_ip(
+            Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let status = app.clone().oneshot(req).await.expect("oneshot").status();
+        println!("GET {path} (non-loopback, no token) -> {status}");
+        assert!(
+            !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+            "{path} must stay public (no admin required), got {status}"
+        );
+    }
+}
+
+/// v0.30.1 security: `/internal/*` was removed from the PUBLIC router (it is
+/// served only on the dedicated trusted `internal_api_addr` for the gateway).
+/// On the public router it must 404 — never expose UTXO enumeration
+/// (`/internal/utxos/{addr}`) or config disclosure (`/internal/config`).
+#[tokio::test]
+async fn internal_routes_absent_from_public_router() {
+    let app = make_app_with_admin_token()
+        .await
+        .expect("test app builds");
+
+    for path in [
+        "/internal/config",
+        "/internal/utxos/8e1abc",
+        "/internal/tips",
+    ] {
+        let req = inject_remote_ip(
+            Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let status = app.clone().oneshot(req).await.expect("oneshot").status();
+        println!("GET {path} (public router) -> {status}");
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{path} must be absent from the public router (404), got {status}"
+        );
+    }
+}

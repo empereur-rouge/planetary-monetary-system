@@ -51,6 +51,11 @@ struct MintNftRequest {
     owner_address: String,
     owner_x25519_pubkey: String,
     metadata: NftMetadata,
+    // v0.30.1: the API-key path requires an authorized-issuer signature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    creator_pubkey_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    creator_signature_b64: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -277,11 +282,23 @@ async fn e2e_local_simulation() -> Result<()> {
             extra: Some(serde_json::to_string(&cube_extra)?),
         };
 
+        // v0.30.1: /v1/nft/mint requires an authorized-issuer signature on the
+        // API-key path — sign with the coordinator (an authorized issuer).
+        let nft_msg = pms_server::api_fn::nft::nft_mint_signing_message(
+            "pms-e2e-test",
+            "main",
+            &token_id,
+            &addr_a,
+            &metadata,
+        );
+        let nft_sig = wallet_coordinator.sign(&nft_msg)?;
         let mint_req = MintNftRequest {
             token_id: token_id.clone(),
             owner_address: addr_a.clone(),
             owner_x25519_pubkey: x25519_a.clone(),
             metadata,
+            creator_pubkey_hex: Some(wallet_coordinator.public_key_hex.clone()),
+            creator_signature_b64: Some(nft_sig),
         };
 
         let resp = client

@@ -71,14 +71,17 @@ async fn nft_mint_and_verify_ownership() -> Result<()> {
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(mint_action)));
 
     // 5) Forger le bloc avec le payload NFT
-    let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it
+    // inserts into the RAM DAG, so persist_block would return AlreadyExists
+    // and skip validation + apply. persist_block is the single writer.
+    let block_tips = adapter.top_tips(1).await?;
 
     // 6) Signer et créer le WireBlock
     let wb = forge_signed_wire_block_for_test(
-        block.parents.clone(),
+        block_tips.clone(),
         &meta,
         &wallet,
-        block.nonce,
+        0,
         payload,
     );
 
@@ -148,13 +151,16 @@ async fn nft_transfer_changes_ownership() -> Result<()> {
     };
 
     let payload_mint = Some(PayloadEnvelope::Plain(PlainPayload::Nft(mint_action)));
-    let block_mint = dag.forge_block(payload_mint.clone(), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it
+    // inserts into the RAM DAG, so persist_block would return AlreadyExists
+    // and skip validation + apply. persist_block is the single writer.
+    let block_mint_tips = adapter.top_tips(1).await?;
 
     let wb_mint = forge_signed_wire_block_for_test(
-        block_mint.parents.clone(),
+        block_mint_tips.clone(),
         &meta,
         &wallet_a,
-        block_mint.nonce,
+        0,
         payload_mint,
     );
 
@@ -178,14 +184,17 @@ async fn nft_transfer_changes_ownership() -> Result<()> {
     };
 
     let payload_transfer = Some(PayloadEnvelope::Plain(PlainPayload::Nft(transfer_action)));
-    let block_transfer = dag.forge_block(payload_transfer.clone(), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it
+    // inserts into the RAM DAG, so persist_block would return AlreadyExists
+    // and skip validation + apply. persist_block is the single writer.
+    let block_transfer_tips = adapter.top_tips(1).await?;
 
     // Le transfer doit être signé par le owner actuel (wallet_a)
     let wb_transfer = forge_signed_wire_block_for_test(
-        block_transfer.parents.clone(),
+        block_transfer_tips.clone(),
         &meta,
         &wallet_a, // Signé par le owner actuel
-        block_transfer.nonce,
+        0,
         payload_transfer,
     );
 
@@ -243,12 +252,15 @@ async fn nft_burn_removes_token() -> Result<()> {
         metadata: NftMetadata::default(),
     };
     let payload_mint = Some(PayloadEnvelope::Plain(PlainPayload::Nft(mint)));
-    let block_mint = dag.forge_block(payload_mint.clone(), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it
+    // inserts into the RAM DAG, so persist_block would return AlreadyExists
+    // and skip validation + apply. persist_block is the single writer.
+    let block_mint_tips = adapter.top_tips(1).await?;
     let wb_mint = forge_signed_wire_block_for_test(
-        block_mint.parents.clone(),
+        block_mint_tips.clone(),
         &meta,
         &wallet,
-        block_mint.nonce,
+        0,
         payload_mint,
     );
     adapter.persist_block(&wb_mint).await?;
@@ -262,12 +274,15 @@ async fn nft_burn_removes_token() -> Result<()> {
         burner: owner_pk.clone(),
     };
     let payload_burn = Some(PayloadEnvelope::Plain(PlainPayload::Nft(burn)));
-    let block_burn = dag.forge_block(payload_burn.clone(), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it
+    // inserts into the RAM DAG, so persist_block would return AlreadyExists
+    // and skip validation + apply. persist_block is the single writer.
+    let block_burn_tips = adapter.top_tips(1).await?;
     let wb_burn = forge_signed_wire_block_for_test(
-        block_burn.parents.clone(),
+        block_burn_tips.clone(),
         &meta,
         &wallet,
-        block_burn.nonce,
+        0,
         payload_burn,
     );
     adapter.persist_block(&wb_burn).await?;
@@ -321,12 +336,15 @@ async fn nft_unauthorized_transfer_rejected() -> Result<()> {
         metadata: NftMetadata::default(),
     };
     let payload_mint = Some(PayloadEnvelope::Plain(PlainPayload::Nft(mint)));
-    let block_mint = dag.forge_block(payload_mint.clone(), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it
+    // inserts into the RAM DAG, so persist_block would return AlreadyExists
+    // and skip validation + apply. persist_block is the single writer.
+    let block_mint_tips = adapter.top_tips(1).await?;
     let wb_mint = forge_signed_wire_block_for_test(
-        block_mint.parents.clone(),
+        block_mint_tips.clone(),
         &meta,
         &wallet_owner,
-        block_mint.nonce,
+        0,
         payload_mint,
     );
     adapter.persist_block(&wb_mint).await?;
@@ -340,12 +358,15 @@ async fn nft_unauthorized_transfer_rejected() -> Result<()> {
         encrypted_metadata: None,
     };
     let payload_transfer = Some(PayloadEnvelope::Plain(PlainPayload::Nft(transfer)));
-    let block_transfer = dag.forge_block(payload_transfer.clone(), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it
+    // inserts into the RAM DAG, so persist_block would return AlreadyExists
+    // and skip validation + apply. persist_block is the single writer.
+    let block_transfer_tips = adapter.top_tips(1).await?;
     let wb_transfer = forge_signed_wire_block_for_test(
-        block_transfer.parents.clone(),
+        block_transfer_tips.clone(),
         &meta,
         &wallet_attacker, // Signé par l'attaquant, pas le owner!
-        block_transfer.nonce,
+        0,
         payload_transfer,
     );
 
@@ -410,15 +431,15 @@ async fn nft_get_by_owner_after_mint() -> Result<()> {
             metadata: NftMetadata::default(),
         };
         let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(mint)));
-        let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
-        let wb = forge_signed_wire_block_for_test(
-            block.parents.clone(),
-            &meta,
-            &wallet,
-            block.nonce,
-            payload,
-        );
-        adapter.persist_block(&wb).await?;
+        // Parents from the CURRENT tips (non-mutating). Do NOT use
+        // `dag.forge_block` here: it inserts the block into the RAM DAG, so the
+        // subsequent `persist_block` would return `AlreadyExists` and skip
+        // validation + `apply_mint`. `persist_block` is the single writer that
+        // inserts + validates + applies.
+        let parents = adapter.top_tips(1).await?;
+        let wb = forge_signed_wire_block_for_test(parents, &meta, &wallet, 0, payload);
+        let pr = adapter.persist_block(&wb).await?;
+        println!("persist({token_id}) = {pr:?}");
     }
 
     // Vérifier que get_by_owner retourne les 2 NFTs
@@ -470,12 +491,15 @@ async fn nft_get_by_owner_updates_on_transfer() -> Result<()> {
         metadata: NftMetadata::default(),
     };
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(mint)));
-    let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it
+    // inserts into the RAM DAG, so persist_block would return AlreadyExists
+    // and skip validation + apply. persist_block is the single writer.
+    let block_tips = adapter.top_tips(1).await?;
     let wb = forge_signed_wire_block_for_test(
-        block.parents.clone(),
+        block_tips.clone(),
         &meta,
         &wallet_a,
-        block.nonce,
+        0,
         payload,
     );
     adapter.persist_block(&wb).await?;
@@ -493,12 +517,15 @@ async fn nft_get_by_owner_updates_on_transfer() -> Result<()> {
         encrypted_metadata: None,
     };
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(transfer)));
-    let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it
+    // inserts into the RAM DAG, so persist_block would return AlreadyExists
+    // and skip validation + apply. persist_block is the single writer.
+    let block_tips = adapter.top_tips(1).await?;
     let wb = forge_signed_wire_block_for_test(
-        block.parents.clone(),
+        block_tips.clone(),
         &meta,
         &wallet_a,
-        block.nonce,
+        0,
         payload,
     );
     adapter.persist_block(&wb).await?;
@@ -555,12 +582,15 @@ async fn nft_get_by_owner_clears_on_burn() -> Result<()> {
         metadata: NftMetadata::default(),
     };
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(mint)));
-    let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it
+    // inserts into the RAM DAG, so persist_block would return AlreadyExists
+    // and skip validation + apply. persist_block is the single writer.
+    let block_tips = adapter.top_tips(1).await?;
     let wb = forge_signed_wire_block_for_test(
-        block.parents.clone(),
+        block_tips.clone(),
         &meta,
         &wallet,
-        block.nonce,
+        0,
         payload,
     );
     adapter.persist_block(&wb).await?;
@@ -574,12 +604,15 @@ async fn nft_get_by_owner_clears_on_burn() -> Result<()> {
         burner: owner_pk.clone(),
     };
     let payload = Some(PayloadEnvelope::Plain(PlainPayload::Nft(burn)));
-    let block = dag.forge_block(payload.clone(), 0, compute_block_id)?;
+    // Parents from current tips (non-mutating). NOT dag.forge_block: it
+    // inserts into the RAM DAG, so persist_block would return AlreadyExists
+    // and skip validation + apply. persist_block is the single writer.
+    let block_tips = adapter.top_tips(1).await?;
     let wb = forge_signed_wire_block_for_test(
-        block.parents.clone(),
+        block_tips.clone(),
         &meta,
         &wallet,
-        block.nonce,
+        0,
         payload,
     );
     adapter.persist_block(&wb).await?;

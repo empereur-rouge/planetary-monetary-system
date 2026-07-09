@@ -362,6 +362,21 @@ fn get_workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Upsert a `[fees]` key in a generated TOML config string: strip any existing
+/// line for `key`, then re-insert `key = value_toml` right after the `[fees]`
+/// header. `value_toml` is the already-formatted RHS (e.g. `8` or `"1"`).
+fn upsert_fees_key(config: String, key: &str, value_toml: &str) -> String {
+    let mut out = String::new();
+    for line in config.lines() {
+        if line.trim_start().starts_with(key) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.replace("[fees]", &format!("[fees]\n{key} = {value_toml}"))
+}
+
 // ============================================================================
 // BOOT SANDBOX
 // ============================================================================
@@ -472,27 +487,27 @@ async fn boot_sandbox() -> Result<Sandbox> {
         config_bench.replace("[fees]", "[fees]\ndistribution_interval_sec = 2")
     };
 
-    // Inject coord_shard_count into the bench config when the test
-    // requests it via env var. Lets a single test enable sharding for
-    // the engine it's about to boot, without polluting any of the
-    // other dag_sandbox tests.
+    // Inject `[fees]` tunables that individual tests request via env vars,
+    // without polluting the other sandbox tests. `upsert_fees_key` strips any
+    // existing line for the key and re-inserts it under the `[fees]` header.
+    // - PMS_TEST_COORD_SHARD_COUNT: enables coordinator sub-address sharding.
+    // - PMS_TEST_MINT_FEE_BASE: charges a flat token-mint fee — exercises the
+    //   one live coord-shard consumer (`admin_mint_token` → `fee_recipient_address()`),
+    //   used by `test_coord_shard_routing_distributes_fees`.
     let config_bench = match std::env::var("PMS_TEST_COORD_SHARD_COUNT")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
     {
-        Some(n) if n > 0 => {
-            // Strip any pre-existing line, then re-add with our value.
-            let mut out = String::new();
-            for line in config_bench.lines() {
-                if line.trim_start().starts_with("coord_shard_count") {
-                    continue;
-                }
-                out.push_str(line);
-                out.push('\n');
-            }
-            out.replace("[fees]", &format!("[fees]\ncoord_shard_count = {n}"))
-        }
+        Some(n) if n > 0 => upsert_fees_key(config_bench, "coord_shard_count", &n.to_string()),
         _ => config_bench,
+    };
+    let config_bench = match std::env::var("PMS_TEST_MINT_FEE_BASE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        Some(v) => upsert_fees_key(config_bench, "mint_fee_base", &format!("\"{v}\"")),
+        None => config_bench,
     };
 
     let bench_config_path = root.join("etc/config/config.bench.toml");
@@ -729,14 +744,19 @@ async fn boot_sandbox() -> Result<Sandbox> {
 /// 1. Create eden ledger via API
 /// 2. Deposit gas pool for eden (anti-spam)
 /// 3. Faucet mint PMS on eden for a test user
-/// 4. Test user sends transactions on eden → fees are distributed via
-///    immediate Reward blocks (wallet_send_simple creates them directly)
-/// 5. Assert coordinator wallet received fee UTXOs on eden
+/// 4. Test user sends transactions on eden → the native fee is burned at
+///    source and accumulated in eden's FeePool
+/// 5. The periodic distributor re-mints the fees; assert the coordinator
+///    received its 65% share on eden
 ///
-/// **Fee distribution path**: `wallet_send_simple` creates an immediate Reward
-/// block after each TX (via `create_reward_block`). The fee goes directly to
-/// coordinator/treasury on the SAME ledger. This is different from the FeePool
-/// accumulation path used by P2P-submitted blocks.
+/// **Fee distribution path (v0.30.0)**: `wallet_send_simple` burns the native
+/// fee at source (`in − out = fee`) and calls `accumulate_tx_fee`, pooling it
+/// in the per-ledger FeePool. `spawn_fee_distributor_task` (2s in the sandbox)
+/// then mints one consolidated Reward block: `treasury_fee_percent` (35%) to
+/// the treasury, the remaining 65% to the fee beneficiary. eden has no explicit
+/// owner, so its fees accrue to the coordinator, which receives its share
+/// directly (the coordinator is not a node_registry entry — see the
+/// self-share resolution in `fee_distribution::distribute`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore]
 async fn test_coordinator_receives_eden_fees() -> Result<()> {
@@ -824,16 +844,30 @@ async fn test_coordinator_receives_eden_fees() -> Result<()> {
         tx_count, total_payments, total_fees_paid
     );
 
-    // ── 6. Check results ──────────────────────────────────────────────
-    println!("   [6/6] Checking balances...");
-
-    let coord_eden_after = sandbox
-        .get_balance("eden", &sandbox.admin_addr)
-        .await?;
+    // ── 6. Wait for periodic fee distribution, then check results ─────
+    // FEE MODEL (v0.30.0): the native fee is BURNED at source in each TX
+    // (in − out = fee), then re-minted by `spawn_fee_distributor_task`
+    // (2s interval in the sandbox) — NOT via an immediate per-TX Reward
+    // block. eden has no explicit owner, so its fees accrue to the
+    // coordinator's pk; the coordinator now receives its producer share
+    // directly (it is not a node_registry entry — see the distribute.rs
+    // self-share fix). The treasury takes `treasury_fee_percent` (35%)
+    // first; the coordinator receives the remaining 65%.
+    println!("   [6/6] Waiting for periodic fee distribution (2s interval)...");
+    let mut coord_eden_after = coord_eden_before;
+    let mut coord_gained = Decimal::ZERO;
+    for attempt in 0..20 {
+        sleep(Duration::from_millis(750)).await;
+        coord_eden_after = sandbox.get_balance("eden", &sandbox.admin_addr).await?;
+        coord_gained = coord_eden_after - coord_eden_before;
+        // Distribution has run once the coordinator holds MORE than just
+        // the transfer payments users sent it (fee revenue arrived).
+        if coord_gained > total_payments {
+            println!("      distribution observed after {} poll(s)", attempt + 1);
+            break;
+        }
+    }
     let user_balance_after = sandbox.get_balance("eden", &user_addr).await?;
-
-    // Coordinator gained = payments + fee rewards
-    let coord_gained = coord_eden_after - coord_eden_before;
 
     println!("\n   ╔══════════════════════════════════════════════════════╗");
     println!("   ║  RESULTS                                              ║");
@@ -887,21 +921,36 @@ async fn test_coordinator_receives_eden_fees() -> Result<()> {
         coord_gained
     );
 
-    // 2. Coordinator should have received MORE than just payments (fee revenue)
-    //    Each TX pays ~0.3 PMS fee → coordinator gets this via Reward blocks.
-    //    The fee revenue = coord_gained - total_payments should be > 0.
+    // 2. Coordinator should have received its fee share beyond payments.
+    //    Expected = coordinator_fee_percent (65%) of the total fees paid,
+    //    after the treasury's 35% cut. Golden ratio tied to
+    //    config.local.toml (treasury 35 / coordinator 65); update here if
+    //    that split changes. burn_rate_bps is 0 in the sandbox, so no fee
+    //    is burned before distribution.
     let fee_revenue = coord_gained - total_payments;
+    let expected_fee_revenue =
+        (total_fees_paid * Decimal::from(65) / Decimal::from(100)).round_dp(8);
     println!(
-        "\n   Assertion: coordinator fee revenue = {} PMS (from {} tx)",
-        fee_revenue, tx_count
+        "\n   Assertion: coordinator fee revenue = {} PMS (expected ≈ {} = 65% of {} from {} tx)",
+        fee_revenue, expected_fee_revenue, total_fees_paid, tx_count
     );
     assert!(
         fee_revenue > Decimal::ZERO,
-        "Coordinator should have received fee revenue beyond payments. \
+        "Coordinator must receive fee revenue after distribution. \
          Total gained: {}, payments: {}, fee revenue: {}",
         coord_gained,
         total_payments,
         fee_revenue
+    );
+    let fee_tolerance = Decimal::from_str("0.001").unwrap();
+    assert!(
+        (fee_revenue - expected_fee_revenue).abs() < fee_tolerance,
+        "Coordinator fee revenue {} should be ≈ 65% of fees paid ({}), \
+         within {}. Got diff {}.",
+        fee_revenue,
+        expected_fee_revenue,
+        fee_tolerance,
+        (fee_revenue - expected_fee_revenue).abs()
     );
 
     // 3. At least some transactions should have succeeded
@@ -913,6 +962,631 @@ async fn test_coordinator_receives_eden_fees() -> Result<()> {
 
     println!("\n   TEST PASSED: Coordinator received {} PMS in fee revenue from {} eden transactions!",
         fee_revenue, tx_count);
+    Ok(())
+}
+
+// ============================================================================
+// TEST: Coordinator fee share is NOT hijackable via unauthenticated /v1/register
+// ============================================================================
+
+/// Security regression guard for the v0.30.0 fee-distribution fix.
+///
+/// `perform_fee_distribution` resolves the coordinator's producer share
+/// (65% after the 35% treasury cut) via `node_pk == node_wallet.pk` BEFORE any
+/// `node_registry` lookup. This closes a real hijack vector: `POST /v1/register`
+/// is unauthenticated, so before the fix an attacker could register the
+/// coordinator's pk with an attacker-controlled `wallet_address` and the entire
+/// coordinator share would be routed to them.
+///
+/// This test registers the coordinator's pk → an attacker address, drives
+/// fee-bearing transactions on `main`, distributes, and asserts the coordinator
+/// (not the attacker) receives its 65% share.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_coordinator_fee_share_not_hijackable_via_register() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    let coord_pk = sandbox.admin_wallet.encoded_public_key();
+    let coord_addr = sandbox.admin_addr.clone();
+
+    // Attacker wallet — the address they hope to redirect the coordinator's
+    // fees to. Starts empty and must STAY empty.
+    let attacker = Wallet::generate();
+    let attacker_addr = attacker.get_address("8e");
+
+    // Test user + an unrelated destination, so the coordinator's balance delta
+    // is PURE fee revenue (no payments routed to the coordinator).
+    let user = Wallet::generate();
+    let user_addr = user.get_address("8e");
+    let user_sk = user.private_key_b64.clone();
+    let dest = Wallet::generate().get_address("8e");
+
+    sandbox.faucet_mint(None, &user_addr, "1000").await?;
+    sleep(Duration::from_millis(300)).await;
+
+    let coord_before = sandbox.get_balance("main", &coord_addr).await?;
+    println!("   coordinator before: {}", coord_before);
+
+    // ── Plant a malicious registry entry for the coordinator's pk ──
+    // `/v1/register` is now operator-gated (v0.30.1), so we plant the entry via
+    // the admin token — modelling a compromised/misconfigured operator, or any
+    // future registry-write path. The authoritative resolution must STILL ignore
+    // this entry for the coordinator's own share (defense in depth).
+    let (reg_status, reg_body) = sandbox
+        .admin_post(
+            "/v1/register",
+            json!({
+                "node_pk": coord_pk,
+                "api_url": "http://attacker.example",
+                "wallet_address": attacker_addr,
+            }),
+        )
+        .await;
+    println!("   /v1/register (planted via admin) → {} {:?}", reg_status, reg_body);
+    assert!(
+        reg_status.is_success(),
+        "admin-authorized register should be accepted so we can plant the malicious entry"
+    );
+
+    // ── Drive fee-bearing transactions on main ──
+    let mut total_fees = Decimal::ZERO;
+    for i in 0..10 {
+        let resp = sandbox
+            .send_simple(None, &user_sk, &dest, "10.0")
+            .await?;
+        let fee = Decimal::from_str(resp["fee"].as_str().unwrap_or("0")).unwrap_or_default();
+        total_fees += fee;
+        println!("   tx {i}: fee={fee}");
+    }
+    println!("   total fees paid: {}", total_fees);
+
+    // ── Distribute + poll until the coordinator is credited ──
+    // Trigger an explicit distribution (drains the pool synchronously); the 2s
+    // periodic task is a backstop. Then poll passively for the credited UTXO.
+    let _ = sandbox.distribute_fees().await;
+    let mut coord_gain = Decimal::ZERO;
+    for attempt in 0..20 {
+        sleep(Duration::from_millis(500)).await;
+        coord_gain = sandbox.get_balance("main", &coord_addr).await? - coord_before;
+        if coord_gain > Decimal::ZERO {
+            println!("   coordinator credited after {} poll(s)", attempt + 1);
+            break;
+        }
+    }
+
+    let attacker_after = sandbox.get_balance("main", &attacker_addr).await?;
+    let expected_coord = (total_fees * Decimal::from(65) / Decimal::from(100)).round_dp(8);
+
+    println!("\n   ╔══════════════════════════════════════════════════════╗");
+    println!("   ║  HIJACK GUARD RESULTS                                 ║");
+    println!("   ╠══════════════════════════════════════════════════════╣");
+    println!("   ║  Coordinator gain:            {:>20}    ║", coord_gain);
+    println!("   ║  Expected (65% of fees):      {:>20}    ║", expected_coord);
+    println!("   ║  Attacker balance:            {:>20}    ║", attacker_after);
+    println!("   ╚══════════════════════════════════════════════════════╝");
+
+    // The coordinator earns its 65% producer share...
+    assert!(
+        coord_gain > Decimal::ZERO,
+        "coordinator must receive its fee share (got {coord_gain})"
+    );
+    let tol = Decimal::from_str("0.001").unwrap();
+    assert!(
+        (coord_gain - expected_coord).abs() < tol,
+        "coordinator share {coord_gain} should be ≈ 65% of fees ({expected_coord})"
+    );
+    // ...and the attacker gets NOTHING, despite registering the coordinator's pk.
+    assert_eq!(
+        attacker_after,
+        Decimal::ZERO,
+        "attacker who registered the coordinator's pk must receive ZERO — the \
+         self-share branch ignores the registry. Got {attacker_after}"
+    );
+
+    println!(
+        "\n   TEST PASSED: coordinator kept its {} PMS share; /v1/register hijack blocked (attacker = 0).",
+        coord_gain
+    );
+    Ok(())
+}
+
+// ============================================================================
+// TEST: Custom-ledger OWNER fee share is authoritative (registry-independent)
+// ============================================================================
+
+/// Security regression guard for the v0.30.0 authoritative-payout fix.
+///
+/// A custom ledger's transaction fees accrue to that ledger's OWNER pubkey
+/// (`accumulate_tx_fee`). Before the fix, `perform_fee_distribution` resolved
+/// the owner's payout address via the `node_registry`, which is (a) overwritable
+/// by the unauthenticated `POST /v1/register`, letting an attacker steal the
+/// owner's share, and (b) heartbeat-less with a 24h TTL, so the share would
+/// silently divert to the treasury once the entry ages out. The fix derives the
+/// owner payout address from the durable ledger definition (owner_pubkey +
+/// owner_x25519), ignoring the registry entirely for that identity.
+///
+/// This test creates a ledger owned by a distinct wallet, registers an attacker
+/// against the owner's pk, drives fee-bearing transactions on that ledger, and
+/// asserts the OWNER (not the attacker) receives its 65% share.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_custom_ledger_owner_fee_share_not_hijackable_via_register() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // ── Owner wallet (distinct from the coordinator) ─────────────────
+    let owner = Wallet::generate();
+    let owner_pk = owner.encoded_public_key();
+    let owner_x25519 = owner.x25519_pub_hex().to_string();
+    let owner_addr = owner.get_address("8e"); // == derive_address_from_keys(owner_pk, owner_x25519)
+
+    // ── A half-configured owner (pubkey without x25519) must be REJECTED ──
+    // Otherwise the owner would have no derivable authoritative payout address
+    // and its share would fall back to the hijackable registry.
+    let (bad_st, _bad_body) = sandbox
+        .admin_post(
+            "/admin/ledgers/create",
+            json!({
+                "id": "half-owned",
+                "network_id": "half-net",
+                "prefix": "half",
+                "owner_pubkey": owner_pk,
+                // owner_x25519_pubkey deliberately omitted
+            }),
+        )
+        .await;
+    assert_eq!(
+        bad_st,
+        reqwest::StatusCode::BAD_REQUEST,
+        "create with owner_pubkey but no owner_x25519 must be rejected (400)"
+    );
+
+    // ── Create a custom ledger OWNED by that wallet (both keys) ───────
+    let (st, body) = sandbox
+        .admin_post(
+            "/admin/ledgers/create",
+            json!({
+                "id": "owned",
+                "network_id": "owned-net",
+                "prefix": "owned",
+                "symbol": "OWN",
+                "owner_pubkey": owner_pk,
+                "owner_x25519_pubkey": owner_x25519,
+            }),
+        )
+        .await;
+    assert!(st.is_success(), "create owned ledger failed: {} — {:?}", st, body);
+    sandbox.deposit_gas_pool("owned", "50000").await?;
+
+    // ── Plant a malicious registry entry for the OWNER's pk (via admin) ──
+    // `/v1/register` is operator-gated (v0.30.1); planting via admin models any
+    // registry-write path. The authoritative owner-payout resolution must still
+    // ignore it.
+    let attacker = Wallet::generate();
+    let attacker_addr = attacker.get_address("8e");
+    let (reg_status, _) = sandbox
+        .admin_post(
+            "/v1/register",
+            json!({
+                "node_pk": owner_pk,
+                "api_url": "http://attacker.example",
+                "wallet_address": attacker_addr,
+            }),
+        )
+        .await;
+    assert!(reg_status.is_success(), "admin-authorized register should be accepted (planting the entry)");
+
+    // ── Fund a user with PMS on the owned ledger + drive fees ────────
+    let user = Wallet::generate();
+    let user_addr = user.get_address("8e");
+    let user_sk = user.private_key_b64.clone();
+    let dest = Wallet::generate().get_address("8e");
+    sandbox.faucet_mint(Some("owned"), &user_addr, "1000").await?;
+    sleep(Duration::from_millis(400)).await;
+
+    let owner_before = sandbox.get_balance("owned", &owner_addr).await?;
+    println!("   owner before: {} (addr {})", owner_before, &owner_addr[..16]);
+
+    let mut total_fees = Decimal::ZERO;
+    for i in 0..10 {
+        let resp = sandbox
+            .send_simple(Some("owned"), &user_sk, &dest, "10.0")
+            .await?;
+        let fee = Decimal::from_str(resp["fee"].as_str().unwrap_or("0")).unwrap_or_default();
+        total_fees += fee;
+        println!("   tx {i}: fee={fee}");
+    }
+    println!("   total fees paid: {}", total_fees);
+
+    // ── Wait for the periodic distributor to process the owned ledger ─
+    let mut owner_gain = Decimal::ZERO;
+    for attempt in 0..20 {
+        sleep(Duration::from_millis(750)).await;
+        owner_gain = sandbox.get_balance("owned", &owner_addr).await? - owner_before;
+        if owner_gain > Decimal::ZERO {
+            println!("   owner credited after {} poll(s)", attempt + 1);
+            break;
+        }
+    }
+
+    let attacker_after = sandbox.get_balance("owned", &attacker_addr).await?;
+    let expected_owner = (total_fees * Decimal::from(65) / Decimal::from(100)).round_dp(8);
+
+    println!("\n   ╔══════════════════════════════════════════════════════╗");
+    println!("   ║  OWNER HIJACK GUARD RESULTS                           ║");
+    println!("   ╠══════════════════════════════════════════════════════╣");
+    println!("   ║  Owner gain:                  {:>20}    ║", owner_gain);
+    println!("   ║  Expected (65% of fees):      {:>20}    ║", expected_owner);
+    println!("   ║  Attacker balance:            {:>20}    ║", attacker_after);
+    println!("   ╚══════════════════════════════════════════════════════╝");
+
+    // The ledger owner earns its 65% producer share, resolved authoritatively...
+    assert!(
+        owner_gain > Decimal::ZERO,
+        "ledger owner must receive its fee share (got {owner_gain})"
+    );
+    let tol = Decimal::from_str("0.001").unwrap();
+    assert!(
+        (owner_gain - expected_owner).abs() < tol,
+        "owner share {owner_gain} should be ≈ 65% of fees ({expected_owner})"
+    );
+    // ...and the attacker who registered the owner's pk gets NOTHING.
+    assert_eq!(
+        attacker_after,
+        Decimal::ZERO,
+        "attacker who registered the owner's pk must receive ZERO — the owner \
+         payout is derived from the ledger definition, not the registry. Got {attacker_after}"
+    );
+
+    println!(
+        "\n   TEST PASSED: ledger owner kept its {} PMS share; /v1/register hijack blocked (attacker = 0).",
+        owner_gain
+    );
+    Ok(())
+}
+
+// ============================================================================
+// TEST: NFT mint is create-only + issuer-authorized (anti-hijack / anti-farming)
+// ============================================================================
+
+/// Security regression guard (v0.30.1) for `POST /v1/nft/mint`.
+///
+/// Before the fix, any API-key holder could (a) re-mint an existing NFT's
+/// `token_id` with `owner=self` and STEAL it — the encrypted-payload mint
+/// bypassed the consensus create-only guard and `apply_mint` overwrote the
+/// owner — and (b) mint arbitrary NFTs (e.g. a fake "cube") to farm an ungated
+/// burn-refund contract. This test asserts:
+///   1. admin mint works (baseline, `/admin/nft/mint`);
+///   2. re-mint of an existing token via `/v1/nft/mint` → 409, owner unchanged;
+///   3. API-key mint of a NEW token WITHOUT an issuer signature → 403;
+///   4. API-key mint WITH a valid coordinator (authorized issuer) signature → OK;
+///   5. API-key mint signed by a NON-issuer → 403.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn test_nft_mint_authorization_and_create_only() -> Result<()> {
+    use pms_types_nft::NftMetadata;
+    let sandbox = boot_sandbox().await?;
+    let coord = sandbox.admin_wallet.clone(); // coordinator = authorized issuer
+
+    let user1 = Wallet::generate();
+    let u1 = user1.get_address("8e");
+    let u1x = user1.x25519_pub_hex().to_string();
+    let attacker = Wallet::generate();
+    let atk = attacker.get_address("8e");
+    let atkx = attacker.x25519_pub_hex().to_string();
+
+    let token_a = "a".repeat(64);
+
+    // 1. Baseline mint of token_a to user1 via the API-key path WITH a valid
+    //    coordinator (authorized issuer) signature — proves the positive
+    //    authority path works AND establishes an existing token for step 2.
+    let meta_a = NftMetadata {
+        name: Some("Legit".into()),
+        description: None,
+        uri: None,
+        nft_type: Some("collectible".into()),
+        extra: None,
+    };
+    let msg_a = pms_server::api_fn::nft::nft_mint_signing_message(
+        &sandbox.network_id,
+        "main",
+        &token_a,
+        &u1,
+        &meta_a,
+    );
+    let sig_a = coord.sign(&msg_a).expect("coord sign a");
+    let (st, body) = sandbox
+        .post(
+            None,
+            "/v1/nft/mint",
+            json!({
+                "token_id": token_a,
+                "owner_address": u1,
+                "owner_x25519_pubkey": u1x,
+                "metadata": meta_a,
+                "creator_pubkey_hex": coord.public_key_hex,
+                "creator_signature_b64": sig_a,
+            }),
+        )
+        .await;
+    assert!(
+        st.is_success(),
+        "coordinator-signed nft mint failed: {} — {:?}",
+        st,
+        body
+    );
+    println!("   [1] coordinator-signed mint of token_a to user1: {}", st);
+
+    let (_s, nft) = sandbox.public_get(&format!("/v1/nft/{token_a}")).await;
+    assert_eq!(nft["owner"].as_str(), Some(u1.as_str()), "token_a owner must be user1");
+
+    // 2. CREATE-ONLY: attacker re-mints token_a via /v1/nft/mint → 409.
+    let (st2, b2) = sandbox
+        .post(
+            None,
+            "/v1/nft/mint",
+            json!({
+                "token_id": token_a,
+                "owner_address": atk,
+                "owner_x25519_pubkey": atkx,
+                "metadata": { "name": "Stolen", "nft_type": "collectible" },
+            }),
+        )
+        .await;
+    println!("   [2] attacker re-mint token_a → {} {:?}", st2, b2);
+    assert_eq!(
+        st2,
+        reqwest::StatusCode::CONFLICT,
+        "re-mint of an existing token must be 409 (create-only)"
+    );
+    let (_s, nft2) = sandbox.public_get(&format!("/v1/nft/{token_a}")).await;
+    assert_eq!(
+        nft2["owner"].as_str(),
+        Some(u1.as_str()),
+        "token_a owner must STILL be user1 after the blocked re-mint (theft prevented)"
+    );
+
+    // 3. AUTHORITY: API-key mint of a NEW token WITHOUT a signature → 403.
+    let token_b = "b".repeat(64);
+    let (st3, _b3) = sandbox
+        .post(
+            None,
+            "/v1/nft/mint",
+            json!({
+                "token_id": token_b,
+                "owner_address": atk,
+                "owner_x25519_pubkey": atkx,
+                "metadata": { "name": "Fake cube", "nft_type": "cube" },
+            }),
+        )
+        .await;
+    println!("   [3] API-key mint w/o signature → {}", st3);
+    assert_eq!(
+        st3,
+        reqwest::StatusCode::FORBIDDEN,
+        "API-key mint without an issuer signature must be 403"
+    );
+
+    // 4. AUTHORITY POSITIVE: coordinator (authorized issuer) signs → success.
+    let token_c = "c".repeat(64);
+    let meta_c = NftMetadata {
+        name: Some("Signed".into()),
+        description: None,
+        uri: None,
+        nft_type: Some("collectible".into()),
+        extra: None,
+    };
+    let msg_c = pms_server::api_fn::nft::nft_mint_signing_message(
+        &sandbox.network_id,
+        "main",
+        &token_c,
+        &u1,
+        &meta_c,
+    );
+    let sig_c = coord.sign(&msg_c).expect("coord sign");
+    let (st4, b4) = sandbox
+        .post(
+            None,
+            "/v1/nft/mint",
+            json!({
+                "token_id": token_c,
+                "owner_address": u1,
+                "owner_x25519_pubkey": u1x,
+                "metadata": meta_c,
+                "creator_pubkey_hex": coord.public_key_hex,
+                "creator_signature_b64": sig_c,
+            }),
+        )
+        .await;
+    println!("   [4] API-key mint w/ coordinator signature → {} {:?}", st4, b4);
+    assert!(
+        st4.is_success(),
+        "API-key mint with a valid coordinator signature must succeed: {} — {:?}",
+        st4,
+        b4
+    );
+    let (_s, nftc) = sandbox.public_get(&format!("/v1/nft/{token_c}")).await;
+    assert_eq!(nftc["owner"].as_str(), Some(u1.as_str()), "token_c owner must be user1");
+
+    // 5. NON-AUTHORITY: attacker's own valid signature → still 403.
+    let token_d = "d".repeat(64);
+    let meta_d = NftMetadata {
+        name: Some("Fake".into()),
+        description: None,
+        uri: None,
+        nft_type: Some("cube".into()),
+        extra: None,
+    };
+    let msg_d = pms_server::api_fn::nft::nft_mint_signing_message(
+        &sandbox.network_id,
+        "main",
+        &token_d,
+        &atk,
+        &meta_d,
+    );
+    let sig_d = attacker.sign(&msg_d).expect("attacker sign");
+    let (st5, _b5) = sandbox
+        .post(
+            None,
+            "/v1/nft/mint",
+            json!({
+                "token_id": token_d,
+                "owner_address": atk,
+                "owner_x25519_pubkey": atkx,
+                "metadata": meta_d,
+                "creator_pubkey_hex": attacker.public_key_hex,
+                "creator_signature_b64": sig_d,
+            }),
+        )
+        .await;
+    println!("   [5] API-key mint signed by NON-issuer → {}", st5);
+    assert_eq!(
+        st5,
+        reqwest::StatusCode::FORBIDDEN,
+        "mint signed by a non-authorized issuer must be 403"
+    );
+
+    println!("\n   TEST PASSED: NFT mint is create-only + issuer-authorized (theft + farming blocked).");
+    Ok(())
+}
+
+// ============================================================================
+// TEST: /v1/register crypto-auth (peer self-registration, multi-node)
+// ============================================================================
+
+/// Validates the v0.30.1 node-registry proof-of-possession auth: a peer node can
+/// self-register by SIGNING with the private key of its `node_pk` (no admin
+/// token), while forgeries / replays / stale timestamps are rejected. Also
+/// confirms the operator (admin) path still works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn test_node_register_crypto_auth() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+    let net = sandbox.network_id.clone();
+
+    let peer = Wallet::generate();
+    let node_pk = peer.public_key_hex.clone();
+    let api_url = "https://peer.example:8443".to_string();
+    let wallet_addr = peer.get_address("8e");
+
+    let now = pms_utils::ts_ms() as i64;
+    let msg = pms_server::api_fn::nodes::node_register_signing_message(
+        &net,
+        &node_pk,
+        &api_url,
+        Some(&wallet_addr),
+        now,
+    );
+    let sig = peer.sign(&msg).expect("peer sign");
+
+    // 1) Valid self-signed registration (NO admin token) → 200.
+    let (st1, b1) = sandbox
+        .post(
+            None,
+            "/v1/register",
+            json!({
+                "node_pk": node_pk, "api_url": api_url, "wallet_address": wallet_addr,
+                "ts_ms": now, "signature_b64": sig,
+            }),
+        )
+        .await;
+    println!("   [1] self-signed register → {} {:?}", st1, b1);
+    assert!(st1.is_success(), "valid self-signed register must be 200, got {st1}");
+
+    // Node now appears in the (public) discovery list.
+    let (_s, nodes) = sandbox.public_get("/v1/nodes").await;
+    let found = nodes["nodes"]
+        .as_array()
+        .map(|a| a.iter().any(|n| n["node_pk"] == node_pk))
+        .unwrap_or(false);
+    assert!(found, "registered peer must appear in /v1/nodes: {nodes}");
+
+    // 2) Anonymous (no admin, no signature) → 401.
+    let (st2, _) = sandbox
+        .post(
+            None,
+            "/v1/register",
+            json!({ "node_pk": node_pk, "api_url": api_url }),
+        )
+        .await;
+    println!("   [2] no admin, no signature → {}", st2);
+    assert_eq!(st2, reqwest::StatusCode::UNAUTHORIZED, "unauthenticated register must be 401");
+
+    // 3) Bad signature → 401 (an attacker cannot claim node_pk without its key).
+    let (st3, _) = sandbox
+        .post(
+            None,
+            "/v1/register",
+            json!({
+                "node_pk": node_pk, "api_url": "https://evil.example", "wallet_address": wallet_addr,
+                "ts_ms": pms_utils::ts_ms() as i64, "signature_b64": "bm90LWEtc2ln",
+            }),
+        )
+        .await;
+    println!("   [3] bad signature → {}", st3);
+    assert_eq!(st3, reqwest::StatusCode::UNAUTHORIZED, "invalid signature must be 401");
+
+    // 4) Stale timestamp (1h old) → 401 (freshness window).
+    let stale = now - 3_600_000;
+    let msg_stale = pms_server::api_fn::nodes::node_register_signing_message(
+        &net, &node_pk, &api_url, Some(&wallet_addr), stale,
+    );
+    let sig_stale = peer.sign(&msg_stale).expect("peer sign stale");
+    let (st4, _) = sandbox
+        .post(
+            None,
+            "/v1/register",
+            json!({
+                "node_pk": node_pk, "api_url": api_url, "wallet_address": wallet_addr,
+                "ts_ms": stale, "signature_b64": sig_stale,
+            }),
+        )
+        .await;
+    println!("   [4] stale ts → {}", st4);
+    assert_eq!(st4, reqwest::StatusCode::UNAUTHORIZED, "stale timestamp must be 401");
+
+    // 5) REPLAY: re-submit the exact (now, sig) from step 1 → 401 (monotonic:
+    //    ts must be strictly > the last authenticated ts).
+    let (st5, _) = sandbox
+        .post(
+            None,
+            "/v1/register",
+            json!({
+                "node_pk": node_pk, "api_url": api_url, "wallet_address": wallet_addr,
+                "ts_ms": now, "signature_b64": sig,
+            }),
+        )
+        .await;
+    println!("   [5] replay same ts → {}", st5);
+    assert_eq!(st5, reqwest::StatusCode::UNAUTHORIZED, "replay of the same ts must be 401 (monotonic)");
+
+    // 6) Operator (admin token) path still works without any signature.
+    let (st6, _) = sandbox
+        .admin_post(
+            "/v1/register",
+            json!({
+                "node_pk": Wallet::generate().public_key_hex,
+                "api_url": "https://operator.example",
+            }),
+        )
+        .await;
+    println!("   [6] admin register → {}", st6);
+    assert!(st6.is_success(), "admin register must be 200, got {st6}");
+
+    // 7) Malformed api_url (not http/https) → 400 (anti-DoS/pollution field validation).
+    let (st7, _) = sandbox
+        .post(
+            None,
+            "/v1/register",
+            json!({
+                "node_pk": node_pk, "api_url": "ftp://not-http",
+                "ts_ms": now + 1, "signature_b64": "x",
+            }),
+        )
+        .await;
+    println!("   [7] malformed api_url → {}", st7);
+    assert_eq!(st7, reqwest::StatusCode::BAD_REQUEST, "non-http(s) api_url must be 400");
+
+    println!("\n   TEST PASSED: /v1/register accepts a valid node_pk signature; forgeries/replays/stale/malformed rejected; admin path intact.");
     Ok(())
 }
 
@@ -2752,41 +3426,40 @@ async fn test_sustained_tps_stress() -> Result<()> {
 }
 
 // ============================================================================
-// COORD SHARDING (audit follow-up to v0.7.4)
+// COORD SHARDING (audit follow-up to v0.7.4; re-targeted v0.30.0)
 // ============================================================================
 //
-// Boots the sandbox with shard_count=8, sends faucet mints, then
-// asserts:
+// Boots the sandbox with shard_count=8 + a token-mint fee, then asserts:
 //   - GET /v1/coordinator/info exposes 8 distinct shard addresses.
-//   - After enough fee-bearing transactions, the fees actually land
-//     across multiple shards (round-robin worked, not all on one).
-//   - Each shard's balance is reachable via /v1/balance/{addr}, and
-//     summing the shards equals (or approximates) the cumulative
-//     coordinator fees collected.
+//   - After N token mints, the mint fees actually land across the shards
+//     (round-robin worked, not all on one). Token-mint is the ONE live
+//     coord-shard fee consumer since transaction fees moved to
+//     burn-at-source (v0.30.0) — `admin_mint_token` routes its fee to
+//     `AppState::fee_recipient_address()` → `next_coord_shard_address()`.
+//   - Each shard's balance is reachable via /v1/balance/{addr}, and the
+//     shard balances sum to the exact total mint fees collected — with
+//     zero leaking to the legacy master address.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore]
 async fn test_coord_shard_routing_distributes_fees() -> Result<()> {
-    // Activate sharding for THIS test only — boot_sandbox reads the env
-    // var when generating its bench config. Cleared at the end so other
-    // tests in the same process aren't affected.
+    // Activate sharding + a token-mint fee for THIS test only — boot_sandbox
+    // reads these env vars when generating its bench config. Cleared right
+    // after boot so other tests in the same process aren't affected.
     unsafe {
         std::env::set_var("PMS_TEST_COORD_SHARD_COUNT", "8");
+        std::env::set_var("PMS_TEST_MINT_FEE_BASE", "1");
     }
     let sandbox_result = boot_sandbox().await;
     unsafe {
         std::env::remove_var("PMS_TEST_COORD_SHARD_COUNT");
+        std::env::remove_var("PMS_TEST_MINT_FEE_BASE");
     }
     let sandbox = sandbox_result?;
 
     // 1) Hit /v1/coordinator/info → assert we have 8 shards.
-    let info: Value = sandbox
-        .client
-        .get(format!("{}/v1/coordinator/info", sandbox.base_url))
-        .send()
-        .await?
-        .json()
-        .await?;
+    let (info_status, info) = sandbox.public_get("/v1/coordinator/info").await;
+    assert!(info_status.is_success(), "coordinator/info failed: {info_status}");
     println!("coordinator/info:\n{}", serde_json::to_string_pretty(&info)?);
 
     let count = info
@@ -2810,113 +3483,120 @@ async fn test_coord_shard_routing_distributes_fees() -> Result<()> {
     let unique: std::collections::HashSet<&String> = shard_addrs.iter().collect();
     assert_eq!(unique.len(), 8, "shard addresses must be distinct");
 
-    // 2) Send fee-bearing transactions to drive the round-robin.
-    //    `wallet_send_simple` charges a fee that lands on the shard
-    //    chosen by AppState::next_coord_shard_address. Send N >> shard
-    //    count so every shard should see at least one fee.
-    let n_tx = 80usize;
-    let amount = "0.01";
+    // Master (legacy admin) balance BEFORE minting — with sharding on, mint
+    // fees must land on shards, never the master. We assert the delta is 0.
+    let master_before = sandbox.get_balance("main", &sandbox.admin_addr).await?;
 
-    // Mint a fresh worker wallet with enough balance to send N times.
-    let worker = Wallet::generate();
-    let worker_addr = worker.get_address("8e");
-    sandbox.faucet_mint(None, &worker_addr, "10000").await?;
-    sleep(Duration::from_secs(1)).await;
+    // 2) Drive the round-robin via token-MINT fees. Transaction fees are
+    //    burned at source (v0.30.0), so `admin_mint_token` is the one live
+    //    consumer of `AppState::fee_recipient_address()` → it routes each
+    //    mint fee to `next_coord_shard_address()` (round-robin across shards).
+    //    Each mint charges a flat mint_fee_base = 1 PMS (injected via
+    //    PMS_TEST_MINT_FEE_BASE); the fee is MINTED as a direct output in the
+    //    Mint block (no pooling, no distribution wait needed).
+    let n_mints = 80usize;
 
-    let dest = sandbox.admin_addr.clone();
-    for i in 0..n_tx {
-        let body = json!({
-            "private_key_b64": worker.private_key_b64,
-            "to": dest,
-            "amount": amount,
-        });
-        let resp = sandbox
-            .client
-            .post(format!("{}/v1/wallet/send-simple", sandbox.base_url))
-            .json(&body)
-            .send()
-            .await?;
-        assert!(
-            resp.status().is_success(),
-            "tx {} failed: {}",
-            i,
-            resp.status()
+    let (status, body) = sandbox
+        .admin_post(
+            "/admin/tokens/create",
+            json!({
+                "asset_id": "shardtok",
+                "symbol": "SHRD",
+                "name": "Shard Routing Token",
+                "decimals": 0,
+                "max_supply": "1000000"
+            }),
+        )
+        .await;
+    assert!(
+        status.is_success(),
+        "token create failed: {} — {:?}",
+        status,
+        body
+    );
+
+    // The API reports the exact per-mint fee it charged (`mint_fee`). Capture
+    // it from the first mint and require every mint to charge the same amount,
+    // so the golden total below cross-checks routing against the API's own
+    // accounting (no dependence on the fee formula's epsilon).
+    let recipient = Wallet::generate().get_address("8e");
+    let mut per_mint_fee = Decimal::ZERO;
+    for i in 0..n_mints {
+        // Vary the amount per mint so each Mint block has a DISTINCT payload
+        // (identical token+fee outputs on the same tip would hash to the same
+        // block id → 409 "block already exists"). The flat mint_fee_base fee
+        // is independent of the amount, so every mint still charges 1 PMS.
+        let (st, b) = sandbox
+            .admin_post(
+                "/admin/tokens/mint",
+                json!({ "asset_id": "shardtok", "to": recipient, "amount": (i + 1).to_string() }),
+            )
+            .await;
+        assert!(st.is_success(), "mint {} failed: {} — {:?}", i, st, b);
+        let fee = Decimal::from_str(b["mint_fee"].as_str().unwrap_or("0")).unwrap_or_default();
+        if i == 0 {
+            per_mint_fee = fee;
+            println!("   per-mint fee (reported by API) = {} PMS", per_mint_fee);
+        }
+        assert_eq!(
+            fee, per_mint_fee,
+            "mint {i} charged {fee}, expected the same fee as mint 0 ({per_mint_fee})"
         );
     }
-    sleep(Duration::from_secs(2)).await;
+    assert!(
+        per_mint_fee > Decimal::ZERO,
+        "mint fee must be > 0 (PMS_TEST_MINT_FEE_BASE was injected)"
+    );
+    let expected_total_fees = per_mint_fee * Decimal::from(n_mints as i64);
+    // Short settle for UTXO indexing (fees are direct outputs, already persisted).
+    sleep(Duration::from_secs(1)).await;
 
     // 3) Read each shard's balance via /v1/balance/{addr} and check
     //    that the load was actually distributed.
-    let mut per_shard_balance: Vec<(usize, String, rust_decimal::Decimal)> =
-        Vec::with_capacity(8);
+    let mut per_shard_balance: Vec<rust_decimal::Decimal> = Vec::with_capacity(8);
     for (i, addr) in shard_addrs.iter().enumerate() {
-        let bal_resp: Value = sandbox
-            .client
-            .post(format!("{}/v1/balance", sandbox.base_url))
-            .json(&json!({ "address": addr }))
-            .send()
-            .await?
-            .json()
-            .await
-            .unwrap_or(json!({}));
-        let bal_str = bal_resp
-            .get("balance")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0");
-        let bal = rust_decimal::Decimal::from_str(bal_str).unwrap_or_default();
+        let bal = sandbox.get_balance("main", addr).await?;
         println!("   shard[{i:02}] @ {} → balance = {bal}", &addr[..16]);
-        per_shard_balance.push((i, addr.clone(), bal));
+        per_shard_balance.push(bal);
     }
 
-    let total: rust_decimal::Decimal = per_shard_balance.iter().map(|(_, _, b)| *b).sum();
+    let total: rust_decimal::Decimal = per_shard_balance.iter().sum();
     let nonzero = per_shard_balance
         .iter()
-        .filter(|(_, _, b)| *b > rust_decimal::Decimal::ZERO)
+        .filter(|b| **b > rust_decimal::Decimal::ZERO)
         .count();
     println!("\n   total balance across all 8 shards: {total}");
     println!("   shards with non-zero balance: {nonzero} / 8");
 
-    // With round-robin and 80 fee-bearing tx, EVERY shard should have
-    // received at least 80/8 = 10 fees. Allow a small slack in case
-    // some early txes ran before the shard counter started.
+    // With 80 mints round-robined over 8 shards, every shard should have
+    // received exactly 80/8 = 10 fees × 1 PMS = 10 PMS. Assert ≥7/8 got a
+    // non-zero balance (small slack) AND the sum equals the golden total
+    // (every mint fee must land on SOME shard — none leaked to master or
+    // treasury).
     assert!(
         nonzero >= 7,
-        "expected ≥7/8 shards to have received fees (round-robin), got {nonzero}"
+        "expected ≥7/8 shards to have received mint fees (round-robin), got {nonzero}"
     );
-    assert!(
-        total > rust_decimal::Decimal::ZERO,
-        "total fee balance across shards must be positive, got {total}"
-    );
-
-    // 4) Sanity: no fees on the legacy admin master address — when
-    //    sharding is enabled, the master MUST NOT be a destination.
-    //    We use sandbox.admin_addr which is the master in this setup.
-    let master_bal: Value = sandbox
-        .client
-        .post(format!("{}/v1/balance", sandbox.base_url))
-        .json(&json!({ "address": sandbox.admin_addr }))
-        .send()
-        .await?
-        .json()
-        .await
-        .unwrap_or(json!({}));
-    let master_str = master_bal
-        .get("balance")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0");
-    let master_dec = rust_decimal::Decimal::from_str(master_str).unwrap_or_default();
-    println!("   master coord balance: {master_dec} (expected: just the 80 transfer outputs, no fees)");
-    // The master receives the user's transfer (80 × 0.01 = 0.8) but
-    // NOT the fees (fees go to shards). So master >> 0 is expected
-    // but it must equal the transferred amount, not the fees.
-    // We assert master ≥ the transfer total (loose check).
-    let transfer_total = rust_decimal::Decimal::from_str("0.8").unwrap();
-    assert!(
-        master_dec >= transfer_total,
-        "master should hold the transfers ({transfer_total}), got {master_dec}"
+    assert_eq!(
+        total, expected_total_fees,
+        "sum of shard balances must equal total mint fees ({expected_total_fees} PMS), got {total}"
     );
 
-    println!("\n   ✅ coord sharding distributes fees across {nonzero}/8 shards");
+    // 4) Sanity: with sharding enabled the legacy admin MASTER address must
+    //    NOT receive any mint fee — every fee round-robins onto a shard.
+    let master_after = sandbox.get_balance("main", &sandbox.admin_addr).await?;
+    let master_gain = master_after - master_before;
+    println!(
+        "   master coord balance: {} → {} (gain {}, expected 0 — fees go to shards)",
+        master_before, master_after, master_gain
+    );
+    assert_eq!(
+        master_gain,
+        rust_decimal::Decimal::ZERO,
+        "master must NOT receive mint fees when sharding is on; gained {master_gain}"
+    );
+
+    println!("\n   ✅ coord sharding routed {expected_total_fees} PMS of mint fees across {nonzero}/8 shards");
     Ok(())
 }
 
@@ -4177,7 +4857,7 @@ async fn test_sse_activity_stream_real_time() -> Result<()> {
 
 // ----------------------------------------------------------------------------
 // TEST 2: Token full lifecycle (create + mint + transfer + supply)
-//          + OnTokenBurn simulate-endpoint warning regression guard
+//          + OnTokenBurn simulate-endpoint MintNative (voie B) guard
 // ----------------------------------------------------------------------------
 
 /// Validates the full custom-token lifecycle on `main`:
@@ -4186,8 +4866,12 @@ async fn test_sse_activity_stream_real_time() -> Result<()> {
 ///   3. user1 → user2 token transfer (gas in PMS).
 ///   4. Supply, balances, and max-supply enforcement consistent.
 /// Then simulates an `OnTokenBurn` contract via `/admin/contracts/simulate`
-/// and asserts the engine emits the documented "not yet implemented" warning
-/// — preventing accidental shipping of a feature that isn't wired up.
+/// and asserts the engine evaluates the now-implemented voie B conversion:
+/// a `MintNative` action mints native PMS to the burner at rate R = num/den
+/// (100 USDX × 3/2 = 150 PMS). This is the HTTP-level counterpart of the
+/// `test_simulate_token_burn_mint_native` unit test in `pms-contracts`, and
+/// guards the regression where OnTokenBurn used to be flagged "not yet
+/// implemented" (that warning was removed when voie B landed).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn test_token_lifecycle_and_token_burn_warning() -> Result<()> {
@@ -4317,21 +5001,26 @@ async fn test_token_lifecycle_and_token_burn_warning() -> Result<()> {
     assert_eq!(user2_after, Decimal::from(250), "user2 should hold 250 USDX");
     assert_eq!(circ_after, circ_before, "Transfer must NOT change circulating supply");
 
-    // ── 7. OnTokenBurn simulate warning ──────────────────────────────
-    println!("   [7/8] Simulating OnTokenBurn — expecting 'not yet implemented' warning...");
-    let coord = sandbox.admin_addr.clone();
+    // ── 7. OnTokenBurn simulate — voie B (MintNative) ─────────────────
+    // OnTokenBurn is now implemented: a `MintNative` action mints native
+    // PMS to the burner at rate R = num/den. Simulate it through the HTTP
+    // endpoint and assert the minted amount (100 USDX × 3/2 = 150 PMS).
+    // The old behaviour (an "OnTokenBurn ... not yet implemented" warning)
+    // was removed when voie B landed — the pure-function counterpart lives
+    // in `pms-contracts::engine::test_simulate_token_burn_mint_native`.
+    println!("   [7/8] Simulating OnTokenBurn — expecting MintNative (voie B) result...");
     let (sim_status, sim_resp) = sandbox
         .admin_post(
             "/admin/contracts/simulate",
             json!({
                 "contract": {
-                    "name": "usdx-burn-refund",
+                    "name": "usdx-to-pms",
                     "scope": { "Ledger": ["main"] },
                     "trigger": { "OnTokenBurn": { "asset_id": "usdx" } },
                     "actions": [{
-                        "TransferFee": {
-                            "formula": { "PercentageBps": { "rate_bps": 1000 } },
-                            "splits": [{ "address": coord, "share_bps": 10000 }]
+                        "MintNative": {
+                            "rate_numerator": 3,
+                            "rate_denominator": 2
                         }
                     }]
                 },
@@ -4348,21 +5037,51 @@ async fn test_token_lifecycle_and_token_burn_warning() -> Result<()> {
     println!("      Simulate: {} — {}", sim_status, serde_json::to_string_pretty(&sim_resp).unwrap_or_default());
     assert_eq!(sim_status, reqwest::StatusCode::OK);
     assert_eq!(sim_resp["matched"], true, "OnTokenBurn trigger should match TokenBurn event");
+
+    // No "not yet implemented" warning must be emitted anymore (voie B is live).
     let warnings = sim_resp["warnings"]
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let has_warning = warnings.iter().any(|w| {
+    let stale_warning = warnings.iter().any(|w| {
         w.as_str()
             .map(|s| s.contains("OnTokenBurn") && s.contains("not yet implemented"))
             .unwrap_or(false)
     });
     assert!(
-        has_warning,
-        "Expected 'OnTokenBurn ... not yet implemented' warning. Got: {:?}",
+        !stale_warning,
+        "OnTokenBurn is implemented (voie B) — the 'not yet implemented' warning \
+         must NOT be emitted. Got warnings: {:?}",
         warnings
     );
-    println!("      OnTokenBurn 'not yet implemented' warning emitted: OK");
+
+    // MintNative produces exactly one mint instruction: 100 USDX × 3/2 = 150 PMS,
+    // credited in native PMS (asset_id = null).
+    let burn_results = sim_resp["burn_results"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        burn_results.len(),
+        1,
+        "MintNative must produce exactly one mint instruction. Got: {:?}",
+        burn_results
+    );
+    let minted_str = burn_results[0]["refund_amount"].as_str().unwrap_or("0");
+    let minted = Decimal::from_str(minted_str).unwrap_or_default();
+    println!("      OnTokenBurn → MintNative: 100 USDX burned → {} PMS (R=3/2)", minted);
+    assert_eq!(
+        minted,
+        Decimal::from(150),
+        "100 USDX × 3/2 must mint 150 native PMS, got {}",
+        minted
+    );
+    assert!(
+        burn_results[0]["asset_id"].is_null(),
+        "voie B mints native PMS — asset_id must be null, got {:?}",
+        burn_results[0]["asset_id"]
+    );
+    println!("      OnTokenBurn MintNative (voie B) evaluated: OK");
 
     // ── 8. Verify no contract was persisted ─────────────────────────
     println!("   [8/8] Verifying simulate did not persist a contract...");

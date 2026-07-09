@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-01-10
-updated: 2026-03-21
-version: v0.6.0
+updated: 2026-07-09
+version: v0.30.0
 ---
 
 # Fee Distribution (Distribution Automatique des Frais)
@@ -40,6 +40,7 @@ En plus des frais de gas PMS et des burn refunds, le système supporte désormai
 | 2026-03-18 | v0.5.15 | Fix: Supply double-counting — removed redundant `add_utxo` calls after `persist_block` for Mint and Reward blocks. `persist_block` already handles UtxoDelta → `apply_diff()` for plain payloads. |
 | 2026-03-19 | v0.5.16 | Test: DAG Sandbox (`dag_sandbox.rs`) — integration test verifying coordinator receives fees from eden transactions via immediate Reward blocks. |
 | 2026-03-19 | v0.5.18 | Fix: Supply endpoint wallet balances (`admin_balance`, `node_balance`, `treasury_balance`) now use `balance_by_address_and_asset()` — correctly displays EDN (or other custom token) balances instead of always PMS native. |
+| 2026-07-09 | v0.30.0 | Fix: **résolution autoritaire des adresses de paiement**. `perform_fee_distribution()` résout le Coordinator (`node_pk == node_wallet.pk`) vers son propre wallet ET l'owner d'un ledger custom vers l'adresse dérivée de la def du ledger (`owner_pubkey`+`owner_x25519`), AVANT le lookup `node_registry`. Corrige (a) la part producteur qui retombait sur le fallback treasury (→ 100% treasury sur `main` et ledgers sans owner au lieu du split 35/65), et (b) un vecteur de hijack : `POST /v1/register` (non authentifié) de la clé du Coordinator OU d'un owner ne peut plus rediriger sa part, ni la diverger via l'expiration TTL 24 h. `API_VERSION` 35→36. |
 
 ## Mécanisme
 
@@ -277,7 +278,14 @@ Lorsqu'un contrat smart déclenche un burn refund (ex: `OnNftBurn`), le montant 
 
 ### Avec le Node Registry (rewards multi-nœuds)
 
-Dans `perform_fee_distribution()`, les parts de chaque nœud sont calculées proportionnellement au nombre de blocs qu'ils ont créés. Le `node_registry` est consulté pour résoudre les adresses de wallet des nœuds. Si un nœud n'a pas d'adresse de wallet enregistrée, sa part est redirigée vers le Treasury (fallback de sécurité).
+Dans `perform_fee_distribution()`, les parts de chaque nœud sont calculées proportionnellement au nombre de blocs qu'ils ont créés. **Résolution autoritaire (v0.30.0)** : les identités que le moteur peut dériver lui-même sont résolues **avant** tout lookup dans le `node_registry` (table de peer-discovery non authentifiée, écrasable par `POST /v1/register`, et à TTL 24 h sans heartbeat) :
+
+1. **Coordinator** (`node_pk == node_wallet.pk`) → son propre wallet (`node_wallet.get_address(hrp)`). Le Coordinator produit les blocs de `main` (et des ledgers custom sans owner) mais n'est jamais enregistré dans le `node_registry` (pas de self-heartbeat) ; sans cette branche sa part retombait sur le fallback treasury.
+2. **Owner d'un ledger custom** → adresse **dérivée de la définition durable du ledger** (`def.owner_pubkey` + `def.owner_x25519_pubkey`, via `derive_address_from_keys`), PAS du registry. Les frais d'un ledger custom sont crédités à la clé de l'owner (`accumulate_tx_fee`) ; résoudre son adresse depuis la def empêche (a) le hijack via `POST /v1/register {node_pk: owner_pk, wallet_address: attaquant}` et (b) la diversion silencieuse vers la treasury à l'expiration TTL.
+3. **Nœud pair distant** (`node_pk` inconnu localement) → adresse enregistrée dans le `node_registry` (sémantique TTL/peer-discovery correcte pour de vrais pairs).
+4. **Fallback** : si un pair n'a pas d'adresse enregistrée, sa part est redirigée vers le Treasury (fallback de sécurité).
+
+> **Note sécurité** : `POST /v1/register` reste **non authentifié**. La résolution autoritaire neutralise l'impact financier pour le coordinateur et les owners (les seules identités créditées par les frais tx dans le modèle single-writer actuel). Authentifier `/v1/register` (défense en profondeur, pour un futur modèle multi-nœuds où des pairs distants toucheraient des parts) reste un durcissement à part entière non couvert ici.
 
 ## Tests
 
@@ -288,6 +296,7 @@ Dans `perform_fee_distribution()`, les parts de chaque nœud sont calculées pro
 | `crates/pms-server/tests/fee_consistency_test.rs` | Test de cohérence des fees (somme des outputs = total pool) |
 | `crates/pms-server/tests/fee_treasury_test.rs` | Test du split coordinator/treasury et edge cases |
 | `crates/pms-server/tests/fee_helpers_test.rs` | Tests des fonctions helper (load_*, resolve_effective_fees, etc.) |
+| `crates/pms-server/tests/dag_sandbox.rs` (`#[ignore]`) | Sandbox production-like : `test_coordinator_receives_eden_fees` (le Coordinator reçoit ses 65% sur eden via distribution périodique), `test_coordinator_fee_share_not_hijackable_via_register` + `test_custom_ledger_owner_fee_share_not_hijackable_via_register` (gardes de régression sécurité : un `/v1/register` de la clé Coordinator ou owner ne détourne pas la part), `test_coord_shard_routing_distributes_fees` (round-robin des shards sur la fee de mint) |
 | `crates/pms-server/src/fee_distribution/` (mod tests) | Tests unitaires : validation config, N-way split, block reward outputs |
 | `crates/pms-server/src/fee_pool.rs` (mod tests) | Tests unitaires : shares proportionnelles, précision décimale |
 
@@ -306,5 +315,6 @@ Dans `perform_fee_distribution()`, les parts de chaque nœud sont calculées pro
 - **Validation bps** : La somme des basis points doit être exactement 10000 (100%). Tout écart est rejeté.
 - **Treasury wallets signés** : La liste des wallets treasury est signée par le Coordinator (ECDSA secp256k1) et vérifiée au démarrage.
 - **Précision Decimal** : Tous les calculs financiers utilisent `rust_decimal::Decimal` avec arrondi à 8 décimales.
-- **Fallback de sécurité** : Si un nœud n'a pas de wallet, sa part va au Treasury. Si aucun Treasury n'est configuré, les fonds restent dans le pool de nœuds.
+- **Parts non détournables (v0.30.0)** : les parts du Coordinator et de l'owner d'un ledger custom sont résolues depuis des données que le moteur contrôle (sa propre clé / la def durable du ledger), **sans consulter le `node_registry`**. Comme `POST /v1/register` est non authentifié, cela empêche un attaquant d'enregistrer la clé du Coordinator OU d'un owner avec une adresse tierce pour capter sa part de frais (et évite la diversion vers la treasury à l'expiration TTL 24 h).
+- **Fallback de sécurité** : Si un nœud **pair distant** n'a pas de wallet enregistré, sa part va au Treasury. Si aucun Treasury n'est configuré, les fonds restent dans le pool de nœuds.
 - **Protection anti-tipless** : Le système refuse de distribuer si `top_tips()` retourne vide, évitant la création de blocs orphelins.

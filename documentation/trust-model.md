@@ -1,8 +1,8 @@
 ---
 tags: [security, governance, trust-model]
 created: 2026-04-25
-updated: 2026-04-25
-version: v0.7.4
+updated: 2026-07-09
+version: v0.30.1
 ---
 
 # Trust Model — PMS Engine
@@ -334,6 +334,51 @@ mais demandent un travail manuel : (a) garder une copie de l'ancien
 (c) signer manuellement les unlocks des anciens shards UTXOs vers le
 nouveau master, (d) soumettre ces blocs au DAG. Pas trivial — d'où la
 recommandation de consolider d'abord.
+
+---
+
+## Périmètre d'authentification de l'API (durcissement v0.30.1)
+
+Audit de la surface HTTP suivant la classe du hijack `/v1/register` : *un endpoint
+qui touche l'état ou les fonds mais dont le groupe de routes est mergé sans layer
+d'authentification*. Corrections :
+
+| Surface | Avant | Après (v0.30.1) |
+|---|---|---|
+| `POST /v1/nft/mint` (API-key) | create-or-overwrite ; n'importe quelle clé API | **create-only** (409 si le token existe) + **signature d'un émetteur autorisé** (coordinateur / admin-signer / owner du ledger). Chemin admin `/admin/nft/mint` de confiance. |
+| `POST /v1/register`, `/v1/heartbeat` | anonymes | **auth crypto** dans le handler : token admin OU signature de `node_pk` (preuve de possession) + anti-rejeu (fraîcheur ±5 min + monotonie `ts_ms`) + cap anti-DoS. Un pair s'auto-inscrit sans le token opérateur. |
+| `POST /v1/peers/connect` | anonyme | `require_local_or_admin` — opérateur-only (primitive SSRF, pas de self-service). Les READ `/v1/nodes`,`/v1/peers` restent publics. |
+| `/internal/*` | mergé dans le routeur **public** | servi **uniquement** sur le port dédié `internal_api_addr` (gateway) |
+| `require_api_key` avec store vide | fail-**open** partout | fail-**closed** en `Mainnet` (permissif Dev/Testnet) |
+
+**Invariant de dérivation autoritaire (fee distribution)** : la part producteur
+du coordinateur et de l'owner d'un ledger custom est résolue depuis des données
+que le moteur contrôle (sa propre clé / la def durable du ledger), **jamais**
+depuis le `node_registry` (table non authentifiée, TTL 24 h) — cf. [[fee-distribution]].
+
+**Note loopback** : `require_local_or_admin` autorise une connexion **loopback**
+sans token (convenance dev). L'engine NE DOIT PAS être bindé en clair sur une
+interface publique ; il siège derrière un proxy de confiance (Caddy/gateway) qui
+le joint via le réseau Docker (IP non-loopback → token requis). Invariant de
+déploiement à préserver.
+
+**Surfaces vérifiées saines** (audit v0.30.1) : custody (chaque dépense est
+signature-bound à l'owner de l'UTXO), bridge (anti-replay durable +
+réconciliation cross-ledger), compliance (admin + coordinateur), royalty
+(signature du bénéficiaire courant + version monotone anti-replay), market
+settle (égalités de comptes exactes), token/SFT mint authority
+(`signer == mint_authority` au consensus), ingestion P2P (même chokepoint
+`validate_payload_authority` que le HTTP — aucun bypass).
+
+**Bridge — durcissement pré-exposition hors-admin (v0.30.1)** : un `BridgeLock`
+détruit les UTXOs de `from_address` sans `unlocks`, donc l'engine ne peut pas
+vérifier la propriété des fonds. `BridgeEngine::execute_transfer` prend désormais
+un paramètre `authorized` **obligatoire** (fail-closed sinon) ; `BridgeAuth::
+can_transfer` est neutralisé (admin-only — la propriété du ledger n'autorise PAS
+à déplacer les fonds d'un `from_address` arbitraire) ; et une future route
+non-custodiale doit prouver le contrôle de `from_address` via
+`from_address_control_proven` (la clé dérive vers `from_address` + signature du
+message canonique + fraîcheur). Le bridge reste **admin-only** aujourd'hui.
 
 ---
 

@@ -7,12 +7,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.30.0] - Unreleased — Démo transfert distant single-writer (fix forge 1-parent)
+## [0.30.1] - Unreleased — Durcissement sécurité API (audit « autres hijacks »)
 
-> Bump `Cargo.toml` (workspace) à faire au merge sur `main` (0.29.0 → 0.30.0).
-> `DAG_VERSION`/`API_VERSION` inchangés : ni le format des blocs ni les endpoints
-> ne changent (le fix touche la sélection de parents du forge CLI, pas le
-> consensus de production).
+> `Cargo.toml` bumpé `0.30.0 → 0.30.1`. `API_VERSION` **36 → 37** (nouveaux
+> comportements d'endpoint). `DAG_VERSION` inchangé (format des blocs stable).
+> Audit multi-agent de la surface API, en suivant la classe du hijack
+> `/v1/register` (endpoint touchant l'état/les fonds, sous-authentifié). Chaque
+> finding réel a été vérifié en lecture de code puis corrigé + testé.
+
+### Fixed / Security
+- **sec(nft) — CRITIQUE : vol de NFT par re-mint + farming de burn-refund.**
+  `POST /v1/nft/mint` (API-key) permettait à n'importe quel détenteur de clé de
+  (a) **re-minter le `token_id` d'un tiers** avec `owner=lui` et **voler le
+  NFT** — le payload chiffré contournait le garde create-only du consensus
+  (`validate_nft_action` ne tourne que pour les payloads `Plain(Nft)`) et
+  `apply_mint`/`set_owner` écrasait l'owner ; et (b) minter de faux NFT (ex.
+  « cube » aux attributs choisis) pour **farmer un contrat `AccumulateRefund`
+  non gaté**. Corrigé :
+  - **create-only** dual-layer : `mint_nft` rejette (409) si le token existe
+    déjà (pré-check avant persist), et `NftStorage::apply_mint` refuse d'écraser
+    un token existant (garde stockage).
+  - **autorité d'émission** : sur le chemin API-key, le mint exige une signature
+    (`creator_pubkey_hex` + `creator_signature_b64` sur `nft_mint_signing_message`)
+    d'un **émetteur autorisé** (coordinateur, admin-signer, ou owner du ledger
+    courant). Le chemin admin (`/admin/nft/mint`) reste de confiance. `nft.rs`,
+    `pms-storage/nft_store.rs`, `pms-core/validations/signature.rs` (réutilisé).
+- **sec(node-routes) — SSRF + empoisonnement du mesh.** `/v1/register`,
+  `/v1/heartbeat`, `/v1/peers/connect` étaient **anonymes** (mêmes que
+  `/v1/register` : groupe de routes mergé sans `route_layer`). `peers/connect`
+  laissait un attaquant forcer une connexion sortante vers un `host:port`
+  arbitraire (SSRF), et `register`/`heartbeat` d'empoisonner l'`api_url` annoncé
+  par `/v1/nodes`. Passés derrière `require_local_or_admin` (les READ
+  `/v1/nodes`,`/v1/peers` restent publics). Le coordinateur s'auto-enregistre
+  in-process, donc inchangé. `routes.rs`.
+- **sec(internal) — divulgation UTXO/config.** `/internal/*` était mergé dans le
+  routeur **public** sans auth (énumération UTXO de n'importe quelle adresse via
+  `/internal/utxos/{addr}`, fuite de config via `/internal/config`). Retiré du
+  routeur public ; toujours servi sur le port dédié `internal_api_addr` (gateway).
+  `routes.rs`.
+- **sec(api-key) — fail-closed en prod.** `require_api_key` laissait tout passer
+  quand le store de clés est vide (footgun : un mainnet sans `api_keys.json`
+  ouvrait toutes les routes API-key). Désormais fail-**closed** en `Mainnet`
+  (permissif en Dev/Testnet). `middleware.rs`.
+- **feat(node-registry) — auth crypto de `/v1/register` + `/v1/heartbeat`
+  (multi-nœuds).** Ces endpoints authentifient désormais DANS le handler : SOIT
+  le token admin (opérateur), SOIT une **preuve de possession de `node_pk`** — une
+  signature détachée de `node_pk` sur `node_register_signing_message(network_id,
+  node_pk, api_url, wallet_address, ts_ms)`. Un vrai pair peut donc s'auto-inscrire
+  **sans** le token opérateur, tout en empêchant un tiers de réécrire l'entrée
+  d'un autre nœud (il faudrait sa clé privée). Anti-rejeu : fenêtre de **fraîcheur
+  ±5 min** + **monotonie** (`ts_ms` strictement croissant, `last_auth_ts` stocké
+  par nœud) — une signature capturée n'est ni rejouable à l'identique ni
+  utilisable pour un rollback. Anti-DoS : cap `MAX_REGISTERED_NODES = 10 000` sur
+  les nouvelles clés (mises à jour d'un nœud existant toujours permises) + bornes
+  de taille (`node_pk ≤ 200`, `api_url ≤ 512` et http(s), `wallet_address ≤ 128`)
+  pour que la RAM du registre reste ~10 Mo (sans ça, un body ~1 Mio × 10 000
+  entrées ≈ plusieurs Go — revue sécurité). `peers/connect` reste
+  **opérateur-only** (primitive SSRF). `api_fn/nodes.rs`, `node_registry.rs`,
+  `routes.rs`. `API_VERSION` 37 → 38.
+  - **Résiduel documenté (avant d'activer le routage client distribué)** : la
+    liste publique `/v1/nodes` (discovery) peut être « polluée » par des
+    `api_url` d'attaquant auto-signés (jusqu'au cap). Sans impact de fonds
+    (signatures coordinateur infalsifiables), latent en mono-coordinateur (les
+    clients passent par la gateway). Durcissement recommandé au moment du
+    multi-nœuds : n'inclure un nœud dans la discovery qu'après une **vraie
+    session P2P** établie avec lui.
+- **sec(bridge) — preuve de contrôle de `from_address` (durcissement pré-exposition
+  hors-admin).** Un `BridgeLock` DÉTRUIT les UTXOs de `from_address` **sans
+  `unlocks`** (le bloc n'est signé que par le coordinateur), donc l'engine ne peut
+  pas vérifier lui-même la propriété des fonds. Risque LATENT (bridge admin-only
+  aujourd'hui) : `BridgeAuth::can_transfer` autorisait un **owner de ledger** à
+  transférer depuis un `from_address` **arbitraire** → un owner aurait pu **drainer
+  n'importe quel utilisateur de son ledger** si la fonction était câblée à une
+  route. Corrections :
+  - `BridgeEngine::execute_transfer(req, authorized)` : nouveau paramètre
+    **obligatoire** ; l'engine **fail-closed** (`bail!`) si `authorized == false` —
+    il ne verrouille JAMAIS les fonds de `from_address` sans autorisation explicite
+    de l'appelant. Le handler admin passe `true` (token admin déjà vérifié).
+  - `BridgeAuth::can_transfer` **neutralisé** : n'autorise plus QUE l'admin (la
+    propriété du ledger n'est PAS une preuve de contrôle des fonds).
+  - **Mécanisme de preuve prêt** pour une future route bridge non-custodiale :
+    `bridge_transfer_signing_message` + `from_address_control_proven` (la clé doit
+    dériver vers `from_address` ET signer le message canonique liant
+    réseau/ledgers/from/to/montant/asset/ts + fraîcheur ±5 min). `pms-bridge`
+    (`engine.rs`, `auth.rs`), `pms-server` (`api_fn/bridge.rs`). API inchangée
+    (`admin/bridge/transfer` toujours admin-only) → `API_VERSION` inchangé (38).
+
+### Added (tests sécurité)
+- `dag_sandbox::test_nft_mint_authorization_and_create_only` : re-mint → 409,
+  owner inchangé ; mint API-key sans signature → 403 ; signature coordinateur →
+  OK ; signature non-autorité → 403.
+- `admin_auth_enforcement::{peers_connect_requires_admin_from_non_loopback,
+  node_read_routes_stay_public, internal_routes_absent_from_public_router}`
+  (via `ConnectInfo` non-loopback synthétique).
+- `middleware::tests::empty_api_key_store_fails_closed_only_in_prod`.
+- `dag_sandbox::test_node_register_crypto_auth` : signature valide → 200 ;
+  anonyme / mauvaise signature / ts périmé / rejeu → 401 ; chemin admin → 200.
+- `node_registry::tests::{authenticated_register_is_monotonic_anti_replay,
+  authenticated_register_caps_new_nodes_but_allows_updates}`.
+- `api_fn::bridge::tests::bridge_from_address_control_proof` (preuve valide→true ;
+  clé non-propriétaire / montant modifié / ts périmé → false) ;
+  `bridge_e2e_test::execute_transfer_rejects_unauthorized` (engine fail-closed) ;
+  `bridge_test` : `can_transfer` owner→false, admin→true.
+- `version_endpoint` / le pin littéral d'`API_VERSION` alignés sur 38.
+
+### Fixed (tests pré-existants rouges — sans rapport avec la sécurité)
+- **test(nft_e2e, submit_block_auth)** — 8 tests rouges réparés. Cause racine
+  commune : ils appariaient `ConcurrentDag::forge_block` (qui **insère** le bloc
+  dans le DAG RAM) avec `adapter.persist_block` — ce dernier renvoyait alors
+  `AlreadyExists` et **court-circuitait** la validation + l'application du payload
+  (owner NFT jamais posé ; gate d'autorité de mint jamais atteint). Fix : parents
+  pris via `adapter.top_tips(1)` (non-mutant) ; `persist_block` est le seul writer
+  qui insère + valide + applique. `nft_e2e` (7/7), `submit_block_auth::non_authorized_mint` (1).
+- **test(activity_e2e)** — `activity_bridge_mint_appears` réparé : forgeait un
+  `BridgeMint` sans wirer de `BridgeLockResolver` (rejet « no resolver wired »
+  depuis la réconciliation cross-ledger). Ajout d'un resolver de test
+  (`FixedBridgeResolver`) renvoyant un `BridgeLockInfo` matchant les outputs.
+
+### Notes
+- Les gardes `/v1/register` etc. reposent sur `require_local_or_admin`, qui
+  **autorise le loopback sans token** (modèle de confiance : l'engine doit
+  siéger derrière un proxy de confiance, jamais bindé en clair). Voir
+  [[documentation/trust-model]].
+- **Auth crypto `/v1/register`** : le résiduel « non authentifié au sens crypto »
+  noté précédemment est désormais **fermé** (cf. `feat(node-registry)` ci-dessus).
+  Surfaces déjà saines vérifiées par l'audit : custody (signature liée à l'owner
+  d'UTXO), bridge (anti-replay), compliance (admin+coord), royalty (signature
+  bénéficiaire + version), market settle (comptes exacts), token mint authority
+  (`signer == mint_authority`).
+
+---
+
+## [0.30.0] - Unreleased — Démo transfert distant single-writer (fix forge 1-parent) + part producteur coordinateur
+
+> `Cargo.toml` (workspace) bumpé `0.29.0 → 0.30.0`. `DAG_VERSION` inchangé (le
+> format des blocs ne change pas). `API_VERSION` **35 → 36** : le *comportement*
+> de routage des fonds de `POST /admin/distribute_fees` (et de la tâche de
+> distribution périodique) change — le coordinateur encaisse désormais sa part
+> producteur au lieu de la voir retomber sur la treasury. Format requête/réponse
+> inchangé. Le fix forge 1-parent, lui, ne touche que la sélection de parents du
+> forge CLI (pas le consensus de production).
 
 ### Fixed
 - **fix(forge)** — en mode Single-Writer, le nœud rejette tout bloc à ≠1 parent
@@ -25,6 +159,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via le CLI. **Portée** : `ConcurrentDag::forge_block` (tools-cli + tests
   d'intégration) uniquement ; le coordinateur de production forge via
   `forge_and_sign_block`/`forge_persist_plain` (chemin distinct, inchangé).
+- **fix(fees/distribution)** — **résolution autoritaire des adresses de paiement**
+  dans `perform_fee_distribution`. La part nœud était résolue via le `node_registry`
+  (table de peer-discovery **non authentifiée**, écrasable par `POST /v1/register`,
+  et à **TTL 24 h sans heartbeat**). Deux identités que le moteur peut dériver
+  lui-même sont désormais résolues **avant** tout lookup registry :
+  - **Coordinateur** (`node_pk == node_wallet.pk`) → son propre wallet. Il n'est
+    **jamais enregistré** (pas de self-heartbeat), donc sa part retombait sur le
+    fallback treasury → **100 % des frais `main` (et des ledgers custom sans owner)
+    partaient à la treasury** au lieu du split 35/65.
+  - **Owner d'un ledger custom** → adresse **dérivée de la définition durable du
+    ledger** (`owner_pubkey` + `owner_x25519_pubkey`), pas du registry. Sinon un
+    attaquant pouvait `POST /v1/register {node_pk: owner_pk, wallet_address: sien}`
+    et **capter la part de l'owner**, ou celle-ci divergeait vers la treasury à
+    l'expiration TTL (24 h).
+
+  Seules les clés réellement inconnues (futurs nœuds pairs distants) passent encore
+  par le registry. **Effet production** : la treasury passe de 100 % à 35 % des
+  frais tx ; le coordinateur / l'owner encaissent leurs 65 %. `derive_address_from_keys`
+  passe `pub(crate)`. `fee_distribution/distribute.rs`, `api/serve.rs`.
+- **fix(ledgers/validation)** — `POST /admin/ledgers/create` et
+  `.../transfer-ownership` **rejettent** (400) un owner à moitié configuré
+  (`owner_pubkey` sans `owner_x25519_pubkey`, ou l'inverse). Sans les deux clés,
+  l'adresse de paiement autoritaire de l'owner n'est pas dérivable et sa part
+  retomberait sur le registry hijackable — la validation garantit l'invariant
+  « owner configuré ⇒ paiement autoritaire ». `api_fn/ledger.rs`.
+- **fix(test/sandbox)** — réparation des 3 tests sandbox rouges pré-existants
+  (indépendants du travail royalty 0.29.0), réalignés sur le modèle de frais actuel
+  (frais brûlés à la source → pool → distribution périodique) :
+  - `test_coordinator_receives_eden_fees` : attend la distribution périodique (au
+    lieu de l'ancien Reward-block immédiat) et vérifie que le coordinateur reçoit
+    ses **65 %** sur eden (golden `1.95000065` PMS pour `3.0000010` de frais).
+  - `test_coord_shard_routing_distributes_fees` : re-ciblé sur le seul consommateur
+    vivant du sharding coordinateur — la **fee de mint** (`admin_mint_token` route
+    vers `fee_recipient_address()`), les frais tx étant désormais brûlés à la source
+    (v0.24.0). 80 mints × 1 PMS → **exactement 10 PMS sur chacun des 8 shards**, 0
+    sur le master. Nouvel outil : `boot_sandbox` injecte `[fees].mint_fee_base` via
+    `PMS_TEST_MINT_FEE_BASE` (gaté par env, off par défaut).
+  - `test_token_lifecycle_and_token_burn_warning` : `OnTokenBurn` est implémenté
+    (voie B / `MintNative`) et l'ancien warning « not yet implemented » retiré ; le
+    test vérifie désormais le mint natif via `/admin/contracts/simulate` (100 USDX →
+    **150 PMS** à R=3/2), en miroir du unit test `test_simulate_token_burn_mint_native`.
+- **test(sécurité)** — deux nouvelles gardes de régression sur le hijack via
+  `/v1/register` (non authentifié) :
+  - `test_coordinator_fee_share_not_hijackable_via_register` : un attaquant
+    enregistre la clé du coordinateur → le coordinateur garde ses 65 %, attaquant = 0.
+  - `test_custom_ledger_owner_fee_share_not_hijackable_via_register` : idem pour
+    l'owner d'un ledger custom (part résolue depuis la def du ledger) → owner garde
+    ses 65 %, attaquant = 0.
+- **fix(test)** — `version_endpoint.rs` assertait `api_version == 31` (rot silencieux
+  accumulé sur plusieurs bumps 31→…→35) → aligné sur **36**.
 
 ### Added
 - **feat(tools-cli)** — exemple `remote_tx` : transfert wallet-à-wallet

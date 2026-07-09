@@ -23,7 +23,11 @@ use std::sync::{
 
 /// Derives a wallet address from Ed25519 and X25519 public keys.
 /// This mirrors the logic in `pms_wallet::Wallet::get_address()`.
-fn derive_address_from_keys(
+/// Derive a bech32m wallet address from an Ed25519 + X25519 public-key pair
+/// (hex). This is the canonical, registry-independent address derivation used
+/// for **authoritative payout resolution** in fee distribution — it matches
+/// `pms_wallet::Wallet::get_address` exactly (SHA-256(ed25519)[..20] ∥ x25519).
+pub(crate) fn derive_address_from_keys(
     ed25519_hex: &str,
     x25519_hex: &str,
     hrp: &str,

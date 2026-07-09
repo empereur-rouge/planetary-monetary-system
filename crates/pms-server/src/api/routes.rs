@@ -569,13 +569,30 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
             require_local_or_admin,
         ));
 
-    // Node registry endpoints for distributed TX processing (global, not per-ledger)
-    let node_routes = Router::new()
-        .route("/v1/register", post(register_node))
+    // Node registry endpoints for distributed TX processing (global, not per-ledger).
+    // READS stay anonymous (SDKs use `/v1/nodes` for client-side node discovery).
+    let node_read_routes = Router::new()
         .route("/v1/nodes", get(list_nodes))
-        .route("/v1/peers", get(list_peers))
-        .route("/v1/peers/connect", post(connect_peer))
+        .route("/v1/peers", get(list_peers));
+    // SELF-AUTHENTICATING writes: `register`/`heartbeat` authorize INSIDE the
+    // handler — admin token OR a proof-of-possession signature of `node_pk`
+    // (v0.30.1). No route_layer, so a genuine peer node (non-loopback, no admin
+    // token) can self-register by signing, while an anonymous caller with no
+    // signature gets 401. The signature binds api_url + wallet_address + network
+    // + a fresh, monotonic ts (anti-replay), so an attacker cannot overwrite
+    // another node's entry without its key.
+    let node_selfauth_routes = Router::new()
+        .route("/v1/register", post(register_node))
         .route("/v1/heartbeat", post(node_heartbeat));
+    // OPERATOR-ONLY write: `peers/connect` triggers an OUTBOUND connection to a
+    // caller-chosen host (SSRF + P2P-poisoning primitive) — there is no peer
+    // self-service reason to expose it, so it stays behind `require_local_or_admin`.
+    let node_admin_routes = Router::new()
+        .route("/v1/peers/connect", post(connect_peer))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_local_or_admin,
+        ));
 
     // Multi-ledger endpoints (global)
     let ledger_routes = Router::new().route("/v1/ledgers", get(list_ledgers));
@@ -621,8 +638,13 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     let per_ledger_router: Router<AppState> =
         Router::new().route("/l/{ledger_id}/{*rest}", any(dynamic_ledger_handler));
 
-    // Internal API routes (used by gateway)
-    let internal_routes = crate::internal_api::internal_routes();
+    // NOTE: `/internal/*` is intentionally NOT merged here. It is served on a
+    // dedicated, trusted port via `serve_internal_api` (see `bin/src/main.rs`,
+    // `[client].internal_api_addr`) for the gateway only. Merging it onto the
+    // PUBLIC router previously exposed unauthenticated UTXO enumeration
+    // (`/internal/utxos/{addr}`) and config disclosure (`/internal/config`) —
+    // the same "no auth layer on a state/data route" class as the `/v1/register`
+    // hijack. Removed from the public surface (security review, v0.30.1).
 
     // Combine all
     Router::new()
@@ -632,11 +654,12 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .merge(ready)
         .merge(metrics)
         .merge(admin)
-        .merge(internal_routes)
         .merge(public_ledger_routes)
         .merge(auth_ledger_read_routes)
         .merge(auth_ledger_write_routes)
-        .merge(node_routes)
+        .merge(node_read_routes)
+        .merge(node_selfauth_routes)
+        .merge(node_admin_routes)
         .merge(ledger_routes)
         .merge(bridge_routes)
         .merge(gas_pool_routes)
