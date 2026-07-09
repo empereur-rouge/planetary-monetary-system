@@ -15,6 +15,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `/v1/register` (endpoint touchant l'état/les fonds, sous-authentifié). Chaque
 > finding réel a été vérifié en lecture de code puis corrigé + testé.
 
+### Fixed
+- **fix(simulator)**: backoff d'état + throttle global de logs contre le spam
+  de refuel (simulator `0.2.0 → 0.2.1`). Incident testnet 2026-07-09 : wallet
+  coordinator à sec → chaque agent retentait son refuel À CHAQUE tick
+  (~24 000 WARN « Refuel failed » 422/heure), réduisant la fenêtre de rétention
+  des logs Docker à ~4 h et chargeant le gateway pour rien. Application de la
+  règle « state-divergence vs transient » : nouveau module `backoff.rs`
+  (`StateBackoff` : suspension exponentielle 30s → 15min jitter ±20 % par agent,
+  reset sur succès ou solde revenu par canal externe ; `log_throttle` : 1 warn/min
+  max flotte entière par clé, avec compte d'occurrences étouffées),
+  `SimError::is_state_error()` (statut 404 = signal canonique ; code ApiError
+  3xxx si wire format `{"code":NNNN}` présent — forward-compat avec la
+  migration ApiError planifiée ; sinon wording legacy en 4xx : insufficient
+  balance / not found / already spent-burned ; réseau/5xx/429 = transitoire,
+  retry inchangé — consolide aussi le classifieur state-divergence inline du
+  burn handler v0.7.22, une seule source de vérité), intégré au refuel de
+  `RandomAgent` (skip du tick complet pendant le backoff — pas de 422
+  secondaires du send loop) et aux deux warns du `CoordinatorAgent`.
+  Volume de logs : ~24 000/h → ≤60/h ; charge API refuel :
+  1 req/tick → ~4 req/h/agent au cap. Tests : unitaires déterministes (horloge
+  explicite, volume flotte 360k occurrences → 57 lignes) + intégration e2e au
+  boundary HTTP (mock gateway rejouant le 422 de prod verbatim : 20 ticks à sec
+  = 1 requête, récupération après refinancement).
+
 ### Fixed / Security
 - **sec(nft) — CRITIQUE : vol de NFT par re-mint + farming de burn-refund.**
   `POST /v1/nft/mint` (API-key) permettait à n'importe quel détenteur de clé de

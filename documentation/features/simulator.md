@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-15
-updated: 2026-06-11
-version: v0.9.1
+updated: 2026-07-10
+version: v0.30.1
 ---
 
 # Simulator / Game Engine
@@ -247,7 +247,8 @@ Le simulateur est un crate standalone dans `tools/simulator/` (pas un workspace 
 | `pms-simulator` | `tools/simulator/src/client.rs` | Client HTTP typé (`DagClient`) : wallet, send, faucet, balance, tips, supply, ledger/token admin, NFT mint/burn. Retry automatique sur 429 avec backoff exponentiel. |
 | `pms-simulator` | `tools/simulator/src/game.rs` | Game engine Edenite : `GameEngine` struct, `CubeAttributes`, formule de reward, mint/burn de cubes [[nft-system|NFT]], `cube_registry` (HashMap local) |
 | `pms-simulator` | `tools/simulator/src/agent/mod.rs` | Trait `Agent` (name, wallet, tick), `AgentContext` (shared state), `AgentHandle`, `spawn_agent()` avec jitter anti-thundering-herd |
-| `pms-simulator` | `tools/simulator/src/agent/random.rs` | `RandomAgent` : transactions PMS aléatoires + game loop (burn cubes, send EDN, re-mint). Auto-refuel via faucet quand PMS < 10. |
+| `pms-simulator` | `tools/simulator/src/agent/random.rs` | `RandomAgent` : transactions PMS aléatoires + game loop (burn cubes, send EDN, re-mint). Auto-refuel via wallet coordinator quand PMS < 10, avec backoff exponentiel sur coordinator à sec (v0.2.1). |
+| `pms-simulator` | `tools/simulator/src/backoff.rs` | (v0.2.1) `StateBackoff` (backoff exponentiel par agent sur erreurs d'état, 30s → 15min, jitter ±20%) + `log_throttle` (throttle global de logs par clé : volume indépendant du nombre d'agents). |
 | `pms-simulator` | `tools/simulator/src/agent/smart.rs` | `SmartAgent` : piloté par Gemini AI. Construit un contexte (solde, peers, messages, historique) et exécute les directives Gemini (Send, Wait, Observe, Message). Auto-diagnostic sur erreurs. |
 | `pms-simulator` | `tools/simulator/src/agent/observer.rs` | `ObserverAgent` : agent passif. Alterne entre tips, supply, et balances. Alimente le pipeline de métriques sans transacter. |
 | `pms-simulator` | `tools/simulator/src/agent/coordinator.rs` | `CoordinatorAgent` : utilise le wallet du nœud coordinateur. Envoie des PMS aléatoires aux peers. Pas de refuel (financé par les fees réseau), pas de game loop. |
@@ -261,7 +262,7 @@ Le simulateur est un crate standalone dans `tools/simulator/` (pas un workspace 
 | `pms-simulator` | `tools/simulator/src/tui/dashboard.rs` | `render()` : layout ratatui 5 zones (header, sparklines TPS + barres latence, DAG status + table agents, chat P2P, event log). |
 | `pms-simulator` | `tools/simulator/src/web.rs` | Dashboard web Axum : `GET /` (page HTML inline avec CSS dark + JS WebSocket), `GET /ws` (WebSocket fan-out). Affiche les messages agents en temps réel. |
 | `pms-simulator` | `tools/simulator/src/types.rs` | Types de requêtes/réponses pour l'API PMS : `WalletInfo`, `SendSimpleRequest`, `BalanceRequest`, `FaucetRequest`, `CreateLedgerRequest`, `CreateTokenRequest`, `MintTokenRequest`, `MintNftRequest`, `BurnNftSimpleRequest`, `BurnNftBatchSimpleRequest`, `SendResponse` (avec `transfer_fee` v0.5.17), etc. |
-| `pms-simulator` | `tools/simulator/src/error.rs` | `SimError` enum (Http, ServerError, Gemini, InsufficientBalance, Config, Bootstrap, Json, Other). `SimResult<T>` type alias. |
+| `pms-simulator` | `tools/simulator/src/error.rs` | `SimError` enum (Http, ServerError, Gemini, InsufficientBalance, Config, Bootstrap, Json, Other). `SimResult<T>` type alias. `is_state_error()` (v0.2.1) : discrimine erreurs d'état durable vs transitoires. |
 | -- | `tools/simulator/simulator.dev.toml` | Config pour développement local (gateway localhost:8443, TUI active, web 9090) |
 | -- | `tools/simulator/simulator.docker.toml` | Config pour Docker (gateway via DNS interne `pms-gateway:8443`, TUI désactivé) |
 | -- | `tools/simulator/simulator.testnet.toml` | Config pour testnet VPS (secrets via env vars, coordinator activé) |
@@ -358,7 +359,10 @@ Agent qui utilise le wallet du nœud coordinateur (configuré via `[coordinator]
 | `Agent::tick()` | `tools/simulator/src/agent/mod.rs` | Trait method exécutée à chaque interval_ms. Les erreurs sont loguées mais pas fatales. |
 | `RandomAgent::tick()` PMS loop | `tools/simulator/src/agent/random.rs` | Boucle `sends_per_tick` itérations : chaque itération décide d'envoyer (probabilité), choisit un peer aléatoire, et envoie. Les sends sont séquentiels (dépendance UTXO par wallet). Break on error (UTXO exhaustion). v0.5.17 : `sends_per_tick` multiplie le débit PMS sans ajouter d'agents. |
 | `RandomAgent::game_tick()` | `tools/simulator/src/agent/random.rs` | Game loop (lock-free v0.5.17) : Phase 1 (batch burn cubes → EDN, write lock only for registry drain), Phase 2 (send EDN ×`edn_sends_per_tick` à peers, no lock — cached client, v0.5.18), Phase 3 (re-mint cubes, write lock only for registry insert). `burn_cooldown_ticks` pauses reminting after burn to allow fee_distribution to deliver EDN. |
-| `RandomAgent::refuel()` | `tools/simulator/src/agent/random.rs` | Auto-refuel 50 PMS via `POST /admin/faucet` quand solde < 10 PMS |
+| `RandomAgent::refuel()` | `tools/simulator/src/agent/random.rs` | Auto-refuel 50 PMS via `POST /v1/wallet/send-simple` signé par le wallet coordinator, quand solde < 10 PMS. Sous backoff d'état (v0.2.1), la tentative ET le reste du tick sont skippés. |
+| `StateBackoff::should_attempt()` / `on_state_failure()` / `reset()` | `tools/simulator/src/backoff.rs` | (v0.2.1) Backoff exponentiel par agent : 30s → 15min (jitter ±20%) sur erreur d'état, reset au premier succès ou quand le solde revient par un canal externe. Compte les tentatives étouffées. |
+| `log_throttle::allow()` | `tools/simulator/src/backoff.rs` | (v0.2.1) Throttle global par clé statique : au plus 1 log/période pour toute la flotte, retourne le nombre d'occurrences étouffées à inclure dans le message. |
+| `SimError::is_state_error()` | `tools/simulator/src/error.rs` | (v0.2.1) `true` si le serveur affirme un état bloquant durable : statut **404** (signal canonique), code ApiError **3xxx** (wire format `{"code":NNNN}`, forward-compat migration), ou wording legacy en 4xx (insufficient balance, not found, already spent/burned). `false` pour transitoire (réseau, 5xx, 429, 503 read-only) — retry légitime. Remplace aussi le classifieur inline du burn handler (pattern state-divergence v0.7.22) : une seule source de vérité. |
 | `SmartAgent::build_context()` | `tools/simulator/src/agent/smart.rs` | Construit la string de contexte pour Gemini (solde, peers, messages, historique) |
 | `SmartAgent::execute_directive()` | `tools/simulator/src/agent/smart.rs` | Exécute la directive Gemini courante (Send, Wait, Observe, Message) |
 | `SmartAgent::diagnose_error()` | `tools/simulator/src/agent/smart.rs` | Auto-diagnostic en cas d'erreur : construit une explication avec solde, dernière directive, messages en attente |
@@ -455,6 +459,33 @@ Le simulateur a subi un crash OOM sur VPS (commit `41fc717`, 2026-03-10) avec 25
 ### Backpressure strategy
 
 Tous les canaux de communication utilisent `try_send()` au lieu de `.send().await`. Cela signifie que si un consommateur est plus lent que le producteur, les messages sont **silencieusement droppés** plutôt que de bloquer l'émetteur. C'est un choix délibéré : la perte de quelques messages de métriques ou de chat est acceptable, mais bloquer un agent qui transacte ne l'est pas.
+
+## Anti-spam : backoff d'état + throttle de logs (v0.2.1)
+
+### Problématique
+
+Incident testnet du 2026-07-09 : le wallet coordinator à sec (~0.08 PMS) a mis chaque agent en échec de refuel (`422 insufficient balance`) **à chaque tick**, soit ~24 000 WARN/heure. Conséquences : la rotation des logs Docker (3×50 Mo) ne couvrait plus que ~4 h d'historique (impossible de dater le début de l'incident), et le gateway encaissait 24 000 requêtes/h vouées à l'échec. Le warn « Balance < min_amount » du `CoordinatorAgent` spammait de la même façon.
+
+### Mécanisme
+
+Application de la règle globale « state-divergence vs transient errors » (voir `~/.claude/CLAUDE.md` §7) :
+
+| Type d'erreur | Signal | Réaction |
+|---------------|--------|----------|
+| **État durable** | statut 404, code ApiError 3xxx, ou 4xx + `insufficient balance` / `not found` / `already spent` / `already burned` (`SimError::is_state_error()`) | `StateBackoff` : suspension exponentielle 30s → 15min (jitter ±20%), skip du tick complet, warn throttlé |
+| **Transitoire** | réseau, timeout, 5xx, 429, 503 read-only | Comportement historique : warn direct, retry au tick suivant |
+
+Trois couches complémentaires :
+
+1. **`StateBackoff` par agent** ([backoff.rs](../../tools/simulator/src/backoff.rs)) : réduit la charge API de 1 tentative/tick à ~4/heure/agent au cap. Reset au premier refuel réussi **ou** quand le refresh de balance (tous les 5 ticks) voit le solde revenu par un canal externe (funder, faucet manuel).
+2. **`log_throttle` global** : 1 warn/minute maximum pour toute la flotte par clé (`refuel_state_error`, `coordinator_low_balance`, `coordinator_send_state_error`), porteur du compte d'occurrences étouffées. Le volume de logs devient indépendant du nombre d'agents (~60 lignes/h au lieu de 24 000).
+3. **Skip du tick complet** pendant le backoff : préserve le court-circuit historique (pas de game loop ni de sends avec un wallet vide, qui déclencheraient leurs propres 422).
+
+### Vérification
+
+- Tests unitaires déterministes (`backoff::tests`, horloge explicite) : progression 30s→900s, bornes de jitter, comptage des suppressions, fenêtres de throttle, volume flotte (360 000 occurrences/h simulées → 57 lignes émises).
+- Test d'intégration bout-en-bout (`agent::random::tests::test_refuel_backoff_end_to_end`) : mock gateway au boundary HTTP rejouant **verbatim** le 422 de production → 20 ticks à sec = 1 seule requête HTTP (contre 20 avant le fix), puis récupération complète après refinancement.
+- Lancer : `cargo test -- --nocapture backoff error test_refuel` dans `tools/simulator/`.
 
 ## Interactions
 

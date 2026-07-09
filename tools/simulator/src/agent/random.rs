@@ -1,4 +1,5 @@
 use crate::agent::{Agent, AgentContext};
+use crate::backoff::{log_throttle, StateBackoff, WARN_THROTTLE_PERIOD};
 use crate::client::DagClient;
 use crate::comms::types::AgentMessage;
 use crate::config::AgentGameConfig;
@@ -11,6 +12,7 @@ use crate::sim_metrics::{
 };
 use crate::types::{SendSimpleRequest, WalletInfo};
 use rand::Rng;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// Classify a `SimError` into the coarse `reason` bucket exposed in
@@ -40,6 +42,10 @@ fn classify_error(e: &crate::error::SimError) -> &'static str {
 const LOW_BALANCE_THRESHOLD: f64 = 10.0;
 /// Amount the coordinator sends during refuel
 const REFUEL_AMOUNT: &str = "50.00";
+/// Premier backoff après un refuel raté pour cause d'ÉTAT (coordinator à sec)
+const REFUEL_BACKOFF_BASE: Duration = Duration::from_secs(30);
+/// Plafond du backoff refuel (double à chaque échec d'état consécutif)
+const REFUEL_BACKOFF_CAP: Duration = Duration::from_secs(15 * 60);
 /// Minimum EDN balance to attempt a send
 const EDN_SEND_THRESHOLD: f64 = 0.000_000_01;
 
@@ -70,6 +76,9 @@ pub struct RandomAgent {
     burn_cooldown: u32,
     /// Cached game client + edenite_asset_id (cloned once, never changes after setup)
     game_client_cache: Option<(DagClient, String)>,
+    /// Backoff exponentiel sur les refuels ratés pour cause d'ÉTAT
+    /// (coordinator à sec) — évite le hot-loop de retries à chaque tick
+    refuel_backoff: StateBackoff,
 }
 
 impl RandomAgent {
@@ -97,6 +106,7 @@ impl RandomAgent {
             game_config,
             burn_cooldown: 0,
             game_client_cache: None,
+            refuel_backoff: StateBackoff::new(REFUEL_BACKOFF_BASE, REFUEL_BACKOFF_CAP),
         }
     }
 
@@ -179,8 +189,7 @@ impl RandomAgent {
         if !jitter_pct.is_finite() || jitter_pct <= 0.0 {
             return base;
         }
-        let mut rng = rand::rng();
-        let factor: f64 = 1.0 + rng.random_range(-jitter_pct..jitter_pct);
+        let factor = crate::backoff::jitter_factor(jitter_pct);
         let scaled = (base as f64 * factor.max(0.0)).round() as i64;
         scaled.max(1) as u32
     }
@@ -318,10 +327,7 @@ impl RandomAgent {
                     // burned anyway. For genuinely transient errors
                     // (network, 5xx), keep restoring so the agent retries
                     // with the same cubes after the engine recovers.
-                    let is_state_divergence = err_str.contains("404")
-                        || err_str.contains("not found")
-                        || err_str.contains("already burned");
-                    if is_state_divergence {
+                    if e.is_state_error() {
                         tracing::warn!(
                             "[{}] State-divergence detected: dropping {} ghost cube IDs from local state (engine sees them as gone)",
                             self.name, count
@@ -608,10 +614,28 @@ impl Agent for RandomAgent {
                 agent_name: self.name.clone(),
                 balance: bal_str,
             });
+
+            // Récupération par un canal externe (funder, faucet manuel) :
+            // le solde est revenu sans refuel réussi → clore l'épisode.
+            if self.cached_balance >= LOW_BALANCE_THRESHOLD && self.refuel_backoff.is_active() {
+                let skipped = self.refuel_backoff.reset();
+                tracing::info!(
+                    "[{}] Balance rétablie ({:.2} PMS) — backoff refuel levé ({} tentatives étouffées)",
+                    self.name,
+                    self.cached_balance,
+                    skipped
+                );
+            }
         }
 
-        // Auto-refuel PMS quand le solde est trop bas
+        // Auto-refuel PMS quand le solde est trop bas.
+        // En backoff (coordinator à sec) : on skippe la tentative ET le reste
+        // du tick — même court-circuit que le chemin d'échec, sinon le send
+        // loop spammerait des 422 « insufficient balance » à son tour.
         if self.cached_balance < LOW_BALANCE_THRESHOLD {
+            if !self.refuel_backoff.should_attempt(Instant::now()) {
+                return Ok(());
+            }
             tracing::info!(
                 "[{}] Balance {:.2} PMS < {:.2}, refueling...",
                 self.name,
@@ -620,6 +644,14 @@ impl Agent for RandomAgent {
             );
             match self.refuel(ctx).await {
                 Ok(()) => {
+                    let skipped = self.refuel_backoff.reset();
+                    if skipped > 0 {
+                        tracing::info!(
+                            "[{}] Refuel rétabli ({} tentatives étouffées pendant le backoff)",
+                            self.name,
+                            skipped
+                        );
+                    }
                     let bal_str = ctx
                         .client
                         .balance(&self.wallet.address)
@@ -628,7 +660,29 @@ impl Agent for RandomAgent {
                     self.cached_balance = bal_str.parse::<f64>().unwrap_or(0.0);
                 }
                 Err(e) => {
-                    tracing::warn!("[{}] Refuel failed: {:#}", self.name, e);
+                    if e.is_state_error() {
+                        // Erreur d'ÉTAT (coordinator à sec) : backoff
+                        // exponentiel + warn throttlé (1 ligne/min max,
+                        // flotte entière).
+                        let backoff =
+                            self.refuel_backoff.on_state_failure(Instant::now());
+                        if let Some(suppressed) =
+                            log_throttle::allow("refuel_state_error", WARN_THROTTLE_PERIOD)
+                        {
+                            tracing::warn!(
+                                "[{}] Refuel failed (erreur d'état, backoff {:.0?}): {:#} — {} warns similaires étouffés sur {:?}",
+                                self.name,
+                                backoff,
+                                e,
+                                suppressed,
+                                WARN_THROTTLE_PERIOD
+                            );
+                        }
+                    } else {
+                        // Erreur transitoire (réseau, 5xx) : comportement
+                        // historique — warn direct, retry au tick suivant.
+                        tracing::warn!("[{}] Refuel failed: {:#}", self.name, e);
+                    }
                     let _ = ctx.metrics_tx.try_send(MetricEvent::AgentError {
                         agent_name: self.name.clone(),
                         error: format!("refuel failed: {:#}", e),
@@ -719,5 +773,175 @@ impl Agent for RandomAgent {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServerTarget;
+    use crate::types::WalletInfo;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::Router;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    /// Réponse 422 de production, rejouée verbatim (testnet 2026-07-09,
+    /// coordinator à sec — l'incident qui a motivé le backoff).
+    const PROD_422_BODY: &str =
+        r#"{"error":"insufficient balance: available=0.07962557, required=51.5000001"}"#;
+
+    #[derive(Clone)]
+    struct MockGateway {
+        refuel_ok: Arc<AtomicBool>,
+        send_hits: Arc<AtomicU64>,
+    }
+
+    /// Mock gateway au boundary HTTP (axum, comme le vrai dashboard web).
+    /// Tant que `refuel_ok` est false : send-simple → 422 de prod, balance →
+    /// wallet quasi vide. Une fois true : send-simple → 200, balance → 55 PMS.
+    /// Compte les hits send-simple pour prouver la suppression du hot-loop.
+    async fn spawn_mock_gateway(
+        refuel_ok: Arc<AtomicBool>,
+        send_hits: Arc<AtomicU64>,
+    ) -> String {
+        async fn send_simple(State(gw): State<MockGateway>) -> (StatusCode, String) {
+            gw.send_hits.fetch_add(1, Ordering::SeqCst);
+            if gw.refuel_ok.load(Ordering::SeqCst) {
+                (
+                    StatusCode::OK,
+                    r#"{"block_id":"aabbccddeeff00112233","fee":"0.1","error":null}"#.to_string(),
+                )
+            } else {
+                (StatusCode::UNPROCESSABLE_ENTITY, PROD_422_BODY.to_string())
+            }
+        }
+
+        async fn balance(State(gw): State<MockGateway>) -> (StatusCode, String) {
+            let bal = if gw.refuel_ok.load(Ordering::SeqCst) { "55.0" } else { "0.05" };
+            (StatusCode::OK, format!(r#"{{"balance":"{bal}"}}"#))
+        }
+
+        let app = Router::new()
+            .route("/v1/wallet/send-simple", post(send_simple))
+            .route("/v1/balance", post(balance))
+            .with_state(MockGateway {
+                refuel_ok,
+                send_hits,
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        format!("http://{addr}")
+    }
+
+    fn test_wallet(name: &str) -> WalletInfo {
+        WalletInfo {
+            address: format!("pms1{name}"),
+            private_key_b64: "dGVzdC1rZXk=".to_string(),
+            private_key_hex: String::new(),
+            public_key_hex: "00".to_string(),
+            x25519_pub_hex: "00".to_string(),
+            mnemonic_words: None,
+        }
+    }
+
+    /// Construit l'AgentContext de test. Retourne aussi les receivers des
+    /// channels : le test doit les garder vivants pour que les try_send des
+    /// agents ne voient pas un canal fermé.
+    fn test_ctx(
+        base_url: String,
+    ) -> (
+        AgentContext,
+        mpsc::Receiver<AgentMessage>,
+        mpsc::Receiver<MetricEvent>,
+    ) {
+        let (log_tx, log_rx) = mpsc::channel(64);
+        let (metrics_tx, metrics_rx) = mpsc::channel(1024);
+        let ctx = AgentContext {
+            client: DagClient::new(&ServerTarget {
+                url: base_url,
+                admin_token: None,
+                api_key: None,
+                ledger_id: None,
+                accept_invalid_certs: true,
+            }),
+            gemini: None,
+            comms: crate::comms::CommsRouter::new(log_tx),
+            metrics_tx,
+            peer_registry: std::sync::Arc::new(tokio::sync::RwLock::new(vec![])),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            game_engines: vec![],
+            game_engine: None,
+            coordinator_wallet: Some(test_wallet("coordinator")),
+        };
+        (ctx, log_rx, metrics_rx)
+    }
+
+    /// Chemin réel de bout en bout : tick → refuel → HTTP 422 (réponse de
+    /// prod verbatim) → classification erreur d'état → backoff → skip des
+    /// ticks suivants → récupération après refinancement.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_refuel_backoff_end_to_end() {
+        let refuel_ok = Arc::new(AtomicBool::new(false));
+        let send_hits = Arc::new(AtomicU64::new(0));
+        let base_url = spawn_mock_gateway(refuel_ok.clone(), send_hits.clone()).await;
+        println!("mock gateway: {base_url}");
+
+        let (ctx, _log_rx, _metrics_rx) = test_ctx(base_url);
+        let (_inbox_tx, inbox_rx) = mpsc::channel(8);
+        let mut agent = RandomAgent::new(
+            "spammer-test".to_string(),
+            test_wallet("spammer-test"),
+            inbox_rx,
+            0.1,
+            1.0,
+            0.0, // send_probability 0 : pas de sends parasites
+            1,
+            None,
+        );
+        // Backoff court pour le test (la prod utilise 30s → 15min)
+        agent.refuel_backoff =
+            StateBackoff::new(Duration::from_millis(500), Duration::from_secs(1));
+
+        // ── Phase 1 : coordinator à sec — 20 ticks rapprochés ──
+        for _ in 0..20 {
+            agent.tick(&ctx).await.unwrap();
+        }
+        let hits_phase1 = send_hits.load(Ordering::SeqCst);
+        println!(
+            "Phase 1 (coordinator à sec): 20 ticks → {hits_phase1} requête(s) HTTP send-simple (avant fix: 20), backoff actif = {}",
+            agent.refuel_backoff.is_active()
+        );
+        assert_eq!(
+            hits_phase1, 1,
+            "le backoff doit étouffer les retries tick par tick"
+        );
+        assert!(agent.refuel_backoff.is_active());
+
+        // ── Phase 2 : coordinator refinancé, le backoff expire ──
+        refuel_ok.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(700)).await; // > 500ms × 1.2 jitter
+        agent.tick(&ctx).await.unwrap();
+        let hits_phase2 = send_hits.load(Ordering::SeqCst);
+        println!(
+            "Phase 2 (refinancé): {hits_phase2} requêtes cumulées, balance = {:.2} PMS, backoff actif = {}",
+            agent.cached_balance,
+            agent.refuel_backoff.is_active()
+        );
+        assert_eq!(hits_phase2, 2, "une seule tentative de refuel à l'expiration");
+        assert!(
+            !agent.refuel_backoff.is_active(),
+            "backoff levé après refuel réussi"
+        );
+        assert!(
+            agent.cached_balance >= LOW_BALANCE_THRESHOLD,
+            "balance rafraîchie après refuel: {}",
+            agent.cached_balance
+        );
     }
 }
