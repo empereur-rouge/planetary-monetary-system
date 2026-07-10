@@ -94,7 +94,8 @@ fn try_decrypt_plain(enc: &EncryptedPayload, sk_hex: &str) -> Result<PlainPayloa
 pub fn collect_involved_addresses(plain: &PlainPayload) -> Vec<String> {
     let mut addrs = Vec::new();
     match plain {
-        PlainPayload::Mint { outputs } => {
+        PlainPayload::Mint { outputs }
+        | PlainPayload::CustodialMint { outputs, .. } => {
             addrs.extend(outputs.iter().map(|o| o.address.clone()));
         }
         PlainPayload::TxUtxo(tx) => {
@@ -158,7 +159,8 @@ pub fn collect_involved_addresses(plain: &PlainPayload) -> Vec<String> {
 
 pub fn involves_address(plain: &PlainPayload, addr: &str) -> bool {
     match plain {
-        PlainPayload::Mint { outputs } => outputs.iter().any(|o| o.address == addr),
+        PlainPayload::Mint { outputs }
+        | PlainPayload::CustodialMint { outputs, .. } => outputs.iter().any(|o| o.address == addr),
         PlainPayload::TxUtxo(tx) => tx.outputs.iter().any(|o| o.address == addr),
         PlainPayload::MarketSettle { tx, seller, buyer, .. } => {
             seller == addr || buyer == addr || tx.outputs.iter().any(|o| o.address == addr)
@@ -218,7 +220,8 @@ fn nft_involves_any(action: &pms_types_nft::NftAction, candidates: &[String]) ->
 
 pub fn involves_any_address(plain: &PlainPayload, candidates: &[String]) -> bool {
     match plain {
-        PlainPayload::Mint { outputs } => outputs
+        PlainPayload::Mint { outputs }
+        | PlainPayload::CustodialMint { outputs, .. } => outputs
             .iter()
             .any(|o| candidates.iter().any(|c| o.address.eq_ignore_ascii_case(c))),
         PlainPayload::TxUtxo(tx) => tx

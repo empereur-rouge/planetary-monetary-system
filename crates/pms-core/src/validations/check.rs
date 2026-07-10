@@ -308,6 +308,14 @@ pub fn validate_block(
                 // mintés doivent être bien formées (même règle que TxUtxo).
                 crate::validations::conditions::validate_output_conditions(outputs)?;
             }
+            // Mint custodial (protocole 2.8) — checks basiques ici (chemin sync).
+            // Les gates AUTORITAIRES (signature `mint_authority` + binding +
+            // anti-replay + cap) vivent dans le hot path (`do_persist_block_internal`),
+            // comme la royalty pour MarketSettle.
+            PlainPayload::CustodialMint { outputs, .. } => {
+                amounts_positive_outputs(outputs)?;
+                crate::validations::conditions::validate_output_conditions(outputs)?;
+            }
             PlainPayload::TxUtxo(tx) => {
                 verify_tx_signatures(tx, &policy.network_id)?;
                 validate_fee_recipient_output(tx, policy)?;

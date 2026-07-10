@@ -620,6 +620,197 @@ where
             }
         }
 
+        // 1.custodial) Mint custodial (protocole 2.8) — token OU classe SFT minté
+        // par la SIGNATURE du `mint_authority` embarquée (PAS l'admin du DAG). Le
+        // Coordinator forge/signe le bloc (single-writer) mais NE PEUT PAS minter la
+        // classe/le token d'un créateur sans sa clé. Modèle : RoyaltyUpdate
+        // (signature détachée vérifiée au persist) + anti-replay nonce (BridgeMint) +
+        // cap sous lock per-asset (anti-TOCTOU d'inflation multi-opérateurs).
+        //
+        // Le gate coordinateur global du `Mint` (`validate_mint_security`) NE
+        // s'applique PAS ici (payload distinct) — l'autorité dérive ENTIÈREMENT de
+        // la signature du `mint_authority`. Aucun trou : le natif ne peut pas être
+        // minté ici (tous les outputs doivent porter un asset_id enregistré), et
+        // pour les assets custom la signature `mint_authority` est un gate PLUS fort
+        // que le gate coordinateur pour le cas délégué.
+        //
+        // `custodial_mint_cap_guard` (lock per-asset) est acquis ici et TENU
+        // jusqu'après `apply_diff` (section 5) : deux mints concurrents du MÊME asset
+        // ne peuvent pas lire la même `circulating_supply` obsolète et dépasser le cap.
+        let mut custodial_mint_cap_guard: Option<tokio::sync::OwnedMutexGuard<()>> = None;
+        if let Some(PayloadEnvelope::Plain(PlainPayload::CustodialMint {
+            asset_id,
+            outputs,
+            auth_pubkey_hex,
+            auth_signature_b64,
+            mint_nonce,
+        })) = &payload
+        {
+            // (a) Structure : outputs non vides, TOUS sur `asset_id` (jamais natif
+            //     ni un autre asset), conditions de dépense bien formées.
+            if outputs.is_empty() {
+                return Ok(PutResult::Rejected("custodial mint: no outputs".to_string()));
+            }
+            if outputs.iter().any(|o| o.asset_id.as_deref() != Some(asset_id.as_str())) {
+                return Ok(PutResult::Rejected(
+                    "custodial mint: every output must carry the declared asset_id (native/other asset forbidden)".to_string(),
+                ));
+            }
+            if let Err(e) = crate::validations::conditions::validate_output_conditions(outputs) {
+                return Ok(PutResult::Rejected(format!("custodial mint output condition: {e}")));
+            }
+
+            // (b) Résolution FAIL-CLOSED : l'asset DOIT être enregistré (token OU
+            //     classe SFT). Un asset inconnu ou une erreur store → rejet (pas de
+            //     fallback gate coordinateur, contrairement au Mint historique).
+            let meta = match self.resolve_asset_metadata_strict(asset_id) {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "custodial mint: unknown asset {asset_id}"
+                    )));
+                }
+                Err(e) => return Ok(PutResult::Rejected(format!("custodial mint: {e}"))),
+            };
+
+            // (c) Signature du `mint_authority` sur le message canonique (bind
+            //     network_id + asset_id + outputs + nonce). Anti-forge.
+            let msg = pms_types::custodial_mint_signing_message(
+                &self.wire_meta.network_id,
+                asset_id,
+                outputs,
+                mint_nonce,
+            );
+            if crate::validations::signature::verify_detached_signature(
+                msg.as_bytes(),
+                auth_pubkey_hex,
+                auth_signature_b64,
+            )
+            .is_err()
+            {
+                return Ok(PutResult::Rejected(
+                    "custodial mint: invalid mint_authority signature".to_string(),
+                ));
+            }
+
+            // (d) Binding : la clé signataire DOIT dériver l'adresse `mint_authority`
+            //     enregistrée (gère pubkey-hex ET bech32m).
+            if !crate::validations::ownership::unlock_matches_address(
+                auth_pubkey_hex,
+                &meta.mint_authority,
+            ) {
+                return Ok(PutResult::Rejected(
+                    "custodial mint: signer is not the asset mint_authority".to_string(),
+                ));
+            }
+
+            // (e) Anti-replay EARLY reject (durable CF + RAM). Le claim autoritaire
+            //     atomique est au commit-point (section 5, avant apply_diff).
+            let consumed_key = pms_types::custodial_mint_consumed_key(asset_id, mint_nonce);
+            let durably_consumed = match self.store.is_custodial_mint_consumed(&consumed_key).await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "custodial mint consumed lookup failed: {e}"
+                    )));
+                }
+            };
+            if durably_consumed || self.dag.is_custodial_mint_consumed_ram(&consumed_key) {
+                return Ok(PutResult::Rejected(format!(
+                    "custodial mint nonce already consumed (replay): {asset_id}"
+                )));
+            }
+
+            // (f) Compliance : aucune adresse d'output gelée (plus strict que le Mint
+            //     admin — l'autorité étant déléguée à un opérateur semi-fiable, un
+            //     mint vers une adresse gelée serait un vecteur d'évasion). FAIL-CLOSED
+            //     (audit F2) : une erreur store rejette (jamais « pas gelé » par
+            //     défaut), pour ne pas bypasser la compliance ni forker le consensus
+            //     selon la santé du store. Le rejet précède le claim du nonce (section
+            //     5) → l'opérateur peut retenter sans brûler le nonce.
+            for out in outputs {
+                match self.store.is_frozen(&out.address) {
+                    Ok(true) => {
+                        return Ok(PutResult::Rejected(format!(
+                            "compliance: recipient address is frozen: {}",
+                            out.address
+                        )));
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        return Ok(PutResult::Rejected(format!(
+                            "compliance check failed (fail-closed): {e}"
+                        )));
+                    }
+                }
+            }
+
+            // Montants mintés par asset (checked_add anti-overflow). FONCTION PURE des
+            // `outputs` → calculée HORS lock (n'accède à aucun état de supply partagé).
+            let minted = match crate::validations::mint::minted_amounts_by_custom_asset(outputs) {
+                Ok(m) => m,
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!("custodial mint amounts: {e}")));
+                }
+            };
+
+            // (g) CAP sous LOCK per-asset (anti-TOCTOU d'inflation). Le guard est
+            //     tenu de la lecture de la supply JUSQU'À `apply_diff`. On récupère
+            //     l'Arc<Mutex> (RefMut DashMap droppée avant l'await → pas de deadlock
+            //     de shard), puis on lock_owned. Seuls la lecture supply + la validation
+            //     du cap sont sous le lock (le calcul `minted` ci-dessus, pur, ne l'est pas).
+            //     NOTE (audit F3) : ce lock sérialise CustodialMint-vs-CustodialMint du
+            //     MÊME asset. Il n'est PAS partagé avec le `Mint` classique ni
+            //     `BridgeMint`, mais ce n'est pas exploitable : un asset custodial a un
+            //     `mint_authority` ≠ coordinateur, donc un `Mint` classique de cet asset
+            //     est rejeté par `validate_custom_asset_mints` (signer bloc == coordinateur
+            //     ≠ mint_authority), et `BridgeMint` ne crée que des assets bridgés (pas
+            //     d'émission neuve d'un asset custodial). Aucun autre chemin ne peut donc
+            //     émettre concurremment le même asset custodial. (Le `Mint` classique
+            //     porte le MÊME TOCTOU de cap pré-existant pour les assets coordinateur-
+            //     mintés cappés ; le généraliser exigerait un lock multi-asset ordonné
+            //     — évité ici, blast-radius consensus — à traiter séparément.)
+            let lock_arc = self
+                .custodial_mint_locks
+                .entry(asset_id.clone())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            custodial_mint_cap_guard = Some(lock_arc.lock_owned().await);
+
+            let now_ms_cm = now_ms_for_signers.max(0) as u64;
+            let mut metadata = std::collections::HashMap::new();
+            let mut circulating = std::collections::HashMap::new();
+            let mut locked_collateral = std::collections::HashMap::new();
+            if meta.max_supply.is_some() || meta.collateral_address.is_some() {
+                let (supply, _n) = self.utxos.circulating_supply_by_asset(Some(asset_id)).await;
+                circulating.insert(asset_id.clone(), supply);
+            }
+            if let Some(reserve_addr) = &meta.collateral_address {
+                let reserve_utxos = self.utxos.utxos_by_address(reserve_addr).await;
+                let locked = crate::validations::mint::sum_locked_collateral(
+                    &reserve_utxos,
+                    &meta.collateral_asset_id,
+                    now_ms_cm,
+                );
+                locked_collateral.insert(asset_id.clone(), locked);
+            }
+            metadata.insert(asset_id.clone(), Some(meta));
+            if let Err(e) = crate::validations::mint::validate_custom_asset_mint_amounts(
+                outputs,
+                &minted,
+                &metadata,
+                &circulating,
+                &locked_collateral,
+            ) {
+                tracing::warn!(
+                    "🚫 Custodial mint blocked on block {}: {e}",
+                    &wb.id[..16.min(wb.id.len())]
+                );
+                return Ok(PutResult::Rejected(format!("custodial mint: {e}")));
+            }
+        }
+
         // 1.y) Validation NFT (PlainPayload::Nft)
         //
         // - Valide l'action NFT (ownership, existence, autorisation)
@@ -974,6 +1165,59 @@ where
                 class.royalty_beneficiary.as_deref(),
             ) {
                 return Ok(PutResult::Rejected(format!("sft class: {e}")));
+            }
+            // ANTI-SQUAT de collection (protocole 2.8, Q4) — la 1ʳᵉ classe d'une
+            // `collection_id` en fixe le propriétaire (`creator`) ; toute classe
+            // suivante sous la même collection DOIT porter le MÊME `creator`. Sans
+            // ça, N opérateurs indépendants pourraient squatter/polluer le
+            // namespace collection d'un autre (`creator` étant fixé au wallet
+            // custodial côté endpoint `/v1`). Durable (`sft_collections`, survit au
+            // restart) PUIS claim RAM atomique (`try_claim_collection`, ferme la
+            // course entre deux créations concurrentes du même préfixe neuf).
+            let creator = class.creator.trim();
+            match self.store.get_collection_owner(&class.collection_id) {
+                Ok(Some(existing)) => {
+                    // Déjà réclamée durablement (source de vérité, survit au restart) :
+                    // même propriétaire OK, autre → squat rejeté. Pas de claim RAM ici —
+                    // le RAM set n'est consulté que dans la branche `None` (course entre
+                    // deux PREMIÈRES créations) ; une fois le durable écrit, on ne repasse
+                    // plus jamais par `None` pour cette collection.
+                    if !existing.eq_ignore_ascii_case(creator) {
+                        return Ok(PutResult::Rejected(format!(
+                            "sft collection '{}' is owned by another creator",
+                            class.collection_id
+                        )));
+                    }
+                }
+                Ok(None) => {
+                    // Pas encore réclamée durablement → claim RAM atomique (ferme la
+                    // course entre deux premières créations concurrentes par des
+                    // créateurs DIFFÉRENTS : `try_claim_collection` ne renvoie `Err`
+                    // que si un AUTRE créateur détient déjà le claim → un seul gagnant).
+                    if self
+                        .dag
+                        .try_claim_collection(&class.collection_id, creator)
+                        .is_err()
+                    {
+                        return Ok(PutResult::Rejected(format!(
+                            "sft collection '{}' is being claimed by another creator",
+                            class.collection_id
+                        )));
+                    }
+                    if let Err(e) = self
+                        .store
+                        .put_collection_owner(&class.collection_id, creator)
+                    {
+                        return Ok(PutResult::Rejected(format!(
+                            "sft collection owner store failed: {e}"
+                        )));
+                    }
+                }
+                Err(e) => {
+                    return Ok(PutResult::Rejected(format!(
+                        "sft collection owner lookup failed: {e}"
+                    )));
+                }
             }
             // Unicité : une classe déjà enregistrée ne doit pas être écrasée
             // silencieusement (anti-overwrite, comme la gouvernance).
@@ -1621,8 +1865,10 @@ where
             Some(d)
         } else {
             match &payload {
-            Some(PayloadEnvelope::Plain(PlainPayload::Mint { outputs })) => {
-                // Mint = create only (no inputs)
+            Some(PayloadEnvelope::Plain(PlainPayload::Mint { outputs }))
+            | Some(PayloadEnvelope::Plain(PlainPayload::CustodialMint { outputs, .. })) => {
+                // Mint / CustodialMint = create only (no inputs). Both stamp
+                // `created_at` via the system clock (anti-antidatage).
                 Some(UtxoDelta {
                     spend: vec![],
                     create: stamped_creates(outputs),
@@ -1814,6 +2060,28 @@ where
             }
         }
 
+        // ── Custodial-mint anti-replay CLAIM (atomic, in-process commit point) ──
+        // Mirrors the bridge claim (protocole 2.8). The durable early reject
+        // (validation section) catches replays of already-persisted nonces; THIS
+        // atomic test-and-set closes the validate→apply window for two concurrent
+        // mints of the SAME `(asset_id, mint_nonce)` racing before either's durable
+        // write lands. Held under `custodial_mint_cap_guard` (per-asset) so ordering
+        // vs the cap read is total. `CustodialMint` has no `spend`, so there is no
+        // post-claim reject path before `apply_diff` → no unconsume needed here.
+        if let Some(PayloadEnvelope::Plain(PlainPayload::CustodialMint {
+            asset_id,
+            mint_nonce,
+            ..
+        })) = &payload
+        {
+            let key = pms_types::custodial_mint_consumed_key(asset_id, mint_nonce);
+            if !self.dag.try_consume_custodial_mint(&key) {
+                return Ok(PutResult::Rejected(format!(
+                    "custodial mint nonce already consumed (replay): {asset_id}"
+                )));
+            }
+        }
+
         let t0 = std::time::Instant::now();
 
         // 5.a) UTXO RAM Update FIRST (essential for preventing double-spend)
@@ -1875,6 +2143,11 @@ where
                 .collect();
             self.utxos.apply_diff(&spends, &creates).await;
         }
+
+        // Relâche le lock-cap du mint custodial (protocole 2.8) DÈS que la supply
+        // RAM est à jour (`apply_diff`) : un mint concurrent du même asset lira la
+        // nouvelle `circulating`. No-op pour tout autre payload (guard = None).
+        drop(custodial_mint_cap_guard);
 
         let t_utxo = t0.elapsed();
 

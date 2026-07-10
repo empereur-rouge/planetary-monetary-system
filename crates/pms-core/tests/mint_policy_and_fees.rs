@@ -257,6 +257,8 @@ fn mint_policy_rejects_non_admin_in_mainnet() {
             request_timeout_ms: 0,
             rate_limit_rps: 0,
             burst: 0,
+            api_key_rate_rps: None,
+            api_key_burst: None,
         },
         auth: Auth {
             require_signed_submit: true,
@@ -409,6 +411,8 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_testnet() {
             request_timeout_ms: 0,
             rate_limit_rps: 0,
             burst: 0,
+            api_key_rate_rps: None,
+            api_key_burst: None,
         },
         auth: Auth {
             require_signed_submit: true,
@@ -566,6 +570,8 @@ fn mint_policy_rejects_empty_signer_pubkeys_in_mainnet() {
             request_timeout_ms: 0,
             rate_limit_rps: 0,
             burst: 0,
+            api_key_rate_rps: None,
+            api_key_burst: None,
         },
         auth: Auth {
             require_signed_submit: true,
@@ -723,6 +729,8 @@ fn mint_policy_allows_empty_signer_pubkeys_in_dev() {
             request_timeout_ms: 0,
             rate_limit_rps: 0,
             burst: 0,
+            api_key_rate_rps: None,
+            api_key_burst: None,
         },
         auth: Auth {
             require_signed_submit: false,

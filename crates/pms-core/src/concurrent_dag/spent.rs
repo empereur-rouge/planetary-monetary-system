@@ -108,4 +108,60 @@ impl ConcurrentDag {
     pub fn is_bridge_lock_consumed_ram(&self, lock_block_id: &str) -> bool {
         self.consumed_bridge_locks.contains(lock_block_id)
     }
+
+    /// **Atomic custodial-mint anti-replay claim** (protocole 2.8). A
+    /// `CustodialMint` creates fresh units of a custom asset authorized by the
+    /// `mint_authority` signature; each `(asset_id, mint_nonce)` — `key` here,
+    /// built by `custodial_mint_consumed_key` — may be minted AT MOST ONCE.
+    /// Inserts `key` and returns `true` if **newly** claimed, `false` if it was
+    /// **already** consumed (a replay). `DashSet::insert` is atomic → two
+    /// concurrent submissions of the same signed payload resolve to exactly one
+    /// winner (same commit-point discipline as [`ConcurrentDag::try_mark_spent`]
+    /// and [`ConcurrentDag::try_consume_bridge_lock`]). The cross-restart record
+    /// is the durable `custodial_mint_consumed` column family; the early reject is
+    /// [`DagStorage::is_custodial_mint_consumed`].
+    pub fn try_consume_custodial_mint(&self, key: &str) -> bool {
+        self.consumed_custodial_mints.insert(key.to_string())
+    }
+
+    /// Undo a [`ConcurrentDag::try_consume_custodial_mint`] claim. Used if the
+    /// block is rejected AFTER the claim (e.g. a later commit-point guard fails),
+    /// so a transient failure doesn't permanently burn the nonce.
+    pub fn unconsume_custodial_mint(&self, key: &str) {
+        self.consumed_custodial_mints.remove(key);
+    }
+
+    /// RAM fast-path check for custodial-mint consumption. Pair with the durable
+    /// [`DagStorage::is_custodial_mint_consumed`] for an authoritative answer —
+    /// the RAM set is empty after a restart until each nonce is re-claimed, so it
+    /// only covers the in-flight window before the durable batch write lands.
+    pub fn is_custodial_mint_consumed_ram(&self, key: &str) -> bool {
+        self.consumed_custodial_mints.contains(key)
+    }
+
+    /// **Atomic collection-ownership claim** for SFT anti-squat (protocole 2.8,
+    /// Q4). The first `SftClassCreate` referencing `collection_id` claims it for
+    /// `owner`; later classes under the same collection must present the same
+    /// owner. Returns `Ok(())` if the claim is consistent (fresh claim, or an
+    /// existing claim by the SAME owner), `Err(existing_owner)` if the collection
+    /// is already owned by a DIFFERENT party (squat attempt). `DashMap::entry` is
+    /// atomic, so concurrent first-claims resolve to exactly one owner. The
+    /// cross-restart record is the durable `sft_collections` column family.
+    pub fn try_claim_collection(&self, collection_id: &str, owner: &str) -> Result<(), String> {
+        use dashmap::mapref::entry::Entry;
+        match self.claimed_collections.entry(collection_id.to_string()) {
+            Entry::Occupied(e) => {
+                let existing = e.get();
+                if existing.eq_ignore_ascii_case(owner) {
+                    Ok(())
+                } else {
+                    Err(existing.clone())
+                }
+            }
+            Entry::Vacant(v) => {
+                v.insert(owner.to_string());
+                Ok(())
+            }
+        }
+    }
 }

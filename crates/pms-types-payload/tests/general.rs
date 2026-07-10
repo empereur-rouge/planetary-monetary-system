@@ -41,6 +41,7 @@ fn mvp_encrypt_decrypt_confidential_type_only() {
         PlainPayload::TokenCreate(_) => println!("Type = TokenCreate"),
         PlainPayload::SftClassCreate(_) => println!("Type = SftClassCreate"),
         PlainPayload::RoyaltyUpdate { .. } => println!("Type = RoyaltyUpdate"),
+        PlainPayload::CustodialMint { .. } => println!("Type = CustodialMint"),
         PlainPayload::BridgeLock { .. } => println!("Type = BridgeLock"),
         PlainPayload::BridgeMint { .. } => println!("Type = BridgeMint"),
         PlainPayload::Freeze { .. } => println!("Type = Freeze"),

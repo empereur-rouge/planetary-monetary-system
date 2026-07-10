@@ -30,6 +30,13 @@ pub trait SftClassStorage: Send + Sync {
     fn list_sft_classes(&self) -> Result<Vec<SftClass>>;
     /// Liste les classes d'une collection (préfixe `"{collection_id}:"`).
     fn list_sft_classes_by_collection(&self, collection_id: &str) -> Result<Vec<SftClass>>;
+
+    /// Enregistre le propriétaire (`creator`) d'une collection SFT (anti-squat,
+    /// protocole 2.8, Q4). CF `sft_collections`, clé = `collection_id`, valeur =
+    /// owner (adresse/pubkey du créateur de la 1ʳᵉ classe de la collection).
+    fn put_collection_owner(&self, collection_id: &str, owner: &str) -> Result<()>;
+    /// Récupère le propriétaire d'une collection, `None` si non réclamée.
+    fn get_collection_owner(&self, collection_id: &str) -> Result<Option<String>>;
 }
 
 /// Supertrait « moteur complet » : l'union des capacités de stockage que

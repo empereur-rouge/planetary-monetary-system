@@ -14,20 +14,43 @@ use rocksdb::{Direction, IteratorMode};
 
 use super::activity_index::iter_cf_all;
 
-/// Extract the `lock_block_id` claimed by a `BridgeMint` block, if any.
+/// Anti-replay markers to persist in the SAME atomic `WriteBatch` as a block, so
+/// they can never diverge from the block that backs them:
+/// `.0` = the `bridge_consumed` key (a `BridgeMint`'s source `lock_block_id`,
+/// audit rang 3 B3), `.1` = the `custodial_mint_consumed` key (a `CustodialMint`'s
+/// `(asset_id, mint_nonce)`, protocole 2.8). At most one is `Some` (a block is one
+/// payload). `None,None` for every other block.
 ///
-/// Used to record the durable bridge-mint anti-replay marker (`bridge_consumed`
-/// CF) in the SAME atomic `WriteBatch` as the block itself, so the consumed-lock
-/// record can never diverge from the mint it backs (audit rang 3, B3). Returns
-/// `None` for any non-`BridgeMint` block (including encrypted payloads, which a
-/// bridge mint never is — it is always a Plain coordinator-signed block).
-fn bridge_mint_lock_id(b: &StoredBlock) -> Option<String> {
-    let pjson = b.payload_json.as_ref()?;
+/// Single `PayloadEnvelope` parse for both markers — earlier revisions parsed the
+/// payload JSON twice per block (once per marker) on the persist hot path. A
+/// cheap substring pre-filter skips the parse entirely for the >99% of blocks
+/// that are neither (`TxUtxo`, `Mint`, …) — the externally-tagged variant name
+/// always appears verbatim in the JSON, so a miss on both substrings is a
+/// guaranteed non-match (a false positive merely falls through to the parse). The
+/// custodial key uses the SHARED [`pms_types_payload::custodial_mint_consumed_key`]
+/// so the durable marker matches the pms-core RAM claim byte-for-byte.
+fn block_anti_replay_markers(b: &StoredBlock) -> (Option<String>, Option<String>) {
+    let Some(pjson) = b.payload_json.as_ref() else {
+        return (None, None);
+    };
+    if !pjson.contains("BridgeMint") && !pjson.contains("CustodialMint") {
+        return (None, None);
+    }
+    use pms_types_payload::{PayloadEnvelope::Plain, PlainPayload};
     match serde_json::from_str::<pms_types_payload::PayloadEnvelope>(pjson) {
-        Ok(pms_types_payload::PayloadEnvelope::Plain(
-            pms_types_payload::PlainPayload::BridgeMint { lock_block_id, .. },
-        )) => Some(lock_block_id),
-        _ => None,
+        Ok(Plain(PlainPayload::BridgeMint { lock_block_id, .. })) => (Some(lock_block_id), None),
+        Ok(Plain(PlainPayload::CustodialMint {
+            asset_id,
+            mint_nonce,
+            ..
+        })) => (
+            None,
+            Some(pms_types_payload::custodial_mint_consumed_key(
+                &asset_id,
+                &mint_nonce,
+            )),
+        ),
+        _ => (None, None),
     }
 }
 
@@ -603,14 +626,20 @@ impl DagStorage for RocksStore {
             }
         }
 
-        // 1.a-bis) Bridge-mint anti-replay (audit rang 3, B3) — record the
-        // source lock consumed by this BridgeMint in the SAME atomic batch, so
-        // the durable `bridge_consumed` marker can never diverge from the mint.
-        // A replayed BridgeMint reusing this `lock_block_id` is rejected at
-        // validation (`DagStorage::is_bridge_lock_consumed`) before re-minting.
-        if let Some(lock_block_id) = bridge_mint_lock_id(b) {
+        // 1.a-bis) Anti-replay markers (BridgeMint audit rang 3 B3 / CustodialMint
+        // protocole 2.8) — record the consumed source-lock / (asset,nonce) in the
+        // SAME atomic batch as the block, so the durable marker can never diverge
+        // from the mint it backs. Replays are rejected at validation
+        // (`is_bridge_lock_consumed` / `is_custodial_mint_consumed`) before re-minting.
+        // Single payload parse for both (hot path).
+        let (bridge_lock, custodial_key) = block_anti_replay_markers(b);
+        if let Some(lock_block_id) = bridge_lock {
             let cf_bridge_consumed = self.cf("bridge_consumed");
             batch.put_cf(&cf_bridge_consumed, lock_block_id.as_bytes(), b.id.as_bytes());
+        }
+        if let Some(consumed_key) = custodial_key {
+            let cf_custodial = self.cf("custodial_mint_consumed");
+            batch.put_cf(&cf_custodial, consumed_key.as_bytes(), b.id.as_bytes());
         }
 
         // 1.b) Indices DAG
@@ -800,14 +829,17 @@ impl DagStorage for RocksStore {
                 }
             }
 
-            // Bridge-mint anti-replay (audit rang 3, B3) — same atomic batch as
-            // the block, mirrors the single-block path. Records the source lock
-            // this BridgeMint consumes so a replay reusing it is rejected. The CF
-            // handle is resolved lazily (bridge mints are rare) so non-bridge
-            // batches never touch it.
-            if let Some(lock_block_id) = bridge_mint_lock_id(b) {
+            // Anti-replay markers (BridgeMint / CustodialMint) — same atomic batch
+            // as the block, mirrors the single-block path. Single payload parse for
+            // both; CF handles resolved lazily so non-mint batches never touch them.
+            let (bridge_lock, custodial_key) = block_anti_replay_markers(b);
+            if let Some(lock_block_id) = bridge_lock {
                 let cf_bridge_consumed = self.cf("bridge_consumed");
                 batch.put_cf(&cf_bridge_consumed, lock_block_id.as_bytes(), b.id.as_bytes());
+            }
+            if let Some(consumed_key) = custodial_key {
+                let cf_custodial = self.cf("custodial_mint_consumed");
+                batch.put_cf(&cf_custodial, consumed_key.as_bytes(), b.id.as_bytes());
             }
 
             // ── DAG indices (inlined from apply_dag_indices, using
@@ -942,6 +974,18 @@ impl DagStorage for RocksStore {
         Ok(self
             .db
             .get_cf(&cf_bridge_consumed, lock_block_id.as_bytes())?
+            .is_some())
+    }
+
+    async fn is_custodial_mint_consumed(&self, consumed_key: &str) -> Result<bool> {
+        // Durable anti-replay record (protocole 2.8):
+        // `custodial_mint_consumed["asset\0nonce"] = mint_block_id`. Written in the
+        // atomic batch alongside the CustodialMint block (mirrors
+        // `is_bridge_lock_consumed`). Survives restarts / RAM-tracker eviction.
+        let cf_custodial = self.cf("custodial_mint_consumed");
+        Ok(self
+            .db
+            .get_cf(&cf_custodial, consumed_key.as_bytes())?
             .is_some())
     }
 

@@ -58,6 +58,20 @@ impl SftClassStorage for RocksStore {
         }
         Ok(out)
     }
+
+    fn put_collection_owner(&self, collection_id: &str, owner: &str) -> Result<()> {
+        let cf = self.cf("sft_collections");
+        self.db.put_cf(&cf, collection_id.as_bytes(), owner.as_bytes())?;
+        Ok(())
+    }
+
+    fn get_collection_owner(&self, collection_id: &str) -> Result<Option<String>> {
+        let cf = self.cf("sft_collections");
+        match self.db.get_cf(&cf, collection_id.as_bytes())? {
+            Some(bytes) => Ok(Some(String::from_utf8(bytes.to_vec())?)),
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]

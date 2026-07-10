@@ -115,6 +115,23 @@ pub struct ConcurrentDag {
     /// for anything past its batch write — the RAM set only needs to cover the
     /// in-flight window, so eviction is unnecessary.
     pub consumed_bridge_locks: DashSet<String>,
+
+    /// Consumed custodial-mint nonces for `CustodialMint` anti-replay (protocole
+    /// 2.8). Key = `custodial_mint_consumed_key(asset_id, mint_nonce)`. Each
+    /// `(asset_id, mint_nonce)` may be minted AT MOST ONCE. In-process atomic claim
+    /// set (mirrors [`consumed_bridge_locks`](Self::consumed_bridge_locks)); the
+    /// cross-restart record is the durable `custodial_mint_consumed` column family.
+    /// Unbounded for the same reason as the bridge set (the durable CF is
+    /// authoritative past the batch write; RAM only covers the in-flight window).
+    pub consumed_custodial_mints: DashSet<String>,
+
+    /// Collection ownership claims for SFT anti-squat (protocole 2.8, Q4). Key =
+    /// `collection_id`, value = owner (`creator` address/pubkey of the first class
+    /// registered under the collection). The FIRST `SftClassCreate` to reference a
+    /// collection claims it atomically; subsequent classes must carry the same
+    /// `creator`. In-process claim map (mirrors the consumed sets); the durable
+    /// record is the `sft_collections` column family.
+    pub claimed_collections: DashMap<String, String>,
 }
 
 impl Default for ConcurrentDag {

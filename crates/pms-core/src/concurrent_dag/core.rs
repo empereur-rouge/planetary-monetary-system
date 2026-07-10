@@ -36,6 +36,8 @@ impl ConcurrentDag {
             max_spent_outpoints,
             tips: DashSet::new(),
             consumed_bridge_locks: DashSet::new(),
+            consumed_custodial_mints: DashSet::new(),
+            claimed_collections: DashMap::new(),
         }
     }
 

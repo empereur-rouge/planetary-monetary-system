@@ -53,6 +53,7 @@ pub fn compute_block_id(
                 PlainPayload::TokenCreate(_) => "TokenCreate",
                 PlainPayload::SftClassCreate(_) => "SftClassCreate",
                 PlainPayload::RoyaltyUpdate { .. } => "RoyaltyUpdate",
+                PlainPayload::CustodialMint { .. } => "CustodialMint",
                 PlainPayload::BridgeLock { .. } => "BridgeLock",
                 PlainPayload::BridgeMint { .. } => "BridgeMint",
                 PlainPayload::Freeze { .. } => "Freeze",
