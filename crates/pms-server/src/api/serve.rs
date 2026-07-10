@@ -268,6 +268,22 @@ pub async fn serve_api(
         emission_gate,
     };
 
+    // Diagnostic fail-closed (v0.30.2) : sur un déploiement networké
+    // (testnet/mainnet), un store de clés API vide fait REJETER (401) toutes les
+    // routes write API-key-gated — le middleware `require_api_key` fail-closed
+    // hors Dev. Logguer fort au boot pour que l'opérateur voie immédiatement la
+    // cause si les writes 401, au lieu de la découvrir en prod.
+    if !matches!(state.settings.network.mode, pms_config::NetworkMode::Dev)
+        && state.api_key_store.read().await.is_empty()
+    {
+        tracing::error!(
+            mode = ?state.settings.network.mode,
+            "🔒 API key store VIDE en mode networké — toutes les routes write API-key-gated \
+             renverront 401 (fail-closed). Provisionner `api_keys.json` (settings.auth.api_keys_file) \
+             ou POST /admin/api-keys avant d'ouvrir aux clients."
+        );
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // WEBHOOK DELIVERY LOOP (Phase 4) — subscribes to BlockPersisted and
     // POSTs HMAC-signed bodies to registered SaaS callbacks. Cheap when no

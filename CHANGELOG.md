@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.30.2] - Unreleased — Durcissement anti-DoS (rate limiting per-client, timeouts au bord)
+## [0.30.3] - Unreleased — Résiduels anti-DoS (fail-closed API keys, anti-slowloris, quota par API-key)
+
+> `Cargo.toml` workspace bumpé `0.30.2 → 0.30.3`. Traite les 3 résiduels
+> documentés en 0.30.2. `API_VERSION` inchangé (durcissement infra).
+
+### Fixed / Security
+- **sec(auth) — key store vide fail-CLOSED aussi en testnet.** Auparavant
+  `empty_key_store_allows = !is_prod()` : seul mainnet fail-closed, testnet
+  restait permissif → un `api_keys.json` vide ou non provisionné laissait TOUTES
+  les routes write API-key-gated (send-simple, nft/mint, submit/block,
+  market/settle) ouvertes en testnet (amplificateur du gap DoS, cf. revue sécu
+  v0.30.2). Désormais seul le mode **Dev** (sandbox local) reste permissif ;
+  testnet + mainnet fail-closed. Le store testnet est provisionné en pratique
+  (prouvé par les 401 no_auth), donc zéro impact nominal. Diagnostic de boot :
+  `tracing::error!` fort si le store est vide en mode networké (l'opérateur voit
+  la cause si les writes 401). `crates/pms-server/src/api/middleware.rs`,
+  `serve.rs`. Test `empty_api_key_store_fails_open_only_in_dev` mis à jour.
 
 > `Cargo.toml` workspace bumpé `0.30.1 → 0.30.2`, `pms-gateway` `0.1.0 → 0.1.3`.
 > Suite au diagnostic DoS du 2026-07-10 : le rate limiter de l'engine
