@@ -24,6 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tracing::error!` fort si le store est vide en mode networké (l'opérateur voit
   la cause si les writes 401). `crates/pms-server/src/api/middleware.rs`,
   `serve.rs`. Test `empty_api_key_store_fails_open_only_in_dev` mis à jour.
+- **sec(net) — anti-slowloris : `header_read_timeout` sur les serveurs TLS.**
+  Le `TimeoutLayer` (v0.30.2) ne borne que le handler APRÈS lecture des
+  headers ; un client qui distille ses headers octet par octet (slowloris)
+  tenait un socket/task avant. Ajout d'un `header_read_timeout` hyper (via
+  `TokioTimer` — obligatoire, sinon hyper panique) sur les chemins TLS de
+  l'engine (`serve.rs`, const 15 s) et du gateway (`main.rs`, env
+  `HEADER_READ_TIMEOUT_MS` défaut 15 s). Défense en profondeur : Caddy borne
+  déjà la lecture au bord public ; ce garde couvre l'engine/gateway en
+  exposition plus directe. Chemins plain-HTTP (dev) non couverts (hyper-util ne
+  l'expose pas via `axum::serve`). Nouvelle dép directe `hyper-util`
+  (feature `tokio`, déjà tirée transitivement). Tests
+  `slowloris_partial_headers_connection_dropped` (connexion fermée ~timeout,
+  vérifié à 403 ms pour un timeout de 400 ms) + `complete_request_served_normally`
+  (contrôle : requête complète → 200). `pms-gateway 0.1.3 → 0.1.4`.
 
 > `Cargo.toml` workspace bumpé `0.30.1 → 0.30.2`, `pms-gateway` `0.1.0 → 0.1.3`.
 > Suite au diagnostic DoS du 2026-07-10 : le rate limiter de l'engine

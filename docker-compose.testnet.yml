@@ -150,6 +150,9 @@ services:
       # retourne des l'arrivee des headers amont).
       REQUEST_TIMEOUT_MS: 30000
       MAX_CONCURRENT: 512
+      # v0.30.3 — anti-slowloris : ferme les connexions dont les headers
+      # n'arrivent pas à temps (chemin TLS). Caddy le fait deja au bord.
+      HEADER_READ_TIMEOUT_MS: 15000
       SERVICES_MONITOR: "Engine|https://pms-engine:8080/internal/health|ok,Prometheus|http://prometheus:9090/-/healthy|,Simulator|http://pms-simulator:9090/|,Caddy|http://caddy:80|"
       SERVICES_CHECK_INTERVAL: "20"
     volumes:

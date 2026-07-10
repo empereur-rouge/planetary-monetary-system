@@ -345,7 +345,7 @@ checksum = "cf9ff0bbfd639f15c74af777d81383cf53efb7c93613f6cab67c6c11e05bbf8b"
 
 [[package]]
 name = "bin"
-version = "0.30.2"
+version = "0.30.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2564,13 +2564,14 @@ dependencies = [
 
 [[package]]
 name = "pms-gateway"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "axum",
  "axum-server",
  "dotenvy",
  "http",
+ "hyper-util",
  "pms-wire",
  "reqwest",
  "rustls",
@@ -2647,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "pms-server"
-version = "0.30.2"
+version = "0.30.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2666,6 +2667,7 @@ dependencies = [
  "hex",
  "hmac",
  "http",
+ "hyper-util",
  "ipnetwork",
  "k256",
  "libc",
