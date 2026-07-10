@@ -337,6 +337,11 @@ pub struct Limits {
 impl Limits {
     /// Plafond per-API-key effectif (rps, burst) : la surcharge explicite, sinon
     /// la limite per-IP. Voir [`Limits::api_key_rate_rps`].
+    ///
+    /// ⚠️ **Couplage opérateur** : sans surcharge, augmenter `rate_limit_rps`
+    /// (capacité) relève AUSSI le plafond per-key (contrôle sécurité). Pour
+    /// desserrer le per-IP sans affaiblir la défense « une clé sur N IPs »,
+    /// poser `api_key_rate_rps`/`api_key_burst` explicitement.
     pub fn effective_api_key_limits(&self) -> (u32, u32) {
         (
             self.api_key_rate_rps.unwrap_or(self.rate_limit_rps),

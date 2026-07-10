@@ -61,6 +61,10 @@ const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// `axum_server` avant `serve()`. Le `timer` est OBLIGATOIRE : hyper-util
 /// **panique** si `header_read_timeout` est posé sans timer. Générique sur
 /// l'acceptor pour couvrir tous les chemins (TLS en prod, plain en test).
+///
+/// ⚠️ DUAL-LAYER : le gateway câble le MÊME `.http1().timer().header_read_timeout()`
+/// inline dans `pms-gateway/src/main.rs` (crates séparés, pas de crate http
+/// partagée). Garder les deux synchronisés (timer obligatoire, valeur du timeout).
 fn apply_header_read_timeout<Addr: axum_server::Address, Acc>(
     server: &mut axum_server::Server<Addr, Acc>,
     timeout: std::time::Duration,

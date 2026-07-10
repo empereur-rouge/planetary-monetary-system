@@ -1,8 +1,8 @@
 ---
 tags: [feature]
 created: 2026-02-20
-updated: 2026-02-20
-version: v0.2.0
+updated: 2026-07-10
+version: v0.30.3
 ---
 
 # API Key Authentication
@@ -220,8 +220,38 @@ En mode test, le testkit initialise un `api_key_store` vide via `create_api_key_
 - **Stockage sécurisé** : seul le hash est persisté sur disque, jamais la clé en clair.
 - **Écriture atomique** : le fichier JSON est écrit via un fichier temporaire puis rename, évitant la corruption.
 
+### Fail-open sur store vide — DEV LOCAL uniquement (v0.30.3)
+
+`empty_key_store_allows` (`middleware.rs`) décide si un store de clés VIDE laisse
+passer (fail-open) ou rejette (fail-closed). Depuis v0.30.3, **seul le mode
+`Dev`** (sandbox local, jamais exposé) fail-open ; **`Testnet` ET `Mainnet`
+fail-closed** — un `api_keys.json` vide/non provisionné fait renvoyer 401 à
+toutes les routes write API-key-gated (avant : testnet restait permissif, un
+fail-open exploitable, cf. durcissement DoS v0.30.2). Un diagnostic `error!`
+loud est émis au boot (`serve.rs`) si le store est vide en mode networké, pour
+que l'opérateur voie la cause immédiatement. Le store testnet étant provisionné
+en pratique, zéro impact nominal.
+
+### Quota de rate limit PAR API-key (v0.30.3)
+
+En plus du rate limit **per-IP** (`SmartIpKeyExtractor`, global), un second
+`GovernorLayer` (`ApiKeyKeyExtractor`, `routes.rs`) borne le débit d'écriture
+**par clé** sur `auth_ledger_write_routes` :
+
+- **Pourquoi** : le per-IP ne stoppe pas une clé valide abusée depuis plusieurs
+  IPs (botnet). Le per-key borne l'identité, indépendamment de l'IP.
+- **Clé de bucket** : hash `u64` (`DefaultHasher`/SipHash) du header `X-API-Key`
+  — pas la valeur en clair. Header absent → sentinelle partagée (ces requêtes
+  sont de toute façon 401 hors Dev).
+- **Isolation** : une clé qui dépasse son burst prend 429 ; les autres clés
+  gardent un bucket frais.
+- **Plafond** : `[limits].api_key_rate_rps` / `api_key_burst` (optionnels).
+  **Défaut = la limite per-IP** (`Limits::effective_api_key_limits`) : prod hérite
+  1000/2000, bench/e2e héritent leur per-IP desserré (pas de bottleneck).
+
 ### Limites connues
 
-- Pas de rate limiting spécifique sur les tentatives de vérification de clé (le rate limiting global du serveur s'applique).
+- Pas de rate limiting spécifique sur les tentatives de vérification de clé (le rate limiting global du serveur s'applique) — atténué par le quota per-key (v0.30.3) sur les routes write.
 - Pas d'expiration automatique des clés (la révocation est manuelle).
 - L'ID de clé est basé sur un compteur séquentiel (`key_01`, `key_02`), pas un UUID.
+- Le quota per-key ne couvre que les routes **write** (pas les reads ni l'admin) et un attaquant faisant tourner de FAUSSES clés obtient un bucket frais par clé (borné par le per-IP, et rejeté 401 par l'auth).

@@ -307,6 +307,8 @@ async fn main() -> Result<()> {
         let mut server = axum_server::bind_rustls(addr, config);
         // Anti-slowloris : ferme les connexions qui n'ont pas fini d'envoyer
         // leurs headers. `timer` OBLIGATOIRE (hyper-util panique sinon).
+        // ⚠️ DUAL-LAYER : même chaîne que `pms-server/src/api/serve.rs::
+        // apply_header_read_timeout` (crates séparés). Garder synchronisé.
         server
             .http_builder()
             .http1()

@@ -41,19 +41,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **sec(auth) — quota de rate limit PAR API-key sur les routes write.** Le rate
   limit per-IP ne stoppe pas une clé valide abusée depuis plusieurs IPs
   (botnet). Ajout d'un second `GovernorLayer` (`ApiKeyKeyExtractor` — clé =
-  hash du header `X-API-Key`, pas la valeur en clair ; sentinelle partagée si
-  header absent) en route_layer outermost sur les routes write API-key-gated
+  hash `u64` SipHash du header `X-API-Key`, pas la valeur en clair ; sentinelle
+  partagée si header absent) sur les routes write API-key-gated
   (`auth_ledger_write_routes`). Un flood d'écriture d'une même clé prend 429,
   indépendamment de l'IP ; les autres clés gardent un bucket frais (isolation).
+  - **Ordre (revue sécu)** : le layer per-key s'exécute **APRÈS** `require_api_key`
+    (le plus interne), pas avant. Sinon une clé invalide/tournante créerait une
+    entrée de store AVANT son 401 → store non borné (vecteur OOM) + contournement
+    du quota. Après le gate, le store est borné aux clés valides (+ sentinelle,
+    atteinte seulement par l'admin-bypass déjà authentifié).
+  - **GC des stores (revue sécu)** : tower_governor ne s'auto-évince JAMAIS
+    (README). Ajout d'une tâche `retain_recent()` toutes les 120 s pour les DEUX
+    governors (per-IP : une entrée par IP au fil du temps ; per-key : borné mais
+    GC par sécurité) — ferme une fuite mémoire pré-existante côté per-IP.
   Plafond **`api_key_rate_rps`/`api_key_burst` optionnels, défaut = la limite
   per-IP** (`Limits::effective_api_key_limits`) : prod/testnet/mainnet héritent
   1000/2000 (protecteur), bench/e2e héritent 100000/200000 (pas de bottleneck
   des benchs 10K TPS — le simulateur mono-clé reste ≤500 rps au bord). Nouvelle
   dép directe `governor` (nommer `NoOpMiddleware` dans le type de retour).
-  `crates/pms-server/src/api/routes.rs`. Tests : `extractor_keys_per_api_key_value`
-  (keying + isolation + sentinelle) et `per_key_quota_throttles_one_key_and_
-  isolates_others` (via le VRAI wiring : keyA 3 OK + 3×429 sur burst 3, keyB
-  frais → 200) ; `test_api_key_limits_override_else_fallback_to_ip`.
+  `crates/pms-server/src/api/routes.rs`. Config governor factorisée dans un
+  helper générique `governor_config<K>` partagé par le per-IP et le per-key (le
+  footgun `per_nanosecond` vit une seule fois). Tests :
+  `extractor_keys_per_api_key_value` (keying + isolation + sentinelle),
+  `per_key_quota_throttles_one_key_and_isolates_others` (via le VRAI wiring :
+  keyA 3 OK + 3×429 sur burst 3, keyB frais → 200),
+  `governor_with_gc_preserves_throttling`, `test_api_key_limits_override_else_fallback_to_ip`.
+
+> Revues : 4 agents `/simplify` + 1 revue de sécurité adversariale. La revue a
+> attrapé le placement du layer per-key (avant vs après l'auth) et l'absence de
+> GC des stores governor — corrigés ci-dessus. `/simplify` : factorisation
+> `governor_config<K>`, cross-réfs dual-layer, warning de couplage per-key/per-IP.
 
 > `Cargo.toml` workspace bumpé `0.30.1 → 0.30.2`, `pms-gateway` `0.1.0 → 0.1.3`.
 > Suite au diagnostic DoS du 2026-07-10 : le rate limiter de l'engine
