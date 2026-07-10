@@ -33,6 +33,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Test bout-en-bout (`client::tests`, engine mock enregistrant les headers
     reçus au vrai boundary reqwest→hyper) : XFF/X-Real-IP/API-Key/Authorization
     forwardés, Cookie droppé.
+- **sec(gateway) — timeout + plafond de concurrence au bord public.** Le
+  gateway (bord public devant l'engine) n'installait que Governor + BodyLimit +
+  CORS : ni timeout de requête ni plafond de concurrence, alors que les features
+  tower étaient déjà compilées. Une requête lente (slow-body, upstream lent)
+  pouvait tenir un slot indéfiniment, et le nombre de requêtes in-flight était
+  non borné. Ajout de `TimeoutLayer` (`REQUEST_TIMEOUT_MS`, défaut 30 s → 408)
+  et `ConcurrencyLimitLayer` (`MAX_CONCURRENT`, défaut 512 = 2× l'engine), en
+  miroir exact de la pile de l'engine. Les routes SSE (`/blocks/stream`,
+  `/wallet/.../activity/stream`) restent saines : leur handler retourne dès
+  l'arrivée des headers amont, donc ni le timeout ni le plafond ne bornent le
+  flux vivant. Construction du router extraite dans `build_app()` (testable via
+  `oneshot`). `crates/pms-gateway/src/main.rs` (`pms-gateway 0.1.1 → 0.1.2`).
+  - Tests : `slow_upstream_hits_gateway_timeout_408` (upstream 5 s + timeout
+    250 ms → 408 sans attendre les 30 s reqwest), `fast_upstream_passes_through`
+    (200 + corps proxifié), `health_route_bypasses_stack` (`/livez` hors pile).
+- `API_VERSION` inchangé (**38**) : ces fixes sont du durcissement infra (edge
+  gateway + config), ils ne modifient aucun contrat/format d'endpoint engine.
 
 ## [0.30.1] - Unreleased — Durcissement sécurité API (audit « autres hijacks »)
 

@@ -4,12 +4,15 @@ use axum::Router;
 use http::header::{AUTHORIZATION, CONTENT_TYPE};
 use http::{HeaderValue, Method};
 use std::sync::Arc;
+use std::time::Duration;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_governor::GovernorLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -50,6 +53,17 @@ pub struct GatewaySettings {
     pub rate_limit_rps: u64,
     pub burst_size: u32,
     pub max_body_bytes: usize,
+    /// Timeout par requête (ms) appliqué au bord public. Borne les requêtes
+    /// lentes (slow-body, upstream engine lent) → 408. Ne coupe PAS les flux
+    /// SSE : le handler stream retourne dès l'arrivée des headers amont, le
+    /// timeout ne borne donc que le time-to-first-byte, pas la durée du flux.
+    pub request_timeout_ms: u64,
+    /// Plafond de requêtes concurrentes in-flight au bord public. Sans lui,
+    /// un client pouvait ouvrir un nombre illimité de connexions lentes et
+    /// saturer le gateway (les slots ne sont tenus que le temps du round-trip
+    /// proxy ; les handlers SSE relâchent leur slot dès le retour de la
+    /// réponse). Mirror du plafond engine (256).
+    pub max_concurrent: usize,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     /// Origines CORS autorisées (séparées par virgule).
@@ -86,6 +100,14 @@ impl GatewaySettings {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10 * 1024 * 1024), // 10MB default
+            request_timeout_ms: std::env::var("REQUEST_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30_000), // 30s — aligné sur le timeout reqwest amont
+            max_concurrent: std::env::var("MAX_CONCURRENT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(512), // 2× le plafond engine (256) pour absorber les bursts
             tls_cert: std::env::var("TLS_CERT").ok(),
             tls_key: std::env::var("TLS_KEY").ok(),
             cors_allowed_origins: cors_origins,
@@ -102,45 +124,22 @@ pub struct GatewayState {
     pub services_cache: health_checker::SharedServicesCache,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Install rustls crypto provider (Ring)
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
-
-    dotenvy::dotenv().ok();
-
-    let filter = EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    fmt().with_env_filter(filter).with_target(true).init();
-
-    // Load settings from environment variables (NOT from config file)
-    let settings = GatewaySettings::from_env();
-
-    tracing::info!("🚪 PMS Gateway starting...");
-    tracing::info!("   Engine URL: {}", settings.engine_url);
-    tracing::info!("   Listen Address: {}", settings.listen_addr);
-    tracing::info!(
-        "   Rate Limit: {} rps, Burst: {}",
-        settings.rate_limit_rps,
-        settings.burst_size
-    );
-
-    let engine_client = Arc::new(client::EngineClient::new(&settings.engine_url));
-
-    // Initialize the services health cache and spawn the background checker
-    let services_cache: health_checker::SharedServicesCache =
-        Arc::new(tokio::sync::RwLock::new(health_checker::ServicesSnapshot {
-            services: vec![],
-            checked_at: 0,
-        }));
-    health_checker::spawn_health_checker(services_cache.clone());
-
-    let state = GatewayState {
-        engine_client,
-        settings: Arc::new(settings.clone()),
-        services_cache,
-    };
+/// Construit le Router complet du gateway (health + API proxifiée + dashboard
+/// optionnel) avec toute la pile de couches défensives. Extrait de `main` pour
+/// être testable via `oneshot` sans ouvrir de socket TLS.
+///
+/// Pile de couches (ordre miroir de l'engine — la DERNIÈRE `.layer()` est la
+/// plus externe / exécutée en premier) :
+/// 1. Governor (rate limit per-IP via `SmartIpKeyExtractor`)
+/// 2. Timeout (borne les requêtes lentes → 408)
+/// 3. Body limit (rejette les corps trop gros → 413)
+/// 4. Concurrency limit (borne les requêtes in-flight)
+/// 5. CORS
+///
+/// Les routes health (`/livez`, `/healthz`, `/services/status`) restent hors
+/// de cette pile : ni rate limit ni auth (données cachées, non sensibles).
+pub fn build_app(state: GatewayState) -> Router {
+    let settings = state.settings.clone();
 
     // NOTE: per_second(N) in tower-governor 0.8 means "period of N seconds"
     // (NOT "N requests per second"). Use per_nanosecond for correct rps conversion.
@@ -167,7 +166,7 @@ async fn main() -> Result<()> {
         .route("/services/status", get(routes::services_status))
         .with_state(state.clone());
 
-    // API routes (with rate limiting)
+    // API routes (with the full defensive layer stack).
     //
     // Only routes that need special handling are listed explicitly:
     //   - Handlers using /internal/* API (typed request/response)
@@ -182,7 +181,10 @@ async fn main() -> Result<()> {
         .route("/v1/blocks/{id}", get(routes::get_block))
         .route("/submit/block", post(routes::submit_block))
         .route("/v1/config", get(routes::get_config))
-        // SSE stream endpoints — require streaming proxy (not buffered)
+        // SSE stream endpoints — require streaming proxy (not buffered).
+        // Safe under Timeout/Concurrency : the handler returns as soon as the
+        // upstream response headers arrive, so neither layer bounds the live
+        // stream — only the time-to-first-byte.
         .route("/blocks/stream", get(routes::proxy_stream))
         .route(
             "/v1/wallet/{address}/activity/stream",
@@ -192,7 +194,11 @@ async fn main() -> Result<()> {
         .fallback(routes::proxy_fallback)
         .with_state(state.clone())
         .layer(GovernorLayer::new(governor_conf))
+        .layer(TimeoutLayer::new(Duration::from_millis(
+            settings.request_timeout_ms,
+        )))
         .layer(RequestBodyLimitLayer::new(settings.max_body_bytes))
+        .layer(ConcurrencyLimitLayer::new(settings.max_concurrent))
         .layer(build_cors_layer(&settings.cors_allowed_origins));
 
     // Dashboard static files (if configured)
@@ -214,6 +220,56 @@ async fn main() -> Result<()> {
     if let Some(dashboard) = dashboard_service {
         app = app.nest_service("/dashboard", dashboard);
     }
+
+    app
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Install rustls crypto provider (Ring)
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
+    dotenvy::dotenv().ok();
+
+    let filter = EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt().with_env_filter(filter).with_target(true).init();
+
+    // Load settings from environment variables (NOT from config file)
+    let settings = GatewaySettings::from_env();
+
+    tracing::info!("🚪 PMS Gateway starting...");
+    tracing::info!("   Engine URL: {}", settings.engine_url);
+    tracing::info!("   Listen Address: {}", settings.listen_addr);
+    tracing::info!(
+        "   Rate Limit: {} rps, Burst: {}",
+        settings.rate_limit_rps,
+        settings.burst_size
+    );
+    tracing::info!(
+        "   Timeout: {} ms, Max concurrent: {}",
+        settings.request_timeout_ms,
+        settings.max_concurrent
+    );
+
+    let engine_client = Arc::new(client::EngineClient::new(&settings.engine_url));
+
+    // Initialize the services health cache and spawn the background checker
+    let services_cache: health_checker::SharedServicesCache =
+        Arc::new(tokio::sync::RwLock::new(health_checker::ServicesSnapshot {
+            services: vec![],
+            checked_at: 0,
+        }));
+    health_checker::spawn_health_checker(services_cache.clone());
+
+    let state = GatewayState {
+        engine_client,
+        settings: Arc::new(settings.clone()),
+        services_cache,
+    };
+
+    let app = build_app(state);
 
     // Check if TLS is enabled
     if let (Some(cert_path), Some(key_path)) = (&settings.tls_cert, &settings.tls_key) {
@@ -239,4 +295,124 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use http::{Request, StatusCode};
+    use std::net::SocketAddr;
+    use tower::ServiceExt; // for `oneshot`
+
+    /// Settings de test : rate limit large (on ne teste pas le 429 ici),
+    /// timeout court pour trancher vite le cas lent.
+    fn test_settings(engine_url: String, timeout_ms: u64) -> GatewaySettings {
+        GatewaySettings {
+            engine_url,
+            listen_addr: "127.0.0.1:0".to_string(),
+            rate_limit_rps: 100_000,
+            burst_size: 200_000,
+            max_body_bytes: 10 * 1024 * 1024,
+            request_timeout_ms: timeout_ms,
+            max_concurrent: 512,
+            tls_cert: None,
+            tls_key: None,
+            cors_allowed_origins: vec![],
+            dashboard_path: None,
+        }
+    }
+
+    fn test_state(settings: GatewaySettings) -> GatewayState {
+        let engine_client = Arc::new(client::EngineClient::new(&settings.engine_url));
+        let services_cache: health_checker::SharedServicesCache =
+            Arc::new(tokio::sync::RwLock::new(health_checker::ServicesSnapshot {
+                services: vec![],
+                checked_at: 0,
+            }));
+        GatewayState {
+            engine_client,
+            settings: Arc::new(settings),
+            services_cache,
+        }
+    }
+
+    /// Engine mock qui dort `delay` avant de répondre, pour éprouver le
+    /// TimeoutLayer du gateway (upstream lent).
+    async fn spawn_slow_engine(delay: Duration) -> String {
+        let app = Router::new().fallback(move || async move {
+            tokio::time::sleep(delay).await;
+            "engine-ok"
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        format!("http://{addr}")
+    }
+
+    fn get(uri: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .method("GET")
+            .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4321))))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// Un upstream plus lent que le timeout gateway → le bord public répond
+    /// 408 sans attendre les 30s du client reqwest amont : borne les requêtes
+    /// lentes au lieu de tenir un slot indéfiniment.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slow_upstream_hits_gateway_timeout_408() {
+        let engine_url = spawn_slow_engine(Duration::from_secs(5)).await;
+        let app = build_app(test_state(test_settings(engine_url, 250)));
+
+        let res = app.oneshot(get("/v1/balance")).await.unwrap();
+        println!(
+            "upstream 5s + timeout gateway 250ms → status {} (attendu 408)",
+            res.status()
+        );
+        assert_eq!(
+            res.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "le TimeoutLayer du gateway doit couper la requête lente en 408"
+        );
+    }
+
+    /// Le timeout ne casse pas le chemin normal : un upstream rapide passe.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fast_upstream_passes_through() {
+        let engine_url = spawn_slow_engine(Duration::from_millis(10)).await;
+        let app = build_app(test_state(test_settings(engine_url, 5_000)));
+
+        let res = app.oneshot(get("/v1/balance")).await.unwrap();
+        let status = res.status();
+        let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8_lossy(&body);
+        println!("upstream rapide → status {status}, body {body_str:?} (attendu 200 / engine-ok)");
+        assert_eq!(status, StatusCode::OK, "un upstream rapide doit passer");
+        assert_eq!(
+            body_str, "engine-ok",
+            "le corps de l'engine doit être proxifié tel quel"
+        );
+    }
+
+    /// Les routes health restent hors de la pile défensive : `/livez` répond
+    /// sans dépendre de l'engine ni du timeout.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn health_route_bypasses_stack() {
+        // engine URL bidon : /livez ne doit pas le toucher
+        let app = build_app(test_state(test_settings(
+            "http://127.0.0.1:1".to_string(),
+            250,
+        )));
+        let res = app.oneshot(get("/livez")).await.unwrap();
+        println!("/livez → status {} (attendu 200, sans engine)", res.status());
+        assert_eq!(res.status(), StatusCode::OK);
+    }
 }
