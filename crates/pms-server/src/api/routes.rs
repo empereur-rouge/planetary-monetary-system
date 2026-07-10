@@ -321,6 +321,8 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
 
     // NOTE: per_second(N) in tower-governor 0.8 means "period of N seconds"
     // (NOT "N requests per second"). Use per_nanosecond for correct rps conversion.
+    // ⚠️ DUAL-LAYER : conversion + key_extractor identiques au gateway
+    // (`pms-gateway/src/main.rs::build_app`). Garder les deux synchronisés.
     let period_ns = 1_000_000_000u64 / (settings.limits.rate_limit_rps as u64).max(1);
     let governor_conf = Box::new(
         GovernorConfigBuilder::default()

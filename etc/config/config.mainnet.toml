@@ -66,8 +66,12 @@ whitelist_fp256 = []
 [limits]
 max_body_bytes = 1048576
 request_timeout_ms = 30000
-rate_limit_rps = 10000
-burst = 20000
+# Per-client (par IP) — resserré 10000/20000 → 1000/2000 (aligné prod/testnet).
+# À 10000 rps le bucket était quasi illimité : gap DoS pour le lancement. Pas de
+# simulateur en mainnet, donc pas de charge interne à ménager ; 1000 rps/client
+# est large pour un usage légitime. Cf. durcissement anti-DoS v0.30.2.
+rate_limit_rps = 1000
+burst = 2000
 
 [fees]
 epsilon = "0.001"

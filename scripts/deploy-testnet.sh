@@ -484,6 +484,14 @@ cat > Caddyfile.testnet << CADDY_EOF
 \$DOMAIN_NAME {
     tls admin@pms-network.com
     reverse_proxy https://pms-gateway:8443 {
+        # SECURITE (v0.30.2) : ECRASE X-Forwarded-For avec l'IP reelle du peer.
+        # Sans cette ligne Caddy APPEND a un XFF potentiellement falsifie par le
+        # client ; le rate limiter per-IP (gateway ET engine, SmartIpKeyExtractor
+        # lit la valeur la plus a gauche) devient alors contournable par rotation
+        # de XFF et empoisonnable (429 cible sur l'IP d'une victime). Le gateway
+        # forwarde ce XFF a l'engine, donc l'ecrasement DOIT etre ici. Cf. revue
+        # securite DoS v0.30.2.
+        header_up X-Forwarded-For {remote_host}
         transport http {
             tls
             tls_insecure_skip_verify

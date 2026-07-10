@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.30.2] - Unreleased — Durcissement anti-DoS (rate limiting per-client, timeouts au bord)
+
+> `Cargo.toml` workspace bumpé `0.30.1 → 0.30.2`, `pms-gateway` `0.1.0 → 0.1.3`.
+> Suite au diagnostic DoS du 2026-07-10 : le rate limiter de l'engine
+> s'effondrait en un bucket global keyé sur l'IP du gateway (per-client
+> inopérant), le gateway public n'avait ni timeout ni plafond de concurrence,
+> et les limites testnet de l'engine étaient quasi illimitées. Quatre fixes
+> (dont un must-fix issu de la revue de sécurité adversariale), chacun testé au
+> vrai boundary HTTP.
+
+### Fixed / Security
+- **sec(gateway) — rate limiting per-client rétabli à l'engine.** Le proxy
+  gateway ne transmettait que `Authorization` + `X-API-Key` à l'engine, jamais
+  `X-Forwarded-For` : le `SmartIpKeyExtractor` de l'engine voyait donc l'IP du
+  gateway pour TOUT le trafic proxifié → un unique token bucket global, qu'un
+  seul client pouvait épuiser pour tout le monde. Le gateway forwarde désormais
+  `X-Forwarded-For` (whitelist stricte `FORWARDED_HEADERS` = `Authorization`,
+  `X-API-Key`, `X-Forwarded-For` ; aucun autre header — Cookie, **X-Real-IP** —
+  n'est proxifié). `X-Real-IP` est délibérément exclu : `SmartIpKeyExtractor`
+  lit XFF en premier et Caddy le pose toujours, donc le forwarder n'élargirait
+  que la surface d'un header contrôlable par le client. L'engine key à nouveau
+  par client réel ; le trafic simulateur interne (sans XFF) reste keyé sous
+  l'IP du gateway, isolé des clients externes. `crates/pms-gateway/src/client.rs`.
+  - Test bout-en-bout (`client::tests`, engine mock enregistrant les headers
+    reçus au vrai boundary reqwest→hyper) : XFF/API-Key/Authorization forwardés,
+    Cookie ET X-Real-IP droppés.
+- **sec(deploy) — Caddy écrase X-Forwarded-For (MUST-FIX revue sécu).** Le
+  forward XFF ci-dessus n'est sûr que si Caddy **écrase** le XFF avec l'IP
+  réelle du peer ; par défaut Caddy **append** à un XFF client falsifiable, et
+  `SmartIpKeyExtractor` lisant la valeur la plus à gauche, un client pouvait
+  alors (a) faire tourner sa clé de rate limit → **évasion** totale des limites
+  gateway ET engine, ou (b) poser l'IP d'une victime → **empoisonnement** (429
+  ciblé). La revue de sécurité a montré que le prérequis n'existait qu'en doc :
+  les scripts qui GÉNÈRENT le Caddyfile (`scripts/deploy-testnet.sh`,
+  `deploy-mainnet.sh`, `deploy.sh`) ne l'écrasaient pas. Ajout de
+  `header_up X-Forwarded-For {remote_host}` dans le `reverse_proxy` généré par
+  les trois. Test-garde `deploy_scripts_overwrite_xff` (échoue si un script
+  génère le reverse_proxy gateway sans l'écrasement).
+  - ⚠️ **Séquencement déploiement** : l'image gateway (forward XFF) et le
+    Caddyfile (écrasement) doivent être déployés ENSEMBLE via `deploy-*.sh`.
+    Tant que le Caddy en cours d'exécution n'a pas le `header_up`, ne pas
+    considérer le rate limiting per-client comme actif (état spoofable).
+- **sec(gateway) — timeout + plafond de concurrence au bord public.** Le
+  gateway (bord public devant l'engine) n'installait que Governor + BodyLimit +
+  CORS : ni timeout de requête ni plafond de concurrence, alors que les features
+  tower étaient déjà compilées. Une requête lente (slow-body, upstream lent)
+  pouvait tenir un slot indéfiniment, et le nombre de requêtes in-flight était
+  non borné. Ajout de `TimeoutLayer` (`REQUEST_TIMEOUT_MS`, défaut 30 s → 408)
+  et `ConcurrencyLimitLayer` (`MAX_CONCURRENT`, défaut 512 = 2× l'engine), en
+  miroir exact de la pile de l'engine. Les routes SSE (`/blocks/stream`,
+  `/wallet/.../activity/stream`) restent saines vis-à-vis de ces deux couches :
+  leur handler retourne dès l'arrivée des headers amont, donc ni le
+  `TimeoutLayer` ni le `ConcurrencyLimitLayer` ne bornent/tiennent un slot sur
+  le flux vivant (le timeout total reqwest amont de 30 s le borne déjà, indep.
+  de ce changement). Construction du router extraite dans `build_app()`
+  (testable via `oneshot`). `crates/pms-gateway/src/main.rs`.
+  - Tests : `slow_upstream_hits_gateway_timeout_408` (upstream 5 s + timeout
+    250 ms → 408 sans attendre les 30 s reqwest), `fast_upstream_passes_through`
+    (200 + corps proxifié), `health_route_bypasses_stack` (`/livez` hors pile).
+- **sec(config) — rate limits engine resserrés (testnet + mainnet).** Les
+  limites per-client de l'engine étaient à `10000/20000` (quasi illimité) en
+  testnet ET mainnet. Devenues effectives avec le forward XFF ci-dessus, elles
+  sont resserrées à **`1000/2000`** (aligné prod) dans `config.testnet.toml` et
+  `config.mainnet.toml`. Le simulateur (keyé sous l'IP du gateway côté engine,
+  déjà plafonné à 500 rps au bord) garde 2× de marge ; les clients externes ont
+  chacun leur clé per-IP. Défaut code du gateway aussi abaissé `10000/20000 →
+  1000/2000` (secure-by-default ; testnet surcharge à 500/1000 via env).
+  Nouvelles env gateway `REQUEST_TIMEOUT_MS`/`MAX_CONCURRENT` explicitées dans
+  `docker-compose.testnet.yml`. Test-garde `deployed_configs_keep_tightened_
+  rate_limits` : **glob** `etc/config/*.toml` moins une skip-list des configs
+  non-déployées (dev/local/bench/…), échoue si un `rate_limit_rps > 2000`
+  réapparaît — secure-by-default, couvre aussi tout futur `config.<net>.toml`.
+- `API_VERSION` inchangé (**38**) : ces fixes sont du durcissement infra (edge
+  gateway + config), ils ne modifient aucun contrat/format d'endpoint engine.
+
+### Résiduel / à traiter
+- **Pas de quota par API-key** : tout le rate limiting reste keyé sur l'IP. Une
+  clé valide (ou, testnet avec key store vide → fail-open, mais store provisionné
+  actuellement) n'a pas de limite par identité. Amélioration future.
+- **Anti-slowloris** : `TimeoutLayer` borne le handler après lecture des headers ;
+  un `http1_header_read_timeout` au niveau serveur (Caddy le fait déjà au bord)
+  reste à câbler côté gateway/engine pour les déploiements sans Caddy.
+
 ## [0.30.1] - Unreleased — Durcissement sécurité API (audit « autres hijacks »)
 
 > `Cargo.toml` bumpé `0.30.0 → 0.30.1`. `API_VERSION` **36 → 37** (nouveaux

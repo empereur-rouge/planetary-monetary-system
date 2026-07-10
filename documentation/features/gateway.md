@@ -1,8 +1,8 @@
 ---
 tags: [feature, infrastructure]
 created: 2026-03-14
-updated: 2026-03-15
-version: v0.5.0
+updated: 2026-07-10
+version: v0.30.2
 ---
 
 # Gateway (Proxy Public)
@@ -12,9 +12,9 @@ version: v0.5.0
 Le Gateway est le point d'entree public unique du reseau PMS. C'est un reverse proxy Axum autonome (`pms-gateway`) qui se place entre les clients externes (SDK, dashboard, navigateurs) et le Engine interne (coordinateur). Il assure cinq responsabilites :
 
 1. **Proxy transparent** : toute requete HTTP (GET, POST, PUT, PATCH, DELETE) est relayee au Engine via un fallback catch-all. Les nouveaux endpoints Engine sont automatiquement disponibles sans modification du Gateway.
-2. **Rate limiting per-IP** : limitation de debit par adresse IP via `tower-governor` (token bucket configurable en RPS + burst).
-3. **Streaming SSE** : deux endpoints de streaming temps reel (`/blocks/stream` et `/v1/wallet/{address}/activity/stream`) sont proxifies en mode streaming (non buffered) pour maintenir la connexion SSE ouverte.
-4. **Forward d'authentification** : les headers `Authorization` et `X-API-Key` sont transmis au Engine qui applique la validation (le Gateway ne valide pas lui-meme les cles).
+2. **Rate limiting per-IP + protection DoS au bord** : limitation de debit par adresse IP via `tower-governor` (token bucket RPS + burst), plus (v0.30.2) un `TimeoutLayer` (→ 408 sur requete lente) et un `ConcurrencyLimitLayer` (plafond de requetes in-flight), en miroir de la pile du Engine. La construction du router est extraite dans `build_app()` (testable via `oneshot`).
+3. **Streaming SSE** : deux endpoints de streaming temps reel (`/blocks/stream` et `/v1/wallet/{address}/activity/stream`) sont proxifies en mode streaming (non buffered) pour maintenir la connexion SSE ouverte. Sains vis-a-vis de Timeout/Concurrency : le handler retourne des l'arrivee des headers amont, donc ces deux couches ne bornent pas / ne tiennent pas de slot sur le flux vivant (le timeout total reqwest amont de 30s le borne deja, independamment de ce changement).
+4. **Forward d'authentification + IP client** : les headers `Authorization`, `X-API-Key` **et `X-Forwarded-For`** (v0.30.2, whitelist stricte `FORWARDED_HEADERS`) sont transmis au Engine. Le forward de l'IP client permet au rate limiter du Engine de key par vrai client (voir prerequis Caddy en section Configuration). Aucun autre header (Cookie, X-Real-IP, etc.) n'est proxifie.
 5. **TLS termination** : support natif HTTPS via `axum-server` + `rustls` (certificats PEM configurables). En production, un Caddy en amont gere Let's Encrypt et proxifie vers le Gateway en TLS interne.
 6. **Health monitoring** (v0.5.0) : background health checker qui poll tous les services d'infrastructure (Engine, Prometheus, Simulator, Caddy) toutes les 20s et cache le resultat. Endpoint `GET /services/status` pour le dashboard. Voir [[service-monitoring]].
 
@@ -110,9 +110,11 @@ Le Gateway est configure exclusivement par variables d'environnement (pas de fic
 |----------|------|--------|-------------|
 | `UPSTREAM_URL` | String | `http://127.0.0.1:8080` | URL du Engine interne. Alias : `ENGINE_URL` |
 | `LISTEN_ADDR` | String | `0.0.0.0:8443` | Adresse d'ecoute du Gateway |
-| `RATE_LIMIT_RPS` | u64 | `10000` | Nombre de requetes par seconde par IP |
-| `BURST_SIZE` | u32 | `20000` | Taille du burst (token bucket) par IP |
+| `RATE_LIMIT_RPS` | u64 | `1000` | Requetes/seconde par IP (secure-by-default depuis v0.30.2 ; etait 10000) |
+| `BURST_SIZE` | u32 | `2000` | Taille du burst (token bucket) par IP |
 | `MAX_BODY_BYTES` | usize | `10485760` (10 MB) | Limite de taille du body HTTP |
+| `REQUEST_TIMEOUT_MS` | u64 | `30000` | (v0.30.2) Timeout par requete au bord public → 408. Ne coupe pas les flux SSE |
+| `MAX_CONCURRENT` | usize | `512` | (v0.30.2) Plafond de requetes concurrentes in-flight (2× le plafond engine) |
 | `TLS_CERT` | String | (aucun) | Chemin vers le certificat PEM. Si absent, HTTP plain |
 | `TLS_KEY` | String | (aucun) | Chemin vers la cle privee PEM |
 | `CORS_ALLOWED_ORIGINS` | String | (vide) | Origines CORS autorisees, separees par virgule. Si vide ou `*`, mode permissif |
@@ -135,9 +137,43 @@ BURST_SIZE: 2000
 ```yaml
 # docker-compose.testnet.yml (testnet, simule config prod avec HTTPS)
 UPSTREAM_URL: https://pms-engine:8080   # HTTPS auto-signe (v0.4.3: danger_accept_invalid_certs)
-RATE_LIMIT_RPS: 50000
-BURST_SIZE: 100000
+RATE_LIMIT_RPS: 500     # 5 spammers partagent l'IP docker du simulateur
+BURST_SIZE: 1000
+REQUEST_TIMEOUT_MS: 30000
+MAX_CONCURRENT: 512
 ```
+
+### ⚠️ Prerequis Caddy — X-Forwarded-For fiable (v0.30.2, load-bearing)
+
+Depuis v0.30.2, le Gateway **forwarde `X-Forwarded-For` au Engine** (whitelist
+`FORWARDED_HEADERS` ; `X-Real-IP` volontairement exclu — jamais lu par
+`SmartIpKeyExtractor` et controlable par le client) pour que le rate limiter
+per-IP du Engine key sur le vrai client et non sur l'IP du Gateway (sinon bucket
+global, faille DoS). Ce keying n'est fiable **que si Caddy ecrase**
+`X-Forwarded-For` avec l'adresse reelle du peer. **Cet ecrasement est injecte
+automatiquement par les scripts de deploiement** (`scripts/deploy-testnet.sh`,
+`deploy-mainnet.sh`, `deploy.sh`) dans le `reverse_proxy` genere ; garde de
+non-regression : `deploy_scripts_overwrite_xff` (crate `pms-config`).
+
+```caddyfile
+testnet.pms-network.com {
+    reverse_proxy https://pms-gateway:8443 {
+        header_up X-Forwarded-For {remote_host}   # ← ECRASE (pas append)
+        transport http { tls tls_insecure_skip_verify }
+    }
+}
+```
+
+Sans cette ligne, Caddy **ajoute** l'IP client a un XFF eventuellement falsifie ;
+`SmartIpKeyExtractor` prenant la valeur de gauche, le client controlerait sa cle
+(evasion) ou celle d'une victime (empoisonnement, 429 cible). Le Gateway n'etant
+joignable que via Caddy (public) et le simulateur (interne, de confiance),
+forwarder le XFF est sur sous cette condition.
+
+⚠️ **Sequencement** : l'image gateway (forward XFF) et le Caddyfile (ecrasement)
+doivent etre deployes ENSEMBLE. Un `upgrade-*.sh` qui ne regenere pas le
+Caddyfile laisse le Caddy en cours SANS l'ecrasement → etat spoofable ; utiliser
+`deploy-*.sh` (regenere + pousse le Caddyfile) pour ce changement.
 
 > **Note (v0.4.3)** : Le Gateway accepte les certificats auto-signes via `danger_accept_invalid_certs(true)` quand `UPSTREAM_URL` commence par `https://`. L'option `api_tls_enabled` dans `[client]` (voir [[config-system]]) permet de desactiver le TLS API independamment du P2P si necessaire (default: `true`).
 
