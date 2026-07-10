@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.30.2] - Unreleased — Durcissement anti-DoS (rate limiting per-client, timeouts au bord)
+
+> `Cargo.toml` workspace bumpé `0.30.1 → 0.30.2`, `pms-gateway` `0.1.0 → 0.1.1`.
+> Suite au diagnostic DoS du 2026-07-10 : le rate limiter de l'engine
+> s'effondrait en un bucket global keyé sur l'IP du gateway (per-client
+> inopérant), le gateway public n'avait ni timeout ni plafond de concurrence,
+> et les limites testnet de l'engine étaient quasi illimitées. Trois fixes,
+> chacun testé au vrai boundary HTTP.
+
+### Fixed / Security
+- **sec(gateway) — rate limiting per-client rétabli à l'engine.** Le proxy
+  gateway ne transmettait que `Authorization` + `X-API-Key` à l'engine, jamais
+  `X-Forwarded-For` : le `SmartIpKeyExtractor` de l'engine voyait donc l'IP du
+  gateway pour TOUT le trafic proxifié → un unique token bucket global, qu'un
+  seul client pouvait épuiser pour tout le monde. Le gateway forwarde désormais
+  `X-Forwarded-For` et `X-Real-IP` (whitelist stricte `FORWARDED_HEADERS` —
+  aucun header ambiant type Cookie n'est proxifié). L'engine key à nouveau par
+  client réel ; le trafic simulateur interne (sans XFF) reste keyé sous l'IP du
+  gateway, isolé des clients externes. `crates/pms-gateway/src/client.rs`.
+  - **Prérequis de déploiement** : Caddy DOIT écraser `X-Forwarded-For` avec
+    l'adresse réelle du peer (`header_up X-Forwarded-For {remote_host}`), sinon
+    un client peut pré-poser un XFF falsifié et faire tourner sa clé de rate
+    limit. Cf. `documentation/features/gateway.md`.
+  - Test bout-en-bout (`client::tests`, engine mock enregistrant les headers
+    reçus au vrai boundary reqwest→hyper) : XFF/X-Real-IP/API-Key/Authorization
+    forwardés, Cookie droppé.
+
 ## [0.30.1] - Unreleased — Durcissement sécurité API (audit « autres hijacks »)
 
 > `Cargo.toml` bumpé `0.30.0 → 0.30.1`. `API_VERSION` **36 → 37** (nouveaux
