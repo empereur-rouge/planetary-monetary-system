@@ -6,6 +6,7 @@ pub mod config;
 pub mod consolidation;
 pub mod contracts;
 pub mod coordinator;
+pub mod custodial;
 pub mod gas_pool;
 pub mod dag;
 pub mod estimate_fee;

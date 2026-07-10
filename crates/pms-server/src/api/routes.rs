@@ -114,6 +114,16 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
         // Royalty change — returns the canonical message the CURRENT beneficiary
         // must sign to authorize a change (no block; non-custodial signing path).
         .route("/v1/royalty/prepare", post(crate::api_fn::market::royalty_prepare))
+        // Custodial mint prepare (protocole 2.8) — returns the message + nonce the
+        // mint_authority must sign (no block; non-custodial signing path).
+        .route(
+            "/v1/sft/mint/prepare",
+            post(crate::api_fn::custodial::custodial_mint_prepare),
+        )
+        .route(
+            "/v1/tokens/mint/prepare",
+            post(crate::api_fn::custodial::custodial_mint_prepare),
+        )
         .route("/v1/wallet/create", post(wallet_create));
 
     // Write-producing wallet endpoints — gated.
@@ -138,6 +148,23 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
         .route(
             "/v1/royalty/update",
             post(crate::api_fn::market::royalty_update),
+        )
+        // Custodial provisioning (protocole 2.8) — create + mint token/SFT
+        // authorized by the CREATOR's / mint_authority's key (NO admin token).
+        // creator = mint_authority = derived address; mint bounded by max_supply,
+        // signature + cap + anti-replay re-verified at consensus.
+        .route(
+            "/v1/sft/classes",
+            post(crate::api_fn::custodial::create_sft_class_custodial),
+        )
+        .route(
+            "/v1/tokens/create",
+            post(crate::api_fn::custodial::create_token_custodial),
+        )
+        .route("/v1/sft/mint", post(crate::api_fn::custodial::custodial_mint))
+        .route(
+            "/v1/tokens/mint",
+            post(crate::api_fn::custodial::custodial_mint),
         );
 
     let blocks = Router::new().route("/blocks/stream", get(stream_blocks));

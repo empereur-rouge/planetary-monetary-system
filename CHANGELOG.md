@@ -10,13 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.31.0] - Unreleased — Provisionnement custodial d'assets (token + SFT sans token admin, protocole 2.8)
 
 > `Cargo.toml` workspace `0.30.3 → 0.31.0` (feature MINOR). `DAG_VERSION`
-> `3.14.0 → 3.15.0`, `CURRENT_VER` `12 → 13` (deux nouveaux CFs, auto-migrating).
-> `API_VERSION` sera bumpé en P2 (routes `/v1`). Feature en 3 phases ; ceci est
-> **P1 — protocole + storage** (le cœur consensus). ⚠️ Mixed-version P2P : un nœud
-> < 3.15.0 ne sait pas désérialiser un `CustodialMint` → upgrade coordonné AVANT
-> tout mint custodial.
+> `3.14.0 → 3.15.0`, `CURRENT_VER` `12 → 13` (deux nouveaux CFs, auto-migrating),
+> `API_VERSION` `38 → 39` (routes `/v1` custodiales). Feature en 3 phases : **P1**
+> protocole+storage (consensus), **P2** routes API `/v1`, **P3** SDK+docs.
+> ⚠️ Mixed-version P2P : un nœud < 3.15.0 ne sait pas désérialiser un `CustodialMint`
+> → upgrade coordonné AVANT tout mint custodial.
 
-### Added
+### Added (P2 — API `/v1`, API-key, PAS admin)
+- **feat(api) — provisionnement custodial sans token admin** : `POST /v1/sft/classes`
+  + `POST /v1/tokens/create` (create ; `creator = mint_authority =` adresse dérivée
+  de `creator_private_key_b64`, jamais fournie en clair → anti-usurpation), `POST
+  /v1/sft/mint` + `POST /v1/tokens/mint` (mint, autorisé par `mint_authority_private_key_b64`
+  custodiale OU `(auth_pubkey_hex + auth_signature_b64 + mint_nonce)` pré-signés),
+  `POST /v1/{sft,tokens}/mint/prepare` (renvoie message + nonce à signer, voie
+  non-custodiale). Nouveau module `crates/pms-server/src/api_fn/custodial.rs`.
+  Nouveau scope API-key `"sft"` (les routes `/v1/tokens/*` réutilisent `"tokens"`).
+  `API_VERSION` `38 → 39`. Test sandbox e2e `test_custodial_provisioning_end_to_end`
+  (chemin HTTP réel : create → mint → mauvaise-clé 403 → transfert → marketSettle
+  royalty ; le créateur encaisse exactement la royalty, ZÉRO token admin).
+
+### Added (P1 — protocole + storage)
 - **feat(protocol) — `PlainPayload::CustodialMint`** : mint d'un token fongible OU
   d'une classe SFT autorisé par la **signature du `mint_authority`** embarquée dans
   le payload (`auth_pubkey_hex` + `auth_signature_b64` + `mint_nonce`), PAS par le

@@ -72,7 +72,7 @@ pub struct SettleResponse {
 /// Résout les métadonnées d'un asset custom (token OU classe SFT, vue
 /// `TokenMetadata`). Mutuellement exclusifs (namespace `:`), donc au plus un
 /// match. Miroir serveur de `CoreAdapter::resolve_asset_metadata`.
-fn resolve_meta(state: &AppState, asset_id: &str) -> Option<TokenMetadata> {
+pub(crate) fn resolve_meta(state: &AppState, asset_id: &str) -> Option<TokenMetadata> {
     if let Ok(Some(m)) = state.store.get_token(asset_id) {
         return Some(m);
     }
@@ -95,7 +95,7 @@ fn resolve_meta(state: &AppState, asset_id: &str) -> Option<TokenMetadata> {
 /// interne loggée). Le custodial (creator-studio) tient les deux clés et ne
 /// devrait jamais l'atteindre en pratique ; le `label` distingue les deux flux
 /// dans les logs.
-async fn forge_persist_plain(
+pub(crate) async fn forge_persist_plain(
     state: &AppState,
     payload: PlainPayload,
     label: &str,
