@@ -62,12 +62,15 @@ use axum::{
 };
 use pms_config::Settings;
 use serde_json::json;
+use governor::middleware::NoOpMiddleware;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::sleep;
 use tower_governor::GovernorLayer;
-use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::SmartIpKeyExtractor;
+use tower_governor::errors::GovernorError;
+use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
+use tower_governor::key_extractor::{KeyExtractor, SmartIpKeyExtractor};
 use tower_http::{
     catch_panic::CatchPanicLayer,
     cors::{Any, CorsLayer},
@@ -310,27 +313,111 @@ async fn debug_slow(State(_state): State<AppState>) -> impl IntoResponse {
     "slow-ok"
 }
 
+/// Clé de rate limit dérivée du header `X-API-Key` (quota par identité, v0.30.3).
+///
+/// Le rate limit per-IP (`SmartIpKeyExtractor`) ne stoppe pas une clé valide
+/// abusée depuis plusieurs IPs (botnet). Ce quota per-key complète : il borne le
+/// débit d'écriture d'UNE clé, quelle que soit l'IP. Appliqué UNIQUEMENT aux
+/// routes write API-key-gated, **APRÈS `require_api_key`** (cf. `build_api_router`) :
+/// une clé invalide/tournante est 401 AVANT de créer un bucket, ce qui borne le
+/// store du rate limiter à l'ensemble des clés valides (+ sentinelle) — sans ça
+/// un attaquant faisant tourner de fausses clés ferait grossir le store sans fin
+/// (vecteur OOM). La clé est le HASH `u64` (SipHash) du header, pas sa valeur en
+/// clair — pas de secret retenu en RAM du rate limiter. Header absent →
+/// sentinelle partagée (seuls des appelants déjà authentifiés, ex. admin-bypass,
+/// l'atteignent après le gate auth).
+#[derive(Clone)]
+pub(super) struct ApiKeyKeyExtractor;
+
+impl KeyExtractor for ApiKeyKeyExtractor {
+    type Key = u64;
+
+    fn extract<T>(&self, req: &http::Request<T>) -> Result<Self::Key, GovernorError> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        req.headers()
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("\0__no_api_key__")
+            .hash(&mut h);
+        Ok(h.finish())
+    }
+}
+
+/// Intervalle de GC des stores de rate limit. tower_governor stocke l'état
+/// par-clé dans une DashMap qui **ne s'auto-évince jamais** (cf. son README) :
+/// sans `retain_recent()` périodique, le store grossit indéfiniment (une entrée
+/// par IP vue / par clé). Requis pour les deux governors (per-IP : une entrée
+/// par IP cliente au fil du temps ; per-key : borné aux clés valides depuis le
+/// re-ordering, mais on GC par sécurité).
+const GOVERNOR_GC_INTERVAL: Duration = Duration::from_secs(120);
+
+/// Construit une `GovernorConfig` (partagée par le governor per-IP et per-key).
+/// Le footgun `per_nanosecond` (tower-governor 0.8 : `per_second(N)` = période de
+/// N secondes, PAS N req/s) vit ici, une seule fois.
+///
+/// ⚠️ DUAL-LAYER : conversion identique au gateway
+/// (`pms-gateway/src/main.rs::build_app`) — garder synchronisé.
+pub(super) fn governor_config<K: KeyExtractor>(
+    rps: u32,
+    burst: u32,
+    key_extractor: K,
+) -> GovernorConfig<K, NoOpMiddleware> {
+    let period_ns = 1_000_000_000u64 / (rps as u64).max(1);
+    GovernorConfigBuilder::default()
+        .per_nanosecond(period_ns)
+        .burst_size(burst)
+        .key_extractor(key_extractor)
+        .finish()
+        .expect("GovernorConfig: invalid rps or burst (0 or > 1e9)")
+}
+
+/// Enveloppe une `GovernorConfig` dans un `Arc` et **spawn une tâche GC**
+/// (`retain_recent()` toutes les [`GOVERNOR_GC_INTERVAL`]) qui évince les entrées
+/// idle du store — sinon fuite mémoire non bornée (vecteur OOM). Retourne l'`Arc`
+/// à passer à `GovernorLayer::new`. Doit être appelé dans un runtime tokio (tous
+/// les appelants de `build_api_router` en ont un).
+fn governor_with_gc<K>(
+    config: GovernorConfig<K, NoOpMiddleware>,
+    label: &'static str,
+) -> Arc<GovernorConfig<K, NoOpMiddleware>>
+where
+    K: KeyExtractor + 'static,
+    K::Key: Send + Sync,
+{
+    let conf = Arc::new(config);
+    let limiter = conf.limiter().clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(GOVERNOR_GC_INTERVAL);
+        loop {
+            tick.tick().await;
+            limiter.retain_recent();
+        }
+    });
+    tracing::debug!(governor = label, "GC task (retain_recent) spawned");
+    conf
+}
+
 /// Construit le Router HTTP complet (public + admin + debug) avec les layers de sécurité.
 /// Utilisable depuis le serveur **et** depuis les tests.
 pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
+    let (per_key_rps, per_key_burst) = settings.limits.effective_api_key_limits();
     tracing::info!(
-        "🔒 Engine Rate Limit: {} rps, Burst: {}",
+        "🔒 Engine Rate Limit: {} rps / burst {} (per-IP), {} rps / burst {} (per-API-key, routes write)",
         settings.limits.rate_limit_rps,
-        settings.limits.burst
+        settings.limits.burst,
+        per_key_rps,
+        per_key_burst
     );
 
-    // NOTE: per_second(N) in tower-governor 0.8 means "period of N seconds"
-    // (NOT "N requests per second"). Use per_nanosecond for correct rps conversion.
-    // ⚠️ DUAL-LAYER : conversion + key_extractor identiques au gateway
-    // (`pms-gateway/src/main.rs::build_app`). Garder les deux synchronisés.
-    let period_ns = 1_000_000_000u64 / (settings.limits.rate_limit_rps as u64).max(1);
-    let governor_conf = Box::new(
-        GovernorConfigBuilder::default()
-            .per_nanosecond(period_ns)
-            .burst_size(settings.limits.burst as u32)
-            .key_extractor(SmartIpKeyExtractor)
-            .finish()
-            .expect("GovernorConfig: invalid rate_limit_rps or burst"),
+    // Governor per-IP (global) + tâche GC du store.
+    let governor_conf = governor_with_gc(
+        governor_config(
+            settings.limits.rate_limit_rps,
+            settings.limits.burst,
+            SmartIpKeyExtractor,
+        ),
+        "per_ip",
     );
 
     // Endpoint: /livez (Check process UP)
@@ -624,7 +711,23 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
     let auth_ledger_read_routes = auth_ledger_read_routes.route_layer(
         middleware::from_fn_with_state(state.clone(), require_api_key),
     );
+    // Quota PAR API-KEY (v0.30.3) — borne le débit d'écriture d'UNE clé, quelle
+    // que soit l'IP (le governor per-IP global, lui, ne stoppe pas une clé
+    // abusée depuis plusieurs IPs). Défaut = limite per-IP (cf.
+    // Limits::effective_api_key_limits) + GC du store.
+    let per_key_governor = governor_with_gc(
+        governor_config(per_key_rps, per_key_burst, ApiKeyKeyExtractor),
+        "per_api_key",
+    );
+    // ORDRE CRITIQUE (revue sécu v0.30.3) : le governor per-key est le PLUS
+    // INTERNE → il s'exécute APRÈS `require_api_key`. Une clé invalide/tournante
+    // est donc 401 AVANT de créer un bucket : le store reste borné aux clés
+    // valides (+ sentinelle atteinte seulement par l'admin-bypass déjà auth).
+    // Le mettre outermost (avant l'auth) laisserait un attaquant faire grossir
+    // le store sans fin avec de fausses clés (vecteur OOM) ET contourner le
+    // quota (chaque fausse clé = bucket frais).
     let auth_ledger_write_routes = auth_ledger_write_routes
+        .route_layer(GovernorLayer::new(per_key_governor))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_writable,
@@ -713,4 +816,95 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .layer(TraceLayer::new_for_http())
         // 0. Catch panics in handlers → 500 instead of killing the server
         .layer(CatchPanicLayer::new())
+}
+
+#[cfg(test)]
+mod api_key_quota_tests {
+    use super::{governor_config, ApiKeyKeyExtractor};
+    use axum::body::Body;
+    use axum::routing::post;
+    use axum::Router;
+    use http::{Request, StatusCode};
+    use tower::ServiceExt; // oneshot
+    use tower_governor::key_extractor::KeyExtractor;
+    use tower_governor::GovernorLayer;
+
+    fn req_with_key(key: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("POST").uri("/w");
+        if let Some(k) = key {
+            b = b.header("x-api-key", k);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// L'extracteur dérive une clé DISTINCTE par valeur de `X-API-Key`, STABLE
+    /// pour une même valeur, et une sentinelle partagée quand le header manque.
+    #[test]
+    fn extractor_keys_per_api_key_value() {
+        let ex = ApiKeyKeyExtractor;
+        let a1 = ex.extract(&req_with_key(Some("keyA"))).unwrap();
+        let a2 = ex.extract(&req_with_key(Some("keyA"))).unwrap();
+        let b = ex.extract(&req_with_key(Some("keyB"))).unwrap();
+        let none1 = ex.extract(&req_with_key(None)).unwrap();
+        let none2 = ex.extract(&req_with_key(None)).unwrap();
+        println!("keyA→{a1} (stable {a2}), keyB→{b}, no-key→{none1} (stable {none2})");
+        assert_eq!(a1, a2, "même clé → même bucket");
+        assert_ne!(a1, b, "clés différentes → buckets différents (isolation)");
+        assert_eq!(none1, none2, "no-key → sentinelle stable");
+        assert_ne!(a1, none1, "une clé réelle ≠ la sentinelle no-key");
+    }
+
+    /// Bout-en-bout via le VRAI wiring (`per_api_key_governor_config` +
+    /// `GovernorLayer`, ceux de la prod) : une clé qui dépasse son burst prend
+    /// 429, tandis qu'une AUTRE clé garde un bucket frais (isolation per-key).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn per_key_quota_throttles_one_key_and_isolates_others() {
+        let burst = 3u32;
+        // Utilise le VRAI helper de prod (governor_config + ApiKeyKeyExtractor).
+        let cfg = governor_config(2, burst, ApiKeyKeyExtractor); // 2 rps, burst 3
+        let app = Router::new()
+            .route("/w", post(|| async { StatusCode::OK }))
+            .route_layer(GovernorLayer::new(cfg));
+
+        // Clé A : on dépasse le burst → au moins un 429.
+        let mut a_statuses = Vec::new();
+        for _ in 0..(burst + 3) {
+            let res = app.clone().oneshot(req_with_key(Some("keyA"))).await.unwrap();
+            a_statuses.push(res.status());
+        }
+        let a_429 = a_statuses.iter().filter(|s| **s == StatusCode::TOO_MANY_REQUESTS).count();
+        let a_ok = a_statuses.iter().filter(|s| **s == StatusCode::OK).count();
+        println!("keyA: {a_ok} OK, {a_429} × 429 sur {} requêtes (burst {burst})", burst + 3);
+        assert!(a_429 >= 1, "keyA doit se faire throttler (429) au-delà du burst");
+        assert!(a_ok >= 1, "keyA doit passer au moins le burst initial");
+
+        // Clé B : bucket frais (isolation) → la 1ʳᵉ requête n'est PAS 429.
+        let res_b = app.clone().oneshot(req_with_key(Some("keyB"))).await.unwrap();
+        println!("keyB (bucket frais): {}", res_b.status());
+        assert_ne!(
+            res_b.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "keyB (clé distincte) ne doit PAS hériter du throttle de keyA"
+        );
+    }
+
+    /// L'enveloppe `governor_with_gc` (Arc + spawn de la tâche `retain_recent`)
+    /// ne casse PAS le rate limiting : la config renvoyée throttle toujours.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn governor_with_gc_preserves_throttling() {
+        use super::governor_with_gc;
+        let cfg = governor_with_gc(governor_config(2, 3, ApiKeyKeyExtractor), "test_gc");
+        let app = Router::new()
+            .route("/w", post(|| async { StatusCode::OK }))
+            .route_layer(GovernorLayer::new(cfg));
+
+        let mut statuses = Vec::new();
+        for _ in 0..6 {
+            let res = app.clone().oneshot(req_with_key(Some("k"))).await.unwrap();
+            statuses.push(res.status());
+        }
+        let n_429 = statuses.iter().filter(|s| **s == StatusCode::TOO_MANY_REQUESTS).count();
+        println!("GC-wrapped config: {statuses:?} → {n_429} × 429");
+        assert!(n_429 >= 1, "la config enveloppée par GC doit toujours throttler");
+    }
 }

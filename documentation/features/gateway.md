@@ -115,6 +115,7 @@ Le Gateway est configure exclusivement par variables d'environnement (pas de fic
 | `MAX_BODY_BYTES` | usize | `10485760` (10 MB) | Limite de taille du body HTTP |
 | `REQUEST_TIMEOUT_MS` | u64 | `30000` | (v0.30.2) Timeout par requete au bord public → 408. Ne coupe pas les flux SSE |
 | `MAX_CONCURRENT` | usize | `512` | (v0.30.2) Plafond de requetes concurrentes in-flight (2× le plafond engine) |
+| `HEADER_READ_TIMEOUT_MS` | u64 | `15000` | (v0.30.3) Anti-slowloris : ferme une connexion qui n'a pas fini d'envoyer ses headers (chemin TLS uniquement) |
 | `TLS_CERT` | String | (aucun) | Chemin vers le certificat PEM. Si absent, HTTP plain |
 | `TLS_KEY` | String | (aucun) | Chemin vers la cle privee PEM |
 | `CORS_ALLOWED_ORIGINS` | String | (vide) | Origines CORS autorisees, separees par virgule. Si vide ou `*`, mode permissif |

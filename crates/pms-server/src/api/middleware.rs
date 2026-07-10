@@ -111,15 +111,22 @@ pub(super) async fn require_admin_token(
 /// - Si clé invalide → 403 "Invalid API Key"
 /// - Si clé révoquée → 403 "API Key revoked"
 /// - Si scope insuffisant → 403 "Insufficient permissions"
-/// Decide whether an EMPTY API-key store should fail OPEN (dev/testnet
-/// convenience) or CLOSED (production safety).
+/// Decide whether an EMPTY API-key store should fail OPEN (local dev only) or
+/// CLOSED (testnet + mainnet).
 ///
-/// In production (`Mainnet`) an empty store is a misconfiguration that would
-/// silently leave every API-key-gated write route fully open, so we fail
-/// closed. Dev/Testnet stay permissive so local sandboxes and the testnet
-/// don't need keys provisioned to function.
+/// An empty store on a NETWORKED deployment (testnet ou mainnet) est une
+/// misconfiguration qui laisserait silencieusement TOUTES les routes
+/// API-key-gated (send-simple, nft/mint, submit/block, market/settle) grandes
+/// ouvertes — un fail-open exploitable (revue sécu DoS v0.30.2 : combiné à un
+/// rate limiting spoofable, le testnet n'avait aucun plafond sur l'abus
+/// anonyme). Seul le mode **Dev** (sandbox local, jamais exposé) reste
+/// permissif pour ne pas exiger de clés provisionnées en développement.
+///
+/// Le store testnet EST provisionné en pratique (prouvé par les 401 de
+/// l'attaque `no_auth` de l'adversarial simulator), donc ce durcissement ne
+/// change rien au fonctionnement nominal — il ferme juste le fail-open.
 pub(super) fn empty_key_store_allows(mode: &pms_config::NetworkMode) -> bool {
-    !mode.is_prod()
+    matches!(mode, pms_config::NetworkMode::Dev)
 }
 
 pub(super) async fn require_api_key(
@@ -136,11 +143,11 @@ pub(super) async fn require_api_key(
     // Lire le store (read lock — non-bloquant pour les autres lecteurs)
     let store = state.api_key_store.read().await;
 
-    // Store vide : permissif en dev/testnet (sandbox, testnet sans clés), mais
-    // FAIL-CLOSED en production. Sans ce garde, un déploiement mainnet sans
+    // Store vide : permissif en DEV LOCAL uniquement (sandbox), FAIL-CLOSED en
+    // testnet ET mainnet. Sans ce garde, un déploiement networké sans
     // `api_keys.json` provisionné laisserait TOUTES les routes API-key-gated
     // (send-simple, nft/mint, submit/block, market/settle) grandes ouvertes —
-    // un fail-open silencieux. Cf. revue sécurité v0.30.1.
+    // un fail-open silencieux. Cf. revue sécurité v0.30.1 + DoS v0.30.2.
     if store.is_empty() {
         drop(store); // Libérer le lock avant de continuer
         if empty_key_store_allows(&state.settings.network.mode) {
@@ -263,17 +270,19 @@ mod tests {
     use pms_config::NetworkMode;
 
     #[test]
-    fn empty_api_key_store_fails_closed_only_in_prod() {
-        // Dev / Testnet: an empty store stays permissive (sandbox, testnet).
+    fn empty_api_key_store_fails_open_only_in_dev() {
+        // Dev local: an empty store stays permissive (sandbox convenience).
         assert!(
             empty_key_store_allows(&NetworkMode::Dev),
             "Dev must allow an empty key store (fail-open for local sandboxes)"
         );
+        // Testnet: NETWORKÉ → un store vide est une misconfiguration → fail CLOSED
+        // (durcissement DoS v0.30.2 ; auparavant fail-open).
         assert!(
-            empty_key_store_allows(&NetworkMode::Testnet),
-            "Testnet must allow an empty key store"
+            !empty_key_store_allows(&NetworkMode::Testnet),
+            "Testnet must REJECT an empty key store (fail-closed depuis v0.30.2)"
         );
-        // Mainnet: an empty store is a misconfiguration → fail CLOSED.
+        // Mainnet: idem, fail CLOSED.
         assert!(
             !empty_key_store_allows(&NetworkMode::Mainnet),
             "Mainnet must REJECT an empty key store (no silent fail-open in prod)"

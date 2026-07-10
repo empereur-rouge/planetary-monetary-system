@@ -65,6 +65,12 @@ pub struct GatewaySettings {
     /// réponse). Défaut 512 = 2× le plafond engine (256, hardcodé dans
     /// `routes.rs`), pour absorber les bursts avant que l'engine ne queue.
     pub max_concurrent: usize,
+    /// Timeout de lecture des headers de requête (anti-slowloris, ms). Une
+    /// connexion qui n'a pas fini d'envoyer ses headers est fermée par hyper →
+    /// un client qui distille des octets ne peut plus tenir un socket
+    /// indéfiniment. Agit AVANT le `TimeoutLayer` (qui ne borne que le handler
+    /// après lecture des headers). Appliqué uniquement au chemin TLS.
+    pub header_read_timeout_ms: u64,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     /// Origines CORS autorisées (séparées par virgule).
@@ -112,6 +118,10 @@ impl GatewaySettings {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(512), // 2× le plafond engine (256) pour absorber les bursts
+            header_read_timeout_ms: std::env::var("HEADER_READ_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(15_000), // 15s — généreux, borne le slowloris sans couper un client lent
             tls_cert: std::env::var("TLS_CERT").ok(),
             tls_key: std::env::var("TLS_KEY").ok(),
             cors_allowed_origins: cors_origins,
@@ -261,9 +271,10 @@ async fn main() -> Result<()> {
         settings.burst_size
     );
     tracing::info!(
-        "   Timeout: {} ms, Max concurrent: {}",
+        "   Timeout: {} ms, Max concurrent: {}, Header read timeout: {} ms",
         settings.request_timeout_ms,
-        settings.max_concurrent
+        settings.max_concurrent,
+        settings.header_read_timeout_ms
     );
 
     let engine_client = Arc::new(client::EngineClient::new(&settings.engine_url));
@@ -293,7 +304,19 @@ async fn main() -> Result<()> {
         let addr: std::net::SocketAddr = settings.listen_addr.parse()?;
 
         tracing::info!("🚪 Gateway listening on https://{}", addr);
-        axum_server::bind_rustls(addr, config)
+        let mut server = axum_server::bind_rustls(addr, config);
+        // Anti-slowloris : ferme les connexions qui n'ont pas fini d'envoyer
+        // leurs headers. `timer` OBLIGATOIRE (hyper-util panique sinon).
+        // ⚠️ DUAL-LAYER : même chaîne que `pms-server/src/api/serve.rs::
+        // apply_header_read_timeout` (crates séparés). Garder synchronisé.
+        server
+            .http_builder()
+            .http1()
+            .timer(hyper_util::rt::TokioTimer::new())
+            .header_read_timeout(std::time::Duration::from_millis(
+                settings.header_read_timeout_ms,
+            ));
+        server
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await?;
     } else {
@@ -330,6 +353,7 @@ mod tests {
             max_body_bytes: 10 * 1024 * 1024,
             request_timeout_ms: timeout_ms,
             max_concurrent: 512,
+            header_read_timeout_ms: 15_000,
             tls_cert: None,
             tls_key: None,
             cors_allowed_origins: vec![],

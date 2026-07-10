@@ -47,6 +47,35 @@ pub(crate) fn derive_address_from_keys(
     Ok(encode(hrp, payload.to_base32(), Variant::Bech32m)?)
 }
 
+/// Timeout de lecture des headers de requête (anti-slowloris, v0.30.3).
+/// Une connexion qui n'a pas fini d'envoyer ses headers au bout de ce délai
+/// est fermée par hyper → un client qui distille des octets ne peut plus tenir
+/// un socket/task indéfiniment. Le `TimeoutLayer` (couche tower) ne borne QUE
+/// le handler APRÈS lecture des headers ; ce garde agit AVANT. Générreux (15s)
+/// pour ne jamais couper un client réseau légitime lent. Défense en profondeur :
+/// Caddy borne déjà la lecture au bord public, ce garde couvre l'engine si
+/// exposé plus directement.
+const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Configure le garde anti-slowloris (`header_read_timeout`) sur un serveur
+/// `axum_server` avant `serve()`. Le `timer` est OBLIGATOIRE : hyper-util
+/// **panique** si `header_read_timeout` est posé sans timer. Générique sur
+/// l'acceptor pour couvrir tous les chemins (TLS en prod, plain en test).
+///
+/// ⚠️ DUAL-LAYER : le gateway câble le MÊME `.http1().timer().header_read_timeout()`
+/// inline dans `pms-gateway/src/main.rs` (crates séparés, pas de crate http
+/// partagée). Garder les deux synchronisés (timer obligatoire, valeur du timeout).
+fn apply_header_read_timeout<Addr: axum_server::Address, Acc>(
+    server: &mut axum_server::Server<Addr, Acc>,
+    timeout: std::time::Duration,
+) {
+    server
+        .http_builder()
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(timeout);
+}
+
 pub async fn serve_api(
     addr: &str,
     srv: Arc<Server>,
@@ -268,6 +297,22 @@ pub async fn serve_api(
         emission_gate,
     };
 
+    // Diagnostic fail-closed (v0.30.2) : sur un déploiement networké
+    // (testnet/mainnet), un store de clés API vide fait REJETER (401) toutes les
+    // routes write API-key-gated — le middleware `require_api_key` fail-closed
+    // hors Dev. Logguer fort au boot pour que l'opérateur voie immédiatement la
+    // cause si les writes 401, au lieu de la découvrir en prod.
+    if !matches!(state.settings.network.mode, pms_config::NetworkMode::Dev)
+        && state.api_key_store.read().await.is_empty()
+    {
+        tracing::error!(
+            mode = ?state.settings.network.mode,
+            "🔒 API key store VIDE en mode networké — toutes les routes write API-key-gated \
+             renverront 401 (fail-closed). Provisionner `api_keys.json` (settings.auth.api_keys_file) \
+             ou POST /admin/api-keys avant d'ouvrir aux clients."
+        );
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // WEBHOOK DELIVERY LOOP (Phase 4) — subscribes to BlockPersisted and
     // POSTs HMAC-signed bodies to registered SaaS callbacks. Cheap when no
@@ -443,7 +488,9 @@ pub async fn serve_api(
             let tls_cfg = load_tls(&tls.cert_pem, &tls.key_pem)?;
             let tls_cfg = RustlsConfig::from_config(Arc::new(tls_cfg));
 
-            bind_rustls(addr, tls_cfg)
+            let mut server = bind_rustls(addr, tls_cfg);
+            apply_header_read_timeout(&mut server, HEADER_READ_TIMEOUT);
+            server
                 .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await?;
             return Ok(());
@@ -463,7 +510,9 @@ pub async fn serve_api(
 
         let tls_cfg = load_tls(&tls.cert_pem, &tls.key_pem)?;
         let tls_cfg = RustlsConfig::from_config(Arc::new(tls_cfg));
-        bind_rustls(addr, tls_cfg)
+        let mut server = bind_rustls(addr, tls_cfg);
+        apply_header_read_timeout(&mut server, HEADER_READ_TIMEOUT);
+        server
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
         return Ok(());
@@ -477,4 +526,104 @@ pub async fn serve_api(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod slowloris_tests {
+    use super::apply_header_read_timeout;
+    use axum::routing::get;
+    use axum::Router;
+    use std::time::{Duration, Instant};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    /// Démarre un serveur axum_server plain (HTTP) avec un header_read_timeout
+    /// court, et retourne son adresse. Prouve le garde anti-slowloris SANS TLS
+    /// (le helper est générique sur l'acceptor — même code que le chemin prod).
+    async fn spawn_guarded_server(header_timeout: Duration) -> std::net::SocketAddr {
+        let app = Router::new().route("/", get(|| async { "ok" }));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap(); // requis par tokio from_std
+        let addr = listener.local_addr().unwrap();
+        let mut server = axum_server::from_tcp(listener).unwrap();
+        apply_header_read_timeout(&mut server, header_timeout);
+        tokio::spawn(async move {
+            server.serve(app.into_make_service()).await.ok();
+        });
+        // Laisse le serveur démarrer.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        addr
+    }
+
+    /// Un client qui envoie une requête partielle (headers jamais terminés par
+    /// la ligne vide) — le pattern slowloris — doit voir sa connexion fermée
+    /// par hyper autour du header_read_timeout, pas tenue indéfiniment.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slowloris_partial_headers_connection_dropped() {
+        let timeout = Duration::from_millis(400);
+        let addr = spawn_guarded_server(timeout).await;
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        // Requête volontairement INCOMPLÈTE : pas de "\r\n\r\n" final.
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .unwrap();
+
+        let start = Instant::now();
+        let mut buf = [0u8; 64];
+        // Sans le garde, ce read bloquerait indéfiniment (hyper attend la fin
+        // des headers). Avec le garde, la connexion est fermée ~timeout.
+        let res = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf)).await;
+        let elapsed = start.elapsed();
+
+        match res {
+            Ok(Ok(0)) => println!("slowloris fermé (EOF propre) après {elapsed:?}"),
+            Ok(Ok(n)) => {
+                // hyper peut renvoyer un 408 partiel avant de fermer — acceptable
+                // tant que ce n'est pas le contenu d'une requête traitée.
+                let s = String::from_utf8_lossy(&buf[..n]);
+                println!("slowloris: {n} octets reçus avant fermeture après {elapsed:?}: {s:?}");
+                assert!(
+                    s.contains("408") || s.contains("Timeout"),
+                    "réponse inattendue à une requête slowloris: {s:?}"
+                );
+            }
+            Ok(Err(e)) => println!("slowloris fermé (reset: {e}) après {elapsed:?}"),
+            Err(_) => panic!(
+                "connexion slowloris NON fermée après 3s — header_read_timeout inopérant"
+            ),
+        }
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "fermeture trop précoce ({elapsed:?}) — pas le header_read_timeout ?"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "fermeture trop tardive ({elapsed:?}) — le garde n'a pas agi"
+        );
+    }
+
+    /// Contrôle : une requête COMPLÈTE est servie normalement (le garde ne
+    /// casse pas le chemin nominal).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn complete_request_served_normally() {
+        let addr = spawn_guarded_server(Duration::from_millis(400)).await;
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut resp = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut resp))
+            .await
+            .expect("requête complète ne doit pas timeout")
+            .unwrap();
+        let s = String::from_utf8_lossy(&resp);
+        println!("requête complète → {:?}", s.lines().next().unwrap_or(""));
+        assert!(s.contains("200"), "la requête complète doit être servie (200): {s:?}");
+        assert!(s.contains("ok"), "le corps du handler doit être présent");
+    }
 }
