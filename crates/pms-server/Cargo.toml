@@ -51,6 +51,10 @@ tower-http = { version = "0.6.6", features = [
     "catch-panic",
 ] }
 tower_governor = "0.8.0"
+# Crate sous-jacente de tower_governor — dép directe pour nommer
+# `governor::middleware::NoOpMiddleware` dans le type de retour de
+# `per_api_key_governor_config` (v0.30.3).
+governor = "0.10"
 base64 = "0.22.1"
 hex = "0.4.3"
 k256 = "0.13.4"

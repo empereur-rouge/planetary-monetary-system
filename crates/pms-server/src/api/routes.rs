@@ -66,8 +66,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::sleep;
 use tower_governor::GovernorLayer;
+use tower_governor::errors::GovernorError;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::SmartIpKeyExtractor;
+use tower_governor::key_extractor::{KeyExtractor, SmartIpKeyExtractor};
 use tower_http::{
     catch_panic::CatchPanicLayer,
     cors::{Any, CorsLayer},
@@ -310,13 +311,66 @@ async fn debug_slow(State(_state): State<AppState>) -> impl IntoResponse {
     "slow-ok"
 }
 
+/// Clé de rate limit dérivée du header `X-API-Key` (quota par identité, v0.30.3).
+///
+/// Le rate limit per-IP (`SmartIpKeyExtractor`) ne stoppe pas une clé valide
+/// abusée depuis plusieurs IPs (botnet). Ce quota per-key complète : il borne le
+/// débit d'écriture d'UNE clé, quelle que soit l'IP. Appliqué UNIQUEMENT aux
+/// routes write API-key-gated (cf. [`per_api_key_governor_layer`]).
+///
+/// Requêtes sans header → une clé sentinelle partagée : elles seront de toute
+/// façon rejetées 401 par `require_api_key` (hors Dev), et le bucket sentinelle
+/// borne un flood keyless résiduel. La clé est le HASH du header, pas sa valeur
+/// en clair, pour ne pas retenir de secret en RAM du rate limiter.
+#[derive(Clone)]
+pub(super) struct ApiKeyKeyExtractor;
+
+impl KeyExtractor for ApiKeyKeyExtractor {
+    type Key = u64;
+
+    fn extract<T>(&self, req: &http::Request<T>) -> Result<Self::Key, GovernorError> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        match req.headers().get("x-api-key").and_then(|v| v.to_str().ok()) {
+            Some(k) => k.hash(&mut h),
+            None => "\0__no_api_key__".hash(&mut h),
+        }
+        Ok(h.finish())
+    }
+}
+
+/// Construit la config du quota par API-key. Réutilisée par `build_api_router`
+/// (prod) ET les tests — le wiring `.route_layer(GovernorLayer::new(cfg))` reste
+/// au call-site (le type `RespBody` du layer y est inféré). Retourne la config
+/// portant l'`ApiKeyKeyExtractor` + la conversion rps→période (même footgun
+/// `per_nanosecond` que le governor per-IP).
+pub(super) fn per_api_key_governor_config(
+    rps: u32,
+    burst: u32,
+) -> Box<
+    tower_governor::governor::GovernorConfig<ApiKeyKeyExtractor, governor::middleware::NoOpMiddleware>,
+> {
+    let period_ns = 1_000_000_000u64 / (rps as u64).max(1);
+    Box::new(
+        GovernorConfigBuilder::default()
+            .per_nanosecond(period_ns)
+            .burst_size(burst)
+            .key_extractor(ApiKeyKeyExtractor)
+            .finish()
+            .expect("per-API-key GovernorConfig: invalid api_key_rate_rps or api_key_burst"),
+    )
+}
+
 /// Construit le Router HTTP complet (public + admin + debug) avec les layers de sécurité.
 /// Utilisable depuis le serveur **et** depuis les tests.
 pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
+    let (per_key_rps, per_key_burst) = settings.limits.effective_api_key_limits();
     tracing::info!(
-        "🔒 Engine Rate Limit: {} rps, Burst: {}",
+        "🔒 Engine Rate Limit: {} rps / burst {} (per-IP), {} rps / burst {} (per-API-key, routes write)",
         settings.limits.rate_limit_rps,
-        settings.limits.burst
+        settings.limits.burst,
+        per_key_rps,
+        per_key_burst
     );
 
     // NOTE: per_second(N) in tower-governor 0.8 means "period of N seconds"
@@ -632,7 +686,15 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
-        ));
+        ))
+        // Quota PAR API-KEY (v0.30.3), outermost → rejette un flood d'écriture
+        // d'une même clé le plus tôt possible, indépendamment de l'IP. Complète
+        // le governor per-IP global (qui ne stoppe pas une clé abusée depuis
+        // plusieurs IPs). Défaut = limite per-IP (cf. Limits::effective_api_key_limits).
+        .route_layer(GovernorLayer::new({
+            let (rps, burst) = settings.limits.effective_api_key_limits();
+            per_api_key_governor_config(rps, burst)
+        }));
 
     // Dynamic per-ledger routing: /l/{ledger_id}/{*rest}
     // Resolves the ledger at request time from LedgerManager, so newly created
@@ -713,4 +775,74 @@ pub fn build_api_router(state: AppState, settings: &Settings) -> Router {
         .layer(TraceLayer::new_for_http())
         // 0. Catch panics in handlers → 500 instead of killing the server
         .layer(CatchPanicLayer::new())
+}
+
+#[cfg(test)]
+mod api_key_quota_tests {
+    use super::{per_api_key_governor_config, ApiKeyKeyExtractor};
+    use axum::body::Body;
+    use axum::routing::post;
+    use axum::Router;
+    use http::{Request, StatusCode};
+    use tower::ServiceExt; // oneshot
+    use tower_governor::key_extractor::KeyExtractor;
+    use tower_governor::GovernorLayer;
+
+    fn req_with_key(key: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("POST").uri("/w");
+        if let Some(k) = key {
+            b = b.header("x-api-key", k);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// L'extracteur dérive une clé DISTINCTE par valeur de `X-API-Key`, STABLE
+    /// pour une même valeur, et une sentinelle partagée quand le header manque.
+    #[test]
+    fn extractor_keys_per_api_key_value() {
+        let ex = ApiKeyKeyExtractor;
+        let a1 = ex.extract(&req_with_key(Some("keyA"))).unwrap();
+        let a2 = ex.extract(&req_with_key(Some("keyA"))).unwrap();
+        let b = ex.extract(&req_with_key(Some("keyB"))).unwrap();
+        let none1 = ex.extract(&req_with_key(None)).unwrap();
+        let none2 = ex.extract(&req_with_key(None)).unwrap();
+        println!("keyA→{a1} (stable {a2}), keyB→{b}, no-key→{none1} (stable {none2})");
+        assert_eq!(a1, a2, "même clé → même bucket");
+        assert_ne!(a1, b, "clés différentes → buckets différents (isolation)");
+        assert_eq!(none1, none2, "no-key → sentinelle stable");
+        assert_ne!(a1, none1, "une clé réelle ≠ la sentinelle no-key");
+    }
+
+    /// Bout-en-bout via le VRAI wiring (`per_api_key_governor_config` +
+    /// `GovernorLayer`, ceux de la prod) : une clé qui dépasse son burst prend
+    /// 429, tandis qu'une AUTRE clé garde un bucket frais (isolation per-key).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn per_key_quota_throttles_one_key_and_isolates_others() {
+        let burst = 3u32;
+        let cfg = per_api_key_governor_config(2, burst); // 2 rps, burst 3
+        let app = Router::new()
+            .route("/w", post(|| async { StatusCode::OK }))
+            .route_layer(GovernorLayer::new(cfg));
+
+        // Clé A : on dépasse le burst → au moins un 429.
+        let mut a_statuses = Vec::new();
+        for _ in 0..(burst + 3) {
+            let res = app.clone().oneshot(req_with_key(Some("keyA"))).await.unwrap();
+            a_statuses.push(res.status());
+        }
+        let a_429 = a_statuses.iter().filter(|s| **s == StatusCode::TOO_MANY_REQUESTS).count();
+        let a_ok = a_statuses.iter().filter(|s| **s == StatusCode::OK).count();
+        println!("keyA: {a_ok} OK, {a_429} × 429 sur {} requêtes (burst {burst})", burst + 3);
+        assert!(a_429 >= 1, "keyA doit se faire throttler (429) au-delà du burst");
+        assert!(a_ok >= 1, "keyA doit passer au moins le burst initial");
+
+        // Clé B : bucket frais (isolation) → la 1ʳᵉ requête n'est PAS 429.
+        let res_b = app.clone().oneshot(req_with_key(Some("keyB"))).await.unwrap();
+        println!("keyB (bucket frais): {}", res_b.status());
+        assert_ne!(
+            res_b.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "keyB (clé distincte) ne doit PAS hériter du throttle de keyA"
+        );
+    }
 }

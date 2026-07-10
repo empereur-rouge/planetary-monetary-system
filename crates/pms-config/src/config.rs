@@ -320,6 +320,29 @@ pub struct Limits {
     pub request_timeout_ms: u64, // 4000
     pub rate_limit_rps: u32,     // 20
     pub burst: u32,              // 40
+    /// Quota par API-key (v0.30.3) sur les routes write API-key-gated : borne le
+    /// débit d'écriture d'UNE clé, indépendamment de l'IP. Complète le rate
+    /// limit per-IP (qui, lui, ne stoppe pas une clé valide abusée depuis
+    /// plusieurs IPs). **Optionnel — défaut = la limite per-IP** (`rate_limit_rps`
+    /// / `burst`) : là où l'IP est desserré (bench, e2e), le per-key l'est aussi
+    /// (pas de bottleneck des benchs) ; là où l'IP est resserré (prod 1000/2000),
+    /// le per-key l'est aussi. Surcharger seulement pour un plafond per-key
+    /// distinct du per-IP.
+    #[serde(default)]
+    pub api_key_rate_rps: Option<u32>,
+    #[serde(default)]
+    pub api_key_burst: Option<u32>,
+}
+
+impl Limits {
+    /// Plafond per-API-key effectif (rps, burst) : la surcharge explicite, sinon
+    /// la limite per-IP. Voir [`Limits::api_key_rate_rps`].
+    pub fn effective_api_key_limits(&self) -> (u32, u32) {
+        (
+            self.api_key_rate_rps.unwrap_or(self.rate_limit_rps),
+            self.api_key_burst.unwrap_or(self.burst),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

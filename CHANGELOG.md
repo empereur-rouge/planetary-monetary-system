@@ -38,6 +38,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `slowloris_partial_headers_connection_dropped` (connexion fermée ~timeout,
   vérifié à 403 ms pour un timeout de 400 ms) + `complete_request_served_normally`
   (contrôle : requête complète → 200). `pms-gateway 0.1.3 → 0.1.4`.
+- **sec(auth) — quota de rate limit PAR API-key sur les routes write.** Le rate
+  limit per-IP ne stoppe pas une clé valide abusée depuis plusieurs IPs
+  (botnet). Ajout d'un second `GovernorLayer` (`ApiKeyKeyExtractor` — clé =
+  hash du header `X-API-Key`, pas la valeur en clair ; sentinelle partagée si
+  header absent) en route_layer outermost sur les routes write API-key-gated
+  (`auth_ledger_write_routes`). Un flood d'écriture d'une même clé prend 429,
+  indépendamment de l'IP ; les autres clés gardent un bucket frais (isolation).
+  Plafond **`api_key_rate_rps`/`api_key_burst` optionnels, défaut = la limite
+  per-IP** (`Limits::effective_api_key_limits`) : prod/testnet/mainnet héritent
+  1000/2000 (protecteur), bench/e2e héritent 100000/200000 (pas de bottleneck
+  des benchs 10K TPS — le simulateur mono-clé reste ≤500 rps au bord). Nouvelle
+  dép directe `governor` (nommer `NoOpMiddleware` dans le type de retour).
+  `crates/pms-server/src/api/routes.rs`. Tests : `extractor_keys_per_api_key_value`
+  (keying + isolation + sentinelle) et `per_key_quota_throttles_one_key_and_
+  isolates_others` (via le VRAI wiring : keyA 3 OK + 3×429 sur burst 3, keyB
+  frais → 200) ; `test_api_key_limits_override_else_fallback_to_ip`.
 
 > `Cargo.toml` workspace bumpé `0.30.1 → 0.30.2`, `pms-gateway` `0.1.0 → 0.1.3`.
 > Suite au diagnostic DoS du 2026-07-10 : le rate limiter de l'engine

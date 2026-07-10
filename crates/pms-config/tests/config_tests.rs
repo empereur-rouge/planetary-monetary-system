@@ -214,6 +214,55 @@ fn test_limits_deserialize() {
     assert_eq!(limits.request_timeout_ms, 4000);
     assert_eq!(limits.rate_limit_rps, 20);
     assert_eq!(limits.burst, 40);
+    // v0.30.3 : champs per-API-key absents → None → défaut = limite per-IP.
+    assert_eq!(limits.api_key_rate_rps, None);
+    assert_eq!(limits.api_key_burst, None);
+    assert_eq!(
+        limits.effective_api_key_limits(),
+        (20, 40),
+        "per-key non spécifié doit retomber sur la limite per-IP (20/40)"
+    );
+}
+
+/// La surcharge explicite du plafond per-API-key prend le pas sur la limite
+/// per-IP ; l'omission retombe sur le per-IP (v0.30.3).
+#[test]
+fn test_api_key_limits_override_else_fallback_to_ip() {
+    use pms_config::Limits;
+
+    // Surcharge explicite
+    let overridden: Limits = serde_json::from_str(
+        r#"{"max_body_bytes":1,"request_timeout_ms":1,"rate_limit_rps":1000,"burst":2000,
+            "api_key_rate_rps":300,"api_key_burst":600}"#,
+    )
+    .unwrap();
+    println!(
+        "override: per-IP {}/{}, per-key {:?}/{:?} → effectif {:?}",
+        overridden.rate_limit_rps,
+        overridden.burst,
+        overridden.api_key_rate_rps,
+        overridden.api_key_burst,
+        overridden.effective_api_key_limits()
+    );
+    assert_eq!(overridden.effective_api_key_limits(), (300, 600));
+
+    // Omission → retombe sur per-IP (ex. config bench 100000/200000 → per-key idem,
+    // pas de bottleneck des benchs 10K TPS)
+    let inherited: Limits = serde_json::from_str(
+        r#"{"max_body_bytes":1,"request_timeout_ms":1,"rate_limit_rps":100000,"burst":200000}"#,
+    )
+    .unwrap();
+    println!(
+        "inherit: per-IP {}/{} → per-key effectif {:?}",
+        inherited.rate_limit_rps,
+        inherited.burst,
+        inherited.effective_api_key_limits()
+    );
+    assert_eq!(
+        inherited.effective_api_key_limits(),
+        (100000, 200000),
+        "per-key omis doit hériter du per-IP desserré (anti-bottleneck bench)"
+    );
 }
 
 /// Configs `etc/config/*.toml` volontairement LOOSE (dev/test/bench/local, pas
