@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.31.0] - Unreleased — Provisionnement custodial d'assets (token + SFT sans token admin, protocole 2.8)
+
+> `Cargo.toml` workspace `0.30.3 → 0.31.0` (feature MINOR). `DAG_VERSION`
+> `3.14.0 → 3.15.0`, `CURRENT_VER` `12 → 13` (deux nouveaux CFs, auto-migrating),
+> `API_VERSION` `38 → 39` (routes `/v1` custodiales). Feature en 3 phases : **P1**
+> protocole+storage (consensus), **P2** routes API `/v1`, **P3** SDK+docs.
+> ⚠️ Mixed-version P2P : un nœud < 3.15.0 ne sait pas désérialiser un `CustodialMint`
+> → upgrade coordonné AVANT tout mint custodial.
+
+### Added (P3 — SDK + docs)
+- **docs** : fiche Obsidian `documentation/features/custodial-provisioning.md`
+  (modèle, Q1–Q5, sécurité, séquence e2e) + entrée `[[MOC]]`. rustdoc sur tous les
+  items publics neufs.
+- **SDK TypeScript** (`pms-sdk` `0.10.0 → 0.11.0`) : fonction pure
+  `custodialMintSigningMessage` (parité golden **byte-identique** avec l'engine Rust,
+  2 vecteurs pinnés) + wrappers `createSftClassCustodial`, `createTokenCustodial`,
+  `mintSftCustodial`/`mintTokenCustodial` (custodial), `prepareSftMint`/`prepareTokenMint`
+  + `mintSftSigned`/`mintTokenSigned` (voie pré-signée : prepare → contrôle de parité
+  local → soumission signée). 14 tests SDK dédiés (188 au total), build vert.
+
+### Added (P2 — API `/v1`, API-key, PAS admin)
+- **feat(api) — provisionnement custodial sans token admin** : `POST /v1/sft/classes`
+  + `POST /v1/tokens/create` (create ; `creator = mint_authority =` adresse dérivée
+  de `creator_private_key_b64`, jamais fournie en clair → anti-usurpation), `POST
+  /v1/sft/mint` + `POST /v1/tokens/mint` (mint, autorisé par `mint_authority_private_key_b64`
+  custodiale OU `(auth_pubkey_hex + auth_signature_b64 + mint_nonce)` pré-signés),
+  `POST /v1/{sft,tokens}/mint/prepare` (renvoie message + nonce à signer, voie
+  non-custodiale). Nouveau module `crates/pms-server/src/api_fn/custodial.rs`.
+  Nouveau scope API-key `"sft"` (les routes `/v1/tokens/*` réutilisent `"tokens"`).
+  `API_VERSION` `38 → 39`. Test sandbox e2e `test_custodial_provisioning_end_to_end`
+  (chemin HTTP réel : create → mint → mauvaise-clé 403 → transfert → marketSettle
+  royalty ; le créateur encaisse exactement la royalty, ZÉRO token admin).
+
+### Added (P1 — protocole + storage)
+- **feat(protocol) — `PlainPayload::CustodialMint`** : mint d'un token fongible OU
+  d'une classe SFT autorisé par la **signature du `mint_authority`** embarquée dans
+  le payload (`auth_pubkey_hex` + `auth_signature_b64` + `mint_nonce`), PAS par le
+  token admin du DAG. Permet à N opérateurs custodiaux indépendants (chacun
+  détenant les clés de SES créateurs) de provisionner leurs éditions capées +
+  royalty SANS partager l'admin. Le Coordinator forge/signe le bloc (single-writer
+  intact) mais NE PEUT PAS minter la classe/le token d'un créateur sans sa clé.
+  Modèle calqué sur `RoyaltyUpdate` (signature détachée vérifiée au consensus).
+  `crates/pms-types-payload/src/payload.rs`, `crates/pms-core/src/net_adapter/persist.rs`.
+- **feat(protocol) — `custodial_mint_signing_message`** (domaine `pms-custodial-mint-v1`,
+  lié `network_id`) : message canonique signé par le `mint_authority`, liant TOUS
+  les champs d'output (`address`/`amount`/`asset_id`/`locked_until`/spend-condition)
+  sauf `created_at` (assigné par le système). Vecteurs golden pour parité SDK.
+- **feat(storage) — anti-squat de collection SFT** : nouveau CF `sft_collections`
+  (`collection_id → owner`). La 1ʳᵉ classe d'une collection en fixe le propriétaire
+  (`creator`) ; toute classe suivante doit porter le même `creator` (claim atomique
+  RAM + durable). Empêche un opérateur de squatter le namespace collection d'un autre.
+
+### Security
+- **sec(consensus) — anti-replay du mint custodial** : chaque `(asset_id, mint_nonce)`
+  n'est consommable QU'UNE FOIS. CF durable `custodial_mint_consumed` écrite dans le
+  MÊME batch atomique que le bloc + claim RAM atomique (`DashSet`) au commit-point
+  (modèle `BridgeMint`). Un payload signé rejoué dans un nouveau bloc (block_id
+  distinct) est rejeté.
+- **sec(consensus) — anti-TOCTOU d'inflation** : le cap `circulating + mint ≤ max_supply`
+  est ré-vérifié sous un **lock async per-asset** tenu de la lecture de la supply
+  jusqu'à l'`apply_diff`. Deux mints custodiaux concurrents du même asset (nonces
+  distincts) ne peuvent plus lire la même supply obsolète et dépasser le cap
+  (prouvé par test concurrent : 60 + 60 sous cap 100 → un seul passe, supply finale 60).
+- **sec(consensus) — autorité fail-closed** : `CustodialMint` résout l'asset en
+  fail-closed (`resolve_asset_metadata_strict`) ; asset non enregistré ou natif
+  (`asset_id = None`) → rejet. La signature `mint_authority` (vérifiée via
+  `unlock_matches_address`, gère pubkey-hex ET bech32m) remplace le gate coordinateur
+  global du `Mint` classique. Rejet aussi si une adresse d'output est gelée (compliance,
+  plus strict que le `Mint` admin car l'autorité est déléguée).
+
+### Performance
+- **perf(storage)** : les marqueurs anti-replay (`bridge_consumed` + `custodial_mint_consumed`)
+  sont extraits en UN SEUL parse `PayloadEnvelope` par bloc au lieu de deux, avec un
+  pré-filtre substring qui saute le parse pour les >99% de blocs qui ne sont ni
+  bridge ni custodial (`TxUtxo`/`Mint`…). Supprime la double-désérialisation sur le
+  chemin de persistance (10K+ TPS) et accélère aussi le chemin bridge pré-existant.
+
+### Changed
+- **refactor(consensus)** : `validate_custom_asset_mints` scindé — l'autorité
+  (`signer == mint_authority`) reste dans cette fonction (chemin `Mint` classique),
+  les **money-rules** (granularité `decimals` + cap + collatéral) extraites en
+  `validate_custom_asset_mint_amounts` (sans autorité), partagée à l'identique par
+  le `Mint` classique ET l'arm `CustodialMint`. Source unique → aucune divergence.
+
+### Infrastructure
+- Migration `mig_12_to_13` (init CFs `sft_collections` + `custodial_mint_consumed`).
+  Trait `DagStorage::is_custodial_mint_consumed` + `SftClassStorage::{put,get}_collection_owner`.
+- **fix(tests)** : `mint_policy_and_fees.rs` hand-buildait `Limits {..}` sans les
+  champs `api_key_rate_rps`/`api_key_burst` ajoutés en 0.30.3 → le test target
+  `pms-core` ne compilait plus (donc invisible en CI). Corrigé (footgun config
+  hand-buildé documenté dans CLAUDE.md).
+- Tests : `crates/pms-core/tests/custodial_mint_test.rs` (11 cas persist-level : mint
+  SFT/token valides, mauvaise autorité, signature forgée, replay, duplicata concurrent,
+  cap dépassé simple + joint concurrent, output natif, asset non enregistré, gelé) +
+  golden signing-message (`pms-types-payload`).
+
+---
+
 ## [0.30.3] - Unreleased — Résiduels anti-DoS (fail-closed API keys, anti-slowloris, quota par API-key)
 
 > `Cargo.toml` workspace bumpé `0.30.2 → 0.30.3`. Traite les 3 résiduels

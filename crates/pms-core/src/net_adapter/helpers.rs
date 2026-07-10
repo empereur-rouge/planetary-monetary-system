@@ -24,6 +24,7 @@ pub(super) fn plain_payload_type_str(p: &PlainPayload) -> &'static str {
         PlainPayload::TokenCreate(_) => "TokenCreate",
         PlainPayload::SftClassCreate(_) => "SftClassCreate",
         PlainPayload::RoyaltyUpdate { .. } => "RoyaltyUpdate",
+        PlainPayload::CustodialMint { .. } => "CustodialMint",
         PlainPayload::BridgeLock { .. } => "BridgeLock",
         PlainPayload::BridgeMint { .. } => "BridgeMint",
         PlainPayload::Freeze { .. } => "Freeze",

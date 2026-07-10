@@ -71,6 +71,7 @@ impl RocksStore {
                 9 => self.mig_9_to_10().await?,
                 10 => self.mig_10_to_11().await?,
                 11 => self.mig_11_to_12().await?,
+                12 => self.mig_12_to_13().await?,
                 _ => return Err(MigError::Unexpected(v)),
             }
             v += 1;
@@ -653,6 +654,27 @@ impl RocksStore {
             .map_err(|e| MigError::Any(anyhow!(e)))?;
 
         tracing::info!("Migration 11→12: sft_classes CF ready (semi-fungibles)");
+        Ok(())
+    }
+
+    /// Migration 12→13 (protocole 2.8, provisionnement custodial) : prépare les
+    /// deux nouveaux CFs — `sft_collections` (ownership de collection, anti-squat)
+    /// et `custodial_mint_consumed` (anti-replay des mints custodiaux). Additive :
+    /// pas de données existantes à transformer (touch idempotent `__init__`).
+    async fn mig_12_to_13(&self) -> std::result::Result<(), MigError> {
+        for name in ["sft_collections", "custodial_mint_consumed"] {
+            let cf = self.cf(name);
+            self.db
+                .put_cf(&cf, b"__init__", b"")
+                .map_err(|e| MigError::Any(anyhow!(e)))?;
+            self.db
+                .delete_cf(&cf, b"__init__")
+                .map_err(|e| MigError::Any(anyhow!(e)))?;
+        }
+
+        tracing::info!(
+            "Migration 12→13: sft_collections + custodial_mint_consumed CFs ready (custodial provisioning 2.8)"
+        );
         Ok(())
     }
 }

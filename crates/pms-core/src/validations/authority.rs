@@ -263,12 +263,18 @@ pub fn validate_payload_authority(
         // ici et non dans le groupe coordinator-only. La vérification de la
         // signature (contre le bénéficiaire courant résolu du registre) est faite
         // au persist (`do_persist_block_internal`), comme l'ownership d'un TxUtxo.
+        // CustodialMint est autorisé par la SIGNATURE du `mint_authority` de l'asset
+        // (protocole 2.8), PAS par le coordinateur — comme RoyaltyUpdate. La
+        // vérification (signature + binding `unlock_matches_address` contre le
+        // `mint_authority` résolu du registre + anti-replay + cap) est faite au
+        // persist (`do_persist_block_internal`), comme l'ownership d'un TxUtxo.
         PlainPayload::Genesis
         | PlainPayload::Mint { .. }
         | PlainPayload::TxUtxo(_)
         | PlainPayload::TokenBurn { .. }
         | PlainPayload::MarketSettle { .. }
         | PlainPayload::RoyaltyUpdate { .. }
+        | PlainPayload::CustodialMint { .. }
         | PlainPayload::Nft(_) => Ok(()),
     }
 }

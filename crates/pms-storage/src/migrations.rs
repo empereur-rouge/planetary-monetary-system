@@ -15,7 +15,7 @@ use thiserror::Error;
 
 /// Version logique du schéma attendu par ce binaire.
 /// Incrémentez lorsqu'une nouvelle migration est introduite.
-pub const CURRENT_VER: i64 = 12;
+pub const CURRENT_VER: i64 = 13;
 
 /// Version du protocole DAG (SemVer).
 /// - MAJOR : changement incompatible (refus de démarrer, migration manuelle requise)
@@ -93,7 +93,15 @@ pub const CURRENT_VER: i64 = 12;
 // courant (`auth_pubkey_hex` + `auth_signature_b64`, co-signature) — le format du
 // payload change, mais 3.13.0 étant Unreleased (aucun bloc RoyaltyUpdate déployé),
 // c'est additif en pratique → MINOR, migration auto.
-pub const DAG_VERSION: &str = "3.14.0";
+// 3.14.0 → 3.15.0 (protocole 2.8, provisionnement custodial) : nouveau payload
+// `PlainPayload::CustodialMint` — mint d'un token OU d'une classe SFT autorisé par
+// la SIGNATURE du `mint_authority` embarquée (PAS l'admin du DAG), borné par
+// `max_supply`, anti-replay par nonce consommé une fois (CF `custodial_mint_consumed`),
+// + ownership de collection anti-squat (CF `sft_collections`). Additif : blocs/CFs
+// existants valides, deux nouveaux CFs (CURRENT_VER 12→13, auto-migrating). MINOR →
+// pas de wipe. (Mixed-version P2P : un nœud 3.14.x ne sait pas désérialiser un
+// `CustodialMint` — upgrade coordonné requis AVANT tout mint custodial.)
+pub const DAG_VERSION: &str = "3.15.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

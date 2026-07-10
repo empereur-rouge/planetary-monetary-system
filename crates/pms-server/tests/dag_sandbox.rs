@@ -7613,3 +7613,163 @@ async fn test_royalty_change_signature_not_replayable() -> Result<()> {
     println!("  ✅ signature d'autorisation à usage unique (version monotone) — pas de replay");
     Ok(())
 }
+
+/// e2e (protocole 2.8) — PROVISIONNEMENT CUSTODIAL COMPLET sur le chemin réel /v1,
+/// SANS token admin : create classe SFT (clé créateur) → mint (clé mint_authority)
+/// → transfert (rail UTXO générique) → marketSettle (royalty enforced consensus).
+/// Prouve qu'une classe créée+mintée par la seule clé du créateur est citoyenne de
+/// 1re classe et que sa royalty atterrit au bénéficiaire au règlement. + rejet du
+/// mint par une mauvaise clé (autorité).
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_custodial_provisioning_end_to_end() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    // Créateur = mint_authority + royalty_beneficiary. Vendeur détient l'item.
+    // Acheteur paie en PMS. (creator ≠ seller → prouve le routage royalty vers un
+    // tiers, pas le cas dégénéré vendeur==bénéficiaire.)
+    let creator = Wallet::generate();
+    let creator_addr = creator.get_address("8e");
+    let creator_sk = creator.private_key_b64.clone();
+    let seller = Wallet::generate();
+    let seller_addr = seller.get_address("8e");
+    let seller_sk = seller.private_key_b64.clone();
+    let buyer = Wallet::generate();
+    let buyer_addr = buyer.get_address("8e");
+    let buyer_sk = buyer.private_key_b64.clone();
+
+    // Gas/paiement PMS (main). Le mint custodial ne dépense aucun UTXO créateur
+    // (émission pure) ; seuls le transfert et le settle consomment du gas.
+    sandbox.faucet_mint(None, &seller_addr, "100").await?; // gas vendeur
+    sandbox.faucet_mint(None, &buyer_addr, "1000").await?; // paiement 100 + gas
+    sleep(Duration::from_millis(400)).await;
+
+    // ── 1. CREATE classe SFT custodiale (clé créateur, AUCUN token admin) ──
+    let (status, body) = sandbox
+        .post(
+            None,
+            "/v1/sft/classes",
+            json!({
+                "collection_id": "studio",
+                "class_id": "ticket",
+                "name": "Concert Ticket",
+                "decimals": 0,
+                "max_supply": "1000",
+                "royalty_bps": 1000,                    // 10 %
+                "royalty_beneficiary": creator_addr,    // royalty → créateur
+                "creator_private_key_b64": creator_sk,
+            }),
+        )
+        .await;
+    println!("   [1] create SFT class (custodial, no admin) → {} {:?}", status, body);
+    anyhow::ensure!(status.is_success(), "custodial create failed: {} — {}", status, body);
+    // mint_authority == adresse dérivée de la clé créateur (jamais fournie en clair).
+    assert_eq!(
+        body["mint_authority"].as_str(),
+        Some(creator_addr.as_str()),
+        "mint_authority must be the creator's derived address"
+    );
+
+    // ── 2. MINT custodial 5 tickets → vendeur (clé du mint_authority) ──
+    let (status, body) = sandbox
+        .post(
+            None,
+            "/v1/sft/mint",
+            json!({
+                "asset_id": "studio:ticket",
+                "to": seller_addr,
+                "amount": "5",
+                "mint_authority_private_key_b64": creator_sk,
+            }),
+        )
+        .await;
+    println!("   [2] custodial mint 5 → seller → {} {:?}", status, body);
+    anyhow::ensure!(status.is_success(), "custodial mint failed: {} — {}", status, body);
+    sleep(Duration::from_millis(400)).await;
+    let seller_tickets = sandbox
+        .get_asset_balance("main", &seller_addr, Some("studio:ticket"))
+        .await?;
+    println!("   seller tickets after mint = {}", seller_tickets);
+    assert_eq!(seller_tickets, Decimal::from(5), "seller must hold 5 minted tickets");
+
+    // ── 2b. AUTORITÉ : une MAUVAISE clé (acheteur) ne peut PAS minter → 403 ──
+    let (status, body) = sandbox
+        .post(
+            None,
+            "/v1/sft/mint",
+            json!({
+                "asset_id": "studio:ticket",
+                "to": buyer_addr,
+                "amount": "99",
+                "mint_authority_private_key_b64": buyer_sk,
+            }),
+        )
+        .await;
+    println!("   [2b] wrong-key mint → {} {:?}", status, body);
+    anyhow::ensure!(
+        status == reqwest::StatusCode::FORBIDDEN,
+        "mint by a non-mint_authority key must be 403 Forbidden, got {} — {}",
+        status,
+        body
+    );
+
+    // ── 3. TRANSFERT 2 tickets vendeur → acheteur (rail UTXO générique, send-simple) ──
+    let (status, body) = sandbox
+        .post(
+            None,
+            "/v1/wallet/send-simple",
+            json!({
+                "private_key_b64": seller_sk,
+                "to": buyer_addr,
+                "amount": "2",
+                "asset_id": "studio:ticket",
+            }),
+        )
+        .await;
+    println!("   [3] transfer 2 tickets seller→buyer → {} {:?}", status, body);
+    anyhow::ensure!(status.is_success(), "SFT transfer failed: {} — {}", status, body);
+    sleep(Duration::from_millis(400)).await;
+
+    // ── 4. MARKETSETTLE : vendeur vend 1 ticket à l'acheteur pour 100 PMS ──
+    // Royalty 10 % = 10 PMS → créateur (bénéficiaire), net 90 → vendeur.
+    let (status, body) = sandbox
+        .post(
+            None,
+            "/v1/market/settle",
+            json!({
+                "seller_private_key_b64": seller_sk,
+                "buyer_private_key_b64": buyer_sk,
+                "asset_sold": "studio:ticket",
+                "quantity": "1",
+                "price": "100",
+            }),
+        )
+        .await;
+    println!("   [4] marketSettle 1 ticket @100 PMS → {} {:?}", status, body);
+    anyhow::ensure!(status.is_success(), "marketSettle failed: {} — {}", status, body);
+    assert_eq!(body["royalty"].as_str(), Some("10"), "royalty = 10% of 100");
+    assert_eq!(
+        body["royalty_beneficiary"].as_str(),
+        Some(creator_addr.as_str()),
+        "royalty beneficiary = creator (re-derived from registry at consensus)"
+    );
+    sleep(Duration::from_millis(400)).await;
+
+    // ── 5. ASSERTIONS finales : la royalty a atterri chez le créateur ──
+    let buyer_tickets = sandbox
+        .get_asset_balance("main", &buyer_addr, Some("studio:ticket"))
+        .await?;
+    let creator_pms = sandbox.get_balance("main", &creator_addr).await?;
+    println!(
+        "   buyer tickets = {} (2 transferred + 1 bought), creator PMS (royalty) = {}",
+        buyer_tickets, creator_pms
+    );
+    assert_eq!(buyer_tickets, Decimal::from(3), "buyer holds 2 (transfer) + 1 (settle) = 3 tickets");
+    // Le créateur n'a JAMAIS été fauceté en PMS → son solde PMS == exactement la
+    // royalty encaissée au settlement (10). Prouve l'enforcement consensus de la
+    // royalty sur un asset créé+minté PAR SA SEULE CLÉ, sans admin.
+    assert_eq!(creator_pms, Decimal::from(10), "creator received exactly the 10 PMS royalty");
+
+    println!("  ✅ provisionnement custodial e2e : create+mint (clé créateur) → transfert → settle royalty, ZÉRO token admin");
+    Ok(())
+}

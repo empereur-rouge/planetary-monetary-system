@@ -57,7 +57,8 @@ pub(crate) async fn classify_activity(
     adapter: &dyn pms_interface::NetDagAdapter,
 ) -> Vec<ActivityItem> {
     match plain {
-        PlainPayload::Mint { outputs } => {
+        PlainPayload::Mint { outputs }
+        | PlainPayload::CustodialMint { outputs, .. } => {
             let my_outputs: Vec<_> = outputs.iter().filter(|o| o.address == addr).collect();
             my_outputs
                 .iter()
@@ -465,7 +466,8 @@ pub(crate) async fn classify_activity(
 /// Sync version for SSE (no UTXO lookup, outputs-only for TxUtxo sender detection).
 pub(crate) fn classify_activity_sync(plain: &PlainPayload, addr: &str) -> Vec<ActivityItem> {
     match plain {
-        PlainPayload::Mint { outputs } => outputs
+        PlainPayload::Mint { outputs }
+        | PlainPayload::CustodialMint { outputs, .. } => outputs
             .iter()
             .filter(|o| o.address == addr)
             .map(|o| ActivityItem {

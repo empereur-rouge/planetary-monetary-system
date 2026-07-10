@@ -1,6 +1,6 @@
 ---
 tags: [index]
-updated: 2026-05-04
+updated: 2026-07-10
 ---
 
 # PMS Engine — Map of Content
@@ -43,6 +43,7 @@ updated: 2026-05-04
 | [[token-system]] | Tokens custom multi-asset, Amount (8 décimales), FeePolicy |
 | [[semi-fungibles]] | SFT façon ERC-1155 : classes `collection:class` sur le moteur UTXO, mint contraint, catalogue public (v0.19.0) |
 | [[marketplace-royalty]] | Règlement atomique vente/revente + royalty de revente enforced consensus, tout token/SFT/ledger, royalty dans l'asset de paiement (v0.27.0) |
+| [[custodial-provisioning]] | Create + mint token/SFT capé+royalty autorisé par la clé du créateur (`CustodialMint`), SANS token admin — N opérateurs indépendants ; anti-replay + anti-squat + cap enforced consensus (v0.31.0) |
 | [[block-payloads]] | 17 types de payload (PlainPayload), chiffrement X25519+AES-256-GCM |
 
 ## Protocole & Consensus

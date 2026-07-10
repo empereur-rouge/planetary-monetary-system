@@ -190,17 +190,16 @@ pub fn validate_custom_asset_mints(
 ) -> Result<(), ValidationError> {
     let signer = signer_pk.trim();
 
-    for (asset_id, mint_amount) in minted {
-        // Asset non enregistré → comportement historique (gate Coordinator
-        // seul). Les contraintes per-asset sont opt-in via TokenCreate.
+    // 1. AUTORITÉ per-asset : le signataire du bloc (= Coordinateur, single-writer)
+    //    DOIT être le `mint_authority` enregistré. Un asset non enregistré est
+    //    skippé (comportement historique : refunds de contrats). Le mint custodial
+    //    (protocole 2.8) NE passe PAS par cette fonction — il prouve l'autorité par
+    //    une signature détachée du `mint_authority` (cf. arm CustodialMint du
+    //    persist), puis réutilise les MÊMES money-rules ci-dessous.
+    for (asset_id, _mint_amount) in minted {
         let Some(Some(meta)) = metadata.get(asset_id) else {
-            tracing::debug!(
-                "Mint of unregistered asset {asset_id}: no TokenMetadata, per-asset constraints skipped"
-            );
             continue;
         };
-
-        // 1. Autorité per-asset
         if !signer.eq_ignore_ascii_case(meta.mint_authority.trim()) {
             tracing::error!(
                 "🚫 Unauthorized token mint: asset={asset_id}, signer={} != mint_authority",
@@ -208,6 +207,38 @@ pub fn validate_custom_asset_mints(
             );
             return Err(ValidationError::UnauthorizedTokenMint(asset_id.clone()));
         }
+    }
+
+    // 2/3/4. Money-rules (granularité + cap + collatéral), partagées.
+    validate_custom_asset_mint_amounts(outputs, minted, metadata, circulating, locked_collateral)
+}
+
+/// Money-rules per-asset **SANS contrôle d'autorité** : granularité `decimals`,
+/// supply cap (`circulating + minted ≤ max_supply`), et couverture collatéral
+/// (2.3 v2). Extrait de [`validate_custom_asset_mints`] pour être partagé, à
+/// l'identique, par le `Mint` classique (autorité = signataire coordinateur,
+/// vérifiée en amont) ET l'arm `CustodialMint` (autorité = signature
+/// `mint_authority` détachée, vérifiée en amont). **Source unique** → la
+/// granularité/cap/collatéral ne peuvent pas diverger entre les deux chemins.
+///
+/// Un asset absent de `metadata` (jamais de `TokenCreate`/`SftClassCreate`) est
+/// skippé — comportement historique du `Mint` (refunds de contrats sur assets non
+/// enregistrés). L'arm `CustodialMint` ne passe JAMAIS un asset non enregistré ici
+/// (il résout fail-closed en amont et rejette l'inconnu).
+pub fn validate_custom_asset_mint_amounts(
+    outputs: &[TxOutput],
+    minted: &HashMap<String, Decimal>,
+    metadata: &HashMap<String, Option<TokenMetadata>>,
+    circulating: &HashMap<String, Decimal>,
+    locked_collateral: &HashMap<String, Decimal>,
+) -> Result<(), ValidationError> {
+    for (asset_id, mint_amount) in minted {
+        let Some(Some(meta)) = metadata.get(asset_id) else {
+            tracing::debug!(
+                "Mint of unregistered asset {asset_id}: no TokenMetadata, per-asset constraints skipped"
+            );
+            continue;
+        };
 
         // 2. Granularité : decimals de l'asset respectées par chaque output
         for out in outputs.iter().filter(|o| o.asset_id.as_deref() == Some(asset_id)) {
@@ -232,7 +263,14 @@ pub fn validate_custom_asset_mints(
                 .get(asset_id)
                 .copied()
                 .unwrap_or(Decimal::ZERO);
-            if current + mint_amount > max_supply {
+            // `checked_add` : un `max_supply` proche de `Decimal::MAX` (le registry
+            // n'impose pas de plafond) rendrait `current + mint` overflow → panic
+            // sur input attaquant (S2 : même défense que `minted_amounts_by_custom_asset`).
+            // Un overflow implique un total > tout `max_supply` valide → MaxSupplyExceeded.
+            let total = current
+                .checked_add(*mint_amount)
+                .ok_or_else(|| ValidationError::MaxSupplyExceeded(asset_id.clone()))?;
+            if total > max_supply {
                 tracing::warn!(
                     "🚫 Max supply exceeded for {asset_id}: circulating={current} + mint={mint_amount} > max={max_supply}"
                 );
@@ -250,7 +288,14 @@ pub fn validate_custom_asset_mints(
                 .get(asset_id)
                 .copied()
                 .unwrap_or(Decimal::ZERO);
-            let required = (current + mint_amount) * ratio / Decimal::from(10_000);
+            // Arithmétique checked (S2) : un `current + mint` ou un `× ratio` près de
+            // `Decimal::MAX` overflow sinon → panic sur input attaquant. Un overflow
+            // du collatéral requis = couverture impossible à prouver → rejet conservateur.
+            let required = current
+                .checked_add(*mint_amount)
+                .and_then(|total| total.checked_mul(ratio))
+                .and_then(|v| v.checked_div(Decimal::from(10_000)))
+                .ok_or_else(|| ValidationError::InsufficientCollateral(asset_id.clone()))?;
             let locked = locked_collateral
                 .get(asset_id)
                 .copied()
@@ -266,3 +311,4 @@ pub fn validate_custom_asset_mints(
     }
     Ok(())
 }
+

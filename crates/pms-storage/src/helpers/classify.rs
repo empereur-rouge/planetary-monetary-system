@@ -9,7 +9,8 @@ use std::collections::HashMap;
 pub fn extract_involved_addresses(plain: &PlainPayload) -> Vec<String> {
     let mut addrs = Vec::new();
     match plain {
-        PlainPayload::Mint { outputs } => {
+        PlainPayload::Mint { outputs }
+        | PlainPayload::CustodialMint { outputs, .. } => {
             addrs.extend(outputs.iter().map(|o| o.address.clone()));
         }
         PlainPayload::TxUtxo(tx) => {
@@ -122,7 +123,8 @@ impl ActivityCategory {
 pub fn extract_involved_with_category(plain: &PlainPayload) -> Vec<(String, ActivityCategory)> {
     let mut out = Vec::new();
     match plain {
-        PlainPayload::Mint { outputs } => {
+        PlainPayload::Mint { outputs }
+        | PlainPayload::CustodialMint { outputs, .. } => {
             for o in outputs {
                 out.push((o.address.clone(), ActivityCategory::Mint));
             }
@@ -258,7 +260,8 @@ pub fn classify_for_storage(
     sender_addr: Option<&str>,
 ) -> Vec<StoredActivityItem> {
     match plain {
-        PlainPayload::Mint { outputs } => outputs
+        PlainPayload::Mint { outputs }
+        | PlainPayload::CustodialMint { outputs, .. } => outputs
             .iter()
             .filter(|o| o.address == addr)
             .map(|o| StoredActivityItem {

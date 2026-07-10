@@ -361,6 +361,7 @@ pub const KNOWN_SCOPES: &[&str] = &[
     "dag",
     "supply",
     "tokens",
+    "sft",
     "history",
     "coordinator",
 ];
@@ -414,9 +415,17 @@ pub fn resolve_scope(path: &str) -> &'static str {
         return "supply";
     }
 
-    // ── Tokens ──
+    // ── Tokens ── (inclut la création/mint custodiale `/v1/tokens/create`,
+    // `/v1/tokens/mint`, `/v1/tokens/mint/prepare` — protocole 2.8)
     if path.starts_with("/v1/tokens") {
         return "tokens";
+    }
+
+    // ── SFT (semi-fongibles) ── création/mint custodiale (protocole 2.8) :
+    // `/v1/sft/classes`, `/v1/sft/mint`, `/v1/sft/mint/prepare`. (Les GET
+    // catalogue `/v1/sft/...` sont publics — non gated, resolve_scope non consulté.)
+    if path.starts_with("/v1/sft/") {
+        return "sft";
     }
 
     // ── History ──

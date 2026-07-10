@@ -182,6 +182,8 @@ async fn test_automated_fee_distribution() {
             request_timeout_ms: 1000,
             rate_limit_rps: 100,
             burst: 100,
+            api_key_rate_rps: None,
+            api_key_burst: None,
         },
         auth: Auth {
             require_signed_submit: false,

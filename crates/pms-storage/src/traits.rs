@@ -214,6 +214,24 @@ pub trait DagStorage: Send + Sync {
         Ok(false)
     }
 
+    /// Durable anti-replay check for a **custodial mint** (protocole 2.8).
+    ///
+    /// A `CustodialMint` creates fresh units of a custom asset authorized by the
+    /// `mint_authority` signature; each `(asset_id, mint_nonce)` — encoded by
+    /// [`pms_types_payload::custodial_mint_consumed_key`] as `consumed_key` — must
+    /// be minted **at most once**, else a replayed signed payload re-mints out of
+    /// nothing (inflation). `RocksStore` reads the on-disk `custodial_mint_consumed`
+    /// column family (written in the same atomic batch as the mint block), the
+    /// single source of truth across restarts. The default returns `Ok(false)` so
+    /// mocks stay simple — backends that cannot track consumed nonces must never
+    /// be trusted for custodial-mint flows.
+    ///
+    /// See [`ConcurrentDag::try_consume_custodial_mint`] for the in-process atomic
+    /// claim that pairs with this durable record.
+    async fn is_custodial_mint_consumed(&self, _consumed_key: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Paginated reverse-chronological scan of block IDs involving a specific
     /// address.  Returns `(block_ids, next_cursor)`.
     /// Default no-op returns empty results (used by non-RocksDB backends).

@@ -224,6 +224,52 @@ pub enum PlainPayload {
         /// royalty_beneficiary)`.
         auth_signature_b64: String,
     },
+    /// Mint d'un asset custom (token fongible OU classe SFT) autorisé par la
+    /// **signature du wallet `mint_authority`** embarquée — PAS par le token admin
+    /// du DAG (protocole 2.8, provisionnement custodial). Modèle exact de
+    /// [`PlainPayload::RoyaltyUpdate`] : le Coordinator forge/signe le bloc
+    /// (single-writer intact) mais NE PEUT PAS minter la classe/le token d'un
+    /// créateur sans la signature de son `mint_authority`.
+    ///
+    /// Permet à N opérateurs custodiaux indépendants (chacun détenant les clés de
+    /// SES créateurs) de minter leurs éditions capées SANS partager l'admin du DAG.
+    /// Chaque opérateur mint uniquement les assets dont il détient le
+    /// `mint_authority` ; la sur-émission reste bornée par `max_supply` au consensus.
+    ///
+    /// # Autorité (consensus, `do_persist_block_internal`)
+    /// 1. `asset_id` DOIT résoudre à une entrée de registre (token OU classe SFT) —
+    ///    résolution **fail-closed** ([`crate::TokenMetadata`] via
+    ///    `resolve_asset_metadata_strict`) ; un asset non-enregistré ou natif
+    ///    (`asset_id = None` en output) est rejeté. Le gate coordinateur global du
+    ///    `Mint` classique NE s'applique PAS ici (payload distinct) — l'autorité
+    ///    dérive ENTIÈREMENT de la signature `mint_authority`.
+    /// 2. `auth_signature_b64` DOIT être une signature valide de `auth_pubkey_hex`
+    ///    sur [`custodial_mint_signing_message`], ET `auth_pubkey_hex` DOIT dériver
+    ///    l'adresse `mint_authority` enregistrée (`unlock_matches_address` — gère
+    ///    pubkey-hex ET bech32m).
+    /// 3. **Anti-replay** : `mint_nonce` (unique, choisi par le créateur) est
+    ///    consommé une seule fois par asset (CF `custodial_mint_consumed` +
+    ///    claim RAM atomique, comme `BridgeMint`). Un payload signé rejoué dans un
+    ///    nouveau bloc (block-id différent) est rejeté.
+    /// 4. **Cap** : `circulating + Σ(outputs) ≤ max_supply` re-vérifié sous un lock
+    ///    per-asset tenu jusqu'à l'apply (anti-TOCTOU d'inflation multi-opérateurs).
+    /// 5. **Compliance** : rejet si une adresse d'output est gelée.
+    CustodialMint {
+        /// Asset minté : `asset_id` d'un token OU `"collection:class"` d'une classe
+        /// SFT. Tous les `outputs` DOIVENT porter exactement cet `asset_id`.
+        asset_id: String,
+        /// UTXOs créés (mêmes champs qu'un `Mint` : address, amount, asset_id,
+        /// time-lock, spend-condition). `created_at` est écrasé par le système.
+        outputs: Vec<TxOutput>,
+        /// Clé publique secp256k1 (hex sec1) de l'AUTORISATEUR = `mint_authority`.
+        auth_pubkey_hex: String,
+        /// Signature ECDSA (base64 DER) de l'autorisateur sur
+        /// [`custodial_mint_signing_message`]`(network_id, asset_id, outputs, mint_nonce)`.
+        auth_signature_b64: String,
+        /// Nonce unique choisi par le créateur (anti-replay). Consommé une seule
+        /// fois par `(asset_id, mint_nonce)`.
+        mint_nonce: String,
+    },
     /// Verrouille des UTXOs sur ce ledger pour un transfert cross-ledger.
     /// Les fonds sont détruits sur le ledger source. Coordinator seulement.
     BridgeLock {
@@ -396,6 +442,9 @@ impl PlainPayload {
         match self {
             PlainPayload::TxUtxo(t) => Some(t.outputs.clone()),
             PlainPayload::Mint { outputs } => Some(outputs.clone()),
+            // CustodialMint = create only (no inputs), like Mint. The minted UTXOs
+            // MUST be visible to the indexer / lookup / balance scanner.
+            PlainPayload::CustodialMint { outputs, .. } => Some(outputs.clone()),
             PlainPayload::Reward {
                 fee_outputs,
                 reward_outputs,
@@ -480,6 +529,73 @@ pub fn royalty_update_signing_message(
     // de sécurité).
     let bytes = serde_json::to_vec(&canon).expect("canonical royalty message is infallible");
     hex::encode(Sha256::digest(bytes))
+}
+
+/// Message canonique que le `mint_authority` d'un asset signe pour AUTORISER un
+/// mint custodial (protocole 2.8). Bound au `network_id` (anti-replay cross-chain)
+/// + domaine dédié. Renvoie le SHA-256 hex du JSON canonique
+/// `{domain, network_id, asset_id, outputs, mint_nonce}` — **source UNIQUE**
+/// partagée par le signeur (endpoint/SDK) ET le validateur consensus.
+///
+/// Les `outputs` sont sérialisés VERBATIM sauf `created_at`, normalisé à `None` :
+/// ce champ est assigné par le système au persist (anti-antidatage, 2.5), donc
+/// toute valeur cliente est ignorée et NE DOIT PAS entrer dans le message. Tous
+/// les AUTRES champs d'output (`address`, `amount`, `asset_id`, `locked_until`,
+/// `spend_condition`) SONT liés : sans ça, le Coordinator pourrait injecter un
+/// time-lock ou une condition de dépense hors-signature sur les UTXOs mintés.
+///
+/// Anti-replay : la signature commit au `mint_nonce` (unique par asset). Combiné
+/// à la consommation one-shot `(asset_id, mint_nonce)` au consensus (CF
+/// `custodial_mint_consumed`), une signature capturée sur-DAG ne peut jamais être
+/// rejouée pour minter deux fois.
+pub fn custodial_mint_signing_message(
+    network_id: &str,
+    asset_id: &str,
+    outputs: &[TxOutput],
+    mint_nonce: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    // Normalise `created_at` à None (assigné par le système au persist). Les
+    // autres champs optionnels d'output gardent leur `skip_serializing_if` →
+    // forme canonique déterministe et identique côté SDK.
+    let normalized: Vec<TxOutput> = outputs
+        .iter()
+        .map(|o| TxOutput {
+            created_at: None,
+            ..o.clone()
+        })
+        .collect();
+    #[derive(Serialize)]
+    struct Canon<'a> {
+        domain: &'a str,
+        network_id: &'a str,
+        asset_id: &'a str,
+        outputs: &'a [TxOutput],
+        mint_nonce: &'a str,
+    }
+    let canon = Canon {
+        domain: "pms-custodial-mint-v1",
+        network_id,
+        asset_id,
+        outputs: &normalized,
+        mint_nonce,
+    };
+    // Sérialisation déterministe (ordre de déclaration + serde de TxOutput). Comme
+    // pour la royalty : `.expect` plutôt qu'un fail-open vers un hash constant —
+    // ne jamais dégrader silencieusement un message de sécurité.
+    let bytes = serde_json::to_vec(&canon).expect("canonical custodial mint message is infallible");
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// Clé de consommation anti-replay d'un mint custodial (protocole 2.8) : couple
+/// `(asset_id, mint_nonce)`. **Source UNIQUE** partagée par le claim RAM +
+/// early-reject (pms-core, arm `CustodialMint`) ET l'écriture durable (pms-storage,
+/// CF `custodial_mint_consumed`), pour que les deux ne puissent JAMAIS diverger.
+/// Le séparateur `\0` ne peut apparaître ni dans un `asset_id`
+/// (`[a-z0-9_:-]`) ni dans un `mint_nonce` (hex) → aucune collision de clé.
+/// Consommée une seule fois `(asset_id, mint_nonce)`.
+pub fn custodial_mint_consumed_key(asset_id: &str, mint_nonce: &str) -> String {
+    format!("{asset_id}\u{0}{mint_nonce}")
 }
 
 /// Validates the resale-royalty policy fields shared by [`TokenMetadata`] and
@@ -733,6 +849,44 @@ mod royalty_tests {
         // OU tout changement du format de message casse ce test (bien voulu).
         assert_eq!(v1, "5ef3ba01105c96e4e1ab07a702ee4b2ccb2e21aa15f4243956261bd4ebbaeb4e", "PIN v1");
         assert_eq!(v2, "4ae5830ef7f4ce6d8a966fc3fd19053cc3b40094e3e5930c813621b9dec5880f", "PIN v2");
+    }
+
+    #[test]
+    fn custodial_mint_signing_message_golden() {
+        // Vecteurs GOLDEN pour la parité SDK. Le SDK DOIT produire le MÊME JSON
+        // compact (ordre = déclaration, outputs sérialisés comme TxOutput, champs
+        // optionnels absents si None, `created_at` toujours normalisé à None) puis
+        // SHA-256 hex.
+        //
+        // Vecteur 1 — output simple (aucun champ optionnel). JSON attendu :
+        //   {"domain":"pms-custodial-mint-v1","network_id":"pms-dev-v1",
+        //    "asset_id":"studio:ticket",
+        //    "outputs":[{"address":"8e1recipient","amount":"100","asset_id":"studio:ticket"}],
+        //    "mint_nonce":"nonce-abc"}
+        let out1 = TxOutput::new("8e1recipient", "100", Some("studio:ticket".into()));
+        let v1 = custodial_mint_signing_message("pms-dev-v1", "studio:ticket", &[out1], "nonce-abc");
+        // Vecteur 2 — output TIME-LOCKÉ (prouve que `locked_until` est lié à la
+        // signature). JSON attendu :
+        //   {"domain":"pms-custodial-mint-v1","network_id":"pms-dev-v1","asset_id":"col:cls",
+        //    "outputs":[{"address":"8e1locked","amount":"50","asset_id":"col:cls","locked_until":1893456000000}],
+        //    "mint_nonce":"n2"}
+        let out2 = TxOutput::new_locked("8e1locked", "50", Some("col:cls".into()), 1893456000000);
+        let v2 = custodial_mint_signing_message("pms-dev-v1", "col:cls", &[out2], "n2");
+        // Vecteur 3 — MÊME output que v1 mais `created_at` renseigné : DOIT donner
+        // le MÊME hash que v1 (le système écrase created_at → hors signature).
+        let out3 = TxOutput {
+            created_at: Some(1700000000000),
+            ..TxOutput::new("8e1recipient", "100", Some("studio:ticket".into()))
+        };
+        let v3 = custodial_mint_signing_message("pms-dev-v1", "studio:ticket", &[out3], "nonce-abc");
+        println!("GOLDEN cmint v1 = {v1}");
+        println!("GOLDEN cmint v2 = {v2}");
+        println!("cmint v3 (created_at ignoré) = {v3}");
+        // Golden hardcodés (indépendants de la formule) — toute divergence SDK OU
+        // tout changement du format casse ce test (bien voulu).
+        assert_eq!(v1, "277ed5cc66c76ac6256dd4c84a9ce715fc0f8d386308c49876f2344ef143bfe1", "PIN cmint v1");
+        assert_eq!(v2, "7918974d7df75273dbd07982d644d99cd967a3cd3e94b66b29fadaaff3a6c5b3", "PIN cmint v2");
+        assert_eq!(v3, v1, "created_at NE DOIT PAS entrer dans le message signé");
     }
 
     #[test]

@@ -306,6 +306,8 @@ impl RocksStore {
             "config_history", // History of config changes (block_id -> entry)
             "governance_proposals", // Governance timelock proposals: proposal_id -> record (plan §4)
             "sft_classes", // Semi-fungible class registry: asset_id ("collection:class") -> SftClass
+            "sft_collections", // SFT collection ownership (anti-squat, 2.8): collection_id -> owner
+            "custodial_mint_consumed", // CustodialMint anti-replay (2.8): "asset\0nonce" -> mint_block_id
             "node_block_counts", // Block count per node: node_pk -> count
             "node_fee_pool", // Fee pool: single key "pool" -> amount (u64)
             "node_reward_addresses", // Reward addresses: node_pk -> address
@@ -476,6 +478,8 @@ impl RocksStore {
         "config_history",
         "governance_proposals",
         "sft_classes",
+        "sft_collections",
+        "custodial_mint_consumed",
         "node_block_counts",
         "node_fee_pool",
         "node_reward_addresses",

@@ -102,7 +102,13 @@ use crate::api::AppState;
 /// admin — un pair peut s'auto-inscrire sans le token opérateur. Anti-rejeu
 /// (fraîcheur ±5 min + monotonie sur `ts_ms`) + cap anti-DoS. `peers/connect`
 /// reste opérateur-only.
-pub const API_VERSION: u32 = 38;
+/// v39 (protocole 2.8 — provisionnement custodial) : nouvelles routes /v1
+/// (API-key, PAS admin) `POST /v1/sft/classes`, `POST /v1/tokens/create`,
+/// `POST /v1/{sft,tokens}/mint`, `POST /v1/{sft,tokens}/mint/prepare`. Créer/mint
+/// un token OU une classe SFT capée + royalty autorisé par la clé du CRÉATEUR /
+/// `mint_authority` (custodiale ou pré-signée), SANS token admin partagé. Nouveau
+/// scope API-key `"sft"`. Nouveau `PlainPayload::CustodialMint` (DAG_VERSION 3.15.0).
+pub const API_VERSION: u32 = 39;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -214,6 +220,9 @@ mod tests {
         //          du public ; api-key fail-closed en prod).
         // v0.30.1: 37 → 38 (auth crypto node registry : /v1/register &
         //          /v1/heartbeat acceptent une signature de node_pk).
-        assert_eq!(parsed.api_version, 38);
+        // v0.31.0: 38 → 39 (protocole 2.8 : provisionnement custodial —
+        //          /v1/{sft/classes,tokens/create,{sft,tokens}/mint[/prepare]} ;
+        //          scope "sft" ; PlainPayload::CustodialMint).
+        assert_eq!(parsed.api_version, 39);
     }
 }

@@ -179,6 +179,15 @@ pub struct CoreAdapter<
     /// never allow a silent, unreconciled bridge mint).
     pub(crate) bridge_resolver:
         Arc<RwLock<Option<(Arc<dyn pms_interface::BridgeLockResolver>, String)>>>,
+    /// Locks async **par asset** sérialisant la fenêtre lecture-cap → apply d'un
+    /// `CustodialMint` (protocole 2.8, anti-TOCTOU d'inflation). Sans ça, deux
+    /// mints custodiaux concurrents du MÊME asset (nonces distincts) liraient la
+    /// même `circulating_supply` obsolète, passeraient tous deux le cap et
+    /// dépasseraient `max_supply`. Le lock étant per-asset, les autres assets et
+    /// les autres types de payload restent pleinement concurrents. Init paresseuse
+    /// par asset ; jamais purgé (un `Arc<Mutex<()>>` vide est négligeable et les
+    /// assets mintés custodialement sont peu nombreux).
+    pub(crate) custodial_mint_locks: dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl<
@@ -251,6 +260,7 @@ impl<
             wire_meta,
             key_rotation_state,
             bridge_resolver: Arc::new(RwLock::new(None)),
+            custodial_mint_locks: dashmap::DashMap::new(),
         })
     }
 
@@ -362,6 +372,7 @@ impl<
             wire_meta,
             key_rotation_state,
             bridge_resolver: Arc::new(RwLock::new(None)),
+            custodial_mint_locks: dashmap::DashMap::new(),
         })
     }
 
