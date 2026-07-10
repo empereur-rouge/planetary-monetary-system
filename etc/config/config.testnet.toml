@@ -76,8 +76,13 @@ whitelist_fp256 = []
 [limits]
 max_body_bytes = 1048576
 request_timeout_ms = 30000
-rate_limit_rps = 10000
-burst = 20000
+# Per-client (par IP) — effectif depuis que le gateway forwarde X-Forwarded-For
+# (v0.30.2). Resserré 10000/20000 → 1000/2000 (aligné prod) : à 10000 le bucket
+# était quasi illimité. Le simulateur, keyé sous l'IP du gateway côté engine
+# (pas de XFF interne), est déjà plafonné à 500 rps au bord gateway → 2× de
+# marge ici. Les clients externes ont chacun leur propre clé per-IP.
+rate_limit_rps = 1000
+burst = 2000
 
 [fees]
 epsilon = "0.001"

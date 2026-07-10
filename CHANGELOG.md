@@ -48,8 +48,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Tests : `slow_upstream_hits_gateway_timeout_408` (upstream 5 s + timeout
     250 ms → 408 sans attendre les 30 s reqwest), `fast_upstream_passes_through`
     (200 + corps proxifié), `health_route_bypasses_stack` (`/livez` hors pile).
+- **sec(config) — rate limits engine resserrés (testnet + mainnet).** Les
+  limites per-client de l'engine étaient à `10000/20000` (quasi illimité) en
+  testnet ET mainnet. Devenues effectives avec le forward XFF ci-dessus, elles
+  sont resserrées à **`1000/2000`** (aligné prod) dans `config.testnet.toml` et
+  `config.mainnet.toml`. Le simulateur (keyé sous l'IP du gateway côté engine,
+  déjà plafonné à 500 rps au bord) garde 2× de marge ; les clients externes ont
+  chacun leur clé per-IP. Défaut code du gateway aussi abaissé `10000/20000 →
+  1000/2000` (secure-by-default ; testnet surcharge à 500/1000 via env).
+  Nouvelles env gateway `REQUEST_TIMEOUT_MS`/`MAX_CONCURRENT` explicitées dans
+  `docker-compose.testnet.yml`. Test-garde `deployed_configs_keep_tightened_
+  rate_limits` (lit les vrais TOML prod/testnet/mainnet, échoue si un
+  `rate_limit_rps > 2000` réapparaît).
 - `API_VERSION` inchangé (**38**) : ces fixes sont du durcissement infra (edge
   gateway + config), ils ne modifient aucun contrat/format d'endpoint engine.
+
+### Résiduel / à traiter
+- **Pas de quota par API-key** : tout le rate limiting reste keyé sur l'IP. Une
+  clé valide (ou, testnet avec key store vide → fail-open, mais store provisionné
+  actuellement) n'a pas de limite par identité. Amélioration future.
+- **Anti-slowloris** : `TimeoutLayer` borne le handler après lecture des headers ;
+  un `http1_header_read_timeout` au niveau serveur (Caddy le fait déjà au bord)
+  reste à câbler côté gateway/engine pour les déploiements sans Caddy.
 
 ## [0.30.1] - Unreleased — Durcissement sécurité API (audit « autres hijacks »)
 

@@ -145,6 +145,11 @@ services:
       # see recommendation #4 in CHANGELOG (requires gateway code change).
       RATE_LIMIT_RPS: 500
       BURST_SIZE: 1000
+      # v0.30.2 — DoS au bord public : timeout par requete (→ 408) + plafond
+      # de concurrence in-flight. Ne coupent pas les flux SSE (le handler
+      # retourne des l'arrivee des headers amont).
+      REQUEST_TIMEOUT_MS: 30000
+      MAX_CONCURRENT: 512
       SERVICES_MONITOR: "Engine|https://pms-engine:8080/internal/health|ok,Prometheus|http://prometheus:9090/-/healthy|,Simulator|http://pms-simulator:9090/|,Caddy|http://caddy:80|"
       SERVICES_CHECK_INTERVAL: "20"
     volumes:

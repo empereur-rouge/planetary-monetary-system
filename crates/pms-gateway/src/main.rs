@@ -88,14 +88,17 @@ impl GatewaySettings {
                 .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string()),
             listen_addr: std::env::var("LISTEN_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:8443".to_string()),
+            // Secure-by-default : per-IP, aligné prod (1000/2000). Le testnet
+            // surcharge à 500/1000 via env. À l'ancien défaut 10000/20000 un
+            // déploiement sans env avait un rate limit quasi illimité.
             rate_limit_rps: std::env::var("RATE_LIMIT_RPS")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(10000),
+                .unwrap_or(1000),
             burst_size: std::env::var("BURST_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(20000),
+                .unwrap_or(2000),
             max_body_bytes: std::env::var("MAX_BODY_BYTES")
                 .ok()
                 .and_then(|s| s.parse().ok())

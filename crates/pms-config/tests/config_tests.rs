@@ -215,3 +215,46 @@ fn test_limits_deserialize() {
     assert_eq!(limits.rate_limit_rps, 20);
     assert_eq!(limits.burst, 40);
 }
+
+/// Garde anti re-desserrage (durcissement anti-DoS v0.30.2) : les configs
+/// DÉPLOYÉES (prod/testnet/mainnet) doivent garder un `rate_limit_rps` borné.
+/// À 10000 rps le token bucket per-client est quasi illimité — c'est le gap DoS
+/// qu'on vient de fermer. Ce test lit les VRAIS fichiers TOML (pas un littéral)
+/// pour qu'un futur retour à 10000 échoue en CI au lieu de passer en silence.
+#[test]
+fn deployed_configs_keep_tightened_rate_limits() {
+    const MAX_SANE_RPS: i64 = 2000;
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    for name in [
+        "config.prod.toml",
+        "config.testnet.toml",
+        "config.mainnet.toml",
+    ] {
+        let path = format!("{root}/etc/config/{name}");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("lecture {path}: {e}"));
+        let val: toml::Value =
+            toml::from_str(&text).unwrap_or_else(|e| panic!("parse {name}: {e}"));
+        let limits = val
+            .get("limits")
+            .unwrap_or_else(|| panic!("{name}: table [limits] manquante"));
+        let rps = limits
+            .get("rate_limit_rps")
+            .and_then(|v| v.as_integer())
+            .unwrap_or_else(|| panic!("{name}: limits.rate_limit_rps manquant/non-entier"));
+        let burst = limits
+            .get("burst")
+            .and_then(|v| v.as_integer())
+            .unwrap_or_else(|| panic!("{name}: limits.burst manquant/non-entier"));
+        println!("{name}: rate_limit_rps={rps}, burst={burst} (plafond sain ≤ {MAX_SANE_RPS})");
+        assert!(
+            rps <= MAX_SANE_RPS,
+            "{name}: rate_limit_rps={rps} > {MAX_SANE_RPS} — re-desserrage DoS ? (cf. v0.30.2)"
+        );
+        // Le burst reste proportionné (≤ 2× le rps soutenu, comme prod).
+        assert!(
+            burst <= rps * 2,
+            "{name}: burst={burst} > 2× rps ({rps}) — burst trop permissif"
+        );
+    }
+}
