@@ -13,8 +13,8 @@ Le Gateway est le point d'entree public unique du reseau PMS. C'est un reverse p
 
 1. **Proxy transparent** : toute requete HTTP (GET, POST, PUT, PATCH, DELETE) est relayee au Engine via un fallback catch-all. Les nouveaux endpoints Engine sont automatiquement disponibles sans modification du Gateway.
 2. **Rate limiting per-IP + protection DoS au bord** : limitation de debit par adresse IP via `tower-governor` (token bucket RPS + burst), plus (v0.30.2) un `TimeoutLayer` (→ 408 sur requete lente) et un `ConcurrencyLimitLayer` (plafond de requetes in-flight), en miroir de la pile du Engine. La construction du router est extraite dans `build_app()` (testable via `oneshot`).
-3. **Streaming SSE** : deux endpoints de streaming temps reel (`/blocks/stream` et `/v1/wallet/{address}/activity/stream`) sont proxifies en mode streaming (non buffered) pour maintenir la connexion SSE ouverte. Sains sous Timeout/Concurrency : le handler retourne des l'arrivee des headers amont, donc ni le timeout ni le plafond ne bornent le flux vivant.
-4. **Forward d'authentification + IP client** : les headers `Authorization`, `X-API-Key` **et `X-Forwarded-For` / `X-Real-IP`** (v0.30.2, whitelist stricte `FORWARDED_HEADERS`) sont transmis au Engine. Le forward de l'IP client permet au rate limiter du Engine de key par vrai client (voir prerequis Caddy en section Configuration). Aucun header ambiant (Cookie, etc.) n'est proxifie.
+3. **Streaming SSE** : deux endpoints de streaming temps reel (`/blocks/stream` et `/v1/wallet/{address}/activity/stream`) sont proxifies en mode streaming (non buffered) pour maintenir la connexion SSE ouverte. Sains vis-a-vis de Timeout/Concurrency : le handler retourne des l'arrivee des headers amont, donc ces deux couches ne bornent pas / ne tiennent pas de slot sur le flux vivant (le timeout total reqwest amont de 30s le borne deja, independamment de ce changement).
+4. **Forward d'authentification + IP client** : les headers `Authorization`, `X-API-Key` **et `X-Forwarded-For`** (v0.30.2, whitelist stricte `FORWARDED_HEADERS`) sont transmis au Engine. Le forward de l'IP client permet au rate limiter du Engine de key par vrai client (voir prerequis Caddy en section Configuration). Aucun autre header (Cookie, X-Real-IP, etc.) n'est proxifie.
 5. **TLS termination** : support natif HTTPS via `axum-server` + `rustls` (certificats PEM configurables). En production, un Caddy en amont gere Let's Encrypt et proxifie vers le Gateway en TLS interne.
 6. **Health monitoring** (v0.5.0) : background health checker qui poll tous les services d'infrastructure (Engine, Prometheus, Simulator, Caddy) toutes les 20s et cache le resultat. Endpoint `GET /services/status` pour le dashboard. Voir [[service-monitoring]].
 
@@ -143,28 +143,37 @@ REQUEST_TIMEOUT_MS: 30000
 MAX_CONCURRENT: 512
 ```
 
-### ⚠️ Prerequis Caddy — X-Forwarded-For fiable (v0.30.2)
+### ⚠️ Prerequis Caddy — X-Forwarded-For fiable (v0.30.2, load-bearing)
 
-Depuis v0.30.2, le Gateway **forwarde `X-Forwarded-For` / `X-Real-IP` au Engine**
-pour que le rate limiter per-IP du Engine (`SmartIpKeyExtractor`) key sur le vrai
-client et non sur l'IP du Gateway (sinon bucket global, faille DoS). Ce keying
-n'est fiable **que si Caddy ecrase** `X-Forwarded-For` avec l'adresse reelle du
-peer, sinon un client peut pre-poser un XFF falsifie et faire tourner sa cle de
-rate limit :
+Depuis v0.30.2, le Gateway **forwarde `X-Forwarded-For` au Engine** (whitelist
+`FORWARDED_HEADERS` ; `X-Real-IP` volontairement exclu — jamais lu par
+`SmartIpKeyExtractor` et controlable par le client) pour que le rate limiter
+per-IP du Engine key sur le vrai client et non sur l'IP du Gateway (sinon bucket
+global, faille DoS). Ce keying n'est fiable **que si Caddy ecrase**
+`X-Forwarded-For` avec l'adresse reelle du peer. **Cet ecrasement est injecte
+automatiquement par les scripts de deploiement** (`scripts/deploy-testnet.sh`,
+`deploy-mainnet.sh`, `deploy.sh`) dans le `reverse_proxy` genere ; garde de
+non-regression : `deploy_scripts_overwrite_xff` (crate `pms-config`).
 
 ```caddyfile
 testnet.pms-network.com {
     reverse_proxy https://pms-gateway:8443 {
-        transport http { tls tls_insecure_skip_verify }
         header_up X-Forwarded-For {remote_host}   # ← ECRASE (pas append)
+        transport http { tls tls_insecure_skip_verify }
     }
 }
 ```
 
 Sans cette ligne, Caddy **ajoute** l'IP client a un XFF eventuellement falsifie ;
-`SmartIpKeyExtractor` prenant la valeur de gauche, le client controle sa cle.
-Le Gateway n'etant joignable que via Caddy (public) et le simulateur (interne,
-de confiance), forwarder le XFF est sinon sur.
+`SmartIpKeyExtractor` prenant la valeur de gauche, le client controlerait sa cle
+(evasion) ou celle d'une victime (empoisonnement, 429 cible). Le Gateway n'etant
+joignable que via Caddy (public) et le simulateur (interne, de confiance),
+forwarder le XFF est sur sous cette condition.
+
+⚠️ **Sequencement** : l'image gateway (forward XFF) et le Caddyfile (ecrasement)
+doivent etre deployes ENSEMBLE. Un `upgrade-*.sh` qui ne regenere pas le
+Caddyfile laisse le Caddy en cours SANS l'ecrasement → etat spoofable ; utiliser
+`deploy-*.sh` (regenere + pousse le Caddyfile) pour ce changement.
 
 > **Note (v0.4.3)** : Le Gateway accepte les certificats auto-signes via `danger_accept_invalid_certs(true)` quand `UPSTREAM_URL` commence par `https://`. L'option `api_tls_enabled` dans `[client]` (voir [[config-system]]) permet de desactiver le TLS API independamment du P2P si necessaire (default: `true`).
 

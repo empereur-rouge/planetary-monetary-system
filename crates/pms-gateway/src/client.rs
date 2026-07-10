@@ -1,3 +1,4 @@
+use http::header::{HeaderName, AUTHORIZATION};
 use http::StatusCode;
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -5,39 +6,46 @@ use serde::de::DeserializeOwned;
 /// Headers propagés de la requête client entrante vers l'Engine amont.
 ///
 /// - `authorization` / `x-api-key` : identité de l'appelant (auth engine).
-/// - `x-forwarded-for` / `x-real-ip` : **IP du client d'origine**, pour que le
-///   rate limiter per-client de l'engine (`SmartIpKeyExtractor`) key sur le
-///   vrai client et non sur l'adresse TCP du gateway. Sans ça, TOUT le trafic
-///   proxifié s'effondre dans un unique token bucket global keyé sur l'IP du
-///   gateway → un seul abuseur consomme le quota de tout le monde (faille DoS
-///   corrigée 2026-07).
+/// - `x-forwarded-for` : **IP du client d'origine**, pour que le rate limiter
+///   per-client de l'engine (`SmartIpKeyExtractor`) key sur le vrai client et
+///   non sur l'adresse TCP du gateway. Sans ça, TOUT le trafic proxifié
+///   s'effondre dans un unique token bucket global keyé sur l'IP du gateway →
+///   un seul abuseur consomme le quota de tout le monde (faille DoS corrigée
+///   2026-07).
 ///
-/// # Sécurité
+/// `x-real-ip` n'est **pas** forwardé : `SmartIpKeyExtractor` consulte XFF en
+/// premier et Caddy le pose toujours, donc X-Real-IP ne serait jamais lu — le
+/// forwarder ne ferait qu'élargir la surface d'un header contrôlable par le
+/// client. XFF (écrasé par Caddy) est la source unique de vérité.
+///
+/// # Sécurité — prérequis Caddy (load-bearing)
 /// Le keying per-client n'est fiable que si le bord public (Caddy) **écrase**
 /// `X-Forwarded-For` avec l'adresse réelle du peer (`header_up X-Forwarded-For
-/// {remote_host}` dans le Caddyfile). Sinon un client peut pré-poser un XFF
-/// falsifié et faire tourner sa clé de rate limit pour contourner la limite.
+/// {remote_host}`). Par défaut Caddy **append** à un XFF client falsifiable, et
+/// `SmartIpKeyExtractor` lit la valeur la plus à gauche → un client pourrait
+/// faire tourner sa clé de rate limit (évasion) ou poser l'IP d'une victime
+/// (empoisonnement, 429 ciblé). L'écrasement est injecté par les scripts de
+/// déploiement (`scripts/deploy-*.sh`, garde `deploy_scripts_overwrite_xff`).
 /// Le gateway n'étant joignable QUE via Caddy (public) et le simulateur
-/// (interne, de confiance), forwarder le XFF entrant est sûr sous cette
-/// condition. Cf. note de déploiement `documentation/features/gateway.md`.
-const FORWARDED_HEADERS: [&str; 4] = [
-    "authorization",
-    "x-api-key",
-    "x-forwarded-for",
-    "x-real-ip",
+/// (interne, de confiance), forwarder le XFF est sûr sous cette condition.
+const FORWARDED_HEADERS: [HeaderName; 3] = [
+    AUTHORIZATION,
+    HeaderName::from_static("x-api-key"),
+    HeaderName::from_static("x-forwarded-for"),
 ];
 
 /// Recopie sur `req` uniquement les headers de la whitelist [`FORWARDED_HEADERS`]
 /// présents dans `headers`. Tout autre header entrant (Cookie, Host client,
-/// etc.) est volontairement DROPPÉ — le gateway ne proxifie pas d'état
-/// ambiant vers l'engine.
+/// X-Real-IP, etc.) est volontairement DROPPÉ — le gateway ne proxifie pas
+/// d'état ambiant vers l'engine. Les noms sont des `HeaderName` const
+/// (`from_static`) : pas de re-validation ni d'allocation du nom par requête.
 fn forward_client_headers(
     mut req: reqwest::RequestBuilder,
     headers: &http::HeaderMap,
 ) -> reqwest::RequestBuilder {
-    for name in FORWARDED_HEADERS {
+    for name in &FORWARDED_HEADERS {
         if let Some(value) = headers.get(name) {
-            req = req.header(name, value);
+            req = req.header(name.clone(), value);
         }
     }
     req
@@ -191,10 +199,11 @@ mod tests {
         (format!("http://{addr}"), recorded)
     }
 
-    /// Le gateway DOIT transmettre l'IP client (`X-Forwarded-For`/`X-Real-IP`)
-    /// et l'auth à l'engine — sinon le rate limiter engine key sur l'IP du
-    /// gateway (bucket global). Et il NE doit PAS transmettre d'headers
-    /// ambiants arbitraires (Cookie).
+    /// Le gateway DOIT transmettre l'IP client (`X-Forwarded-For`) et l'auth à
+    /// l'engine — sinon le rate limiter engine key sur l'IP du gateway (bucket
+    /// global). Il NE doit PAS transmettre d'headers hors whitelist : ni un
+    /// header ambiant (Cookie), ni `X-Real-IP` (retiré de la whitelist —
+    /// jamais lu par SmartIpKeyExtractor et contrôlable par le client).
     #[tokio::test]
     async fn proxy_forwards_client_ip_and_auth_but_not_arbitrary_headers() {
         let (base_url, recorded) = spawn_recording_engine().await;
@@ -202,11 +211,11 @@ mod tests {
 
         let mut inbound = http::HeaderMap::new();
         inbound.insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
-        inbound.insert("x-real-ip", "203.0.113.7".parse().unwrap());
         inbound.insert("x-api-key", "test-key-abc".parse().unwrap());
         inbound.insert("authorization", "Bearer tok123".parse().unwrap());
-        // Header ambiant qui NE doit PAS être proxifié.
+        // Hors whitelist : NE doivent PAS être proxifiés.
         inbound.insert("cookie", "session=secret".parse().unwrap());
+        inbound.insert("x-real-ip", "9.9.9.9".parse().unwrap());
 
         let (status, _body, _ct) = client
             .proxy_request(
@@ -239,12 +248,15 @@ mod tests {
             Some("203.0.113.7"),
             "le gateway DOIT forwarder X-Forwarded-For (rate limit per-client engine)"
         );
-        assert_eq!(xri, Some("203.0.113.7"), "X-Real-IP doit être forwardé aussi");
         assert_eq!(key, Some("test-key-abc"), "X-API-Key doit être forwardé");
         assert_eq!(auth, Some("Bearer tok123"), "Authorization doit être forwardé");
         assert_eq!(
             cookie, None,
             "le gateway ne doit PAS forwarder un header ambiant (Cookie)"
+        );
+        assert_eq!(
+            xri, None,
+            "X-Real-IP hors whitelist : ne doit PAS être forwardé (surface d'attaque)"
         );
     }
 }

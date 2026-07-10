@@ -62,7 +62,8 @@ pub struct GatewaySettings {
     /// un client pouvait ouvrir un nombre illimité de connexions lentes et
     /// saturer le gateway (les slots ne sont tenus que le temps du round-trip
     /// proxy ; les handlers SSE relâchent leur slot dès le retour de la
-    /// réponse). Mirror du plafond engine (256).
+    /// réponse). Défaut 512 = 2× le plafond engine (256, hardcodé dans
+    /// `routes.rs`), pour absorber les bursts avant que l'engine ne queue.
     pub max_concurrent: usize,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
@@ -131,21 +132,30 @@ pub struct GatewayState {
 /// optionnel) avec toute la pile de couches défensives. Extrait de `main` pour
 /// être testable via `oneshot` sans ouvrir de socket TLS.
 ///
-/// Pile de couches (ordre miroir de l'engine — la DERNIÈRE `.layer()` est la
-/// plus externe / exécutée en premier) :
-/// 1. Governor (rate limit per-IP via `SmartIpKeyExtractor`)
+/// Pile de couches, dans l'ordre du code `.layer()` (rappel tower : la DERNIÈRE
+/// `.layer()` est la plus EXTERNE, exécutée en PREMIER sur la requête) — donc
+/// l'exécution va CORS → Concurrency → BodyLimit → Timeout → Governor → handler :
+/// 1. Governor (rate limit per-IP via `SmartIpKeyExtractor`) — le plus interne
 /// 2. Timeout (borne les requêtes lentes → 408)
 /// 3. Body limit (rejette les corps trop gros → 413)
 /// 4. Concurrency limit (borne les requêtes in-flight)
-/// 5. CORS
+/// 5. CORS — le plus externe
 ///
 /// Les routes health (`/livez`, `/healthz`, `/services/status`) restent hors
 /// de cette pile : ni rate limit ni auth (données cachées, non sensibles).
+///
+/// ⚠️ DUAL-LAYER : cette pile (governor `per_nanosecond` + ordre des couches +
+/// `SmartIpKeyExtractor`) est le MIROIR de celle de l'engine dans
+/// `crates/pms-server/src/api/routes.rs::build_api_router`. Toute correction de
+/// la conversion rps→période ou de l'ordre DOIT être portée aux deux (pas de
+/// helper partagé : le gateway lit des env vars, l'engine `pms_config::Limits`,
+/// et le gateway évite volontairement une dépendance directe à `pms-config`).
 pub fn build_app(state: GatewayState) -> Router {
     let settings = state.settings.clone();
 
     // NOTE: per_second(N) in tower-governor 0.8 means "period of N seconds"
     // (NOT "N requests per second"). Use per_nanosecond for correct rps conversion.
+    // ⚠️ Conversion identique à l'engine (routes.rs) — garder synchronisé.
     let period_ns = 1_000_000_000u64 / settings.rate_limit_rps.max(1);
     let governor_conf = Box::new(
         GovernorConfigBuilder::default()

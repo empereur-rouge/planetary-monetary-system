@@ -216,28 +216,49 @@ fn test_limits_deserialize() {
     assert_eq!(limits.burst, 40);
 }
 
-/// Garde anti re-desserrage (durcissement anti-DoS v0.30.2) : les configs
-/// DÉPLOYÉES (prod/testnet/mainnet) doivent garder un `rate_limit_rps` borné.
-/// À 10000 rps le token bucket per-client est quasi illimité — c'est le gap DoS
-/// qu'on vient de fermer. Ce test lit les VRAIS fichiers TOML (pas un littéral)
-/// pour qu'un futur retour à 10000 échoue en CI au lieu de passer en silence.
+/// Configs `etc/config/*.toml` volontairement LOOSE (dev/test/bench/local, pas
+/// déployés en prod) — exemptés du garde ci-dessous. Tout AUTRE fichier est
+/// traité comme déployé et doit rester borné : secure-by-default, un nouveau
+/// `config.<net>.toml` est couvert sauf exemption explicite ici.
+const NON_DEPLOYED_CONFIGS: &[&str] = &[
+    "config.dev.toml",
+    "config.local.toml",
+    "config.bench.toml",
+    "config.docker-test.toml",
+    "config.e2e-prod.toml",
+    "pms-config-user.toml",
+    "pms-no-tls.toml",
+];
+
+/// Garde anti re-desserrage (durcissement anti-DoS v0.30.2) : TOUTE config
+/// déployée (glob `etc/config/*.toml` moins la skip-list) doit garder un
+/// `rate_limit_rps` borné. À 10000 rps le token bucket per-client est quasi
+/// illimité — c'est le gap DoS qu'on vient de fermer. Lit les VRAIS fichiers
+/// (pas un littéral) : un futur retour à 10000, ou un nouveau config déployé
+/// loose, échoue en CI au lieu de passer en silence.
 #[test]
 fn deployed_configs_keep_tightened_rate_limits() {
     const MAX_SANE_RPS: i64 = 2000;
-    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-    for name in [
-        "config.prod.toml",
-        "config.testnet.toml",
-        "config.mainnet.toml",
-    ] {
-        let path = format!("{root}/etc/config/{name}");
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("lecture {path}: {e}"));
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../etc/config");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {dir}: {e}")) {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_str().unwrap().to_string();
+        if NON_DEPLOYED_CONFIGS.contains(&name.as_str()) {
+            println!("{name}: SKIP (non déployé)");
+            continue;
+        }
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("lecture {name}: {e}"));
         let val: toml::Value =
             toml::from_str(&text).unwrap_or_else(|e| panic!("parse {name}: {e}"));
-        let limits = val
-            .get("limits")
-            .unwrap_or_else(|| panic!("{name}: table [limits] manquante"));
+        let Some(limits) = val.get("limits") else {
+            println!("{name}: pas de [limits] (rien à vérifier)");
+            continue;
+        };
         let rps = limits
             .get("rate_limit_rps")
             .and_then(|v| v.as_integer())
@@ -251,10 +272,48 @@ fn deployed_configs_keep_tightened_rate_limits() {
             rps <= MAX_SANE_RPS,
             "{name}: rate_limit_rps={rps} > {MAX_SANE_RPS} — re-desserrage DoS ? (cf. v0.30.2)"
         );
-        // Le burst reste proportionné (≤ 2× le rps soutenu, comme prod).
         assert!(
             burst <= rps * 2,
             "{name}: burst={burst} > 2× rps ({rps}) — burst trop permissif"
         );
+        checked += 1;
+    }
+    println!("→ {checked} configs déployées vérifiées");
+    assert!(
+        checked >= 3,
+        "attendu ≥3 configs déployées vérifiées (prod/testnet/mainnet), trouvé {checked} — glob cassé ?"
+    );
+}
+
+/// Garde sécurité (revue DoS v0.30.2) : les scripts de déploiement DOIVENT
+/// générer un Caddyfile qui **écrase** `X-Forwarded-For` avec l'IP réelle du
+/// peer. Sans cette ligne, Caddy append à un XFF client falsifiable et le rate
+/// limiter per-IP (que le gateway forwarde à l'engine) devient contournable et
+/// empoisonnable. C'est le test qui aurait attrapé le gap : `client::tests`
+/// prouve seulement que le forwarding a lieu — comportement dangereux SANS
+/// l'écrasement Caddy.
+#[test]
+fn deploy_scripts_overwrite_xff() {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    for script in [
+        "scripts/deploy-testnet.sh",
+        "scripts/deploy-mainnet.sh",
+        "scripts/deploy.sh",
+    ] {
+        let path = format!("{root}/{script}");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("lecture {path}: {e}"));
+        let has_overwrite = text.contains("header_up X-Forwarded-For {remote_host}");
+        let has_reverse_proxy = text.contains("reverse_proxy https://pms-gateway:8443");
+        println!(
+            "{script}: reverse_proxy pms-gateway={has_reverse_proxy}, header_up XFF overwrite={has_overwrite}"
+        );
+        // On ne l'exige que si le script génère bien le reverse_proxy gateway.
+        if has_reverse_proxy {
+            assert!(
+                has_overwrite,
+                "{script} génère le reverse_proxy gateway SANS `header_up X-Forwarded-For {{remote_host}}` — XFF spoofable (cf. revue sécu DoS v0.30.2)"
+            );
+        }
     }
 }
