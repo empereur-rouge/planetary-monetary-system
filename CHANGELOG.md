@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > ⚠️ Mixed-version P2P : un nœud < 3.15.0 ne sait pas désérialiser un `CustodialMint`
 > → upgrade coordonné AVANT tout mint custodial.
 
+### Added (P3 — SDK + docs)
+- **docs** : fiche Obsidian `documentation/features/custodial-provisioning.md`
+  (modèle, Q1–Q5, sécurité, séquence e2e) + entrée `[[MOC]]`. rustdoc sur tous les
+  items publics neufs.
+- **SDK TypeScript** (`pms-sdk` `0.10.0 → 0.11.0`) : fonction pure
+  `custodialMintSigningMessage` (parité golden **byte-identique** avec l'engine Rust,
+  2 vecteurs pinnés) + wrappers `createSftClassCustodial`, `createTokenCustodial`,
+  `mintSftCustodial`/`mintTokenCustodial` (custodial), `prepareSftMint`/`prepareTokenMint`
+  + `mintSftSigned`/`mintTokenSigned` (voie pré-signée : prepare → contrôle de parité
+  local → soumission signée). 14 tests SDK dédiés (188 au total), build vert.
+
 ### Added (P2 — API `/v1`, API-key, PAS admin)
 - **feat(api) — provisionnement custodial sans token admin** : `POST /v1/sft/classes`
   + `POST /v1/tokens/create` (create ; `creator = mint_authority =` adresse dérivée
