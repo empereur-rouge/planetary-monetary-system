@@ -47,8 +47,8 @@ use crate::api_fn::token::{admin_create_token, admin_mint_token, get_token, list
 use crate::api_fn::transaction::{prepare_tx, wallet_send_tx};
 use crate::api_fn::wallet::{balance_by_address, wallet_balance};
 use crate::api_fn::wallet_factory::{
-    faucet_mint, wallet_create, wallet_restore_mnemonic, wallet_restore_private_key,
-    wallet_send_simple,
+    faucet_mint, wallet_canonical_address, wallet_create, wallet_restore_mnemonic,
+    wallet_restore_private_key, wallet_send_simple,
 };
 use crate::api_keys::ApiKeyCreateRequest;
 use axum::Json;
@@ -124,7 +124,14 @@ pub(super) fn build_ledger_scoped_routes() -> (Router<AppState>, Router<AppState
             "/v1/tokens/mint/prepare",
             post(crate::api_fn::custodial::custodial_mint_prepare),
         )
-        .route("/v1/wallet/create", post(wallet_create));
+        .route("/v1/wallet/create", post(wallet_create))
+        // Canonical bech32m address from a private key (no secret in response).
+        // Lets a client mint toward the exact form the node's spend paths derive,
+        // instead of guessing it locally (SDK x25519 ≠ node x25519).
+        .route(
+            "/v1/wallet/canonical-address",
+            post(wallet_canonical_address),
+        );
 
     // Write-producing wallet endpoints — gated.
     let wallet_write = Router::new()

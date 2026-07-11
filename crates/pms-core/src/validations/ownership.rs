@@ -14,8 +14,6 @@
 //!   dépendent de la clé ECDSA — c'est la partie comparée ici (la clé X25519
 //!   est une clé de chiffrement, pas d'autorisation).
 
-use sha2::{Digest, Sha256};
-
 /// Renvoie `true` si la clé publique ECDSA d'un `Unlock` autorise la dépense
 /// d'un UTXO appartenant à `address`.
 ///
@@ -53,12 +51,76 @@ pub fn unlock_matches_address(pubkey_hex: &str, address: &str) -> bool {
     // Forme 2 : adresse bech32m — hash20 == SHA256(pubkey)[..20].
     if let Ok((h20_hex, _x25519_hex)) = pms_wallet::decode_address(addr) {
         if let Ok(pk_bytes) = hex::decode(pk_norm) {
-            let hash = Sha256::digest(&pk_bytes);
-            return hex::encode(&hash[..20]).eq_ignore_ascii_case(&h20_hex);
+            let h20 = pms_wallet::pubkey_hash20(&pk_bytes);
+            return hex::encode(h20).eq_ignore_ascii_case(&h20_hex);
         }
     }
 
     false
+}
+
+/// Canonicalise une adresse-propriétaire vers son **identité** stable, de sorte
+/// que les formes équivalentes d'une même clé collapsent sur une seule entrée.
+///
+/// C'est le pendant « clé de comptabilité » de [`unlock_matches_address`] (même
+/// relation forme↔hash20) : partout où un flux/propriété doit être attribué à
+/// une partie **indépendamment de l'encodage** de l'adresse stockée
+/// (comptabilité de settlement, conservation d'un burn), keyer par
+/// `address_identity` plutôt que par la string brute. Les deux formes d'un même
+/// wallet (pubkey secp hex « forme SDK » et bech32m « forme nœud ») ont la même
+/// identité — c'est ce qui débloque les fonds mintés vers la forme hex.
+///
+/// - **pubkey secp hex brute** (33 ou 65 octets, préfixe `0x`/`0X` optionnel) →
+///   `sha256(pubkey)[..20]` hex, exactement le hash20 que le bech32m embarque ;
+/// - **bech32m** → son hash20 (20 premiers octets du payload) ;
+/// - **autre forme** (multisig `msig1…`, adresse inconnue) → `"nonkey:"` + le
+///   string en minuscules (aucun collapse — déjà canonique, pas d'équivalent
+///   hex). Le préfixe `nonkey:` est **essentiel** : sans lui, une string de 40
+///   hex (= un hash20 nu, non-pubkey non-bech32m) collapserait sur l'identité
+///   d'une partie réelle (`sha256(pubkey)[..20]` fait aussi 40 hex) → un output
+///   de settlement adressé à un hash20 nu passerait la comptabilité tout en
+///   étant **indépensable** (aucune clé ne déverrouille un hash20 nu →
+///   « black-hole » de la royalty). Le préfixe rend ce collapse impossible.
+///
+/// # Examples
+///
+/// ```
+/// use pms_core::validations::ownership::address_identity;
+/// // Une pubkey secp (ici 33 octets = 66 hex) : `0x` et la casse sont
+/// // normalisés vers la même identité (sha256(pubkey)[..20]).
+/// let pk = String::from("02") + &"ab".repeat(32); // 33 octets
+/// assert_eq!(
+///     address_identity(&pk),
+///     address_identity(&format!("0x{}", pk.to_uppercase())),
+/// );
+/// // Une forme inconnue est keyée par elle-même, préfixée `nonkey:`.
+/// assert_eq!(address_identity("MSIG1abc"), "nonkey:msig1abc");
+/// // Un hash20 nu (40 hex) NE collapse PAS sur l'identité d'une pubkey/bech32m.
+/// let bare_hash20 = "ab".repeat(20); // 40 hex = 20 octets
+/// assert_eq!(address_identity(&bare_hash20), format!("nonkey:{bare_hash20}"));
+/// ```
+pub fn address_identity(addr: &str) -> String {
+    let a = addr.trim();
+
+    // Forme pubkey secp brute (0x/0X optionnel) : identité = sha256(pubkey)[..20].
+    // La contrainte de longueur (33 compressé / 65 non-compressé) évite de hasher
+    // par erreur un hex arbitraire qui ne serait pas une clé.
+    let stripped = a.strip_prefix("0x").or_else(|| a.strip_prefix("0X")).unwrap_or(a);
+    if let Ok(pk) = hex::decode(stripped) {
+        if pk.len() == 33 || pk.len() == 65 {
+            // Même dérivation pubkey→hash20 que make_address / get_address.
+            return hex::encode(pms_wallet::pubkey_hash20(&pk));
+        }
+    }
+
+    // Forme bech32m : identité = hash20 (20 premiers octets du payload).
+    if let Ok((h20_hex, _x25519)) = pms_wallet::decode_address(a) {
+        return h20_hex;
+    }
+
+    // Forme inconnue/multisig : keyée par elle-même, PRÉFIXÉE pour ne jamais
+    // collisionner avec un hash20 réel (cf. doc — anti « black-hole »).
+    format!("nonkey:{}", a.to_lowercase())
 }
 
 #[cfg(test)]

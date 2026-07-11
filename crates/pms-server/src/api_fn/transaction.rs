@@ -357,6 +357,11 @@ pub async fn prepare_tx(
         }
     };
 
+    // Fail-fast : destinataire valide (sinon output construit vers un piège).
+    if let Some(rejection) = crate::api_fn::recipient::reject_bad_recipient(&req.to) {
+        return rejection;
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // 2) Charger la policy de frais depuis la config runtime
     // ════════════════════════════════════════════════════════════════════════

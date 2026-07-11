@@ -130,6 +130,9 @@ pub async fn admin_mint_sft(
     State(state): State<AppState>,
     Json(req): Json<MintSftRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Fail-fast : refuser un `to` non canonique (typo bech32, pubkey tronquée…)
+    // AVANT de forger le bloc — sinon fonds mintés mais indépensables.
+    crate::api_fn::recipient::validate_recipient_address(&req.to)?;
     let amount = Decimal::from_str_exact(&req.amount).ok().filter(|d| *d > Decimal::ZERO);
     let Some(amount) = amount else {
         return Err(ApiError::InvalidField {

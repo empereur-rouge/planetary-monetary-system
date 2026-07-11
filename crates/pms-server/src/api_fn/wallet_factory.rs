@@ -83,6 +83,80 @@ pub async fn wallet_create(
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// POST /v1/wallet/canonical-address — Adresse bech32m CANONIQUE d'une clé
+//
+// Un client (SDK) NE PEUT PAS calculer localement l'adresse bech32m canonique du
+// nœud : le bech32m embarque la clé x25519 dérivée CÔTÉ NŒUD
+// (`derive_x25519_pair_from_private_key_b64`), différente de la dérivation locale
+// du SDK. Les chemins de dépense (`get_address`) dérivent cette forme nœud ; un
+// client qui minte vers une bech32m calculée avec SA x25519 re-piégerait les
+// fonds. Cet endpoint renvoie la forme canonique AUTORITAIRE (celle que le nœud
+// dérive) pour que le client mint vers elle.
+//
+// Contrairement à `/v1/wallet/create` et `/admin/wallet/restore/*`, la réponse
+// ne contient AUCUN secret (ni clé privée, ni x25519_sk, ni mnémonique) — juste
+// des données publiques. Le body porte une clé privée (comme `send-simple` /
+// `market/settle`) → NE JAMAIS logger le body.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Corps de `POST /v1/wallet/canonical-address`.
+///
+/// Fournir **soit** `private_key_b64` (base64, 32 octets) **soit**
+/// `private_key_hex` (64 hex). **Secret sensible** — aucun logging du corps.
+#[derive(Debug, Deserialize)]
+pub struct CanonicalAddressRequest {
+    /// Clé privée base64 (prioritaire si les deux sont fournis).
+    #[serde(default)]
+    pub private_key_b64: Option<String>,
+    /// Clé privée hex (64 chars). Alternative à `private_key_b64`.
+    #[serde(default)]
+    pub private_key_hex: Option<String>,
+}
+
+/// Réponse **publique** (aucun secret) de `POST /v1/wallet/canonical-address`.
+#[derive(Debug, Serialize)]
+pub struct CanonicalAddressResponse {
+    /// Adresse bech32m canonique — la forme que les chemins de dépense du nœud
+    /// dérivent nativement. Minter vers elle garantit des fonds dépensables.
+    pub address: String,
+    /// Pubkey secp256k1 non-compressée hex (la forme `address` historique du SDK).
+    pub public_key_hex: String,
+    /// Pubkey x25519 hex telle que dérivée CÔTÉ NŒUD (embarquée dans `address`).
+    pub x25519_pub_hex: String,
+}
+
+/// `POST /v1/wallet/canonical-address` — dérive l'adresse bech32m canonique
+/// (+ pubkeys) d'une clé privée, **sans** renvoyer de secret. API-key-gated.
+pub async fn wallet_canonical_address(
+    State(state): State<AppState>,
+    Json(req): Json<CanonicalAddressRequest>,
+) -> Result<impl IntoResponse, crate::api_error::ApiError> {
+    use crate::api_error::ApiError;
+    let wallet = match (req.private_key_b64.as_deref(), req.private_key_hex.as_deref()) {
+        (Some(b64), _) => wallet_from_b64(b64).map_err(|e| ApiError::InvalidField {
+            field: "private_key_b64",
+            reason: e,
+        })?,
+        (None, Some(hex_key)) => Wallet::from_hex(hex_key).map_err(|e| ApiError::InvalidField {
+            field: "private_key_hex",
+            reason: e,
+        })?,
+        (None, None) => {
+            return Err(ApiError::InvalidField {
+                field: "private_key_b64",
+                reason: "private_key_b64 or private_key_hex is required".into(),
+            });
+        }
+    };
+    let hrp = &state.settings.address.hrp;
+    Ok(Json(CanonicalAddressResponse {
+        address: wallet.get_address(hrp),
+        public_key_hex: wallet.public_key_hex.clone(),
+        x25519_pub_hex: wallet.x25519_pub_hex.clone(),
+    }))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // POST /admin/wallet/restore/mnemonic — Restaure un wallet depuis 24 mots BIP39
 //
 // AUDIT H-5 (v0.9.1) : custodial-by-design. Le client transmet sa mnémonique
@@ -278,6 +352,12 @@ pub async fn faucet_mint(
         }
     }
 
+    // 0.9) Fail-fast : `to` doit être une forme d'adresse dépensable (sinon
+    // fonds mintés indépensables — cf. `recipient::validate_recipient_address`).
+    if let Some(rejection) = crate::api_fn::recipient::reject_bad_recipient(&req.to) {
+        return rejection;
+    }
+
     // 1) Parse amount
     let amount_dec = match Decimal::from_str_exact(&req.amount) {
         Ok(d) if d > Decimal::ZERO => d,
@@ -402,6 +482,20 @@ pub async fn wallet_send_simple(
 
     let hrp = &state.settings.address.hrp;
     let from_address = sender_wallet.get_address(hrp);
+    // Formes d'adresse-propriétaire équivalentes du sender (canonique bech32m
+    // d'abord, puis pubkey hex brute côté SDK) : la coin-selection les unit pour
+    // dépenser des fonds mintés vers l'une OU l'autre forme (fonds « piégés »).
+    let from_forms = pms_wallet::spend_address_forms(
+        hrp,
+        &sender_wallet.public_key_hex,
+        &sender_wallet.x25519_pub_hex,
+    );
+
+    // Fail-fast : le destinataire doit être une forme d'adresse dépensable
+    // (sinon les fonds envoyés seraient piégés chez le destinataire).
+    if let Some(rejection) = crate::api_fn::recipient::reject_bad_recipient(&req.to) {
+        return rejection;
+    }
 
     // ════════════════════════════════════════════════════════════════════
     // 2) Parse et validation du montant
@@ -456,9 +550,9 @@ pub async fn wallet_send_simple(
     // ════════════════════════════════════════════════════════════════════
     let adapter = state.srv.adapter_arc();
 
-    let (selected_inputs, selected_sum) = match tx_helpers::select_utxos(
+    let (selected_inputs, selected_sum) = match tx_helpers::select_utxos_multi(
         &adapter,
-        &from_address,
+        &from_forms,
         total_needed,
         &req.asset_id,
     )
@@ -490,7 +584,7 @@ pub async fn wallet_send_simple(
     // Smart contract transfer fees (in the custom asset) still apply.
     let mut pms_change = Decimal::ZERO;
     if req.asset_id.is_some() && fee_dec > Decimal::ZERO {
-        match tx_helpers::select_utxos(&adapter, &from_address, fee_dec, &None).await {
+        match tx_helpers::select_utxos_multi(&adapter, &from_forms, fee_dec, &None).await {
             Ok((pms_selected, pms_sum)) => {
                 for (output_id, _, _) in &pms_selected {
                     tx_inputs.push(TxInput {

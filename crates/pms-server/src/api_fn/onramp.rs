@@ -52,11 +52,9 @@ pub async fn admin_onramp(
             });
         }
     };
-    if req.to.trim().is_empty() {
-        return Err(ApiError::InvalidAddress {
-            addr: req.to.clone(),
-        });
-    }
+    // Fail-fast : `to` doit être une forme d'adresse dépensable (pas seulement
+    // non vide) — un on-ramp fiat vers un piège bloquerait les fonds émis.
+    crate::api_fn::recipient::validate_recipient_address(&req.to)?;
     if req.payment_ref.trim().is_empty() {
         return Err(ApiError::InvalidField {
             field: "payment_ref",

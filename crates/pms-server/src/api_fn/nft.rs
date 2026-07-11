@@ -315,6 +315,13 @@ pub async fn mint_nft(
             .into_response();
     }
 
+    // 1.0 Fail-fast : `owner_address` doit être une forme d'adresse dépensable —
+    // sinon le NFT est minté vers un propriétaire dont personne ne dérive
+    // l'adresse (transfert/burn impossibles).
+    if let Err(e) = crate::api_fn::recipient::validate_recipient_address(&req.owner_address) {
+        return e.into_response();
+    }
+
     // 1a. CREATE-ONLY — refuse de réécrire un token existant AVANT de persister
     //     (sinon un attaquant re-minte le token_id d'un tiers avec
     //     owner_address=lui et vole le NFT). Pré-check handler ; `apply_mint`

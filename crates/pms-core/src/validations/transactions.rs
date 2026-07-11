@@ -472,9 +472,21 @@ pub async fn validate_token_burn_async(
     check_input_time_locks(&input_outputs, now_ms)?;
 
     // 6. Conservation-burn : owner possède tout, même asset, inputs = change + amount.
+    //    Attribution par IDENTITÉ d'adresse (pas string brute) : un token minté
+    //    vers la pubkey hex « forme SDK » est sélectionné par la coin-selection
+    //    multi-forme (`select_utxos_multi`) mais l'`owner` déclaré est en bech32m
+    //    — sans le collapse hex↔bech32m, le burn serait rejeté à tort (parité
+    //    avec `validate_settlement`, cf. Dual-Layer Consistency).
+    let owner_id = crate::validations::ownership::address_identity(owner);
     let mut in_sum = Decimal::ZERO;
     for out in &input_outputs {
-        if out.address != owner {
+        // Fast path : la forme canonique (cas commun — le change est minté
+        // canonique par le nœud) est byte-identique à `owner` → on évite le
+        // hex-decode/SHA256 de `address_identity`. Le collapse hex↔bech32m ne
+        // sert que pour un input détenu sous une AUTRE forme.
+        if out.address != owner
+            && crate::validations::ownership::address_identity(&out.address) != owner_id
+        {
             return Err(ValidationError::InvalidSignature(format!(
                 "TokenBurn input not owned by burner: input addr={}, owner={}",
                 out.address, owner
@@ -498,7 +510,7 @@ pub async fn validate_token_burn_async(
                 outputs: format!("{:?}", o.asset_id),
             });
         }
-        if o.address != owner {
+        if crate::validations::ownership::address_identity(&o.address) != owner_id {
             return Err(ValidationError::InvalidSignature(format!(
                 "TokenBurn change must return to burner: output addr={}, owner={}",
                 o.address, owner

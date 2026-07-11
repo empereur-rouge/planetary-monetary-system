@@ -22,6 +22,7 @@
 //! compliance) are validated separately by the shared `validate_plain_txutxo`
 //! path — this module only adds the settlement-shape + role-binding gate on top.
 
+use crate::validations::ownership::address_identity;
 use pms_types::TxOutput;
 use rust_decimal::{Decimal, RoundingStrategy};
 use std::collections::HashMap;
@@ -165,14 +166,24 @@ pub fn validate_settlement(
     let net_to_seller = c.price - c.royalty;
     let item = Some(c.asset_sold);
 
-    // ── Net change per (address, asset): + received, − spent ─────────────
+    // Identités des parties déclarées : les inputs/outputs sont attribués par
+    // IDENTITÉ (cf. `address_identity`), pas par string brute, pour qu'un UTXO
+    // détenu sous la pubkey hex (forme SDK) soit correctement compté comme
+    // appartenant au `seller`/`buyer` déclaré en bech32m (régression #1a —
+    // sinon un item minté en hex est invendable, « fonds piégés »).
+    let seller_id = address_identity(c.seller);
+    let buyer_id = address_identity(c.buyer);
+
+    // ── Net change per (identity, asset): + received, − spent ────────────
     // Checked arithmetic (audit A3): a consensus validator must never panic on
     // attacker-influenced amounts — `Decimal`'s `+=`/`-=` panic on overflow.
-    let mut net: HashMap<(&str, Option<&str>), Decimal> = HashMap::new();
+    let mut net: HashMap<(String, Option<&str>), Decimal> = HashMap::new();
     for o in outputs {
         let a = Decimal::from_str_exact(&o.amount)
             .map_err(|_| format!("settlement: bad output amount {}", o.amount))?;
-        let slot = net.entry((o.address.as_str(), o.asset_id.as_deref())).or_default();
+        let slot = net
+            .entry((address_identity(&o.address), o.asset_id.as_deref()))
+            .or_default();
         *slot = slot
             .checked_add(a)
             .ok_or_else(|| "settlement: amount overflow".to_string())?;
@@ -180,56 +191,58 @@ pub fn validate_settlement(
     for i in input_outputs {
         let a = Decimal::from_str_exact(&i.amount)
             .map_err(|_| format!("settlement: bad input amount {}", i.amount))?;
-        let slot = net.entry((i.address.as_str(), i.asset_id.as_deref())).or_default();
+        let slot = net
+            .entry((address_identity(&i.address), i.asset_id.as_deref()))
+            .or_default();
         *slot = slot
             .checked_sub(a)
             .ok_or_else(|| "settlement: amount overflow".to_string())?;
     }
-    let get = |addr: &str, asset: Option<&str>| -> Decimal {
-        net.get(&(addr, asset)).copied().unwrap_or(Decimal::ZERO)
+    let get = |ident: &str, asset: Option<&str>| -> Decimal {
+        net.get(&(ident.to_string(), asset)).copied().unwrap_or(Decimal::ZERO)
     };
 
     // ── The EXHAUSTIVE set of allowed positive nets (audit F1) ───────────
-    // Accumulated per (address, asset) so beneficiary == seller sums to `price`.
-    let mut allowed: HashMap<(&str, Option<&str>), Decimal> = HashMap::new();
-    *allowed.entry((c.buyer, item)).or_default() += c.quantity;
-    *allowed.entry((c.seller, c.price_asset)).or_default() += net_to_seller;
+    // Accumulated per (identity, asset) so beneficiary == seller sums to `price`.
+    let mut allowed: HashMap<(String, Option<&str>), Decimal> = HashMap::new();
+    *allowed.entry((buyer_id, item)).or_default() += c.quantity;
+    *allowed.entry((seller_id.clone(), c.price_asset)).or_default() += net_to_seller;
     if c.royalty > Decimal::ZERO {
         let b = c.beneficiary.expect("beneficiary present when royalty > 0");
-        *allowed.entry((b, c.price_asset)).or_default() += c.royalty;
+        *allowed.entry((address_identity(b), c.price_asset)).or_default() += c.royalty;
     }
 
     // 1. Every positive net MUST be a declared gain of the EXACT expected amount.
     //    Blocks: over-payment to seller (price under-declaration), side-asset
     //    payments, third-party recipients, and wrong amounts.
-    for ((addr, asset), n) in &net {
+    for ((ident, asset), n) in &net {
         if *n > Decimal::ZERO {
-            match allowed.get(&(*addr, *asset)) {
+            match allowed.get(&(ident.clone(), *asset)) {
                 Some(exp) if exp == n => {}
                 _ => {
                     return Err(format!(
                         "settlement: unexpected credit {} {} to {} (not part of the declared split)",
                         n,
                         asset.unwrap_or("PMS"),
-                        addr
+                        ident
                     ));
                 }
             }
         }
     }
     // 2. Every declared gain MUST actually be paid in full (no missing/short output).
-    for ((addr, asset), exp) in &allowed {
-        if *exp > Decimal::ZERO && get(addr, *asset) != *exp {
+    for ((ident, asset), exp) in &allowed {
+        if *exp > Decimal::ZERO && get(ident, *asset) != *exp {
             return Err(format!(
                 "settlement: {} must net-receive exactly {} of {}",
-                addr,
+                ident,
                 exp,
                 asset.unwrap_or("PMS")
             ));
         }
     }
     // 3. Seller relinquishes EXACTLY `quantity` of the item.
-    if get(c.seller, item) != -c.quantity {
+    if get(&seller_id, item) != -c.quantity {
         return Err(format!(
             "settlement: seller must net-relinquish exactly {} of {}",
             c.quantity, c.asset_sold
@@ -546,5 +559,143 @@ mod tests {
         println!("beneficiary==buyer → {r:?}");
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("beneficiary cannot be the buyer"));
+    }
+
+    // ── Régression #1a : identité d'adresse (formes hex ↔ bech32m) ──────────
+
+    use pms_wallet::{SignerBackend, Wallet};
+
+    /// L'identité collapse la pubkey hex brute (forme SDK), sa variante `0x`/casse,
+    /// et le bech32m d'un MÊME wallet vers le même hash20 ; deux wallets diffèrent.
+    #[test]
+    fn address_identity_collapses_wallet_forms() {
+        let w = Wallet::from_seed(&[9u8; 32], None).expect("wallet");
+        let hex = w.public_key_hex.clone();
+        let bech32 = w.get_address("8e");
+        let (h20, _x) = pms_wallet::decode_address(&bech32).expect("decode");
+
+        let id_hex = address_identity(&hex);
+        let id_bech32 = address_identity(&bech32);
+        let id_0x_upper = address_identity(&format!("0x{}", hex.to_uppercase()));
+        println!("id(hex)={id_hex}\nid(bech32)={id_bech32}\nid(0xUPPER)={id_0x_upper}\nhash20={h20}");
+
+        assert_eq!(id_hex, h20, "identité(hex) == hash20 embarqué dans le bech32m");
+        assert_eq!(id_bech32, h20, "identité(bech32m) == son hash20");
+        assert_eq!(id_0x_upper, h20, "0x + casse normalisés vers la même identité");
+
+        let other = Wallet::from_seed(&[10u8; 32], None).expect("wallet");
+        assert_ne!(
+            address_identity(&other.public_key_hex),
+            id_hex,
+            "deux wallets distincts ont des identités distinctes"
+        );
+    }
+
+    /// **Cœur de la régression #1a** : l'item du vendeur est détenu sous sa
+    /// pubkey HEX (forme SDK), mais le settlement le déclare en BECH32m. Le
+    /// validateur DOIT l'accepter (avant le fix : « seller must net-relinquish »).
+    #[test]
+    fn accept_seller_item_input_under_hex_form() {
+        let seller = Wallet::from_seed(&[11u8; 32], None).expect("wallet");
+        let buyer = Wallet::from_seed(&[12u8; 32], None).expect("wallet");
+        let seller_bech32 = seller.get_address("8e");
+        let seller_hex = seller.public_key_hex.clone(); // forme SDK
+        let buyer_bech32 = buyer.get_address("8e");
+
+        // Revente 100 usdc, aucune royalty (swap pur).
+        let c = SettlementCheck {
+            asset_sold: "studio:ticket",
+            quantity: d("1"),
+            price_asset: Some("usdc"),
+            price: d("100"),
+            seller: &seller_bech32,
+            buyer: &buyer_bech32,
+            royalty: d("0"),
+            beneficiary: None,
+        };
+        // Item détenu SOUS LA FORME HEX ; paiement acheteur en bech32m.
+        let inputs = vec![
+            out(&buyer_bech32, "100", Some("usdc")),
+            out(&seller_hex, "1", Some("studio:ticket")),
+        ];
+        let outputs = vec![
+            out(&buyer_bech32, "1", Some("studio:ticket")), // item → acheteur
+            out(&seller_bech32, "100", Some("usdc")),       // net → vendeur (forme canonique)
+        ];
+        let r = validate_settlement(&inputs, &outputs, &c);
+        println!("seller item under hex-form, declared bech32m → {r:?}");
+        assert!(r.is_ok(), "l'item hex du vendeur doit être vendable: {r:?}");
+    }
+
+    /// Symétrique : l'acheteur PAIE depuis un UTXO détenu sous sa forme HEX,
+    /// avec change vers sa forme bech32m. Les deux formes collapsent → Ok.
+    #[test]
+    fn accept_buyer_payment_input_under_hex_form() {
+        let seller = Wallet::from_seed(&[13u8; 32], None).expect("wallet");
+        let buyer = Wallet::from_seed(&[14u8; 32], None).expect("wallet");
+        let seller_bech32 = seller.get_address("8e");
+        let buyer_bech32 = buyer.get_address("8e");
+        let buyer_hex = buyer.public_key_hex.clone();
+
+        let c = SettlementCheck {
+            asset_sold: "studio:ticket",
+            quantity: d("1"),
+            price_asset: Some("usdc"),
+            price: d("100"),
+            seller: &seller_bech32,
+            buyer: &buyer_bech32,
+            royalty: d("0"),
+            beneficiary: None,
+        };
+        // Acheteur paie 120 usdc DEPUIS SA FORME HEX, 20 de change vers bech32m.
+        let inputs = vec![
+            out(&buyer_hex, "120", Some("usdc")),
+            out(&seller_bech32, "1", Some("studio:ticket")),
+        ];
+        let outputs = vec![
+            out(&buyer_bech32, "1", Some("studio:ticket")),
+            out(&seller_bech32, "100", Some("usdc")),
+            out(&buyer_bech32, "20", Some("usdc")), // change acheteur (autre forme)
+        ];
+        let r = validate_settlement(&inputs, &outputs, &c);
+        println!("buyer pays from hex-form, change to bech32m → {r:?}");
+        assert!(r.is_ok(), "le paiement hex de l'acheteur doit être accepté: {r:?}");
+    }
+
+    /// Garde-fou : la normalisation NE doit PAS accepter un input détenu par un
+    /// TIERS comme relinquish du vendeur. Un item sous une pubkey hex ÉTRANGÈRE
+    /// (identité ≠ vendeur déclaré) → rejet « net-relinquish ».
+    #[test]
+    fn reject_foreign_hex_input_as_seller_relinquish() {
+        let seller = Wallet::from_seed(&[15u8; 32], None).expect("wallet");
+        let buyer = Wallet::from_seed(&[16u8; 32], None).expect("wallet");
+        let stranger = Wallet::from_seed(&[17u8; 32], None).expect("wallet");
+        let seller_bech32 = seller.get_address("8e");
+        let buyer_bech32 = buyer.get_address("8e");
+        let stranger_hex = stranger.public_key_hex.clone();
+
+        let c = SettlementCheck {
+            asset_sold: "studio:ticket",
+            quantity: d("1"),
+            price_asset: Some("usdc"),
+            price: d("100"),
+            seller: &seller_bech32,
+            buyer: &buyer_bech32,
+            royalty: d("0"),
+            beneficiary: None,
+        };
+        // L'item vient d'un TIERS (hex étranger), pas du vendeur déclaré.
+        let inputs = vec![
+            out(&buyer_bech32, "100", Some("usdc")),
+            out(&stranger_hex, "1", Some("studio:ticket")),
+        ];
+        let outputs = vec![
+            out(&buyer_bech32, "1", Some("studio:ticket")),
+            out(&seller_bech32, "100", Some("usdc")),
+        ];
+        let r = validate_settlement(&inputs, &outputs, &c);
+        println!("foreign hex item (not the declared seller) → {r:?}");
+        assert!(r.is_err(), "un item d'un tiers ne compte pas comme relinquish du vendeur");
+        assert!(r.unwrap_err().contains("net-relinquish"));
     }
 }

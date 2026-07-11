@@ -103,15 +103,13 @@ impl Wallet {
 
     pub fn get_address(&self, hrp: &str) -> String {
         use bech32::{ToBase32, Variant, encode};
-        use sha2::{Digest, Sha256};
 
         let pub_bytes = hex::decode(&self.public_key_hex).unwrap();
-        let hash = Sha256::digest(&pub_bytes); // 32 bytes
-        let h20 = &hash[..20]; // 20 bytes
+        let h20 = pubkey_hash20(&pub_bytes); // SHA256(pubkey)[..20]
         let xpk = hex::decode(&self.x25519_pub_hex).unwrap();
 
         let mut payload = Vec::with_capacity(52);
-        payload.extend_from_slice(h20);
+        payload.extend_from_slice(&h20);
         payload.extend_from_slice(&xpk);
 
         encode(hrp, payload.to_base32(), Variant::Bech32m).unwrap()
@@ -372,18 +370,59 @@ pub fn decode_address(addr: &str) -> Result<(String, String), String> {
     Ok((h20, xpk))
 }
 
+/// `true` si `s` (hex, **sans** préfixe `0x`) encode une clé publique
+/// secp256k1 valide : 33 octets (compressée) ou 65 (non-compressée) ET un point
+/// réellement sur la courbe (pas seulement la bonne longueur).
+///
+/// Utilisé par la validation d'adresse-destinataire (fail-fast au mint/send) :
+/// une pubkey hex tronquée ou hors-courbe n'a pas de clé privée correspondante
+/// → des fonds mintés vers elle seraient à jamais indépensables.
+///
+/// # Examples
+///
+/// ```
+/// use pms_wallet::{SignerBackend, Wallet, is_valid_secp_pubkey_hex};
+///
+/// let w = Wallet::from_seed(&[1u8; 32], None).unwrap();
+/// assert!(is_valid_secp_pubkey_hex(&w.public_key_hex)); // pubkey non-compressée réelle
+/// assert!(!is_valid_secp_pubkey_hex("04")); // trop court
+/// assert!(!is_valid_secp_pubkey_hex("zz")); // pas hex
+/// ```
+pub fn is_valid_secp_pubkey_hex(s: &str) -> bool {
+    match hex::decode(s) {
+        Ok(bytes) if bytes.len() == 33 || bytes.len() == 65 => {
+            k256::PublicKey::from_sec1_bytes(&bytes).is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// Hash20 canonique d'une clé publique secp256k1 : `SHA256(pubkey)[..20]`.
+///
+/// **Source unique** de la dérivation pubkey→hash20 dont dépendent l'adresse
+/// bech32m ([`make_address`] / [`Wallet::get_address`]), le binding
+/// d'autorisation (`pms_core::validations::ownership::unlock_matches_address`) et
+/// l'identité de comptabilité (`…::ownership::address_identity`). Toutes ces
+/// fonctions doivent produire des octets IDENTIQUES — les lier à ce helper
+/// empêche une divergence silencieuse qui re-piégerait les fonds.
+pub fn pubkey_hash20(pubkey_bytes: &[u8]) -> [u8; 20] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(pubkey_bytes);
+    let mut h20 = [0u8; 20];
+    h20.copy_from_slice(&digest[..20]);
+    h20
+}
+
 pub fn make_address(hrp: &str, ecdsa_pub_hex: &str, x25519_pub_hex: &str) -> String {
     use bech32::{ToBase32, Variant, encode};
-    use sha2::{Digest, Sha256};
 
     let pub_bytes = hex::decode(ecdsa_pub_hex).expect("pub hex");
-    let hash = Sha256::digest(&pub_bytes); // 32 bytes
-    let h20 = &hash[..20]; // prends 20 octets
+    let h20 = pubkey_hash20(&pub_bytes); // SHA256(pubkey)[..20]
 
     let xpk = hex::decode(x25519_pub_hex).expect("x25519 hex");
 
     let mut payload = Vec::with_capacity(52);
-    payload.extend_from_slice(h20);
+    payload.extend_from_slice(&h20);
     payload.extend_from_slice(&xpk);
 
     encode(hrp, payload.to_base32(), Variant::Bech32m).expect("bech32m")
@@ -408,6 +447,63 @@ pub fn address_candidates(hrp: &str, ecdsa_pub_hex: &str, x25519_pub_hex: &str) 
     if !pk.is_empty() && !xpk.is_empty() && hex::decode(&pk).is_ok() && hex::decode(&xpk).is_ok() {
         // make_address panique sur mauvais hex → on garde la garde au-dessus
         out.push(make_address(hrp, &pk, &xpk));
+    }
+
+    out
+}
+
+/// Encodages d'adresse **propriétaire** équivalents d'un wallet à clé unique,
+/// ordonnés **canonique d'abord**, pour le lookup d'UTXO / la coin-selection.
+///
+/// Les fonds d'un wallet peuvent être indexés sous n'importe lequel de ces
+/// strings-propriétaire selon l'encodage utilisé par l'émetteur à la création
+/// de l'output :
+/// 1. **bech32m** (`make_address` / [`Wallet::get_address`]) — la forme
+///    canonique que le nœud dérive nativement (`get_address(hrp)`) dans les
+///    chemins de dépense (`market/settle`, `send-simple`, `token/burn`) ;
+/// 2. **pubkey secp256k1 hex brute** (l'`address` historique du SDK
+///    TypeScript), en clair puis préfixée `0x`.
+///
+/// Comme l'index d'adresse est keyé par le string-propriétaire **exact** écrit
+/// à la création, des fonds mintés vers une forme sont invisibles à un chemin
+/// de dépense qui dérive une autre forme (fonds « piégés »). Unir ces formes
+/// permet à un wallet de toujours dépenser ce qu'il possède, quel que soit
+/// l'encodage utilisé au mint.
+///
+/// L'ordre place la forme bech32m canonique en premier pour que la coin
+/// selection garde son fast-path (early-exit) dans le cas commun : la forme
+/// brute n'est balayée que si la canonique ne couvre pas la cible.
+///
+/// Les formes purement x25519 de [`address_candidates`] sont exclues : une clé
+/// de chiffrement n'est jamais un propriétaire d'UTXO.
+///
+/// # Examples
+///
+/// ```
+/// use pms_wallet::{SignerBackend, Wallet, spend_address_forms};
+///
+/// let w = Wallet::from_seed(&[7u8; 32], None).unwrap();
+/// let forms = spend_address_forms("8e", &w.public_key_hex, &w.x25519_pub_hex);
+/// // La 1re forme est exactement l'adresse canonique du wallet.
+/// assert_eq!(forms[0], w.get_address("8e"));
+/// // La pubkey brute (forme SDK) est aussi couverte.
+/// assert!(forms.iter().any(|f| f == &w.public_key_hex.to_lowercase()));
+/// ```
+pub fn spend_address_forms(hrp: &str, ecdsa_pub_hex: &str, x25519_pub_hex: &str) -> Vec<String> {
+    let pk = ecdsa_pub_hex.trim().trim_start_matches("0x").to_lowercase();
+    let xpk = x25519_pub_hex.trim().trim_start_matches("0x").to_lowercase();
+
+    let mut out = Vec::with_capacity(3);
+
+    // 1) Forme canonique bech32m — tentée en premier (fast-path inchangé).
+    if !pk.is_empty() && !xpk.is_empty() && hex::decode(&pk).is_ok() && hex::decode(&xpk).is_ok() {
+        out.push(make_address(hrp, &pk, &xpk));
+    }
+
+    // 2) Pubkey secp brute (forme SDK historique), en clair puis 0x-préfixée.
+    if !pk.is_empty() && hex::decode(&pk).is_ok() {
+        out.push(pk.clone());
+        out.push(format!("0x{}", pk));
     }
 
     out

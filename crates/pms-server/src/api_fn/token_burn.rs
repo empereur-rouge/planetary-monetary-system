@@ -64,6 +64,11 @@ pub async fn wallet_burn_token(
     })?;
     let hrp = &state.settings.address.hrp;
     let owner = wallet.get_address(hrp);
+    // Formes-propriétaire équivalentes (bech32m canonique + pubkey hex brute
+    // SDK) : la coin-selection les unit pour brûler des fonds mintés vers l'une
+    // OU l'autre forme (cf. `spend_address_forms`).
+    let owner_forms =
+        pms_wallet::spend_address_forms(hrp, &wallet.public_key_hex, &wallet.x25519_pub_hex);
 
     // 2. Montant.
     let amount_dec = match Decimal::from_str_exact(&req.amount) {
@@ -78,7 +83,7 @@ pub async fn wallet_burn_token(
     // 3. Coin selection sur l'asset à brûler.
     let adapter = state.srv.adapter_arc();
     let (selected, selected_sum) =
-        tx_helpers::select_utxos(&adapter, &owner, amount_dec, &req.asset_id)
+        tx_helpers::select_utxos_multi(&adapter, &owner_forms, amount_dec, &req.asset_id)
             .await
             .map_err(|_| ApiError::InsufficientBalance {
                 addr: owner.clone(),

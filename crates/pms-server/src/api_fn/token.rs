@@ -330,6 +330,11 @@ pub async fn admin_mint_token(
         );
     }
 
+    // Fail-fast : refuser un `to` non canonique (sinon fonds mintés indépensables).
+    if let Some(rejection) = crate::api_fn::recipient::reject_bad_recipient(&req.to) {
+        return rejection;
+    }
+
     // Validate amount
     let amount_dec = match Decimal::from_str_exact(&req.amount) {
         Ok(d) if d > Decimal::ZERO => d,
