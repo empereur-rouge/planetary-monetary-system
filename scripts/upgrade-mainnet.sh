@@ -211,6 +211,32 @@ if [ "$UPDATE_CONFIG" = "true" ]; then
     ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" "mkdir -p $REMOTE_DIR/etc/alertmanager"
     scp -q $SSH_OPTS etc/alertmanager/alertmanager.mainnet.yml "$VPS_USER@$VPS_IP:$REMOTE_DIR/etc/alertmanager/alertmanager.mainnet.yml"
 
+    # Caddyfile (v0.30.2 XFF overwrite) — l'upgrade DOIT régénérer+scp le Caddyfile
+    # comme deploy-mainnet.sh, sinon il livre le gateway (qui forwarde XFF) SANS
+    # l'écrasement Caddy `header_up X-Forwarded-For {remote_host}` → rate limiting
+    # per-client spoofable/empoisonnable (revue sécu DoS v0.30.2). Bloc IDENTIQUE à
+    # scripts/deploy-mainnet.sh (garde `deploy_scripts_overwrite_xff` couvre les deux).
+    cat > Caddyfile.mainnet <<'CADDY_EOF'
+{
+    email admin@pms-network.com
+}
+
+pms-network.com {
+    tls admin@pms-network.com
+    reverse_proxy https://pms-gateway:8443 {
+        # SECURITE (v0.30.2) : ECRASE X-Forwarded-For avec l'IP reelle du peer.
+        header_up X-Forwarded-For {remote_host}
+        transport http {
+            tls
+            tls_insecure_skip_verify
+        }
+    }
+}
+CADDY_EOF
+    scp -q $SSH_OPTS Caddyfile.mainnet "$VPS_USER@$VPS_IP:$REMOTE_DIR/Caddyfile.mainnet"
+    ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" \
+        "docker exec pms-caddy-mainnet caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || true"
+
     # Boot-resiliency: compose.yaml symlink → mainnet, legacy disable
     ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" "cd $REMOTE_DIR && \
         ln -sf docker-compose.mainnet.yml compose.yaml && \
