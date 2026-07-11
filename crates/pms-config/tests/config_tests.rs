@@ -348,6 +348,11 @@ fn deploy_scripts_overwrite_xff() {
         "scripts/deploy-testnet.sh",
         "scripts/deploy-mainnet.sh",
         "scripts/deploy.sh",
+        // upgrade-*.sh régénèrent AUSSI le Caddyfile (v0.31.0) : sinon un upgrade
+        // livre le gateway forward-XFF sans l'écrasement Caddy → XFF spoofable
+        // (le gap réel rencontré au deploy custodial 2.8).
+        "scripts/upgrade-testnet.sh",
+        "scripts/upgrade-mainnet.sh",
     ] {
         let path = format!("{root}/{script}");
         let text = std::fs::read_to_string(&path)

@@ -92,6 +92,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   le `Mint` classique ET l'arm `CustodialMint`. Source unique → aucune divergence.
 
 ### Infrastructure
+- **fix(deploy) — `upgrade-{testnet,mainnet}.sh` régénèrent+scp le Caddyfile.** Avant,
+  seuls les `deploy-*.sh` généraient le Caddyfile avec l'écrasement XFF v0.30.2
+  (`header_up X-Forwarded-For {remote_host}`) ; un `upgrade-*.sh` livrait le gateway
+  forward-XFF SANS cet écrasement → rate limiting per-client spoofable (gap réel
+  rencontré au déploiement de cette feature). Les upgrades régénèrent maintenant le
+  Caddyfile (bloc identique aux deploy) + rechargent Caddy en gracieux. La garde
+  `deploy_scripts_overwrite_xff` (pms-config) couvre désormais les **5** scripts
+  deploy+upgrade (ne peut plus dériver). ⚠️ Note : le `{remote_host}` (IP seule) est
+  load-bearing — `{remote}` (IP:port) casse `SmartIpKeyExtractor`.
 - Migration `mig_12_to_13` (init CFs `sft_collections` + `custodial_mint_consumed`).
   Trait `DagStorage::is_custodial_mint_consumed` + `SftClassStorage::{put,get}_collection_owner`.
 - **fix(tests)** : `mint_policy_and_fees.rs` hand-buildait `Limits {..}` sans les

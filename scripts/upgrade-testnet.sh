@@ -231,6 +231,35 @@ if [ "$UPDATE_CONFIG" = "true" ]; then
     scp -q $SSH_OPTS tools/simulator/simulator.testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/simulator.testnet.toml"
     scp -q $SSH_OPTS tools/simulator/agents_testnet.toml "$VPS_USER@$VPS_IP:$REMOTE_DIR/tools/simulator/agents_testnet.toml"
 
+    # Caddyfile (v0.30.2 XFF overwrite) — l'upgrade DOIT régénérer+scp le Caddyfile
+    # comme deploy-testnet.sh, sinon il livre le gateway (qui forwarde XFF) SANS
+    # l'écrasement Caddy `header_up X-Forwarded-For {remote_host}` → rate limiting
+    # per-client spoofable/empoisonnable (revue sécu DoS v0.30.2). Bloc IDENTIQUE à
+    # scripts/deploy-testnet.sh (garde `deploy_scripts_overwrite_xff` couvre les deux).
+    cat > Caddyfile.testnet <<'CADDY_EOF'
+{
+    email admin@pms-network.com
+}
+
+testnet.pms-network.com {
+    tls admin@pms-network.com
+    reverse_proxy https://pms-gateway:8443 {
+        # SECURITE (v0.30.2) : ECRASE X-Forwarded-For avec l'IP reelle du peer.
+        header_up X-Forwarded-For {remote_host}
+        transport http {
+            tls
+            tls_insecure_skip_verify
+        }
+    }
+}
+CADDY_EOF
+    scp -q $SSH_OPTS Caddyfile.testnet "$VPS_USER@$VPS_IP:$REMOTE_DIR/Caddyfile.testnet"
+    # Recharge Caddy en gracieux pour appliquer le Caddyfile même si le gateway
+    # n'est pas recréé dans cet upgrade (le restart caddy plus bas ne se déclenche
+    # que si pms-gateway est dans $SERVICES_TO_RECREATE).
+    ssh -T -q $SSH_OPTS "$VPS_USER@$VPS_IP" \
+        "docker exec pms-caddy-testnet caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || true"
+
     # Boot-resiliency: ensure `docker compose` (without `-f`) on the VPS
     # always picks up the testnet stack. Two invariants:
     #
