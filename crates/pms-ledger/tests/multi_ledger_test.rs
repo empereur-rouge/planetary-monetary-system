@@ -41,6 +41,10 @@ fn test_settings(db_path: &str) -> pms_config::Settings {
             request_timeout_ms: 5000,
             rate_limit_rps: 100,
             burst: 100,
+            // None = héritent de la limite per-IP (ajoutés au durcissement rate-limit
+            // per-clé ; ce littéral de test était resté non-compilant depuis).
+            api_key_rate_rps: None,
+            api_key_burst: None,
         },
         auth: pms_config::Auth {
             require_signed_submit: false,
