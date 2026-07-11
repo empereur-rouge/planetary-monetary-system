@@ -7,6 +7,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.32.0] - Unreleased — Adresse canonique & récupération des fonds « piégés » (hex ↔ bech32m)
+
+> `Cargo.toml` workspace `0.31.0 → 0.32.0` (feature MINOR). `DAG_VERSION`
+> `3.15.0 → 3.16.0` (P1, consensus loosening — aucun bloc existant invalidé,
+> auto-migrating, pas de wipe). `API_VERSION` `39 → 40`. Feature en 3 phases côté
+> nœud : **P1** coin-selection + validation multi-forme (fix « fonds piégés »),
+> **P2** garde-fou de rejet des adresses `to` non canoniques au mint, **P3**
+> endpoint `POST /v1/wallet/canonical-address`. Le SDK (`pms-sdk`) suit dans sa
+> propre version.
+> ⚠️ Mixed-version P2P : un nœud < 3.16.0 REJETTE un `market/settle` dont un
+> input est détenu sous la forme pubkey-hex, qu'un nœud ≥ 3.16.0 accepte →
+> divergence consensus ; upgrade coordonné requis.
+
+### Fixed (P1 — fonds « piégés » : formes d'adresse hex ↔ bech32m)
+- **fix(wallet/market) — fonds mintés vers la pubkey hex redeviennent dépensables** :
+  un `to` = pubkey secp hex (forme `address` historique du SDK) indexe l'UTXO sous
+  ce string, mais `send-simple` / `market/settle` / `wallet/token/burn` dérivent
+  l'adresse **bech32m** canonique du dépensier → l'ancienne coin-selection ne
+  regardait que le bucket bech32m → `3001 InsufficientBalance`, fonds
+  indépensables/invendables. Nouveau `select_utxos_multi` (+ helper
+  `pms_wallet::spend_address_forms`) : la sélection unit les formes-propriétaire
+  équivalentes (bech32m canonique d'abord — fast-path inchangé — puis pubkey hex
+  ±`0x`). Câblé dans `wallet_send_simple`, `market_settle` (seller/buyer), et
+  `wallet_burn_token`.
+- **fix(consensus) — `validate_settlement` ET `validate_token_burn_async` attribuent
+  par identité d'adresse** : les validateurs de settlement et de burn comptaient
+  les flux/la propriété par string brute → un item/paiement/token détenu sous la
+  forme hex n'était pas attribué à la partie déclarée en bech32m (rejets
+  `settlement: seller must net-relinquish` / `TokenBurn input not owned by burner`).
+  Nouvelle `ownership::address_identity` (pubkey hex → `sha256(pubkey)[..20]`,
+  bech32m → hash20, autre → `nonkey:`+self) **partagée** par settlement + burn
+  (parité Dual-Layer). **Loosening pur** — l'enforcement exact du split
+  royalty/prix est intact (test tampered-royalty toujours rejeté). Le préfixe
+  `nonkey:` empêche qu'un hash20 nu (40 hex) collapse sur l'identité d'une partie
+  réelle (durcissement revue sécu : anti « black-hole » de royalty). `DAG_VERSION
+  3.15.0 → 3.16.0`.
+- **fix(coin-selection) — filtre time-lock cohérent** : le slow-fallback de
+  `select_utxos` excluait l'asset mais pas les UTXOs time-lockés (pré-existant) →
+  parité avec le fast-path et `select_utxos_multi` (évite de sélectionner un UTXO
+  verrouillé rejeté ensuite au consensus).
+- **test** : 3 tests sandbox e2e (`test_send_simple_recovers_hex_minted_funds`,
+  `test_market_settle_recovers_hex_minted_item`, `test_token_burn_recovers_hex_minted_funds`)
+  prouvant la précondition du piège (solde sous hex = minté, sous bech32m = 0) puis
+  la récupération réelle sur les 3 chemins (send / settle / burn) ; 4 tests
+  unitaires `validate_settlement` (collapse des formes, item/paiement hex acceptés,
+  input d'un tiers rejeté). Non-régression : les 4 tests `market_settle` bech32m
+  existants + les 2 tests `token_burn` existants restent verts.
+
+### Added (P2 — garde-fou de rejet des adresses `to` non canoniques)
+- **feat(api) — fail-fast sur un destinataire invalide** : nouveau
+  `crate::api_fn::recipient::validate_recipient_address` (+ helper pur
+  `pms_wallet::is_valid_secp_pubkey_hex`) refusant un `to`/`owner_address` qui
+  n'est aucune forme dépensable connue — accepte **bech32m single-key**,
+  **multisig** (`msig1` + 40 hex), **pubkey secp256k1 hex minuscule** (33/65
+  octets, point valide) ; rejette garbage, pubkey tronquée/hors-courbe, typo de
+  checksum bech32m, et casse non canonique (`ApiError::InvalidAddress`, code
+  `2010`). Câblé dans `admin_mint_sft`, `admin_mint_token`, `custodial_mint`,
+  `custodial_mint_prepare`, `mint_nft`, `faucet_mint`, `wallet_send_simple`,
+  `prepare_tx`, `onramp`. Empêche de créer un UTXO « piégé » au mint plutôt que
+  de le récupérer après coup. `API_VERSION 40`.
+- **test** : 6 tests unitaires `recipient` (formes acceptées/rejetées) + 1 test
+  sandbox e2e `test_mint_rejects_garbage_recipient` (chemin HTTP réel : garbage /
+  pubkey tronquée / vide / bech32m corrompu → `400` code `2010` ; contrôle positif
+  bech32m → `201`). Non-régression : NFT mint, on-ramp, custodial e2e, SFT
+  lifecycle restent verts.
+
+### Added (P3 — endpoint adresse canonique)
+- **feat(api) — `POST /v1/wallet/canonical-address`** (API-key-gated,
+  `wallet_read`) : dérive l'adresse **bech32m canonique** (+ `public_key_hex` +
+  `x25519_pub_hex` dérivée nœud) depuis une clé privée (`private_key_b64` **ou**
+  `private_key_hex`). La réponse ne contient **aucun secret** (contrairement à
+  `/v1/wallet/create` et `/admin/wallet/restore/*`). Résout l'impossibilité pour
+  un client de calculer localement la forme canonique (sa dérivation x25519
+  diffère de celle du nœud) : minter vers cette adresse garantit des fonds
+  dépensables. Body porteur d'une clé → jamais loggé.
+- **test** : `test_canonical_address_endpoint` (chemin HTTP réel) — `b64` et
+  `hex` renvoient exactement `wallet.get_address(hrp)` + pubkeys, **zéro secret**
+  dans la réponse, absence de clé → `400`, et faucet vers l'adresse renvoyée →
+  fonds visibles (500).
+
+### Changed (qualité — /simplify + revue sécu)
+- **refactor(pms-wallet)** : dérivation `pubkey → hash20` centralisée dans
+  `pubkey_hash20` — `make_address`, `get_address`, `unlock_matches_address` et
+  `address_identity` l'appellent tous (source unique, anti-divergence silencieuse).
+- **refactor(api)** : helper `recipient::reject_bad_recipient` — les 4 handlers
+  legacy renvoyant `impl IntoResponse` dérivent status/message/code de
+  `ApiError::InvalidAddress` (plus de `2010` en dur ni de message divergent).
+- **perf(consensus)** : `validate_token_burn_async` court-circuite `address_identity`
+  quand l'adresse est déjà la forme canonique (cas commun) — hex-decode/SHA256
+  évités sur un type de bloc fréquemment validé. `select_utxos` réutilise l'horloge
+  protocole `current_time_ms` (au lieu d'un `SystemTime` local dupliqué).
+
+### Added (P5 — solde unifié par forme d'adresse)
+- **feat(api) — `POST /v1/balance` accepte un `public_key_hex` optionnel** : lève
+  l'asymétrie « dépensable mais invisible ». La coin-selection unissait déjà les
+  formes à la dépense, mais le solde reflétait le seul string interrogé (la pubkey
+  n'est pas dérivable d'un bech32m — SHA256 à sens unique). Avec `public_key_hex`,
+  le solde somme l'adresse interrogée + la forme hex (`balance_union_forms`, dédup
+  par bucket), la pubkey devant correspondre à l'adresse (même hash20, sinon
+  `400`). Rétro-compatible (champ absent = comportement historique). `API_VERSION
+  40 → 41`. `test_balance_unifies_address_forms` (chemin HTTP réel) : sans pubkey
+  300/700 par forme, avec pubkey sur le bech32m → **1000**, pubkey d'un autre
+  wallet → `400`.
+- **note** : la même sémantique par-forme s'applique à `GET /v1/wallet/{address}/utxos`
+  et aux soldes par path-adresse (pas de body pour porter `public_key_hex`) — les
+  clients passent par `/v1/balance` pour le solde unifié.
+
 ## [0.31.0] - Unreleased — Provisionnement custodial d'assets (token + SFT sans token admin, protocole 2.8)
 
 > `Cargo.toml` workspace `0.30.3 → 0.31.0` (feature MINOR). `DAG_VERSION`

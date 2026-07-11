@@ -153,6 +153,15 @@ pub async fn market_settle(
     let hrp = &state.settings.address.hrp;
     let seller = seller_wallet.get_address(hrp);
     let buyer = buyer_wallet.get_address(hrp);
+    // Formes-propriétaire équivalentes (bech32m canonique + pubkey hex brute
+    // SDK) pour la coin-selection : un item/paiement minté vers la pubkey hex
+    // (forme SDK) reste dépensable, alors que `settle` dérive le bech32m.
+    // Sans ça, l'item du vendeur minté en hex → `3001 InsufficientBalance`
+    // (fonds piégés). Les OUTPUTS de settlement restent en forme canonique.
+    let seller_forms =
+        pms_wallet::spend_address_forms(hrp, &seller_wallet.public_key_hex, &seller_wallet.x25519_pub_hex);
+    let buyer_forms =
+        pms_wallet::spend_address_forms(hrp, &buyer_wallet.public_key_hex, &buyer_wallet.x25519_pub_hex);
 
     // 2) Montants + sanity (le validateur re-vérifie tout au consensus).
     let max_amount = Decimal::from(market::MAX_SETTLEMENT_AMOUNT);
@@ -225,7 +234,7 @@ pub async fn market_settle(
 
     // 5) Sélection des UTXOs.
     // 5.a) Item du VENDEUR.
-    let (item_inputs, item_sum) = tx_helpers::select_utxos(&adapter, &seller, quantity, &sold)
+    let (item_inputs, item_sum) = tx_helpers::select_utxos_multi(&adapter, &seller_forms, quantity, &sold)
         .await
         .map_err(|_| ApiError::InsufficientBalance {
             addr: seller.clone(),
@@ -239,7 +248,7 @@ pub async fn market_settle(
     let pms_native_price = price_asset.is_none();
     let buyer_pay_target = if pms_native_price { price + gas } else { price };
     let (pay_inputs, pay_sum) =
-        tx_helpers::select_utxos(&adapter, &buyer, buyer_pay_target, &price_asset)
+        tx_helpers::select_utxos_multi(&adapter, &buyer_forms, buyer_pay_target, &price_asset)
             .await
             .map_err(|_| ApiError::InsufficientBalance {
                 addr: buyer.clone(),
@@ -253,7 +262,7 @@ pub async fn market_settle(
     let mut gas_inputs: Vec<(pms_types::OutputId, TxOutput, Decimal)> = Vec::new();
     let mut gas_change = Decimal::ZERO;
     if !pms_native_price && gas > Decimal::ZERO {
-        match tx_helpers::select_utxos(&adapter, &buyer, gas, &None).await {
+        match tx_helpers::select_utxos_multi(&adapter, &buyer_forms, gas, &None).await {
             Ok((gi, gs)) => {
                 gas_change = gs - gas;
                 gas_inputs = gi;

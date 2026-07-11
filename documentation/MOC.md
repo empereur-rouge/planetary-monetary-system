@@ -36,6 +36,7 @@ updated: 2026-07-10
 | Fiche | Description |
 |-------|-------------|
 | [[utxo-system]] | UTXO shardé, LRU cache, balance tracking, supply cache |
+| [[address-forms-canonical]] | Formes d'adresse hex ↔ bech32m : coin-selection multi-forme + settlement par identité (récup. fonds « piégés »), garde-fou de rejet au mint, endpoint adresse canonique (v0.32.0) |
 | [[wallet-encryption]] | Wallets (BIP39, Ed25519, X25519), encryption (ChaCha20-Poly1305) |
 | [[hd-wallet-bip32]] | Dérivation BIP32/BIP39/BIP44 — N adresses de dépôt depuis un seul master seed (SaaS payment rail) |
 | [[payment-rail-integration]] | 4 endpoints REST conçus pour intégration SaaS : dag/status, estimate-fee, transaction lookup, blocks/range |

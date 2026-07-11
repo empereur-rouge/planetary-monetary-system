@@ -273,6 +273,8 @@ pub async fn custodial_mint(
         id: req.asset_id.clone(),
     })?;
     let amount = parse_positive_amount(&req.amount)?;
+    // Fail-fast : `to` doit être une forme d'adresse dépensable (sinon fonds piégés).
+    crate::api_fn::recipient::validate_recipient_address(&req.to)?;
     let outputs = vec![build_mint_output(&req.to, &amount, &req.asset_id, req.locked_until)];
 
     // Autorisation → (auth_pubkey_hex, auth_signature_b64, mint_nonce).
@@ -356,6 +358,8 @@ pub async fn custodial_mint_prepare(
         id: req.asset_id.clone(),
     })?;
     let amount = parse_positive_amount(&req.amount)?;
+    // Fail-fast : refuser un `to` non canonique avant de renvoyer un message à signer.
+    crate::api_fn::recipient::validate_recipient_address(&req.to)?;
     let outputs = vec![build_mint_output(&req.to, &amount, &req.asset_id, req.locked_until)];
     let mint_nonce = req.mint_nonce.clone().unwrap_or_else(random_mint_nonce);
     let message_hex = pms_types::custodial_mint_signing_message(

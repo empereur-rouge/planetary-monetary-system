@@ -108,7 +108,26 @@ use crate::api::AppState;
 /// un token OU une classe SFT capée + royalty autorisé par la clé du CRÉATEUR /
 /// `mint_authority` (custodiale ou pré-signée), SANS token admin partagé. Nouveau
 /// scope API-key `"sft"`. Nouveau `PlainPayload::CustodialMint` (DAG_VERSION 3.15.0).
-pub const API_VERSION: u32 = 39;
+/// v40 (régression #1a — fonds « piégés ») : `send-simple`, `market/settle` et
+/// `wallet/token/burn` unissent désormais les formes d'adresse-propriétaire du
+/// dépensier (bech32m canonique + pubkey secp hex « forme SDK ») pour la
+/// coin-selection (`select_utxos_multi`), et `validate_settlement` attribue les
+/// flux par IDENTITÉ d'adresse. Des fonds mintés vers la pubkey hex — jusque-là
+/// indépensables/invendables (`3001`) — redeviennent dépensables. Aucune
+/// modification du format des requêtes/réponses ; seul le comportement change
+/// (DAG_VERSION 3.15.0 → 3.16.0). v40 couvre aussi (même feature) : (a) le
+/// **garde-fou de rejet** des adresses `to`/`owner_address` non canoniques au
+/// mint/send/faucet/on-ramp/NFT (`ApiError::InvalidAddress` / `2010` — une
+/// pubkey tronquée ou un typo de checksum bech32m est rejeté AVANT de forger un
+/// bloc, plutôt que de piéger les fonds) ; (b) le nouvel endpoint
+/// `POST /v1/wallet/canonical-address` (dérive l'adresse bech32m canonique + les
+/// pubkeys d'une clé privée, aucun secret en réponse) pour que les clients
+/// mintent directement vers la forme canonique.
+/// v41 (P5) : `POST /v1/balance` accepte un champ optionnel `public_key_hex` →
+/// le solde **unit les formes-propriétaire** (adresse interrogée + pubkey hex),
+/// levant l'asymétrie « dépensable mais invisible ». Rétro-compatible (champ
+/// absent = comportement historique, une seule forme).
+pub const API_VERSION: u32 = 41;
 
 /// Réponse pour GET /v1/version
 #[derive(Debug, Serialize, Deserialize)]
@@ -223,6 +242,11 @@ mod tests {
         // v0.31.0: 38 → 39 (protocole 2.8 : provisionnement custodial —
         //          /v1/{sft/classes,tokens/create,{sft,tokens}/mint[/prepare]} ;
         //          scope "sft" ; PlainPayload::CustodialMint).
-        assert_eq!(parsed.api_version, 39);
+        // v0.32.0: 39 → 40 (fonds « piégés » hex↔bech32m : coin-selection +
+        //          settlement/burn par identité ; garde-fou de rejet au mint ;
+        //          POST /v1/wallet/canonical-address) puis
+        //          40 → 41 (P5 : champ optionnel public_key_hex sur /v1/balance
+        //          → solde unifié par forme d'adresse).
+        assert_eq!(parsed.api_version, 41);
     }
 }

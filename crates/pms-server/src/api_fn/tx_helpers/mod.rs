@@ -24,7 +24,7 @@ pub use fee_policy::{
     try_consume_gas,
 };
 
-pub use coin_selection::select_utxos;
+pub use coin_selection::{select_utxos, select_utxos_multi};
 
 pub use block_ops::{
     get_block_parents,

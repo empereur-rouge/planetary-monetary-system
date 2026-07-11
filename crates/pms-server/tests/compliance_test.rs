@@ -18,6 +18,7 @@ use axum::body::Body;
 use axum::extract::connect_info::ConnectInfo;
 use http::Request;
 use pms_storage::ComplianceStorage;
+use pms_wallet::{SignerBackend, Wallet};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tower::ServiceExt;
@@ -191,8 +192,11 @@ async fn test_compliance_log_storage() {
 async fn test_freeze_blocks_outgoing_tx() {
     let ctx = boot_ctx().await;
 
-    let sender_addr = "8e1sender_frozen_test";
-    let receiver_addr = "8e1receiver_test";
+    // Adresses bech32m VALIDES : le garde-fou destinataire (`reject_bad_recipient`,
+    // v0.32.0) rejette une adresse malformée AVANT le check de gel — les anciens
+    // placeholders (`"8e1receiver_test"`) faisaient `400` avant d'atteindre le `403`.
+    let sender_addr = Wallet::from_seed(&[210u8; 32], None).unwrap().get_address("8e");
+    let receiver_addr = Wallet::from_seed(&[211u8; 32], None).unwrap().get_address("8e");
 
     // Add UTXOs for the sender so prepare_tx would normally succeed
     let adapter = ctx.srv.adapter_arc();
@@ -200,13 +204,13 @@ async fn test_freeze_blocks_outgoing_tx() {
         .add_utxo(
             "mint_block_001".into(),
             0,
-            pms_types::TxOutput::new(sender_addr, "100.0", None),
+            pms_types::TxOutput::new(sender_addr.as_str(), "100.0", None),
             )
         .await;
 
     // Freeze the sender
     ctx.store
-        .freeze_address(sender_addr, "freeze_block", "under investigation")
+        .freeze_address(&sender_addr, "freeze_block", "under investigation")
         .unwrap();
 
     // prepare_tx from frozen address should return 403
@@ -214,8 +218,8 @@ async fn test_freeze_blocks_outgoing_tx() {
         &ctx.app,
         "/v1/tx/prepare",
         &json!({
-            "from": sender_addr,
-            "to": receiver_addr,
+            "from": &sender_addr,
+            "to": &receiver_addr,
             "amount": "10.0"
         }),
     )
@@ -234,8 +238,8 @@ async fn test_freeze_blocks_outgoing_tx() {
 async fn test_freeze_blocks_incoming_tx() {
     let ctx = boot_ctx().await;
 
-    let sender_addr = "8e1sender_ok_test";
-    let receiver_addr = "8e1receiver_frozen_test";
+    let sender_addr = Wallet::from_seed(&[212u8; 32], None).unwrap().get_address("8e");
+    let receiver_addr = Wallet::from_seed(&[213u8; 32], None).unwrap().get_address("8e");
 
     // Add UTXOs for sender
     let adapter = ctx.srv.adapter_arc();
@@ -243,14 +247,14 @@ async fn test_freeze_blocks_incoming_tx() {
         .add_utxo(
             "mint_block_002".into(),
             0,
-            pms_types::TxOutput::new(sender_addr, "100.0", None),
+            pms_types::TxOutput::new(sender_addr.as_str(), "100.0", None),
             )
         .await;
 
     // Freeze the receiver
     ctx.store
         .freeze_address(
-            receiver_addr,
+            &receiver_addr,
             "freeze_block_2",
             "recipient under investigation",
         )
@@ -261,8 +265,8 @@ async fn test_freeze_blocks_incoming_tx() {
         &ctx.app,
         "/v1/tx/prepare",
         &json!({
-            "from": sender_addr,
-            "to": receiver_addr,
+            "from": &sender_addr,
+            "to": &receiver_addr,
             "amount": "10.0"
         }),
     )
@@ -281,8 +285,8 @@ async fn test_freeze_blocks_incoming_tx() {
 async fn test_unfreeze_restores_tx() {
     let ctx = boot_ctx().await;
 
-    let sender_addr = "8e1sender_unfreeze_test";
-    let receiver_addr = "8e1receiver_unfreeze_test";
+    let sender_addr = Wallet::from_seed(&[214u8; 32], None).unwrap().get_address("8e");
+    let receiver_addr = Wallet::from_seed(&[215u8; 32], None).unwrap().get_address("8e");
 
     // Add UTXOs for sender
     let adapter = ctx.srv.adapter_arc();
@@ -290,32 +294,32 @@ async fn test_unfreeze_restores_tx() {
         .add_utxo(
             "mint_block_003".into(),
             0,
-            pms_types::TxOutput::new(sender_addr, "100.0", None),
+            pms_types::TxOutput::new(sender_addr.as_str(), "100.0", None),
             )
         .await;
 
     // Freeze sender
     ctx.store
-        .freeze_address(sender_addr, "freeze_block_3", "investigation")
+        .freeze_address(&sender_addr, "freeze_block_3", "investigation")
         .unwrap();
 
     // Verify frozen
     let (status, _) = post_json(
         &ctx.app,
         "/v1/tx/prepare",
-        &json!({ "from": sender_addr, "to": receiver_addr, "amount": "10.0" }),
+        &json!({ "from": &sender_addr, "to": &receiver_addr, "amount": "10.0" }),
     )
     .await;
     assert_eq!(status, 403);
 
     // Unfreeze
-    ctx.store.unfreeze_address(sender_addr).unwrap();
+    ctx.store.unfreeze_address(&sender_addr).unwrap();
 
     // Now prepare_tx should work (200 = success)
     let (status, body) = post_json(
         &ctx.app,
         "/v1/tx/prepare",
-        &json!({ "from": sender_addr, "to": receiver_addr, "amount": "10.0" }),
+        &json!({ "from": &sender_addr, "to": &receiver_addr, "amount": "10.0" }),
     )
     .await;
     assert_eq!(

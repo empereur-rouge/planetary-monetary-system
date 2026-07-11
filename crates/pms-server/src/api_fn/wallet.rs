@@ -95,6 +95,55 @@ pub struct SimpleBalanceReq {
     /// Optional: query balance for a specific asset (e.g. "edenite").
     /// If omitted, returns native PMS balance.
     asset_id: Option<String>,
+    /// Optional: pubkey secp256k1 hex du wallet. Fourni → le solde renvoyé
+    /// **unit les formes-propriétaire** : l'adresse interrogée + la pubkey hex
+    /// (± `0x`). Ainsi un solde interrogé sur le **bech32m canonique** inclut
+    /// aussi les fonds mintés vers la forme hex (« forme SDK »), levant
+    /// l'asymétrie « dépensable mais invisible ». La pubkey DOIT correspondre à
+    /// l'adresse (même hash20), sinon `400`.
+    #[serde(default)]
+    public_key_hex: Option<String>,
+}
+
+/// Formes-propriétaire à sommer pour un solde « unifié » d'un wallet.
+///
+/// Toujours l'adresse interrogée ; **plus** la pubkey hex (± `0x`) si
+/// `public_key_hex` est fourni ET correspond à l'adresse (même identité hash20).
+/// Comme l'index d'adresse est keyé par string exacte, des strings distincts =
+/// buckets disjoints → sommer sur l'ensemble dédupliqué unit sans double-compter.
+///
+/// Ne peut pas reconstruire la forme bech32m depuis la pubkey seule (il faut la
+/// clé x25519 nœud) : le client interroge donc par son **bech32m canonique** et
+/// fournit `public_key_hex` → l'union {bech32m interrogé} ∪ {hex} couvre les deux
+/// buckets réels sans secret ni x25519.
+fn balance_union_forms(
+    address: &str,
+    public_key_hex: Option<&str>,
+) -> Result<Vec<String>, (StatusCode, String)> {
+    let mut forms = vec![address.to_string()];
+    if let Some(pk) = public_key_hex {
+        let pk_norm = pk.trim().trim_start_matches("0x").to_lowercase();
+        if !pms_wallet::is_valid_secp_pubkey_hex(&pk_norm) {
+            return Err((StatusCode::BAD_REQUEST, "invalid public_key_hex".to_string()));
+        }
+        // La pubkey doit correspondre à l'adresse interrogée (anti-somme de
+        // wallets sans rapport). Même relation forme↔hash20 que l'autorisation.
+        let pk_h20 = hex::encode(pms_wallet::pubkey_hash20(
+            &hex::decode(&pk_norm).expect("valid hex checked above"),
+        ));
+        if pms_core::validations::ownership::address_identity(address) != pk_h20 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "public_key_hex does not match address".to_string(),
+            ));
+        }
+        for form in [pk_norm.clone(), format!("0x{pk_norm}")] {
+            if !forms.contains(&form) {
+                forms.push(form);
+            }
+        }
+    }
+    Ok(forms)
 }
 #[derive(serde::Serialize)]
 pub struct SimpleBalanceResp {
@@ -107,6 +156,18 @@ pub struct SimpleBalanceResp {
 
 /// `POST /v1/balance` — query wallet balance by address, with optional
 /// `ledger_id` and `asset_id` parameters.
+///
+/// **Sémantique par forme d'adresse (v0.32.0).** Par défaut le solde est celui
+/// du **string d'adresse exact** interrogé. Depuis v0.32.0 les chemins de dépense
+/// (`select_utxos_multi`) unissent les formes-propriétaire d'un wallet (bech32m
+/// canonique + pubkey hex « forme SDK ») → des fonds mintés vers la pubkey hex
+/// sont dépensables même si `get_address` dérive le bech32m. Pour que le solde
+/// reflète cette réalité, fournir le champ optionnel **`public_key_hex`** : le
+/// solde somme alors l'adresse interrogée + la forme hex (cf.
+/// [`balance_union_forms`]), levant l'asymétrie « dépensable mais invisible ».
+/// Sans `public_key_hex`, comportement historique (une seule forme). La bech32m
+/// n'étant pas reconstructible depuis la pubkey seule, interroger par le
+/// **bech32m canonique** (`POST /v1/wallet/canonical-address`) + `public_key_hex`.
 pub async fn balance_by_address(
     State(app): State<AppState>,
     Json(req): Json<SimpleBalanceReq>,
@@ -133,9 +194,17 @@ pub async fn balance_by_address(
         app.srv.adapter_arc()
     };
 
-    let balance = adapter
-        .balance_by_address_and_asset(&req.address, req.asset_id.as_deref())
-        .await;
+    // Solde unifié sur les formes-propriétaire (cf. `balance_union_forms`) :
+    // sans `public_key_hex`, c'est exactement l'adresse interrogée (comportement
+    // historique) ; avec, on somme aussi la forme hex (lève « dépensable mais
+    // invisible »).
+    let forms = balance_union_forms(&req.address, req.public_key_hex.as_deref())?;
+    let mut balance = rust_decimal::Decimal::ZERO;
+    for form in &forms {
+        balance += adapter
+            .balance_by_address_and_asset(form, req.asset_id.as_deref())
+            .await;
+    }
 
     Ok(Json(SimpleBalanceResp {
         balance: balance.to_string(),

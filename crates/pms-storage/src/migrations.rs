@@ -101,7 +101,17 @@ pub const CURRENT_VER: i64 = 13;
 // existants valides, deux nouveaux CFs (CURRENT_VER 12→13, auto-migrating). MINOR →
 // pas de wipe. (Mixed-version P2P : un nœud 3.14.x ne sait pas désérialiser un
 // `CustodialMint` — upgrade coordonné requis AVANT tout mint custodial.)
-pub const DAG_VERSION: &str = "3.15.0";
+// 3.15.0 → 3.16.0 : `validate_settlement` (MarketSettle) ET `validate_token_burn_async`
+// (TokenBurn) attribuent désormais les flux/la propriété par IDENTITÉ d'adresse
+// (`ownership::address_identity`) et non plus par string brute — les formes
+// équivalentes d'une même clé (pubkey secp hex « forme SDK » et bech32m)
+// collapsent. Un item/paiement/token minté vers la pubkey hex redevient
+// vendable/brûlable (régression « fonds piégés » #1a). LOOSENING pur : aucun bloc
+// existant ne devient invalide (le format des payloads/CFs est inchangé,
+// CURRENT_VER reste 13) → MINOR, migration auto, pas de wipe. (Mixed-version P2P :
+// un nœud 3.15.x REJETTE un settlement/burn hex-form qu'un 3.16.x accepte →
+// divergence consensus ; upgrade coordonné requis avant d'émettre de tels blocs.)
+pub const DAG_VERSION: &str = "3.16.0";
 
 /// Erreurs possibles lors des migrations.
 #[derive(Error, Debug)]

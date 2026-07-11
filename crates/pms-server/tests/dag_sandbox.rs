@@ -6475,6 +6475,65 @@ async fn test_token_burn_reduces_supply() -> Result<()> {
     Ok(())
 }
 
+/// **Régression #1a (burn) — parité dual-layer settlement ↔ burn.**
+///
+/// Du PMS minté vers la pubkey HEX est sélectionné par `select_utxos_multi`, mais
+/// l'`owner` déclaré du burn est en bech32m. Sans le collapse hex↔bech32m dans
+/// `validate_token_burn_async` (parité avec `validate_settlement`, revue sécu
+/// Finding 1), le burn était rejeté (« TokenBurn input not owned by burner »).
+/// Prouve qu'il réussit désormais, avec baisse de supply et change canonique.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_token_burn_recovers_hex_minted_funds() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+    let user = Wallet::generate();
+    let user_hex = user.public_key_hex.to_lowercase();
+    let user_bech32 = user.get_address("8e");
+
+    println!("\n=== [REGRESSION #1a / TOKEN BURN] PMS minté en pubkey-hex, brûlé via bech32m ===");
+
+    // Faucet 1000 PMS vers la pubkey HEX (le piège).
+    sandbox.faucet_mint(None, &user_hex, "1000").await?;
+    sleep(Duration::from_millis(200)).await;
+    let bal_hex = sandbox.get_balance("main", &user_hex).await?;
+    let bal_bech32 = sandbox.get_balance("main", &user_bech32).await?;
+    println!("  PIÈGE: solde(hex)={bal_hex}  solde(bech32m)={bal_bech32}");
+    assert_eq!(bal_hex, Decimal::from(1000), "PMS indexé sous la pubkey hex");
+    assert_eq!(bal_bech32, Decimal::ZERO, "invisible à la forme bech32m (le piège)");
+
+    let supply0 = Decimal::from_str(
+        sandbox.get_supply("main", None).await?["circulating_supply"].as_str().unwrap_or("0"),
+    )
+    .unwrap_or(Decimal::ZERO);
+
+    // Burn 100 : owner dérivé = bech32m, input = hex → DOIT réussir (collapse identité).
+    let (status, body) = sandbox
+        .post(
+            None,
+            "/v1/wallet/token/burn",
+            json!({ "private_key_b64": user.private_key_b64, "amount": "100" }),
+        )
+        .await;
+    println!("  BURN → {status} — {body:?}");
+    anyhow::ensure!(status.is_success(), "burn d'un PMS hex-minté DOIT réussir après le fix: {status} {body:?}");
+    assert_eq!(body["burned"].as_str(), Some("100"), "montant brûlé rapporté");
+    sleep(Duration::from_millis(200)).await;
+
+    let supply1 = Decimal::from_str(
+        sandbox.get_supply("main", None).await?["circulating_supply"].as_str().unwrap_or("0"),
+    )
+    .unwrap_or(Decimal::ZERO);
+    let bal_hex_after = sandbox.get_balance("main", &user_hex).await?;
+    let bal_bech32_after = sandbox.get_balance("main", &user_bech32).await?;
+    println!("  APRÈS: supply {supply0}→{supply1}, hex={bal_hex_after}, bech32(change)={bal_bech32_after}");
+    assert_eq!(supply0 - supply1, Decimal::from(100), "la supply circulante baisse de 100");
+    assert_eq!(bal_hex_after, Decimal::ZERO, "l'UTXO hex a été consommé en input");
+    assert_eq!(bal_bech32_after, Decimal::from(900), "le change (900) revient au burner en bech32m");
+
+    println!("  ✅ burn d'un PMS minté en pubkey-hex réussi (parité dual-layer settlement↔burn)");
+    Ok(())
+}
+
 /// Voie B end-to-end (plan §3.1): burning a CUSTOM token fires an `OnTokenBurn`
 /// smart contract that mints native PMS at rate R, UNDER the shared emission
 /// budget. Proves the full contract-driven conversion: burn → evaluate contract
@@ -7771,5 +7830,309 @@ async fn test_custodial_provisioning_end_to_end() -> Result<()> {
     assert_eq!(creator_pms, Decimal::from(10), "creator received exactly the 10 PMS royalty");
 
     println!("  ✅ provisionnement custodial e2e : create+mint (clé créateur) → transfert → settle royalty, ZÉRO token admin");
+    Ok(())
+}
+
+/// **Régression #1a — coin-selection multi-forme (fonds « piégés »).**
+///
+/// Reproduit le piège rapporté : des fonds mintés vers la **pubkey secp hex
+/// brute** (l'`address` historique du SDK) sont indexés sous ce string, alors
+/// que `send-simple` dérive l'adresse **bech32m** canonique du sender. L'ancienne
+/// coin-selection ne regardait QUE le bucket bech32m → `InsufficientBalance`,
+/// fonds indépensables. Après `select_utxos_multi`, le sender dépense ses fonds
+/// quelle que soit la forme d'indexation.
+///
+/// Le test prouve d'abord la **précondition du piège** (solde sous hex = minté,
+/// sous bech32m = 0), puis la **récupération** end-to-end avec vérif comptable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_send_simple_recovers_hex_minted_funds() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    let seller = Wallet::generate();
+    let recipient = Wallet::generate();
+    let seller_hex = seller.public_key_hex.to_lowercase(); // forme SDK (04… 130 hex)
+    let seller_bech32 = seller.get_address("8e"); // forme canonique nœud
+    let recipient_bech32 = recipient.get_address("8e");
+
+    println!("\n=== [REGRESSION #1a / SEND-SIMPLE] fonds mintés en pubkey-hex, dépensés via bech32m ===");
+    println!(
+        "  seller_hex={}… seller_bech32={}…",
+        &seller_hex[..14],
+        &seller_bech32[..14]
+    );
+
+    // 1) Faucet 1000 PMS vers la PUBKEY HEX BRUTE du seller (le piège).
+    sandbox.faucet_mint(None, &seller_hex, "1000").await?;
+    sleep(Duration::from_millis(200)).await;
+
+    // 2) Précondition du piège : fonds visibles SOUS LA FORME HEX, mais la forme
+    //    bech32m canonique en est aveugle (0).
+    let bal_hex = sandbox.get_balance("main", &seller_hex).await?;
+    let bal_bech32 = sandbox.get_balance("main", &seller_bech32).await?;
+    println!("  PIÈGE: solde(hex)={bal_hex}  solde(bech32m)={bal_bech32}");
+    assert_eq!(bal_hex, Decimal::from(1000), "les fonds sont indexés sous la pubkey hex");
+    assert_eq!(bal_bech32, Decimal::ZERO, "invisibles à la forme bech32m canonique (le piège)");
+
+    // 3) Récupération : send-simple dérive le bech32m du seller mais DOIT
+    //    désormais trouver les UTXOs hex via select_utxos_multi.
+    let resp = sandbox
+        .send_simple(None, &seller.private_key_b64, &recipient_bech32, "100")
+        .await?;
+    let fee = Decimal::from_str(resp["fee"].as_str().unwrap_or("0")).unwrap_or(Decimal::ZERO);
+    println!("  SEND-SIMPLE ok → fee={fee}, resp={resp:?}");
+    sleep(Duration::from_millis(200)).await;
+
+    // 4) Vérif comptable end-to-end.
+    let recipient_bal = sandbox.get_balance("main", &recipient_bech32).await?;
+    let seller_hex_after = sandbox.get_balance("main", &seller_hex).await?;
+    let seller_bech32_after = sandbox.get_balance("main", &seller_bech32).await?;
+    println!(
+        "  APRÈS: recipient={recipient_bal}, seller_hex={seller_hex_after}, seller_bech32(change)={seller_bech32_after}"
+    );
+
+    assert_eq!(recipient_bal, Decimal::from(100), "le destinataire a reçu exactement 100 PMS");
+    assert_eq!(seller_hex_after, Decimal::ZERO, "l'UTXO hex de 1000 a été consommé en input");
+    assert_eq!(
+        seller_bech32_after,
+        Decimal::from(1000) - Decimal::from(100) - fee,
+        "le change (1000 - 100 - fee) revient au seller sous sa forme canonique"
+    );
+
+    println!("  ✅ fonds mintés en pubkey-hex récupérés et dépensés via un chemin qui dérive le bech32m");
+    Ok(())
+}
+
+/// **Régression #1a — market/settle sur un item minté en pubkey-hex.**
+///
+/// Le scénario EXACT du rapport : un SFT minté vers la pubkey hex du vendeur
+/// (forme SDK) faisait échouer `market/settle` avec `3001 InsufficientBalance`,
+/// car `settle` dérive le bech32m du vendeur pour la coin-selection → l'item
+/// était minté mais **invendable** (fonds piégés). Prouve qu'il est désormais
+/// vendable, tout en gardant les OUTPUTS de settlement en forme canonique.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore]
+async fn test_market_settle_recovers_hex_minted_item() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+
+    let seller = Wallet::generate();
+    let buyer = Wallet::generate();
+    let seller_hex = seller.public_key_hex.to_lowercase();
+    let seller_bech32 = seller.get_address("8e");
+    let buyer_bech32 = buyer.get_address("8e");
+
+    println!("\n=== [REGRESSION #1a / MARKET SETTLE] item minté en pubkey-hex ===");
+    println!("  seller_hex={}… buyer_bech32={}…", &seller_hex[..14], &buyer_bech32[..14]);
+
+    // Classe SFT sans royalty, plafond 5.
+    let (st, body) = sandbox
+        .admin_post(
+            "/admin/sft/classes",
+            json!({ "collection_id": "studio", "class_id": "pass", "name": "Studio Pass",
+                    "decimals": 0, "max_supply": "5" }),
+        )
+        .await;
+    anyhow::ensure!(st.is_success(), "create class failed: {st} {body}");
+
+    // Mint 1 exemplaire vers la PUBKEY HEX du vendeur (le piège).
+    let (st, body) = sandbox
+        .admin_post(
+            "/admin/sft/mint",
+            json!({ "asset_id": "studio:pass", "to": seller_hex, "amount": "1" }),
+        )
+        .await;
+    anyhow::ensure!(st.is_success(), "mint failed: {st} {body}");
+
+    // Acheteur : PMS pour payer (forme bech32m normale).
+    sandbox.faucet_mint(None, &buyer_bech32, "1000").await?;
+    sleep(Duration::from_millis(200)).await;
+
+    // Précondition du piège : item sous hex = 1, sous bech32m = 0.
+    let item_hex = sandbox.get_asset_balance("main", &seller_hex, Some("studio:pass")).await?;
+    let item_bech32 = sandbox.get_asset_balance("main", &seller_bech32, Some("studio:pass")).await?;
+    println!("  PIÈGE: item(hex)={item_hex}  item(bech32m)={item_bech32}");
+    assert_eq!(item_hex, Decimal::from(1), "l'item est indexé sous la pubkey hex");
+    assert_eq!(item_bech32, Decimal::ZERO, "invisible à la forme bech32m (le piège → 3001)");
+
+    // Settle : revente atomique 100 PMS, aucune royalty.
+    let (st, body) = sandbox
+        .post(
+            None,
+            "/v1/market/settle",
+            json!({
+                "seller_private_key_b64": seller.private_key_b64,
+                "buyer_private_key_b64": buyer.private_key_b64,
+                "asset_sold": "studio:pass", "quantity": "1", "price": "100",
+            }),
+        )
+        .await;
+    println!("  SETTLE → {st} — {body:?}");
+    anyhow::ensure!(st.is_success(), "settle DOIT réussir après le fix (avant: 3001): {st} {body}");
+    assert_eq!(body["royalty"], "0", "aucune royalty configurée");
+    assert_eq!(body["net_to_seller"], "100", "vendeur net = prix (pas de royalty)");
+    sleep(Duration::from_millis(200)).await;
+
+    // Comptabilité : l'acheteur détient l'item, le vendeur l'a cédé et a reçu 100 PMS.
+    let buyer_item = sandbox.get_asset_balance("main", &buyer_bech32, Some("studio:pass")).await?;
+    let seller_item_hex = sandbox.get_asset_balance("main", &seller_hex, Some("studio:pass")).await?;
+    let seller_item_bech32 = sandbox.get_asset_balance("main", &seller_bech32, Some("studio:pass")).await?;
+    let seller_pms = sandbox.get_balance("main", &seller_bech32).await?;
+    println!(
+        "  APRÈS: buyer_item={buyer_item}, seller_item(hex)={seller_item_hex}, seller_item(bech32)={seller_item_bech32}, seller_pms={seller_pms}"
+    );
+    assert_eq!(buyer_item, Decimal::from(1), "l'acheteur détient l'item");
+    assert_eq!(seller_item_hex, Decimal::ZERO, "l'item hex a été dépensé en input");
+    assert_eq!(seller_item_bech32, Decimal::ZERO, "aucun item résiduel côté vendeur");
+    assert_eq!(seller_pms, Decimal::from(100), "le vendeur a encaissé 100 PMS (net) sous sa forme canonique");
+
+    println!("  ✅ item minté en pubkey-hex vendu via market/settle (piège #1 levé)");
+    Ok(())
+}
+
+/// **Régression #1b — garde-fou de rejet des adresses `to` non canoniques.**
+///
+/// Un `to` qui n'est aucune forme dépensable (garbage, pubkey tronquée, typo de
+/// checksum bech32m) doit être REJETÉ au mint (`400`, code `2010`) AVANT de
+/// forger un bloc — sinon fonds mintés mais indépensables. Prouve le garde-fou
+/// sur le chemin HTTP réel (`/admin/faucet`), + contrôle positif : la forme
+/// canonique passe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn test_mint_rejects_garbage_recipient() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+    println!("\n=== [REGRESSION #1b / REJECT] adresses `to` non canoniques refusées au mint ===");
+
+    // 1) Garbage / pubkey tronquée / vide → 400 (aucun bloc forgé).
+    for bad in ["not-an-address", "04deadbeef", ""] {
+        let (st, body) = sandbox
+            .admin_post("/admin/faucet", json!({ "to": bad, "amount": "10" }))
+            .await;
+        println!("  faucet to {bad:?} → {st} — {body:?}");
+        assert_eq!(st.as_u16(), 400, "garbage recipient {bad:?} doit être rejeté (400)");
+    }
+
+    // 2) Bech32m corrompu (typo de checksum) → 400.
+    let good = Wallet::generate();
+    let mut typo = good.get_address("8e");
+    let last = typo.pop().unwrap();
+    typo.push(if last == 'q' { 'p' } else { 'q' });
+    let (st, body) = sandbox
+        .admin_post("/admin/faucet", json!({ "to": typo, "amount": "10" }))
+        .await;
+    println!("  faucet to bech32m-typo {typo}… → {st} — {body:?}");
+    assert_eq!(st.as_u16(), 400, "bech32m à mauvais checksum doit être rejeté");
+
+    // 3) Contrôle positif : la forme canonique bech32m passe.
+    let (st, body) = sandbox
+        .admin_post("/admin/faucet", json!({ "to": good.get_address("8e"), "amount": "10" }))
+        .await;
+    println!("  faucet to canonical bech32m → {st} — {body:?}");
+    assert!(st.is_success(), "l'adresse canonique DOIT être acceptée: {st} {body}");
+
+    println!("  ✅ garde-fou de rejet actif sur le chemin HTTP réel (mint/faucet)");
+    Ok(())
+}
+
+/// **Endpoint `POST /v1/wallet/canonical-address`** (issue #2/#3).
+///
+/// Un client ne peut pas dériver localement la bech32m canonique du nœud (sa
+/// x25519 diffère de celle du nœud). L'endpoint la renvoie AUTORITAIREMENT
+/// depuis une clé privée, en deux formats (`b64`, `hex`), **sans** aucun secret
+/// dans la réponse. Le résultat doit être exactement `wallet.get_address(hrp)`,
+/// et minter vers cette adresse doit produire des fonds dépensables.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn test_canonical_address_endpoint() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+    println!("\n=== [CANONICAL ADDRESS] dérivation autoritaire depuis une clé ===");
+
+    let priv_hex = "1111111111111111111111111111111111111111111111111111111111111111";
+    let w = Wallet::from_hex(priv_hex).expect("valid key");
+    let expected = w.get_address("8e");
+    println!("  expected canonical = {expected}");
+
+    // Voie b64.
+    let (st, body) = sandbox
+        .post(None, "/v1/wallet/canonical-address", json!({ "private_key_b64": w.private_key_b64 }))
+        .await;
+    println!("  b64 → {st} — {body:?}");
+    assert!(st.is_success(), "canonical-address (b64) failed: {st} {body}");
+    assert_eq!(body["address"].as_str(), Some(expected.as_str()), "adresse == get_address");
+    assert_eq!(body["public_key_hex"].as_str(), Some(w.public_key_hex.as_str()), "pubkey secp");
+    assert_eq!(body["x25519_pub_hex"].as_str(), Some(w.x25519_pub_hex.as_str()), "x25519 nœud");
+    // AUCUN secret dans la réponse.
+    for secret in ["private_key_b64", "private_key_hex", "x25519_sk_hex", "mnemonic_words"] {
+        assert!(body.get(secret).is_none(), "la réponse ne doit PAS contenir {secret}: {body}");
+    }
+
+    // Voie hex → même adresse.
+    let (st, body_hex) = sandbox
+        .post(None, "/v1/wallet/canonical-address", json!({ "private_key_hex": priv_hex }))
+        .await;
+    println!("  hex → {st} — {body_hex:?}");
+    assert!(st.is_success(), "canonical-address (hex) failed: {st} {body_hex}");
+    assert_eq!(body_hex["address"].as_str(), Some(expected.as_str()), "hex path → même adresse canonique");
+
+    // Sans clé → erreur (pas 2xx).
+    let (st, _b) = sandbox.post(None, "/v1/wallet/canonical-address", json!({})).await;
+    println!("  no-key → {st}");
+    assert!(!st.is_success(), "l'absence de clé doit échouer");
+
+    // Bout-en-bout : minter vers l'adresse canonique renvoyée → dépensable.
+    sandbox.faucet_mint(None, &expected, "500").await?;
+    sleep(Duration::from_millis(200)).await;
+    let bal = sandbox.get_balance("main", &expected).await?;
+    println!("  balance après faucet vers l'adresse canonique = {bal}");
+    assert_eq!(bal, Decimal::from(500), "les fonds mintés vers la forme canonique sont visibles/dépensables");
+
+    println!("  ✅ endpoint canonical-address : adresse autoritaire, sans secret, dépensable");
+    Ok(())
+}
+
+/// **P5 — solde unifié par forme d'adresse (`/v1/balance` + `public_key_hex`).**
+///
+/// Lève l'asymétrie « dépensable mais invisible » : sans `public_key_hex` chaque
+/// forme ne voit que sa part ; avec, le solde interrogé sur le bech32m canonique
+/// somme aussi la forme hex. Une pubkey ne correspondant pas à l'adresse → 400.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn test_balance_unifies_address_forms() -> Result<()> {
+    let sandbox = boot_sandbox().await?;
+    let w = Wallet::generate();
+    let hex = w.public_key_hex.to_lowercase();
+    let bech32 = w.get_address("8e");
+
+    println!("\n=== [P5 / BALANCE UNION] solde unifié par forme d'adresse ===");
+
+    // 700 vers la forme hex, 300 vers le bech32m → 1000 répartis sur 2 buckets.
+    sandbox.faucet_mint(None, &hex, "700").await?;
+    sandbox.faucet_mint(None, &bech32, "300").await?;
+    sleep(Duration::from_millis(200)).await;
+
+    // Sans public_key_hex : chaque forme ne voit que sa part (l'asymétrie).
+    let (st, b_bech) = sandbox.post(None, "/v1/balance", json!({ "address": bech32 })).await;
+    let (st2, b_hex) = sandbox.post(None, "/v1/balance", json!({ "address": hex })).await;
+    println!("  sans pubkey: bech32m={:?} hex={:?}", b_bech["balance"], b_hex["balance"]);
+    anyhow::ensure!(st.is_success() && st2.is_success(), "balance query failed");
+    assert_eq!(b_bech["balance"].as_str(), Some("300"), "bech32m seul voit 300");
+    assert_eq!(b_hex["balance"].as_str(), Some("700"), "hex seul voit 700");
+
+    // Avec public_key_hex, interrogé sur le bech32m canonique : union = 1000.
+    let (st3, b_union) = sandbox
+        .post(None, "/v1/balance", json!({ "address": bech32, "public_key_hex": hex }))
+        .await;
+    println!("  avec pubkey (interrogé bech32m): {:?}", b_union["balance"]);
+    anyhow::ensure!(st3.is_success(), "union query failed: {st3} {b_union:?}");
+    assert_eq!(b_union["balance"].as_str(), Some("1000"), "union bech32m + hex = 1000");
+
+    // Pubkey d'un AUTRE wallet (identité ≠ adresse) → 400.
+    let other = Wallet::generate();
+    let (st4, b_bad) = sandbox
+        .post(None, "/v1/balance", json!({ "address": bech32, "public_key_hex": other.public_key_hex }))
+        .await;
+    println!("  pubkey mismatch → {st4} — {b_bad:?}");
+    assert_eq!(st4.as_u16(), 400, "une pubkey ne correspondant pas à l'adresse doit être rejetée");
+
+    println!("  ✅ solde unifié sur les formes — dépensable == visible avec public_key_hex");
     Ok(())
 }

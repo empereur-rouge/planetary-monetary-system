@@ -20,6 +20,7 @@ pub mod governance;
 pub mod nft;
 pub mod nodes;
 pub mod onramp;
+pub mod recipient;
 pub mod reserves;
 pub mod sft;
 pub mod token_burn;
